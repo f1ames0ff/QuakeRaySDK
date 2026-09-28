@@ -60,6 +60,7 @@ class RhiDecalPass;
 class RhiFsrPass;
 class RhiPostEffectPass;
 class RhiProceduralSkyPass;
+class RhiCloudsPass;
 class RhiRasterOverlayPass;
 class RhiRasterSkyPass;
 class RhiRtComposePass;
@@ -231,6 +232,7 @@ private:
     std::shared_ptr<RhiRtReflRefrPass>      rhiRtReflRefrPass;
 
     std::shared_ptr<RhiProceduralSkyPass>   rhiProceduralSkyPass;
+    std::shared_ptr<RhiCloudsPass>          rhiCloudsPass;
 
     std::shared_ptr<RhiRasterSkyPass>       rhiRasterSkyPass;
 

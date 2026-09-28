@@ -301,6 +301,7 @@ CONST = {
     "BINDING_RENDER_CUBEMAP_SAMPLER"            : 2,
     "BINDING_RENDER_CUBEMAP_ENV"                : 1,
     "BINDING_RENDER_CUBEMAP_ENV_SAMPLER"        : 3,
+    "BINDING_RENDER_CUBEMAP_CLOUD_SHADOW"       : 4,
     "BINDING_BLUE_NOISE"                        : 0,
     "BINDING_LUM_HISTOGRAM"                     : 0,
     "BINDING_LIGHT_SOURCES"                     : 0,

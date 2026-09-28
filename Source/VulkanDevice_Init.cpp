@@ -33,6 +33,7 @@
 #include "RHI/RhiFsrPass.h"
 #include "RHI/RhiPostEffectPass.h"
 #include "RHI/RhiProceduralSkyPass.h"
+#include "RHI/RhiCloudsPass.h"
 #include "RHI/RhiRasterOverlayPass.h"
 #include "RHI/RhiRasterSkyPass.h"
 #include "RHI/RhiRtComposePass.h"
@@ -230,9 +231,20 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
             }
 
             {
+                rhiCloudsPass = std::make_shared<RhiCloudsPass>();
+                if (!rhiCloudsPass->Create(nvrhi->GetDevice(), rhiFrameContext.get(),
+                                           info->pShaderFolderPath,
+                                           [this](const char *pMessage) { Print(pMessage); }))
+                {
+                    rhiCloudsPass.reset();
+                    Print("Warning: RHI: the cloud layer pass is unavailable");
+                }
+
                 rhiProceduralSkyPass = std::make_shared<RhiProceduralSkyPass>();
                 if (!rhiProceduralSkyPass->Create(nvrhi->GetDevice(), rhiFrameContext.get(),
                                                   info->pShaderFolderPath,
+                                                  rhiCloudsPass != nullptr ? rhiCloudsPass->GetLayerTexture() : nullptr,
+                                                  rhiCloudsPass != nullptr ? rhiCloudsPass->GetLayerSampler() : nullptr,
                                                   [this](const char *pMessage) { Print(pMessage); }))
                 {
                     rhiProceduralSkyPass.reset();
@@ -445,6 +457,7 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
                 rhiRtComposePass.get(),
                 rhiRtReflRefrPass.get(),
                 rhiProceduralSkyPass.get(),
+                rhiCloudsPass.get(),
                 rhiRasterSkyPass.get(),
                 rhiRasterOverlayPass.get(),
                 rhiDecalPass.get(),
@@ -525,6 +538,7 @@ VulkanDevice::~VulkanDevice()
     rhiPostEffectPass.reset();
     rhiRasterSkyPass.reset();
     rhiProceduralSkyPass.reset();
+    rhiCloudsPass.reset();
     rhiAccelStructs.reset();
 
     rhiTextureTable.reset();

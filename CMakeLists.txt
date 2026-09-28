@@ -67,6 +67,7 @@ set(renderer_SOURCES
     Source/RHI/NvrhiFrameSkeleton.cpp
     Source/RHI/NvrhiRequirements.cpp
     Source/RHI/RhiAccelStructs.cpp
+    Source/RHI/RhiCloudsPass.cpp
     Source/RHI/RhiDecalPass.cpp
     Source/RHI/RhiDescriptors.cpp
     Source/RHI/RhiFrameContext.cpp

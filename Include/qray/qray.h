@@ -230,6 +230,8 @@ typedef struct QrInstanceCreateInfo
     QrTextureSwizzling          pbrTextureSwizzling;
 
     QrBool32                    effectWipeIsUsed;
+
+    uint32_t                    godRaysQuality;
 } QrInstanceCreateInfo;
 
 QRAPI QrResult QRCONV qrCreateInstance(
@@ -934,6 +936,9 @@ typedef struct QrDrawFrameSkyParams
     QrBool32    godRaysFromSkyTexture;
     QrFloat3D   godRaysSkyDirection;
     QrFloat3D   godRaysSkyColor;
+
+    uint32_t    skyCloudsQuality;
+    uint32_t    godRaysQuality;
 } QrDrawFrameSkyParams;
 
 #define QR_LIGHT_STYLE_COUNT 64
