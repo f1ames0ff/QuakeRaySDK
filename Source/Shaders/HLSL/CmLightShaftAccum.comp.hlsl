@@ -1,4 +1,4 @@
-#define DESC_SET_LIGHT_SHAFT_VOLUME 0
+﻿#define DESC_SET_LIGHT_SHAFT_VOLUME 0
 #define DESC_SET_LIGHT_SHAFT_HISTORY 1
 #define DESC_SET_FRAMEBUFFERS 2
 #define DESC_SET_GLOBAL_UNIFORM 3
@@ -106,9 +106,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                 continue;
             }
 
+            const int2 previousCbPixel = getCheckerboardPix(previousPixel);
             const float previousDepth = framebufDepthWorld_Prev_Sampled.Load(
-                int3(previousPixel, 0)).x;
-            const float3 previousNormal = texelFetchNormal_Prev(previousPixel);
+                int3(previousCbPixel, 0)).x;
+            const float3 previousNormal = texelFetchNormal_Prev(previousCbPixel);
 
             if (!testReprojectedDepth(rayDistance, previousDepth, motion.z) ||
                 !testReprojectedNormal(normal, previousNormal))
@@ -141,3 +142,5 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     accumulated = lerp(accumulated, current, 1.0 / historyLength);
     lightShaftHistory[pixelPos] = float4(accumulated * 0.01, historyLength);
 }
+
+
