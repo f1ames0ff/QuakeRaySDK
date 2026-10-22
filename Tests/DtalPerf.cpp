@@ -56,6 +56,8 @@ const PerfCase kCases[] =
     { "huge",   1048576, 65536, 256 },
 };
 
+constexpr int kWarmupHugePasses = 8;
+
 qray::ShLightEncoded MakeLight()
 {
     qray::ShLightEncoded light = {};
@@ -330,6 +332,12 @@ int main(int argc, char **argv)
         Require(shader != nullptr, "load " + shaderPath);
 
         std::vector<CaseResult> results;
+
+        for (int warmup = 0; warmup < kWarmupHugePasses; warmup++)
+        {
+            float warmupChecksum = 0.0f;
+            RunCase(gpu, shader, kCases[3], warmupChecksum);
+        }
 
         for (const PerfCase &perfCase : kCases)
         {
