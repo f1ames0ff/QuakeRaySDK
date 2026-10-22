@@ -47,12 +47,31 @@ void WorldLights::Upload(const QrWorldLightsUploadInfo &uploadInfo, UserPrint *p
     CopyTable(uploadInfo.pClusterMins, uploadInfo.numClusters, clusterMins, "World lights: no cluster bounds");
     CopyTable(uploadInfo.pClusterMaxs, uploadInfo.numClusters, clusterMaxs, "World lights: no cluster bounds");
     CopyTable(uploadInfo.pClusterFlags, uploadInfo.numClusters, clusterFlags, "World lights: no cluster flags");
-    CopyTable(uploadInfo.pVisOffsets, uploadInfo.numClusters, visOffsets, "World lights: no PVS offsets");
     CopyTable(uploadInfo.pFaces, uploadInfo.numFaces, faces, "World lights: no face array");
     CopyTable(uploadInfo.pFaceVertices, uploadInfo.numFaceVertices, faceVertices, "World lights: no face vertex array");
-    CopyTable(uploadInfo.pVisData, uploadInfo.visDataSize, visData, "World lights: no PVS data");
 
-    pvsRowBytes = uploadInfo.pvsRowBytes;
+    if (uploadInfo.numClusters > 0 && uploadInfo.pVisData == nullptr)
+    {
+        const uint32_t rowBytes = (uploadInfo.numClusters + 7) / 8;
+        visOffsets.resize(uploadInfo.numClusters);
+        visData.assign(size_t(uploadInfo.numClusters) * rowBytes, 0xFF);
+        visUncompressed = true;
+
+        for (uint32_t cluster = 0; cluster < uploadInfo.numClusters; cluster++)
+        {
+            visOffsets[cluster] = int32_t(size_t(cluster) * rowBytes);
+        }
+
+        pvsRowBytes = rowBytes;
+    }
+    else
+    {
+        CopyTable(uploadInfo.pVisOffsets, uploadInfo.numClusters, visOffsets, "World lights: no PVS offsets");
+        CopyTable(uploadInfo.pVisData, uploadInfo.visDataSize, visData, "World lights: no PVS data");
+        pvsRowBytes = uploadInfo.pvsRowBytes;
+        visUncompressed = false;
+    }
+
     generation = uploadInfo.clusterGeneration;
 
     /* The sky visibility is sized by the cluster count, so it is copied by hand rather than

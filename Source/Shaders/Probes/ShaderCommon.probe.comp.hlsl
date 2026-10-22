@@ -63,8 +63,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
          globalUniform.talSelfLitOffset + float(globalUniform.emissionBlendMode) +
          globalUniform.emissionBlendStrength + globalUniform.skyAmbientLod +
          globalUniform.skyLightMultiplier + globalUniform.rayLength + float(globalUniform.rayCullBackFaces) +
-         float(globalUniform.rayCullMaskWorld) + float(globalUniform.__pad2) + float(globalUniform.__pad3) +
-         float(globalUniform.__pad4) + globalUniform.bloomIntensity + globalUniform.bloomThreshold +
+         float(globalUniform.rayCullMaskWorld) + globalUniform.smokeWindX + globalUniform.smokeWindY +
+         globalUniform.smokeWindZ + globalUniform.bloomIntensity + globalUniform.bloomThreshold +
          globalUniform.bloomEmissionMultiplier + float(globalUniform.reflectRefractMaxDepth) +
          float(globalUniform.cameraMediaType) + globalUniform.indexOfRefractionWater +
          globalUniform.indexOfRefractionGlass + globalUniform.waterTextureDerivativesMultiplier +
@@ -212,13 +212,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     v += float(framebufMetallicRoughness_Prev_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufMetallicRoughness_Prev_Sampler, uv, 0.0).x;
 
-    // framebufDepthWorld  r16f
+    // framebufDepthWorld  r32f
     framebufDepthWorld[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufDepthWorld[pix].x);
     v += float(framebufDepthWorld_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufDepthWorld_Sampler, uv, 0.0).x;
 
-    // framebufDepthWorld_Prev  r16f
+    // framebufDepthWorld_Prev  r32f
     framebufDepthWorld_Prev[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufDepthWorld_Prev[pix].x);
     v += float(framebufDepthWorld_Prev_Sampled.Load(int3(pix, 0)).x);

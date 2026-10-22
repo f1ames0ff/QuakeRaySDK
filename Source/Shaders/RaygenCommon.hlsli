@@ -189,7 +189,7 @@ void resetPayload(inout ShPayload g_payload)
     g_payload.instIdAndIndex = UINT32_MAX;
     g_payload.geomAndPrimIndex = UINT32_MAX;
     g_payload.glassTint = (float3)1.0;
-    g_payload.glassDistance = MAX_RAY_LENGTH * 2.0;
+    g_payload.glassDistance = globalUniform.rayLength * 2.0;
     g_payload.glassFilter = (float4)0.0;
 }
 

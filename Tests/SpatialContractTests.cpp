@@ -178,6 +178,8 @@ int main()
     cloudSettings[7] = 100.0f;
     cloudSettings[8] = 50.0f;
     reflect.waterColor = { { 0.25f, 0.5f, 0.75f } };
+    reflect.waterWaveSpeed = 2.0f;
+    reflect.waterTextureAreaScale = 3.0f;
     reflect.acidDensity = 25.0f;
     drawInfo.pSkyParams = &sky;
     drawInfo.pReflectRefractParams = &reflect;
@@ -195,6 +197,11 @@ int main()
         !Check(NearlyEqual(storage.info.rayLength, 8000.0f), "ray length conversion failed") ||
         !Check(storage.info.pSkyParams != nullptr, "sky params missing") ||
         !Check(storage.info.pReflectRefractParams != nullptr, "reflect params missing") ||
+        !Check(NearlyEqual(storage.reflectRefract.waterWaveSpeed, 80.0f), "water wave speed conversion failed") ||
+        !Check(NearlyEqual(storage.reflectRefract.waterTextureAreaScale, 120.0f),
+               "water texture area conversion failed") ||
+        !Check(NearlyEqual(storage.reflectRefract.waterColor.data[0], std::pow(0.25f, 0.025f)),
+               "water transmittance conversion failed") ||
         !Check(NearlyEqual(storage.reflectRefract.acidDensity, 25.0f), "acid density changed") ||
         !Check(NearlyEqual(convertedCloudSettings[7], 4000.0f) &&
                NearlyEqual(convertedCloudSettings[8], 2000.0f),
@@ -226,18 +233,29 @@ int main()
         return 1;
     }
 
-    QrSpatialConvention leftHanded = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z, 1.0f);
-    leftHanded.hostIsRightHanded = QR_FALSE;
-    if (!Check(upY.Configure(leftHanded) == false, "left-handed convention accepted"))
-    {
-        return 1;
-    }
-
     const QrFloat3D pointAfterReflection = upY.Point({ { 1.0f, 2.0f, 3.0f } });
     if (!Check(NearlyEqual(pointAfterReflection.data[0], point.data[0]) &&
                NearlyEqual(pointAfterReflection.data[1], point.data[1]) &&
                NearlyEqual(pointAfterReflection.data[2], point.data[2]),
                "failed reflected convention changed the active frame"))
+    {
+        return 1;
+    }
+
+    qray::SpatialFrame mirroredFrame;
+    QrSpatialConvention leftHanded = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Y, QR_AXIS_POSITIVE_Z, 1.0f);
+    leftHanded.hostIsRightHanded = QR_FALSE;
+    if (!Check(mirroredFrame.Configure(leftHanded), "left-handed convention rejected") ||
+        !Check(mirroredFrame.IsMirrored(), "left-handed convention not mirrored"))
+    {
+        return 1;
+    }
+
+    const QrFloat3D mirroredPoint = mirroredFrame.Point({ { 1.0f, 2.0f, 3.0f } });
+    if (!Check(NearlyEqual(mirroredPoint.data[0], 40.0f) &&
+               NearlyEqual(mirroredPoint.data[1], -80.0f) &&
+               NearlyEqual(mirroredPoint.data[2], 120.0f),
+               "left-handed point conversion failed"))
     {
         return 1;
     }

@@ -2,8 +2,8 @@
 
 This guide is for a Win32 host that links `qray::renderer` and owns its window,
 swapchain, assets and scene. The host may use its own units and a right-handed
-Z-up or Y-up frame; the renderer converts its inputs into the internal spatial
-frame described in [spatial-contract.md](spatial-contract.md).
+or left-handed Z-up or Y-up frame; the renderer converts its inputs into the
+internal spatial frame described in [spatial-contract.md](spatial-contract.md).
 
 ## 1. Build and link
 
@@ -56,9 +56,11 @@ them at the API boundary:
 - upload cluster bounds, light positions/radii/reaches and fog distances in
   host units;
 - use the per-type light color convention from the spatial contract;
-- build the view as a column-major right-handed world-to-view matrix, with
-  `-Z` forward and `+Y` up in view space;
+- build the view as a column-major world-to-view matrix in the host world's
+  handedness, with `-Z` forward and `+Y` up in view space;
 - keep `QrDrawFrameInfo.cameraNear`, `cameraFar` and `rayLength` in host units;
+- pass the smoke wind direction with `qrSetSmokeWindDirection` in host scene
+  space;
 - use `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN` for HUD, menus and other
   screen-space geometry.
 
@@ -115,10 +117,12 @@ embedding.
 - Identity convention: QuakeRay's fixed camera, cluster lists and final image
   remain unchanged.
 - Y-up/meter scene: compare against an independently authored Z-up/Quake-unit
-  twin; check cluster lists, area lights, fog, water, particles, clouds and
-  raster overlays.
+  twin; check clusters, area lights, fog, water, particles, clouds and raster
+  overlays. `qray_spatial_twin_gpu` covers the geometry, camera, directed and
+  spherical lights, level fog and final readback path.
 - Swapchain/UI geometry is pixel-positioned and never world-transformed.
-- Left-handed or arbitrarily rotated hosts convert their assets at import;
-  they must not pass a mirrored scene as a right-handed one.
-- Keep the physical draw distance inside the current 250 m ray clamp until
-  the ray envelope is made configurable.
+- Left-handed hosts keep their native coordinates and view matrix; the
+  renderer mirrors the frame and re-winds triangles. Arbitrarily rotated or
+  non-uniformly scaled instance data remains host-baked.
+- Keep `rayLength` positive and finite. The SDK accepts it up to its 10,000,000
+  scene-unit safety ceiling; the depth buffer is `R32_SFLOAT`.

@@ -13,6 +13,7 @@ public:
     bool Configure(const QrSpatialConvention &convention);
 
     bool IsIdentity() const { return identity; }
+    bool IsMirrored() const { return mirrored; }
     float Scale() const { return scale; }
     float InvScale() const { return invScale; }
 
@@ -38,6 +39,7 @@ private:
     float scale;
     float invScale;
     bool identity;
+    bool mirrored;
 };
 
 struct SpatialFrameDrawStorage

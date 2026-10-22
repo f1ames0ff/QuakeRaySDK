@@ -60,11 +60,15 @@ into the instance transform. World-light face vertices and smoke raster
 vertices are copied and rewritten because they carry spatial values without an
 instance transform for those values.
 
-The supported conventions are right-handed, axis-aligned signed permutations
-of the host axes with a uniform scale. A left-handed host must mirror and
-re-wind its assets before upload, or it can pass an equivalent right-handed
-frame. Arbitrary rotations, non-uniform scale and mirrored instance transforms
-are not part of this contract; the host must bake them into its data.
+The supported conventions are right-handed or left-handed, axis-aligned signed
+permutations of the host axes with a uniform scale. A left-handed host keeps
+its native coordinates; the renderer mirrors the frame into the canonical
+right-handed scene and reverses triangle winding for indexed geometry, polygon
+lights and world-light faces. The host must supply the view matrix in the same
+handedness as its world (its native world-to-view matrix); the renderer
+converts it to the canonical camera space. Arbitrary rotations and non-uniform
+instance transforms are not part of this contract; the host must bake them
+into its data.
 
 ## Camera and frame data
 
@@ -74,10 +78,11 @@ projection from `fovYRadians`, the render-resolution aspect, `cameraNear` and
 `cameraFar`. The host does not provide a projection matrix.
 
 The host passes camera near/far and `rayLength` in its own units. The renderer
-converts them to scene units. The current ray clamp is 10,000 scene units
-(250 m); the shader sky sentinel is 20,000 scene units (500 m). Hosts with a
-larger physical draw distance must keep their scene inside the ray envelope
-until it is made configurable.
+converts them to scene units. `rayLength` is host-controlled up to the safety
+ceiling of 10,000,000 scene units (250 km); the shader sky sentinel follows
+`2 * rayLength`. The world-depth buffer is `R32_SFLOAT`, so the ray envelope
+does not rely on a 16-bit depth range. A host still has to keep its scene
+inside the declared ray length and provide a finite positive value.
 
 `worldUpVector` is optional. A non-identity convention makes the internal up
 `+Z`; the host's up vector may still be supplied for compatibility, but it
@@ -113,8 +118,10 @@ are never changed.
 Smoke raster batches additionally carry world-space puff radii in the vertex
 normal channel and world-space noise scales in `smokeNoise`. The renderer
 scales those fields when the convention is non-identity; `smokeLook` remains
-dimensionless. The smoke wind direction is currently an internal art constant
-in scene space, not a host-supplied direction.
+dimensionless. The smoke wind direction is host-supplied through
+`qrSetSmokeWindDirection`; it is passed in host scene space, rotated by the
+frame, and normalized internally. If the setter is never called, the existing
+Quake scene-space wind is used, so the identity host is unchanged.
 
 ## Lights
 
@@ -177,8 +184,11 @@ renderer's cluster constants (16-unit cell, 16-unit quantum, 32-unit margin)
 remain calibrated to the internal scene and therefore become physically
 stable across host units.
 
-A non-BSP host still has to provide clusters and a visibility relation. The
-no-PVS path and the `Q2_MAX_CLUSTERS` limit are separate contracts from
+A non-BSP host still has to provide clusters, but it may omit both the PVS
+offset table and PVS bytes. In that case the renderer synthesizes all-visible
+PVS rows, so every cluster receives the lights its light sources reach and the
+existing top-up pass remains available. A host with a real visibility relation
+may supply the tables as before. The `Q2_MAX_CLUSTERS` limit is separate from
 units and orientation.
 
 ## QuakeRay adapter
@@ -204,17 +214,19 @@ rendered image.
 
 ## Integration checklist
 
-1. Choose right-handed host axes; declare the canonical `X`, `Y`, `Z` axes
+1. Choose the host handedness and declare the canonical `X`, `Y`, `Z` axes
    and `unitsPerMeter`.
-2. Build the camera view as column-major, right-handed, `-Z` forward, with
-   camera near/far and `rayLength` in host units.
+2. Build the camera view as column-major in the host world's handedness with
+   `-Z` forward, and pass camera near/far and `rayLength` in host units.
 3. Upload geometry in host local space and transforms in the documented
    row-major 3x4 layout. Do not pre-scale vertices and transforms together.
 4. Upload light positions/directions/radii/areas in host units and use the
    per-type color convention above.
 5. Upload cluster bounds/reaches in host units and leave cluster IDs/PVS
-   unchanged.
-6. Keep UI/SWAPCHAIN geometry in pixels.
-7. Supply cloud altitude/thickness and sky viewer fields in host units.
-8. Validate the result with a Y-up/meter scene and its independently authored
+   unchanged. Omit both PVS tables for an all-visible non-BSP scene.
+6. Pass the host smoke wind direction with `qrSetSmokeWindDirection` in host
+   scene space.
+7. Keep UI/SWAPCHAIN geometry in pixels.
+8. Supply cloud altitude/thickness and sky viewer fields in host units.
+9. Validate the result with a Y-up/meter scene and its independently authored
    Z-up/Quake-unit twin; compare cluster lists and final readback.

@@ -70,8 +70,13 @@ The renderer normalizes host scene data into a right-handed, `+Z`-up internal
 space with 40 scene units per meter. The host declares its axes, handedness and
 `unitsPerMeter` once after instance creation with
 `qrSetSpatialConvention`; the default is the existing identity Quake
-convention. The full field-by-field conversion rules and the second-host
-checklist are in [docs/spatial-contract.md](docs/spatial-contract.md).
+convention. Right-handed and left-handed signed axis permutations are
+supported. `qrSetSmokeWindDirection` supplies the smoke wind in host scene
+space, and a cluster upload that omits both PVS tables is treated as
+all-visible. The world-depth target is `R32_SFLOAT`; `rayLength` is accepted up
+to the SDK safety ceiling instead of the former 250 m clamp. The full
+field-by-field conversion rules and the second-host checklist are in
+[docs/spatial-contract.md](docs/spatial-contract.md).
 
 ## Frame readback
 
@@ -103,9 +108,9 @@ structures; a host supplies scene uploads through the `Qr*` contract in
 `qray.h`. Embedded/device-sharing integration and non-Windows targets are not
 part of the current package.
 
-The current ray clamp uses 10,000 internal scene units (250 m); the shader sky
-sentinel is 20,000 scene units (500 m). A host with a larger physical draw
-distance must stay inside the ray envelope until it becomes configurable.
-Left-handed worlds, arbitrary world rotations and non-uniform instance scale
-are host-side conversion or unsupported cases; the spatial contract supports
-right-handed signed axis permutations with uniform scale.
+`rayLength` is host-controlled up to the 10,000,000-scene-unit safety ceiling;
+the shader sky sentinel follows `2 * rayLength`, and the world-depth target is
+`R32_SFLOAT`. Right-handed and left-handed signed axis permutations with
+uniform scale are supported. Arbitrary world rotations and non-uniform
+instance scale remain host-side conversion; the spatial contract is in
+[docs/spatial-contract.md](docs/spatial-contract.md).

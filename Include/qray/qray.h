@@ -291,6 +291,14 @@ typedef struct QrFloat4D
     float       data[4];
 } QrFloat4D;
 
+QRAPI QrResult QRCONV qrSetSmokeWindDirection(
+    QrInstance                          qrInstance,
+    const QrFloat3D                     *pDirection);
+
+QRAPI QrResult QRCONV qrGetSmokeWindDirection(
+    QrInstance                          qrInstance,
+    QrFloat3D                           *pDirection);
+
 typedef struct QrVertex
 {
     float       position[3];        uint32_t _padding0;

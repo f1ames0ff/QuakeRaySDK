@@ -184,6 +184,16 @@ QrResult qrGetSpatialConvention(QrInstance qrInstance, QrSpatialConvention *pCon
     return CallAlways(qrInstance, &VulkanDevice::GetSpatialConvention, pConvention);
 }
 
+QrResult qrSetSmokeWindDirection(QrInstance qrInstance, const QrFloat3D *pDirection)
+{
+    return CallAlways(qrInstance, &VulkanDevice::SetSmokeWindDirection, pDirection);
+}
+
+QrResult qrGetSmokeWindDirection(QrInstance qrInstance, QrFloat3D *pDirection)
+{
+    return CallAlways(qrInstance, &VulkanDevice::GetSmokeWindDirection, pDirection);
+}
+
 QrResult qrUploadGeometry(QrInstance qrInstance, const QrGeometryUploadInfo *pUploadInfo)
 {
     return Call(qrInstance, &VulkanDevice::UploadGeometry, pUploadInfo );

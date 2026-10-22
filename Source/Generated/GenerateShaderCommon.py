@@ -385,7 +385,7 @@ CONST = {
 
     "RAY_STATS_CATEGORY_COUNT"              : 6,
 
-    "MAX_RAY_LENGTH"                        : "10000.0",
+    "MAX_RAY_LENGTH"                        : "1.0e7",
 
     "MEDIA_TYPE_VACUUM"                     : 0,
     "MEDIA_TYPE_WATER"                      : 1,
@@ -538,9 +538,9 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 1, "rayLength",                     1),
     (UINT32, 1, "rayCullBackFaces",               1),
     (UINT32, 1, "rayCullMaskWorld",               1),
-    (UINT32, 1, "__pad2",                         1),
-    (UINT32, 1, "__pad3",                         1),
-    (UINT32, 1, "__pad4",                         1),
+    (FLOAT32, 1, "smokeWindX",                    1),
+    (FLOAT32, 1, "smokeWindY",                    1),
+    (FLOAT32, 1, "smokeWindZ",                    1),
 
     (FLOAT32, 1, "bloomIntensity",                1),
     (FLOAT32, 1, "bloomThreshold",                1),
@@ -839,7 +839,7 @@ FRAMEBUFFERS = {
     "Normal"                            : (UINT32,    CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
     "NormalGeometry"                    : (UINT32,    CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
     "MetallicRoughness"                 : (UNORM8,    CHANNELS_RG,   FRAMEBUF_FLAGS_STORE_PREV),
-    "DepthWorld"                        : (FLOAT16,   CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
+    "DepthWorld"                        : (FLOAT32,   CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
     "DepthGrad"                         : (FLOAT16,   CHANNELS_R,    0),
     "DepthNdc"                          : (FLOAT32,   CHANNELS_R,    0),
     "Motion"                            : (FLOAT16,   CHANNELS_RGBA, 0),

@@ -407,7 +407,7 @@ void main()
     if ( hitSurf.isSky )
     {
         skyBsdfWeight = q2SkyNeeBsdfWeight( surf, bounceDir );
-        hitPos      = surf.position + bounceDir * MAX_RAY_LENGTH;
+        hitPos      = surf.position + bounceDir * globalUniform.rayLength;
         hitRadiance = getSkyAmbientMultiplied( bounceDir, surf.roughness * ( SKY_MIP_COUNT - 1.0 ) );
     }
     else
