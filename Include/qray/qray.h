@@ -32,7 +32,20 @@
     #define QRCONV
 #endif
 
-#define QR_API_VERSION "1.04.0000"
+#define QR_API_VERSION "1.05.0000"
+
+#define QR_SCENE_UNITS_PER_METER 40.0f
+#define QR_SPATIAL_CONVENTION_VERSION 1
+
+typedef enum QrAxis
+{
+    QR_AXIS_POSITIVE_X = 0,
+    QR_AXIS_POSITIVE_Y = 1,
+    QR_AXIS_POSITIVE_Z = 2,
+    QR_AXIS_NEGATIVE_X = 3,
+    QR_AXIS_NEGATIVE_Y = 4,
+    QR_AXIS_NEGATIVE_Z = 5,
+} QrAxis;
 
 #ifdef QR_USE_SURFACE_WIN32
     #include <windows.h>
@@ -55,6 +68,21 @@ QR_DEFINE_NON_DISPATCHABLE_HANDLE(QrInstance)
 typedef uint32_t QrMaterial;
 typedef uint32_t QrCubemap;
 typedef uint32_t QrFlags;
+
+typedef struct QrSpatialConvention
+{
+    uint32_t    size;
+    uint32_t    version;
+
+    QrAxis      sceneXAxis;
+    QrAxis      sceneYAxis;
+    QrAxis      sceneZAxis;
+
+    QrBool32    hostIsRightHanded;
+    float       unitsPerMeter;
+
+    uint32_t    reserved[4];
+} QrSpatialConvention;
 
 #define QR_NULL_HANDLE      0
 #define QR_NO_MATERIAL      0
@@ -186,6 +214,14 @@ QRAPI QrResult QRCONV qrCreateInstance(
 
 QRAPI QrResult QRCONV qrDestroyInstance(
     QrInstance                          qrInstance);
+
+QRAPI QrResult QRCONV qrSetSpatialConvention(
+    QrInstance                          qrInstance,
+    const QrSpatialConvention           *pConvention);
+
+QRAPI QrResult QRCONV qrGetSpatialConvention(
+    QrInstance                          qrInstance,
+    QrSpatialConvention                 *pConvention);
 
 typedef struct QrLayeredMaterial
 {
