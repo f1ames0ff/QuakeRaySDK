@@ -10,7 +10,7 @@ stay in the host repository under `gfx/`.
 
 ## Package contents
 
-- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.03.0000`.
+- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.04.0000`.
 - `Source/` — renderer, RHI passes, lighting, shaders, and the FidelityFX API.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `Tests/` — engine-free GPU and policy tests.
@@ -61,6 +61,29 @@ target_link_libraries(my_host PRIVATE qray::renderer)
 
 The package config checks for `nvrhi` and `nvrhi_vk`, resolves the installed
 FidelityFX provider, and exposes `qray::renderer`.
+
+## Frame readback
+
+The public API exposes asynchronous readback of the final LDR image:
+
+```c
+qrGetFrameReadbackRequirements(...);
+qrRequestFrameReadback(...);
+qrGetFrameReadbackStatus(...);
+```
+
+The first call returns the current width, height, row pitch and buffer size for
+`RGBA8_UNORM` or `BGRA8_UNORM`. A request is made during a frame, before
+`qrDrawFrame`; the SDK copies the final composited image, including UI, into a
+staging texture and completes it after the corresponding frame slot has been
+submitted. The host owns `pDst` and must keep it alive until the status reports
+done.
+
+The path does not call `vkDeviceWaitIdle`. Requests use the frame-slot ring, so
+the host should poll `qrGetFrameReadbackStatus`; a slot is busy while its
+previous request is queued or pending. `includeUi = QR_FALSE` and
+`QR_FRAME_READBACK_FORMAT_RGBA16F` are not supported in this revision and return
+`QR_FEATURE_UNAVAILABLE`.
 
 ## Scope
 

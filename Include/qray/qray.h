@@ -32,7 +32,7 @@
     #define QRCONV
 #endif
 
-#define QR_API_VERSION "1.03.0000"
+#define QR_API_VERSION "1.04.0000"
 
 #ifdef QR_USE_SURFACE_WIN32
     #include <windows.h>
@@ -81,6 +81,11 @@ typedef enum QrResult
     QR_WRONG_FUNCTION_CALL,
     QR_ERROR_CANT_FIND_BLUE_NOISE,
     QR_ERROR_CANT_FIND_WATER_TEXTURES,
+    QR_FRAME_NOT_READY,
+    QR_READBACK_BUSY,
+    QR_READBACK_INVALID,
+    QR_READBACK_FAILED,
+    QR_FEATURE_UNAVAILABLE,
 } QrResult;
 
 typedef void (*PFN_qrPrint)(const char *pMessage, void *pUserData);
@@ -1710,6 +1715,48 @@ QRAPI QrResult QRCONV qrGetAdapterInfo(
 QRAPI QrResult QRCONV qrRequestScreenshot(
     QrInstance                          qrInstance,
     const char                         *pFilePath);
+
+#define QR_FRAME_ID_LATEST 0
+
+typedef enum QrFrameReadbackFormat
+{
+    QR_FRAME_READBACK_FORMAT_RGBA8_UNORM,
+    QR_FRAME_READBACK_FORMAT_BGRA8_UNORM,
+    QR_FRAME_READBACK_FORMAT_RGBA16F,
+} QrFrameReadbackFormat;
+
+typedef struct QrFrameReadbackInfo
+{
+    uint32_t                width;
+    uint32_t                height;
+    uint32_t                rowPitch;
+    uint32_t                reserved0;
+    uint64_t                bufferSize;
+    QrFrameReadbackFormat   format;
+    QrBool32                includeUi;
+    uint32_t                reserved1;
+    void                   *pDst;
+    uint64_t                frameId;
+} QrFrameReadbackInfo;
+
+QRAPI QrResult QRCONV qrGetFrameReadbackRequirements(
+    QrInstance                          qrInstance,
+    QrFrameReadbackFormat               format,
+    QrBool32                            includeUi,
+    uint32_t                           *pWidth,
+    uint32_t                           *pHeight,
+    uint32_t                           *pRowPitch,
+    uint64_t                           *pBufferSize);
+
+QRAPI QrResult QRCONV qrRequestFrameReadback(
+    QrInstance                          qrInstance,
+    const QrFrameReadbackInfo          *pInfo,
+    uint64_t                           *pRequestId);
+
+QRAPI QrResult QRCONV qrGetFrameReadbackStatus(
+    QrInstance                          qrInstance,
+    uint64_t                            requestId,
+    QrBool32                           *pDone);
 
 QRAPI QrResult QRCONV qrGetFrameStats(
     QrInstance                          qrInstance,

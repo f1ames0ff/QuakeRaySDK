@@ -41,6 +41,11 @@ const char* qray::QrException::GetQrResultName(QrResult r)
         "QR_WRONG_FUNCTION_CALL",
         "QR_ERROR_CANT_FIND_BLUE_NOISE",
         "QR_ERROR_CANT_FIND_WATER_TEXTURES",
+        "QR_FRAME_NOT_READY",
+        "QR_READBACK_BUSY",
+        "QR_READBACK_INVALID",
+        "QR_READBACK_FAILED",
+        "QR_FEATURE_UNAVAILABLE",
     };
 
     const size_t index = static_cast<size_t>(r);

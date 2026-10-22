@@ -189,6 +189,12 @@ public:
 
     void RequestScreenshot(const char *pFilePath);
 
+    QrResult GetFrameReadbackRequirements(QrFrameReadbackFormat format, QrBool32 includeUi,
+                                          uint32_t *pWidth, uint32_t *pHeight, uint32_t *pRowPitch,
+                                          uint64_t *pBufferSize) const;
+    QrResult RequestFrameReadback(const QrFrameReadbackInfo *pInfo, uint64_t *pRequestId);
+    QrResult GetFrameReadbackStatus(uint64_t requestId, QrBool32 *pDone) const;
+
     void Print(const char *pMessage) const;
 
 private:
