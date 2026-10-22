@@ -2,15 +2,17 @@
 
 QuakeRaySDK accepts scene data in the host's own units and orientation. The
 host declares that convention once, immediately after `qrCreateInstance`, with
-`qrSetSpatialConvention`. The renderer normalizes every spatial input into its
-existing internal scene space, which is right-handed, `+Z` up, and uses one
+`qrSetSpatialConvention`. The renderer normalizes the spatial inputs described
+below into its existing internal scene space, which is right-handed, `+Z` up, and uses one
 scene unit of 0.025 m (40 scene units per meter). A host does not supply
 vertices in scene units.
 
 The convention is immutable for the lifetime of the spatial scene. Calling
 `qrSetSpatialConvention` after a spatial upload, a fog upload, or the first
 drawn frame returns `QR_WRONG_FUNCTION_CALL`. Calling it twice before any
-spatial upload replaces the convention.
+spatial upload replaces the convention. Call the setter on the thread that
+created the instance and before worker uploads or frames begin; the convention
+is not synchronized for concurrent replacement.
 
 ## Declaration
 
@@ -54,8 +56,9 @@ identity convention is used and existing behavior is preserved.
 greater than zero. The renderer scales lengths by
 `QR_SCENE_UNITS_PER_METER / unitsPerMeter`, areas by the square of that scale,
 and inverse lengths by its reciprocal. Ordinary geometry conversion is folded
-into the instance transform; the world-light face-vertex array is the one
-spatial vertex array that is rewritten because it has no instance transform.
+into the instance transform. World-light face vertices and smoke raster
+vertices are copied and rewritten because they carry spatial values without an
+instance transform for those values.
 
 The supported conventions are right-handed, axis-aligned signed permutations
 of the host axes with a uniform scale. A left-handed host must mirror and
@@ -88,9 +91,9 @@ frame.
 
 `QrVertex.position` and `QrVertex.normal` are local-space host data.
 `QrTransform` is the existing row-major 3x4 column-vector affine transform.
-The renderer converts the transform to scene space and leaves the vertex
-arrays untouched. This applies to static, static-movable, dynamic, brush,
-alias, sky, decal and rasterized geometry.
+The renderer converts the transform to scene space for static, static-movable,
+dynamic, brush, alias, sky, decal and rasterized geometry. World-light face
+vertices and smoke raster vertices are handled separately as described below.
 
 Rasterized geometry follows its render type:
 
@@ -108,7 +111,8 @@ are never changed.
 Smoke raster batches additionally carry world-space puff radii in the vertex
 normal channel and world-space noise scales in `smokeNoise`. The renderer
 scales those fields when the convention is non-identity; `smokeLook` remains
-dimensionless.
+dimensionless. The smoke wind direction is currently an internal art constant
+in scene space, not a host-supplied direction.
 
 ## Lights
 
@@ -148,8 +152,9 @@ fields are not.
 Level fog density is per host unit and is divided by the frame scale. Fog
 volume `pointA` and `pointB` keep their order; `softface` parity continues to
 name the `pointA`/`pointB` side while its axis is remapped to canonical space.
-The `acidDensity` coefficient is a per-host-unit density and is divided by the
-frame scale.
+The `acidDensity` coefficient is an artistic dimensionless density multiplier;
+it is not converted. Hosts that need physical unit invariance must author it
+together with the acid color.
 
 Water and acid colors are transmittance over one host unit. The renderer
 raises them to the reciprocal frame scale, matching the existing Quake

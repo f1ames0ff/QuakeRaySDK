@@ -205,6 +205,28 @@ int main()
         return 1;
     }
 
+    if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Y, QR_AXIS_POSITIVE_Z, 1.0f)) == false,
+               "reflected permutation accepted"))
+    {
+        return 1;
+    }
+
+    QrSpatialConvention leftHanded = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z, 1.0f);
+    leftHanded.hostIsRightHanded = QR_FALSE;
+    if (!Check(upY.Configure(leftHanded) == false, "left-handed convention accepted"))
+    {
+        return 1;
+    }
+
+    const QrFloat3D pointAfterReflection = upY.Point({ { 1.0f, 2.0f, 3.0f } });
+    if (!Check(NearlyEqual(pointAfterReflection.data[0], point.data[0]) &&
+               NearlyEqual(pointAfterReflection.data[1], point.data[1]) &&
+               NearlyEqual(pointAfterReflection.data[2], point.data[2]),
+               "failed reflected convention changed the active frame"))
+    {
+        return 1;
+    }
+
     std::puts("spatial contract tests passed");
     return 0;
 }
