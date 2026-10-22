@@ -157,6 +157,19 @@ int main()
         return 1;
     }
 
+    QrMatrix3D cubemap = {};
+    cubemap.matrix[0][0] = 1.0f;
+    cubemap.matrix[1][1] = 1.0f;
+    cubemap.matrix[2][2] = 1.0f;
+    const QrMatrix3D convertedCubemap = upY.CubemapRotation(cubemap);
+    if (!Check(NearlyEqual(convertedCubemap.matrix[0][0], 1.0f) &&
+               NearlyEqual(convertedCubemap.matrix[1][2], 1.0f) &&
+               NearlyEqual(convertedCubemap.matrix[2][1], -1.0f),
+               "cubemap rotation conversion failed"))
+    {
+        return 1;
+    }
+
     QrDrawFrameInfo drawInfo = {};
     QrDrawFrameSkyParams sky = {};
     QrDrawFrameReflectRefractParams reflect = {};
@@ -165,6 +178,7 @@ int main()
     cloudSettings[7] = 100.0f;
     cloudSettings[8] = 50.0f;
     reflect.waterColor = { { 0.25f, 0.5f, 0.75f } };
+    reflect.acidDensity = 25.0f;
     drawInfo.pSkyParams = &sky;
     drawInfo.pReflectRefractParams = &reflect;
     drawInfo.cameraNear = 0.1f;
@@ -181,6 +195,7 @@ int main()
         !Check(NearlyEqual(storage.info.rayLength, 8000.0f), "ray length conversion failed") ||
         !Check(storage.info.pSkyParams != nullptr, "sky params missing") ||
         !Check(storage.info.pReflectRefractParams != nullptr, "reflect params missing") ||
+        !Check(NearlyEqual(storage.reflectRefract.acidDensity, 25.0f), "acid density changed") ||
         !Check(NearlyEqual(convertedCloudSettings[7], 4000.0f) &&
                NearlyEqual(convertedCloudSettings[8], 2000.0f),
                "cloud altitude conversion failed"))
