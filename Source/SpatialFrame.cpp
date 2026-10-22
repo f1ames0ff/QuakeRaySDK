@@ -110,6 +110,11 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
     }
 
     const float candidateInvScale = 1.0f / candidateScale;
+
+    if (!std::isfinite(candidateInvScale))
+    {
+        return false;
+    }
     bool candidateIdentity = candidateScale == 1.0f;
 
     for (int row = 0; row < 3 && candidateIdentity; row++)
@@ -342,7 +347,6 @@ void ConvertDrawFrame(const SpatialFrame &frame, const QrDrawFrameInfo &source,
         storage.reflectRefract = *source.pReflectRefractParams;
         storage.reflectRefract.waterWaveSpeed *= frame.Scale();
         storage.reflectRefract.waterTextureAreaScale *= frame.Scale();
-        storage.reflectRefract.acidDensity *= frame.InvScale();
         storage.reflectRefract.waterColor.data[0] = frame.Transmittance(storage.reflectRefract.waterColor.data[0]);
         storage.reflectRefract.waterColor.data[1] = frame.Transmittance(storage.reflectRefract.waterColor.data[1]);
         storage.reflectRefract.waterColor.data[2] = frame.Transmittance(storage.reflectRefract.waterColor.data[2]);
