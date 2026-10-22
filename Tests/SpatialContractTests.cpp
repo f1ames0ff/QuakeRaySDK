@@ -80,7 +80,17 @@ int main()
                NearlyEqual(point.data[2], 80.0f),
                "Y-up point conversion failed") ||
         !Check(NearlyEqual(upY.Area(2.0f), 3200.0f), "area conversion failed") ||
-        !Check(upY.SoftFace(5) == 4, "softface conversion failed"))
+        !Check(upY.SoftFace(5) == 3, "softface conversion failed"))
+    {
+        return 1;
+    }
+
+    const QrFloat3D fogA = upY.Point({ { 0.0f, 0.0f, 1.0f } });
+    const QrFloat3D fogB = upY.Point({ { 0.0f, 0.0f, 0.0f } });
+    if (!Check(NearlyEqual(fogA.data[1], -40.0f) &&
+               NearlyEqual(fogB.data[1], 0.0f) &&
+               upY.SoftFace(5) == 3,
+               "fog conversion failed"))
     {
         return 1;
     }
@@ -182,6 +192,15 @@ int main()
                "duplicate axes accepted") ||
         !Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z, 0.0f)) == false,
                "zero units accepted"))
+    {
+        return 1;
+    }
+
+    const QrFloat3D pointAfterFailure = upY.Point({ { 1.0f, 2.0f, 3.0f } });
+    if (!Check(NearlyEqual(pointAfterFailure.data[0], point.data[0]) &&
+               NearlyEqual(pointAfterFailure.data[1], point.data[1]) &&
+               NearlyEqual(pointAfterFailure.data[2], point.data[2]),
+               "failed convention changed the active frame"))
     {
         return 1;
     }

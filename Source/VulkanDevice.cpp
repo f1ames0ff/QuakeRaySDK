@@ -147,7 +147,8 @@ QrClusterLightSource SpatialClusterLightSource(const SpatialFrame &frame, const 
 QrFogVolume SpatialFogVolume(const SpatialFrame &frame, const QrFogVolume &source)
 {
     QrFogVolume result = source;
-    frame.Aabb(source.pointA, source.pointB, result.pointA, result.pointB);
+    result.pointA = SpatialPoint(frame, source.pointA);
+    result.pointB = SpatialPoint(frame, source.pointB);
     result.halfExtinctionDistance = frame.Length(source.halfExtinctionDistance);
     result.softface = frame.SoftFace(source.softface);
     return result;
@@ -1409,8 +1410,6 @@ void VulkanDevice::StartFrame(const QrStartFrameInfo *startInfo)
 
 void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
 {
-    LockSpatialFrame();
-
     if (!currentFrameState.WasFrameStarted())
     {
         throw QrException(QR_FRAME_WASNT_STARTED);
@@ -1420,6 +1419,8 @@ void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     SpatialFrameDrawStorage storage;
 
@@ -1959,7 +1960,6 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
                                                 const float *pViewProjection, const QrViewport *pViewport)
 {
     UploadLockScope geometryLock(*this, g_uploadLane);
-    LockSpatialFrame();
     statsApiCallsRasterized.fetch_add(1, std::memory_order_relaxed);
 
     if (pUploadInfo == nullptr)
@@ -1972,6 +1972,11 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SKY)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Incorrect render type of rasterized geometry");
+    }
+
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
+    {
+        LockSpatialFrame();
     }
 
     if (pUploadInfo->pVertices == nullptr || pUploadInfo->vertexCount == 0)
@@ -2001,10 +2006,27 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
     QrRasterizedGeometryUploadInfo converted = *pUploadInfo;
     float convertedViewProjection[16] = {};
+    std::vector<QrVertex> convertedVertices;
 
     if (!spatialFrame.IsIdentity() && pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
     {
         converted.transform = SpatialTransform(spatialFrame, pUploadInfo->transform);
+
+        if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
+        {
+            convertedVertices.assign(pUploadInfo->pVertices, pUploadInfo->pVertices + pUploadInfo->vertexCount);
+
+            for (QrVertex &vertex : convertedVertices)
+            {
+                vertex.normal[1] = spatialFrame.Length(vertex.normal[1]);
+            }
+
+            converted.pVertices = convertedVertices.data();
+            converted.smokeNoise.data[0] *= spatialFrame.InvScale();
+            converted.smokeNoise.data[1] *= spatialFrame.InvScale();
+            converted.smokeNoise.data[2] *= spatialFrame.InvScale();
+            converted.smokeNoise.data[3] *= spatialFrame.Scale();
+        }
 
         if (pViewProjection != nullptr)
         {
@@ -2373,17 +2395,21 @@ void VulkanDevice::BeginClusterLightSources(const QrClusterLightSourcesUploadInf
     std::vector<QrClusterLightSource> convertedSources;
     QrClusterLightSourcesUploadInfo converted = *pInfo;
 
-    if (!spatialFrame.IsIdentity() && pInfo->pLights != nullptr)
+    if (!spatialFrame.IsIdentity())
     {
-        convertedSources.resize(pInfo->numLights);
-
-        for (uint32_t i = 0; i < pInfo->numLights; i++)
-        {
-            convertedSources[i] = SpatialClusterLightSource(spatialFrame, pInfo->pLights[i]);
-        }
-
-        converted.pLights = convertedSources.data();
         converted.topUpReach = spatialFrame.Length(pInfo->topUpReach);
+
+        if (pInfo->pLights != nullptr)
+        {
+            convertedSources.resize(pInfo->numLights);
+
+            for (uint32_t i = 0; i < pInfo->numLights; i++)
+            {
+                convertedSources[i] = SpatialClusterLightSource(spatialFrame, pInfo->pLights[i]);
+            }
+
+            converted.pLights = convertedSources.data();
+        }
     }
 
     clusterLightLists->BeginSources(*worldLights, converted, scene->GetLightManager().get(), userPrint.get(),

@@ -120,5 +120,5 @@ embedding.
 - Swapchain/UI geometry is pixel-positioned and never world-transformed.
 - Left-handed or arbitrarily rotated hosts convert their assets at import;
   they must not pass a mirrored scene as a right-handed one.
-- Keep the physical draw distance inside the current 250 m ray/sky envelope
-  until the envelope is made configurable.
+- Keep the physical draw distance inside the current 250 m ray clamp until
+  the ray envelope is made configurable.
