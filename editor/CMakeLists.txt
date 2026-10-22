@@ -1,0 +1,5 @@
+add_executable(quakerayeditor WIN32 Main.cpp)
+target_compile_features(quakerayeditor PRIVATE cxx_std_20)
+target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+target_link_libraries(quakerayeditor PRIVATE qray::renderer user32 gdi32)
+install(TARGETS quakerayeditor RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

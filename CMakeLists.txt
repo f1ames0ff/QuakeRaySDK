@@ -170,6 +170,7 @@ if(WIN32)
 endif()
 
 option(QR_BUILD_TESTS "Build headless renderer GPU regression tests" OFF)
+option(QR_BUILD_EDITOR "Build the standalone QuakeRay editor" OFF)
 if(QR_RENDERER_STANDALONE)
     if(NOT WIN32)
         message(FATAL_ERROR "qray_renderer currently supports Win32 only")
@@ -347,6 +348,8 @@ add_library(renderer STATIC
     $<TARGET_OBJECTS:qray_alias>
 )
 
+add_library(qray::renderer ALIAS renderer)
+
 target_compile_features(renderer PRIVATE cxx_std_20)
 
 # Keep the vendored renderer warnings under control (the host build uses /WX).
@@ -458,3 +461,7 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/qray_rendererConfigVersion.cmake"
     DESTINATION ${QRAY_RENDERER_CONFIG_INSTALL_DIR}
 )
+
+if(QR_BUILD_EDITOR)
+    add_subdirectory(editor)
+endif()
