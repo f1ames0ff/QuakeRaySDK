@@ -53,8 +53,9 @@ identity convention is used and existing behavior is preserved.
 `unitsPerMeter` is the number of host units in one meter. It must be finite and
 greater than zero. The renderer scales lengths by
 `QR_SCENE_UNITS_PER_METER / unitsPerMeter`, areas by the square of that scale,
-and inverse lengths by its reciprocal. It does not rewrite vertex arrays;
-geometry conversion is folded into the instance transform.
+and inverse lengths by its reciprocal. Ordinary geometry conversion is folded
+into the instance transform; the world-light face-vertex array is the one
+spatial vertex array that is rewritten because it has no instance transform.
 
 The supported conventions are right-handed, axis-aligned signed permutations
 of the host axes with a uniform scale. A left-handed host must mirror and
@@ -70,9 +71,10 @@ projection from `fovYRadians`, the render-resolution aspect, `cameraNear` and
 `cameraFar`. The host does not provide a projection matrix.
 
 The host passes camera near/far and `rayLength` in its own units. The renderer
-converts them to scene units. The current scene has a 10,000 scene-unit
-(250 m) ray/sky envelope; hosts with a larger physical draw distance must keep
-their scene inside that envelope until the envelope is made configurable.
+converts them to scene units. The current ray clamp is 10,000 scene units
+(250 m); the shader sky sentinel is 20,000 scene units (500 m). Hosts with a
+larger physical draw distance must keep their scene inside the ray envelope
+until it is made configurable.
 
 `worldUpVector` is optional. A non-identity convention makes the internal up
 `+Z`; the host's up vector may still be supplied for compatibility, but it
@@ -92,8 +94,9 @@ alias, sky, decal and rasterized geometry.
 
 Rasterized geometry follows its render type:
 
-- `DEFAULT` and `SKY` are world-space and receive the frame conversion,
-  including a non-null `pViewProjection`.
+- `DEFAULT` is world-space and receives the frame conversion, including a
+  non-null `pViewProjection`. `SKY` receives the transform conversion but its
+  `pViewProjection` and viewport must remain null.
 - `SWAPCHAIN` is screen-space pixels and is never converted. HUD, menus, the
   console and other 2D geometry must use this type.
 
@@ -101,6 +104,11 @@ Particle points are world-space positions and world-space sizes. Their
 positions are converted and sizes are scaled; `viewRight` and `viewUp` are
 rotated as directions. Particle point clusters are topology identifiers and
 are never changed.
+
+Smoke raster batches additionally carry world-space puff radii in the vertex
+normal channel and world-space noise scales in `smokeNoise`. The renderer
+scales those fields when the convention is non-identity; `smokeLook` remains
+dimensionless.
 
 ## Lights
 
@@ -114,15 +122,17 @@ Light color follows the existing per-type convention:
 - spherical, spot and polygonal: relative power, multiplied by the frame
   scale squared;
 - textured area and DTAL: radiance, not multiplied; their `area` is scaled
-  by the frame scale squared.
+  by the frame scale squared. A second host must pass radiance for these
+  types, not a Quake-style area-fixed power.
 
 The Quake host applies its own `RT_QUAKE_LIGHT_AREA_INTENSITY_FIX` before
 upload. Because the Quake convention is identity, the new conversion does not
 change that value. A second host should provide relative light values and let
 the SDK apply the unit factor; it must not apply the Quake 1600 factor itself.
 
-Cluster light source origins, reaches and radii are converted. `power` is a
-relative selection weight and is not converted. Cluster identifiers, PVS
+Cluster light source origins, reaches and radii are converted, as is
+`topUpReach` even when the dynamic source array is empty. `power` is a relative
+selection weight and is not converted. Cluster identifiers, PVS
 bytes, visibility offsets, sky visibility bits and `clusterGeneration` are
 topology and are not changed.
 
@@ -136,8 +146,10 @@ fields are not.
 `halfExtinctionDistance` are lengths and are converted.
 
 Level fog density is per host unit and is divided by the frame scale. Fog
-volumes keep their `softface` meaning after the axis mapping; the renderer
-remaps `softface` to the corresponding canonical axis and sign.
+volume `pointA` and `pointB` keep their order; `softface` parity continues to
+name the `pointA`/`pointB` side while its axis is remapped to canonical space.
+The `acidDensity` coefficient is a per-host-unit density and is divided by the
+frame scale.
 
 Water and acid colors are transmittance over one host unit. The renderer
 raises them to the reciprocal frame scale, matching the existing Quake

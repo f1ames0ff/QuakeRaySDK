@@ -70,6 +70,7 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
 
     const QrAxis axes[3] = { convention.sceneXAxis, convention.sceneYAxis, convention.sceneZAxis };
     bool used[3] = {};
+    float candidate[3][3] = {};
 
     for (int canonicalAxis = 0; canonicalAxis < 3; canonicalAxis++)
     {
@@ -88,51 +89,55 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
         }
 
         used[hostAxis] = true;
-
-        for (int otherAxis = 0; otherAxis < 3; otherAxis++)
-        {
-            hostToScene[canonicalAxis][otherAxis] = 0.0f;
-        }
-
-        hostToScene[canonicalAxis][hostAxis] = AxisSign(axis);
+        candidate[canonicalAxis][hostAxis] = AxisSign(axis);
     }
 
     const float determinant =
-        hostToScene[0][0] * (hostToScene[1][1] * hostToScene[2][2] - hostToScene[1][2] * hostToScene[2][1]) -
-        hostToScene[0][1] * (hostToScene[1][0] * hostToScene[2][2] - hostToScene[1][2] * hostToScene[2][0]) +
-        hostToScene[0][2] * (hostToScene[1][0] * hostToScene[2][1] - hostToScene[1][1] * hostToScene[2][0]);
+        candidate[0][0] * (candidate[1][1] * candidate[2][2] - candidate[1][2] * candidate[2][1]) -
+        candidate[0][1] * (candidate[1][0] * candidate[2][2] - candidate[1][2] * candidate[2][0]) +
+        candidate[0][2] * (candidate[1][0] * candidate[2][1] - candidate[1][1] * candidate[2][0]);
 
     if (determinant < 0.5f)
     {
         return false;
     }
 
-    for (int sceneAxis = 0; sceneAxis < 3; sceneAxis++)
+    const float candidateScale = QR_SCENE_UNITS_PER_METER / convention.unitsPerMeter;
+
+    if (!std::isfinite(candidateScale) || candidateScale <= 0.0f)
     {
-        for (int hostAxis = 0; hostAxis < 3; hostAxis++)
-        {
-            sceneToHost[hostAxis][sceneAxis] = hostToScene[sceneAxis][hostAxis];
-        }
+        return false;
     }
 
-    scale = QR_SCENE_UNITS_PER_METER / convention.unitsPerMeter;
-    invScale = 1.0f / scale;
+    const float candidateInvScale = 1.0f / candidateScale;
+    bool candidateIdentity = candidateScale == 1.0f;
 
-    identity = scale == 1.0f;
-
-    for (int row = 0; row < 3 && identity; row++)
+    for (int row = 0; row < 3 && candidateIdentity; row++)
     {
         for (int column = 0; column < 3; column++)
         {
             const float expected = row == column ? 1.0f : 0.0f;
 
-            if (hostToScene[row][column] != expected)
+            if (candidate[row][column] != expected)
             {
-                identity = false;
+                candidateIdentity = false;
                 break;
             }
         }
     }
+
+    for (int sceneAxis = 0; sceneAxis < 3; sceneAxis++)
+    {
+        for (int hostAxis = 0; hostAxis < 3; hostAxis++)
+        {
+            hostToScene[sceneAxis][hostAxis] = candidate[sceneAxis][hostAxis];
+            sceneToHost[hostAxis][sceneAxis] = candidate[sceneAxis][hostAxis];
+        }
+    }
+
+    scale = candidateScale;
+    invScale = candidateInvScale;
+    identity = candidateIdentity;
 
     return true;
 }
@@ -251,8 +256,7 @@ uint32_t SpatialFrame::SoftFace(uint32_t value) const
     {
         if (hostToScene[sceneAxis][hostAxis] != 0.0f)
         {
-            const bool sceneMax = hostToScene[sceneAxis][hostAxis] > 0.0f ? hostMax : !hostMax;
-            return 1 + sceneAxis * 2 + (sceneMax ? 1 : 0);
+            return 1 + sceneAxis * 2 + (hostMax ? 1 : 0);
         }
     }
 
@@ -338,6 +342,7 @@ void ConvertDrawFrame(const SpatialFrame &frame, const QrDrawFrameInfo &source,
         storage.reflectRefract = *source.pReflectRefractParams;
         storage.reflectRefract.waterWaveSpeed *= frame.Scale();
         storage.reflectRefract.waterTextureAreaScale *= frame.Scale();
+        storage.reflectRefract.acidDensity *= frame.InvScale();
         storage.reflectRefract.waterColor.data[0] = frame.Transmittance(storage.reflectRefract.waterColor.data[0]);
         storage.reflectRefract.waterColor.data[1] = frame.Transmittance(storage.reflectRefract.waterColor.data[1]);
         storage.reflectRefract.waterColor.data[2] = frame.Transmittance(storage.reflectRefract.waterColor.data[2]);

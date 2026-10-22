@@ -156,14 +156,32 @@ static auto Call(QrInstance qrInstance, Func f, Args&&... args)
     return ReturnType{};
 }
 
+template<typename Func, typename... Args>
+static QrResult CallAlways(QrInstance qrInstance, Func f, Args&&... args)
+{
+    try
+    {
+        VulkanDevice &dev = GetDevice(qrInstance);
+
+        G_EntryPointCalls.fetch_add(1, std::memory_order_relaxed);
+        (dev.*f)(std::forward<Args>(args)...);
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
+    return QR_SUCCESS;
+}
+
 QrResult qrSetSpatialConvention(QrInstance qrInstance, const QrSpatialConvention *pConvention)
 {
-    return Call(qrInstance, &VulkanDevice::SetSpatialConvention, pConvention);
+    return CallAlways(qrInstance, &VulkanDevice::SetSpatialConvention, pConvention);
 }
 
 QrResult qrGetSpatialConvention(QrInstance qrInstance, QrSpatialConvention *pConvention)
 {
-    return Call(qrInstance, &VulkanDevice::GetSpatialConvention, pConvention);
+    return CallAlways(qrInstance, &VulkanDevice::GetSpatialConvention, pConvention);
 }
 
 QrResult qrUploadGeometry(QrInstance qrInstance, const QrGeometryUploadInfo *pUploadInfo)

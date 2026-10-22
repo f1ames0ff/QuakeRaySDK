@@ -103,9 +103,9 @@ structures; a host supplies scene uploads through the `Qr*` contract in
 `qray.h`. Embedded/device-sharing integration and non-Windows targets are not
 part of the current package.
 
-The current scene envelope uses 10,000 internal scene units (250 m) as the ray
-and sky sentinel. A host with a larger physical draw distance must stay inside
-that envelope until the sentinel becomes configurable. Left-handed worlds,
-arbitrary world rotations and non-uniform instance scale are host-side
-conversion or unsupported cases; the spatial contract supports right-handed
-signed axis permutations with uniform scale.
+The current ray clamp uses 10,000 internal scene units (250 m); the shader sky
+sentinel is 20,000 scene units (500 m). A host with a larger physical draw
+distance must stay inside the ray envelope until it becomes configurable.
+Left-handed worlds, arbitrary world rotations and non-uniform instance scale
+are host-side conversion or unsupported cases; the spatial contract supports
+right-handed signed axis permutations with uniform scale.
