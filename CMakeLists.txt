@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(qray_renderer VERSION 1.3.0 LANGUAGES C CXX)
+    project(qray_renderer VERSION 1.4.0 LANGUAGES C CXX)
     set(QR_RENDERER_STANDALONE ON)
 else()
     set(QR_RENDERER_STANDALONE OFF)
@@ -186,6 +186,12 @@ if(QR_RENDERER_STANDALONE)
 endif()
 
 if(QR_BUILD_TESTS)
+    add_executable(qray_readback_api_tests Tests/ReadbackApiTests.cpp)
+    target_compile_features(qray_readback_api_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_readback_api_tests PRIVATE Include)
+    add_test(NAME qray_readback_api_tests COMMAND qray_readback_api_tests)
+    set_tests_properties(qray_readback_api_tests PROPERTIES TIMEOUT 30)
+
     add_executable(qray_swapchain_policy Tests/SwapchainPolicyTests.cpp)
     target_compile_features(qray_swapchain_policy PRIVATE cxx_std_20)
     target_include_directories(qray_swapchain_policy PRIVATE Source ${Vulkan_INCLUDE_DIRS})
@@ -364,7 +370,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 set(QRAY_RENDERER_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/qray_renderer")
-set(QRAY_RENDERER_VERSION "1.3.0")
+set(QRAY_RENDERER_VERSION "1.4.0")
 
 if(WIN32)
     install(TARGETS renderer

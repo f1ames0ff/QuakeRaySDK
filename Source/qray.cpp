@@ -471,6 +471,25 @@ QrResult qrRequestScreenshot(QrInstance qrInstance, const char *pFilePath)
     return Call(qrInstance, &VulkanDevice::RequestScreenshot, pFilePath);
 }
 
+QrResult qrGetFrameReadbackRequirements(QrInstance qrInstance, QrFrameReadbackFormat format,
+                                        QrBool32 includeUi, uint32_t *pWidth, uint32_t *pHeight,
+                                        uint32_t *pRowPitch, uint64_t *pBufferSize)
+{
+    return Call(qrInstance, &VulkanDevice::GetFrameReadbackRequirements, format, includeUi,
+                pWidth, pHeight, pRowPitch, pBufferSize);
+}
+
+QrResult qrRequestFrameReadback(QrInstance qrInstance, const QrFrameReadbackInfo *pInfo,
+                                uint64_t *pRequestId)
+{
+    return Call(qrInstance, &VulkanDevice::RequestFrameReadback, pInfo, pRequestId);
+}
+
+QrResult qrGetFrameReadbackStatus(QrInstance qrInstance, uint64_t requestId, QrBool32 *pDone)
+{
+    return Call(qrInstance, &VulkanDevice::GetFrameReadbackStatus, requestId, pDone);
+}
+
 const char *qrGetCpuPassName(uint32_t passIndex)
 {
     static const char *const names[QR_CPU_PASS_COUNT] =

@@ -731,6 +731,55 @@ void VulkanDevice::RequestScreenshot(const char *pFilePath)
     }
 }
 
+QrResult VulkanDevice::GetFrameReadbackRequirements(QrFrameReadbackFormat format, QrBool32 includeUi,
+                                                     uint32_t *pWidth, uint32_t *pHeight,
+                                                     uint32_t *pRowPitch, uint64_t *pBufferSize) const
+{
+    if (pWidth == nullptr || pHeight == nullptr || pRowPitch == nullptr || pBufferSize == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    if (nvrhiFrameSkeleton == nullptr || nvrhiFrameSkeleton->IsUnavailable())
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    return nvrhiFrameSkeleton->GetFrameReadbackRequirements(format, includeUi, *pWidth, *pHeight,
+                                                            *pRowPitch, *pBufferSize);
+}
+
+QrResult VulkanDevice::RequestFrameReadback(const QrFrameReadbackInfo *pInfo, uint64_t *pRequestId)
+{
+    if (pInfo == nullptr || pRequestId == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    if (nvrhiFrameSkeleton == nullptr || nvrhiFrameSkeleton->IsUnavailable())
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    return nvrhiFrameSkeleton->RequestFrameReadback(currentFrameState.GetFrameIndex(), *pInfo,
+                                                     *pRequestId);
+}
+
+QrResult VulkanDevice::GetFrameReadbackStatus(uint64_t requestId, QrBool32 *pDone) const
+{
+    if (pDone == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    if (nvrhiFrameSkeleton == nullptr || nvrhiFrameSkeleton->IsUnavailable())
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    return nvrhiFrameSkeleton->GetFrameReadbackStatus(requestId, *pDone);
+}
+
 bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 {
     if (nvrhiFrameSkeleton == nullptr || nvrhiFrameSkeleton->IsUnavailable())
