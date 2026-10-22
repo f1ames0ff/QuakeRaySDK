@@ -245,7 +245,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     // the sky stays empty - there the legacy screen-space volumetric renders
     // the sky shafts. For sky pixels the stored surface position is invalid,
     // so the march starts from the camera.
-    const bool isSky = rayDistance > MAX_RAY_LENGTH;
+    const bool isSky = rayDistance > globalUniform.rayLength;
     if (isSky && globalUniform.coreQ2RTX == 0)
     {
         if (push.passIndex == 0)

@@ -253,7 +253,7 @@ float3 applyVolumetrics( const int2 pix, const float3 color )
     const float3 cameraRayDir = getRayDir( inUV );
 
     float virtualdepth = framebufDepthWorld_Sampled.Load(int3( getCheckerboardPix( pix ), 0 )).r;
-    bool  isSky        = virtualdepth > MAX_RAY_LENGTH;
+    bool  isSky        = virtualdepth > globalUniform.rayLength;
 
     if( globalUniform.volumeEnableType == VOLUME_ENABLE_VOLUMETRIC )
     {
@@ -310,7 +310,7 @@ float3 applyLevelFog( const int2 pix, const float3 color )
     const float depth = framebufDepthWorld_Sampled.Load(int3( getCheckerboardPix( pix ), 0 )).r;
 
     float fog;
-    if( depth > MAX_RAY_LENGTH )
+    if( depth > globalUniform.rayLength )
     {
         fog = 1.0 - skyBlend;
     }
@@ -480,7 +480,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     }
 
     const float virtualdepth = framebufDepthWorld_Sampled.Load(int3( getCheckerboardPix( pix ), 0 )).r;
-    const bool isSky = virtualdepth > MAX_RAY_LENGTH;
+    const bool isSky = virtualdepth > globalUniform.rayLength;
     float3 color = finalizeColor( hdr, isSky );
 
     color = applyVolumetrics( pix, color );

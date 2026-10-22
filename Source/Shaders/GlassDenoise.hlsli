@@ -128,7 +128,7 @@ float3 spatialGlass(int2 pix, float4 mask)
             const float3 tapNormal = texelFetchNormalGeometry(tpos);
             float weight = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
             weight *= exp(-abs(depth - tapDepth) / depthScale);
-            weight *= abs(depth) > MAX_RAY_LENGTH && abs(tapDepth) > MAX_RAY_LENGTH ?
+            weight *= abs(depth) > globalUniform.rayLength && abs(tapDepth) > globalUniform.rayLength ?
                 1.0 : pow(saturate(dot(normal, tapNormal)), 8.0);
             sum += framebufPreFinal.Load(tap).rgb * weight;
             weightSum += weight;

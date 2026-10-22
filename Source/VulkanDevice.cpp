@@ -95,6 +95,11 @@ QrPolygonalLightUploadInfo SpatialPolygonalLight(const SpatialFrame &frame, cons
         result.positions[i] = SpatialPoint(frame, source.positions[i]);
     }
 
+    if (frame.IsMirrored())
+    {
+        std::swap(result.positions[1], result.positions[2]);
+    }
+
     result.color.data[0] *= powerScale;
     result.color.data[1] *= powerScale;
     result.color.data[2] *= powerScale;
@@ -210,6 +215,27 @@ void VulkanDevice::GetSpatialConvention(QrSpatialConvention *pConvention) const
     }
 
     *pConvention = spatialConvention;
+}
+
+void VulkanDevice::SetSmokeWindDirection(const QrFloat3D *pDirection)
+{
+    if (pDirection == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    smokeWindDirection = *pDirection;
+    smokeWindDirectionSet = true;
+}
+
+void VulkanDevice::GetSmokeWindDirection(QrFloat3D *pDirection) const
+{
+    if (pDirection == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    *pDirection = smokeWindDirection;
 }
 
 void VulkanDevice::LockSpatialFrame()
@@ -696,6 +722,35 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     gu->rayCullBackFaces  = rayCullBackFacingTriangles ? 1 : 0;
     gu->rayLength         = clamp( drawInfo.rayLength, 0.1f, ( float )MAX_RAY_LENGTH );
     gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 0.001f, gu->rayLength );
+
+    {
+        if( !smokeWindDirectionSet )
+        {
+            gu->smokeWindX = 0.45f;
+            gu->smokeWindY = 0.20f;
+            gu->smokeWindZ = 0.87f;
+        }
+        else
+        {
+            const QrFloat3D wind = spatialFrame.Direction( smokeWindDirection );
+            const float windLength = std::sqrt( wind.data[ 0 ] * wind.data[ 0 ] +
+                                                wind.data[ 1 ] * wind.data[ 1 ] +
+                                                wind.data[ 2 ] * wind.data[ 2 ] );
+
+            if( windLength > 0.000001f )
+            {
+                gu->smokeWindX = wind.data[ 0 ] / windLength;
+                gu->smokeWindY = wind.data[ 1 ] / windLength;
+                gu->smokeWindZ = wind.data[ 2 ] / windLength;
+            }
+            else
+            {
+                gu->smokeWindX = 0.45f;
+                gu->smokeWindY = 0.20f;
+                gu->smokeWindZ = 0.87f;
+            }
+        }
+    }
 
     {
         gu->rayCullMaskWorld = 0;
@@ -1917,9 +1972,42 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
     }
 
     QrGeometryUploadInfo converted = *uploadInfo;
+    std::vector<uint32_t> convertedIndices;
+    std::vector<QrVertex> convertedVertices;
+
     if (!spatialFrame.IsIdentity())
     {
         converted.transform = SpatialTransform(spatialFrame, uploadInfo->transform);
+    }
+
+    if (spatialFrame.IsMirrored())
+    {
+        if (uploadInfo->pIndices != nullptr && uploadInfo->indexCount >= 3)
+        {
+            convertedIndices.assign(uploadInfo->pIndices, uploadInfo->pIndices + uploadInfo->indexCount);
+
+            for (uint32_t index = 0; index + 2 < uploadInfo->indexCount; index += 3)
+            {
+                std::swap(convertedIndices[index + 1], convertedIndices[index + 2]);
+            }
+
+            converted.pIndices = convertedIndices.data();
+        }
+        else if (uploadInfo->pIndices == nullptr && uploadInfo->vertexCount >= 3)
+        {
+            convertedVertices.assign(uploadInfo->pVertices, uploadInfo->pVertices + uploadInfo->vertexCount);
+
+            for (uint32_t vertex = 0; vertex + 2 < uploadInfo->vertexCount; vertex += 3)
+            {
+                std::swap(convertedVertices[vertex + 1], convertedVertices[vertex + 2]);
+            }
+
+            converted.pVertices = convertedVertices.data();
+        }
+    }
+
+    if (!spatialFrame.IsIdentity() || spatialFrame.IsMirrored())
+    {
         uploadInfo = &converted;
     }
 
@@ -2007,10 +2095,24 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
     QrRasterizedGeometryUploadInfo converted = *pUploadInfo;
     float convertedViewProjection[16] = {};
     std::vector<QrVertex> convertedVertices;
+    std::vector<uint32_t> convertedIndices;
 
     if (!spatialFrame.IsIdentity() && pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
     {
         converted.transform = SpatialTransform(spatialFrame, pUploadInfo->transform);
+
+        if (spatialFrame.IsMirrored() && pUploadInfo->pIndices != nullptr && pUploadInfo->indexCount >= 3)
+        {
+            const uint32_t *sourceIndices = static_cast<const uint32_t *>(pUploadInfo->pIndices);
+            convertedIndices.assign(sourceIndices, sourceIndices + pUploadInfo->indexCount);
+
+            for (uint32_t index = 0; index + 2 < pUploadInfo->indexCount; index += 3)
+            {
+                std::swap(convertedIndices[index + 1], convertedIndices[index + 2]);
+            }
+
+            converted.pIndices = convertedIndices.data();
+        }
 
         if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
         {
@@ -2519,6 +2621,26 @@ void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
                 faceVertices[i].normal[0] = normal.data[0];
                 faceVertices[i].normal[1] = normal.data[1];
                 faceVertices[i].normal[2] = normal.data[2];
+            }
+
+            if (spatialFrame.IsMirrored())
+            {
+                for (uint32_t faceIndex = 0; faceIndex < pInfo->numFaces; faceIndex++)
+                {
+                    const QrWorldLightFace &face = pInfo->pFaces[faceIndex];
+
+                    if (face.firstVertex >= faceVertices.size() ||
+                        face.numVertices > faceVertices.size() - face.firstVertex)
+                    {
+                        continue;
+                    }
+
+                    for (uint32_t i = 0; i < face.numVertices / 2; i++)
+                    {
+                        std::swap(faceVertices[face.firstVertex + i],
+                                  faceVertices[face.firstVertex + face.numVertices - 1 - i]);
+                    }
+                }
             }
 
             converted.pFaceVertices = faceVertices.data();

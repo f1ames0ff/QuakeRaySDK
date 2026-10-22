@@ -51,6 +51,7 @@ public:
     uint32_t GetFaceVertexCount() const { return uint32_t(faceVertices.size()); }
     uint32_t GetVisDataSize() const { return uint32_t(visData.size()); }
     uint32_t GetPvsRowBytes() const { return pvsRowBytes; }
+    bool IsVisUncompressed() const { return visUncompressed; }
     uint32_t GetGeneration() const { return generation; }
 
     const QrFloat3D        &GetClusterMin(uint32_t index) const { return clusterMins[index]; }
@@ -88,6 +89,7 @@ private:
     std::vector<int32_t>          visOffsets;
     std::vector<uint8_t>          clusterSkyVisibility;
     uint32_t                      pvsRowBytes = 0;
+    bool                          visUncompressed = false;
     uint32_t                      generation = 0;
 };
 

@@ -54,6 +54,7 @@ SpatialFrame::SpatialFrame()
     , scale(1.0f)
     , invScale(1.0f)
     , identity(true)
+    , mirrored(false)
 {
 }
 
@@ -61,7 +62,7 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
 {
     if (convention.size != sizeof(QrSpatialConvention) ||
         convention.version != QR_SPATIAL_CONVENTION_VERSION ||
-        convention.hostIsRightHanded != QR_TRUE ||
+        convention.hostIsRightHanded > QR_TRUE ||
         !std::isfinite(convention.unitsPerMeter) ||
         convention.unitsPerMeter <= 0.0f)
     {
@@ -97,7 +98,14 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
         candidate[0][1] * (candidate[1][0] * candidate[2][2] - candidate[1][2] * candidate[2][0]) +
         candidate[0][2] * (candidate[1][0] * candidate[2][1] - candidate[1][1] * candidate[2][0]);
 
-    if (determinant < 0.5f)
+    if (std::abs(determinant) < 0.5f)
+    {
+        return false;
+    }
+
+    const bool mirrored = determinant < 0.0f;
+
+    if ((convention.hostIsRightHanded == QR_TRUE) == mirrored)
     {
         return false;
     }
@@ -143,6 +151,7 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
     scale = candidateScale;
     invScale = candidateInvScale;
     identity = candidateIdentity;
+    this->mirrored = mirrored;
 
     return true;
 }

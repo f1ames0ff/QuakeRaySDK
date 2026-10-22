@@ -98,6 +98,8 @@ public:
 
     void SetSpatialConvention(const QrSpatialConvention *pConvention);
     void GetSpatialConvention(QrSpatialConvention *pConvention) const;
+    void SetSmokeWindDirection(const QrFloat3D *pDirection);
+    void GetSmokeWindDirection(QrFloat3D *pDirection) const;
 
     void UploadGeometry(const QrGeometryUploadInfo *pUploadInfo);
     void UpdateGeometryTransform(const QrUpdateTransformInfo *pUpdateInfo);
@@ -239,6 +241,8 @@ private:
         {},
     };
     bool                spatialFrameLocked = false;
+    bool                smokeWindDirectionSet = false;
+    QrFloat3D           smokeWindDirection = { { 0.45f, 0.20f, 0.87f } };
 
     uint32_t            frameId;
 

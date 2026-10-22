@@ -206,6 +206,29 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_spatial_contract_tests COMMAND qray_spatial_contract_tests)
     set_tests_properties(qray_spatial_contract_tests PROPERTIES TIMEOUT 30)
 
+    add_executable(qray_worldlights_tests Tests/WorldLightsTests.cpp Source/WorldLights.cpp
+        Source/QrException.cpp Source/UserFunction.cpp)
+    target_compile_features(qray_worldlights_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_worldlights_tests PRIVATE QR_STATIC)
+    target_include_directories(qray_worldlights_tests PRIVATE Include Source ${Vulkan_INCLUDE_DIRS})
+    add_test(NAME qray_worldlights_tests COMMAND qray_worldlights_tests)
+    set_tests_properties(qray_worldlights_tests PROPERTIES TIMEOUT 30)
+
+    add_executable(qray_spatial_twin_gpu Tests/SpatialTwinGpu.cpp)
+    target_compile_features(qray_spatial_twin_gpu PRIVATE cxx_std_20)
+    target_compile_definitions(qray_spatial_twin_gpu PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+    target_include_directories(qray_spatial_twin_gpu PRIVATE Include Source)
+    target_link_libraries(qray_spatial_twin_gpu PRIVATE renderer nvrhi nvrhi_vk user32)
+    add_custom_command(TARGET qray_spatial_twin_gpu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+            "$<TARGET_FILE_DIR:qray_spatial_twin_gpu>/amd_fidelityfx_vk.dll"
+        VERBATIM)
+    add_test(NAME qray_spatial_twin_gpu COMMAND qray_spatial_twin_gpu
+        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${CMAKE_CURRENT_SOURCE_DIR}/../gfx/textures")
+    set_tests_properties(qray_spatial_twin_gpu PROPERTIES TIMEOUT 180
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+
     get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
     find_program(QR_DXC NAMES dxc HINTS "${QR_VULKAN_BIN}" REQUIRED)
     set(QR_PROBE_DIR "${CMAKE_CURRENT_BINARY_DIR}/Tests")

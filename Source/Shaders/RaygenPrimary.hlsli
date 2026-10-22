@@ -139,7 +139,7 @@ void storeSky(
 
         framebufAlbedo[getRegularPixFromCheckerboardPix(pix)] = float4(albedo, 0.0);
 
-        storeQ2GBuffer(pix, albedo, 1.0, (float2)0.0, (float3)1.0, 0.0, 1.0, MAX_RAY_LENGTH * 2.0, 0.0, MAX_RAY_LENGTH * 2.0, albedo, 1.0, fogAccum, ~0u);
+        storeQ2GBuffer(pix, albedo, 1.0, (float2)0.0, (float3)1.0, 0.0, 1.0, globalUniform.rayLength * 2.0, 0.0, globalUniform.rayLength * 2.0, albedo, 1.0, fogAccum, ~0u);
     }
 
     float2 m = getMotionForInfinitePoint(rayDir);
@@ -152,7 +152,7 @@ void storeSky(
     imageStoreNormal(                       pix, (float3)0.0);
     imageStoreNormalGeometry(               pix, (float3)0.0);
     framebufMetallicRoughness[pix]          = (float4)0.0;
-    framebufDepthWorld[pix]                 = (float4)(MAX_RAY_LENGTH * 2.0);
+    framebufDepthWorld[pix]                 = (float4)(globalUniform.rayLength * 2.0);
     framebufMotion[pix]                     = float4(m, 0.0, 0.0);
     framebufSurfacePosition[pix]            = (float4)SURFACE_POSITION_INCORRECT;
     framebufVisibilityBuffer[pix]           = (float4)UINT32_MAX;
@@ -348,7 +348,7 @@ void main()
             q2FogAccum = q2SegmentFog(q2SkyFog1, q2SkyFog2, 1e6);
         }
 
-        storeSky(pix, cameraRayDir, globalUniform.skyType != SKY_TYPE_RASTERIZED_GEOMETRY, throughput, MAX_RAY_LENGTH * 2.0, q2FogAccum);
+        storeSky(pix, cameraRayDir, globalUniform.skyType != SKY_TYPE_RASTERIZED_GEOMETRY, throughput, globalUniform.rayLength * 2.0, q2FogAccum);
         if (primaryPayload.glassFilter.z != 0.0)
         {
             framebufQ2GlassFilter[pix] = float4(primaryPayload.glassTint, 1.0 + primaryPayload.glassFilter.x);
@@ -1037,7 +1037,7 @@ void main()
 
             /* The segment leaves the pane and reaches the sky: the frame's particle stand-ins
                are the only thing between the two. */
-            q2BlendParticleProxies(rayOrigin, rayDir, MAX_RAY_LENGTH * 2.0, throughput, pix);
+            q2BlendParticleProxies(rayOrigin, rayDir, globalUniform.rayLength * 2.0, throughput, pix);
 
             uint4 q2SegFog1, q2SegFog2;
             q2FindFogVolumes(rayOrigin, rayDir, 0.0, 1e6, q2SegFog1, q2SegFog2);
@@ -1052,13 +1052,13 @@ void main()
             }
 
             storeSky(pix, rayDir, true, throughput, wasSplit, q2FogAccum);
-            storeQ2GBuffer(pix, (float3)0.0, 1.0, (float2)0.0, (float3)1.0, 0.0, 1.0, -MAX_RAY_LENGTH * 2.0, q2HalfConeAngle, MAX_RAY_LENGTH * 2.0,
+            storeQ2GBuffer(pix, (float3)0.0, 1.0, (float2)0.0, (float3)1.0, 0.0, 1.0, -globalUniform.rayLength * 2.0, q2HalfConeAngle, globalUniform.rayLength * 2.0,
                            q2Transparent.rgb, q2Transparent.a, q2FogAccum, ~0u);
 
             /* The transport's spare RGB carries the segment's own origin to the
                god-rays reflection pass, whose sky continuation would otherwise
                march from the camera and count the primary segment twice. */
-            framebufQ2GodRaysThroughputDist[pix] = float4(rayOrigin, MAX_RAY_LENGTH * 2.0);
+            framebufQ2GodRaysThroughputDist[pix] = float4(rayOrigin, globalUniform.rayLength * 2.0);
             compositeGlassPaint(pix, panePaint);
             return;
         }
