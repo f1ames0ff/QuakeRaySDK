@@ -323,7 +323,7 @@ bool EditorApp::LoadScene()
 {
     std::string error;
 
-    if (!LoadEditorSceneObj(m_scenePath, m_scene, error))
+    if (!LoadEditorScene(m_scenePath, m_scene, error))
     {
         MessageBoxA(m_window, error.c_str(), "QuakeRay Editor", MB_ICONERROR);
         return false;
@@ -410,17 +410,54 @@ void EditorApp::Frame()
         return;
     }
 
-    const float eye[3] = { 4.0f, -6.0f, 3.0f };
-    const float target[3] = { 0.0f, 0.0f, 1.0f };
+    float eye[3] = { 4.0f, -6.0f, 3.0f };
+    float target[3] = { 0.0f, 0.0f, 1.0f };
     const float up[3] = { 0.0f, 0.0f, 1.0f };
+    float sceneExtent = 10.0f;
+
+    if (m_scene.hasBounds)
+    {
+        float center[3] = {};
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            center[axis] = (m_scene.boundsMin[axis] + m_scene.boundsMax[axis]) * 0.5f;
+            sceneExtent = std::max(sceneExtent,
+                                   m_scene.boundsMax[axis] - m_scene.boundsMin[axis]);
+        }
+
+        if (m_scene.hasCamera)
+        {
+            for (int axis = 0; axis < 3; axis++)
+            {
+                eye[axis] = m_scene.cameraPosition[axis];
+            }
+
+            const float yaw = m_scene.cameraYawDegrees * 0.01745329252f;
+            target[0] = eye[0] + std::cos(yaw) * 512.0f;
+            target[1] = eye[1] + std::sin(yaw) * 512.0f;
+            target[2] = eye[2];
+        }
+        else
+        {
+            eye[0] = center[0] + sceneExtent * 0.8f;
+            eye[1] = center[1] - sceneExtent * 1.0f;
+            eye[2] = center[2] + sceneExtent * 0.6f;
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                target[axis] = center[axis];
+            }
+        }
+    }
 
     QrDrawFrameInfo draw = {};
     LookAt(eye, target, up, draw.view);
     draw.worldUpVector = { 0.0f, 0.0f, 1.0f };
     draw.fovYRadians = 1.0471975512f;
-    draw.cameraNear = 0.1f;
-    draw.cameraFar = 1000.0f;
-    draw.rayLength = 1000.0f;
+    draw.cameraNear = std::max(0.1f, sceneExtent * 0.0005f);
+    draw.cameraFar = std::max(1000.0f, sceneExtent * 8.0f);
+    draw.rayLength = draw.cameraFar;
     draw.rayCullMaskWorld = QR_DRAW_FRAME_RAY_CULL_WORLD_0_BIT |
                             QR_DRAW_FRAME_RAY_CULL_WORLD_1_BIT |
                             QR_DRAW_FRAME_RAY_CULL_SKY_BIT;
