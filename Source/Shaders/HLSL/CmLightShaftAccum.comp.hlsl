@@ -73,7 +73,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const float3 surfacePos = framebufSurfacePosition_Sampled.Load(int3(cbPix, 0)).xyz;
     const float3 normal = texelFetchNormal(cbPix);
-    const float3 motion = framebufMotion_Sampled.Load(int3(cbPix, 0)).xyz;
     const uint seed = getRandomSeed(pixelPos, globalUniform.frameId);
     const float3 noise = rndBlueNoise8(seed, 1).xyz;
 
@@ -86,8 +85,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float3 current = lightShaftVolume.SampleLevel(
         lightShaftVolumeSampler, saturate(uvw), 0.0).rgb;
 
-    const float2 previousPos = float2(pixelPos) + 0.5 +
-        motion.xy * float2(globalUniform.renderWidth, globalUniform.renderHeight);
+    const float4 previousClip = mul(globalUniform.projectionPrev,
+                                    mul(globalUniform.viewPrev, float4(surfacePos, 1.0)));
+    const float2 previousPos = (previousClip.xy / previousClip.w * 0.5 + 0.5) *
+                               float2(globalUniform.renderWidth, globalUniform.renderHeight);
     const float2 previousBaseFloat = floor(previousPos - 0.5);
     const int2 previousBase = int2(previousBaseFloat);
     const float2 previousSub = previousPos - 0.5 - previousBaseFloat;
@@ -111,7 +112,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                 int3(previousCbPixel, 0)).x;
             const float3 previousNormal = texelFetchNormal_Prev(previousCbPixel);
 
-            if (!testReprojectedDepth(rayDistance, previousDepth, motion.z) ||
+            if (!testReprojectedDepth(rayDistance, previousDepth, 0.0) ||
                 !testReprojectedNormal(normal, previousNormal))
             {
                 continue;
