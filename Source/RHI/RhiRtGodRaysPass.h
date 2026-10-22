@@ -37,7 +37,8 @@ namespace rhi
 class RhiFrameContext;
 }
 
-// The RHI module of the legacy god rays: the half-resolution volumetric sunlight march into image 63
+// The RHI module of the legacy god rays: the half-resolution volumetric sunlight march, and the
+// smooth light-shaft volume sampled along the same view rays, into image 63
 // (GOD_RAYS) and the full-resolution bilateral upscale into image 64 (GOD_RAYS_FILTERED), which
 // `CmPrepareFinal` consumes. The legacy reference is the `GodRays` class (GodRays.{h,cpp}) and the
 // host block that drives it (VulkanDevice.cpp:906-1028). The RHI module keeps the block's split
@@ -237,15 +238,26 @@ class RhiRtGodRaysPass final
 public:
     using PrintFunction = std::function<void(const char *)>;
 
-    // The CPU mirror of the shader's `GodRaysParams_BT` (CmGodRays.comp.hlsl:87-99). The offsets
-    // are the blob's own, measured 2026-09-26 with `spirv-dis` over `renderer\Build\CmGodRays.comp.spv`:
-    // OpMemberDecorate offsets 0, 16, 32, 48, 64 (MatrixStride 16, RowMajor), 128, 132, 136, 140
-    // and 144. The struct is 148 bytes while the shader's `ArrayStride` is 160 (the runtime
-    // `%_runtimearr_GodRaysParams_BT` decoration) - the trailing 12 bytes are the HLSL structured
-    // buffer's stride padding, and the buffer is created with `structStride = GOD_RAYS_PARAMS_STRIDE`
-    // (160), NOT `sizeof(Params)`. This is deliberately not the legacy `GodRays::Params` layout
-    // (GodRays.h:44-56), which is the same field sequence but was bound as a plain storage buffer
-    // of its own size; the members and their meaning are identical.
+    // The CPU mirror of the shader's `GodRaysParams_BT` (CmGodRays.comp.hlsl). The offsets are the
+    // blob's own, verified with `spirv-dis` over `renderer\Build\CmGodRays.comp.spv`: the original
+    // members keep offsets 0, 16, 32, 48, 64 (MatrixStride 16, RowMajor), 128, 132, 136, 140 and
+    // 144; the light-shaft members follow at 148, 152 and 156 and the array at 160. The shader's
+    // `ArrayStride` is 6304 and the buffer is created with `structStride = GOD_RAYS_PARAMS_STRIDE`.
+    // This is deliberately not the legacy `GodRays::Params` layout (GodRays.h:44-56), which is the
+    // same field sequence but was bound as a plain storage buffer of its own size; the members and
+    // their meaning are identical.
+    static constexpr uint32_t MAX_LIGHT_SHAFTS = 64;
+
+    struct LightShaft
+    {
+        float position[4];
+        float direction[4];
+        float color[4];
+        float cone[4];
+        float tangentU[4];
+        float tangentV[4];
+    };
+
     struct Params
     {
         // Offset 0. The direction TOWARD the sun (the shader's `dot(direction, sunDirection)`).
@@ -270,13 +282,19 @@ public:
         float godRaysEccentricity;
         // Offset 140. The final switch; 0 makes the shader clear image 63 on passIndex 0.
         uint32_t godRaysEnabled;
-        // Offset 144. The HLSL struct's `_padding`; never read.
-        float padding;
+        // Offset 144. The sun-march step scale the quality dropdown drives.
+        float sunStepScale;
+        // Offset 148. The frame's light-shaft sources; the array starts at offset 160.
+        uint32_t lightShaftCount;
+        float lightShaftIntensity;
+        uint32_t lightShaftSteps;
+        LightShaft lightShafts[MAX_LIGHT_SHAFTS];
     };
 
-    // The shader's structured-buffer element stride (measured ArrayStride 160), and the size of the
-    // one-element buffer that carries Params.
-    static constexpr uint32_t GOD_RAYS_PARAMS_STRIDE = 160;
+    // The shader's structured-buffer element stride, and the size of the one-element buffer that
+    // carries Params.
+    static constexpr uint32_t GOD_RAYS_PARAMS_STRIDE =
+        160 + MAX_LIGHT_SHAFTS * uint32_t(sizeof(LightShaft));
 
     // The `GodRaysPush_BT` push constant: one uint passIndex at offset 0 (measured; GodRays.cpp:170-174).
     static constexpr uint32_t GOD_RAYS_PUSH_SIZE = 4;
@@ -337,6 +355,8 @@ public:
     // Set 4's texture: the indirect pass's blue-noise wrap (see the class comment). A null clears
     // it, a replaced one rebuilds the set; the entry points skip until a valid texture is set.
     void SetBlueNoiseTexture(nvrhi::ITexture *pBlueNoise);
+
+    void SetLightShaftVolume(nvrhi::ITexture *pVolume, nvrhi::ISampler *pVolumeSampler);
 
     // The input half of the frame's god-rays block (the legacy :964-1006, with the trace(0) at
     // :1003): the params write, the primary march (passIndex 0) and, on the two self-contained
@@ -421,6 +441,9 @@ private:
         nvrhi::BindingSetHandle filterFramebufferSet;
         nvrhi::IBuffer *uniformBuffer = nullptr;
         nvrhi::BindingSetHandle uniformSet;
+        nvrhi::BindingSetHandle lightShaftVolumeSet;
+        nvrhi::ITexture *lightShaftVolumeTexture = nullptr;
+        nvrhi::ISampler *lightShaftVolumeSampler = nullptr;
 
         // The frame-scoped hand-off of the split entry points: set by RenderInput on the path that
         // defers the reflected half (the same path that returns true) and checked and consumed by
@@ -463,6 +486,12 @@ private:
     // false when the buffer is not the static constant-buffer wrap the shader's
     // `ConstantBuffer<ShGlobalUniform>` requires.
     bool PrepareUniformSet(Target &target, nvrhi::IBuffer *pUniformBuffer);
+
+    // Set 6: builds (or rebuilds, when the slot's TLAS changed) the acceleration-structure set.
+    bool PrepareLightShaftVolumeSet(Target &target, nvrhi::ICommandList *pCommandList);
+
+    bool PrepareLightShaftHistory(uint32_t width, uint32_t height);
+    void ReleaseLightShaftHistory();
 
     // Set 0: builds (or rebuilds, when either pointer changed) the shadow map set. Returns false
     // when no valid shadow map was set.
@@ -510,6 +539,8 @@ private:
     nvrhi::BindingLayoutHandle filterFramebufferLayout;
     nvrhi::BindingLayoutHandle uniformLayout;
     nvrhi::BindingLayoutHandle blueNoiseLayout;
+    nvrhi::BindingLayoutHandle lightShaftVolumeLayout;
+    nvrhi::BindingLayoutHandle lightShaftHistoryLayout;
     nvrhi::BindingLayoutHandle pushConstantLayout;
     nvrhi::BindingLayoutHandle emptyLayout;
 
@@ -542,6 +573,19 @@ private:
     nvrhi::ITexture *blueNoiseSetTexture = nullptr;
     nvrhi::BindingSetHandle blueNoiseSet;
 
+    nvrhi::TextureHandle lightShaftVolumeFallback;
+    nvrhi::SamplerHandle lightShaftVolumeFallbackSampler;
+    bool lightShaftVolumeFallbackCleared = false;
+    nvrhi::ITexture *lightShaftVolumeTexture = nullptr;
+    nvrhi::ISampler *lightShaftVolumeSampler = nullptr;
+
+    nvrhi::SamplerHandle lightShaftHistorySampler;
+    nvrhi::TextureHandle lightShaftHistoryTextures[MAX_FRAMES_IN_FLIGHT];
+    nvrhi::BindingSetHandle lightShaftHistorySets[MAX_FRAMES_IN_FLIGHT];
+    uint32_t lightShaftHistoryWidth = 0;
+    uint32_t lightShaftHistoryHeight = 0;
+    bool lightShaftHistoryCleared = false;
+
     // One entry per engine frame slot (MAX_FRAMES_IN_FLIGHT, Common.h:31).
     Target targets[MAX_FRAMES_IN_FLIGHT];
 
@@ -564,10 +608,10 @@ private:
 };
 
 // The CPU mirror has to match the measured member layout member by member; the shader's element
-// stride is GOD_RAYS_PARAMS_STRIDE (160), not this size, which is why the buffer is created with
-// the stride, not with sizeof().
-static_assert(sizeof(RhiRtGodRaysPass::Params) == 148,
-              "GodRaysParams_BT is 148 bytes; the structured buffer uses the 160-byte stride");
+// stride is GOD_RAYS_PARAMS_STRIDE, not this size, which is why the buffer is created with the
+// stride, not with sizeof().
+static_assert(sizeof(RhiRtGodRaysPass::Params) == 6304,
+              "GodRaysParams_BT is 6304 bytes; the structured buffer uses the 6304-byte stride");
 static_assert(offsetof(RhiRtGodRaysPass::Params, sunDirection) == 0, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, sunColor) == 16, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, worldCenter) == 32, "measured member offset");
@@ -577,8 +621,12 @@ static_assert(offsetof(RhiRtGodRaysPass::Params, shadowMapDepthScale) == 128, "m
 static_assert(offsetof(RhiRtGodRaysPass::Params, godRaysIntensity) == 132, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, godRaysEccentricity) == 136, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, godRaysEnabled) == 140, "measured member offset");
-static_assert(offsetof(RhiRtGodRaysPass::Params, padding) == 144, "measured member offset");
-static_assert(RhiRtGodRaysPass::GOD_RAYS_PARAMS_STRIDE > sizeof(RhiRtGodRaysPass::Params),
-              "the shader's stride carries the HLSL struct's padding");
+static_assert(offsetof(RhiRtGodRaysPass::Params, sunStepScale) == 144, "measured member offset");
+static_assert(offsetof(RhiRtGodRaysPass::Params, lightShaftCount) == 148, "measured member offset");
+static_assert(offsetof(RhiRtGodRaysPass::Params, lightShaftIntensity) == 152, "measured member offset");
+static_assert(offsetof(RhiRtGodRaysPass::Params, lightShaftSteps) == 156, "measured member offset");
+static_assert(offsetof(RhiRtGodRaysPass::Params, lightShafts) == 160, "measured member offset");
+static_assert(RhiRtGodRaysPass::GOD_RAYS_PARAMS_STRIDE == sizeof(RhiRtGodRaysPass::Params),
+              "the shader's stride must match the CPU params mirror");
 
 }

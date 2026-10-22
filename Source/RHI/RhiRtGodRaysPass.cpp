@@ -249,6 +249,21 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
     emptyLayout = nullptr;
     pushConstantLayout = nullptr;
     blueNoiseLayout = nullptr;
+    lightShaftVolumeLayout = nullptr;
+    lightShaftHistoryLayout = nullptr;
+    lightShaftHistorySampler = nullptr;
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        lightShaftHistoryTextures[i] = nullptr;
+        lightShaftHistorySets[i] = nullptr;
+    }
+    lightShaftHistoryWidth = 0;
+    lightShaftHistoryHeight = 0;
+    lightShaftHistoryCleared = false;
+    lightShaftVolumeFallback = nullptr;
+    lightShaftVolumeFallbackSampler = nullptr;
+    lightShaftVolumeTexture = nullptr;
+    lightShaftVolumeSampler = nullptr;
     uniformLayout = nullptr;
     filterFramebufferLayout = nullptr;
     traceFramebufferLayout = nullptr;
@@ -342,6 +357,34 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         blueNoiseLayout = device->createBindingLayout(desc);
     }
 
+    // Set 6: the froxel light-shaft volume and its sampler.
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setSamplerOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Sampler(1));
+
+        lightShaftVolumeLayout = device->createBindingLayout(desc);
+    }
+
+    // Set 7: the screen-space shaft history (previous SRV, current UAV and sampler).
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0)
+                                   .setSamplerOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_UAV(1));
+        desc.addItem(nvrhi::BindingLayoutItem::Sampler(2));
+
+        lightShaftHistoryLayout = device->createBindingLayout(desc);
+    }
+
     // The trace's push constant. The pinned backend skips a PushConstants item when it builds the
     // Vulkan descriptor set layout and takes the pipeline's single VkPushConstantRange from it
     // (vulkan-resource-bindings.cpp:90-94, :1110-1140), so the layout creates an empty descriptor
@@ -367,16 +410,50 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
 
     if (shadowLayout == nullptr || paramsLayout == nullptr || traceFramebufferLayout == nullptr ||
         filterFramebufferLayout == nullptr || uniformLayout == nullptr || blueNoiseLayout == nullptr ||
+        lightShaftVolumeLayout == nullptr || lightShaftHistoryLayout == nullptr ||
         pushConstantLayout == nullptr || emptyLayout == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a god-rays pass binding layout");
         return false;
     }
 
+    {
+        nvrhi::TextureDesc desc;
+        desc.dimension = nvrhi::TextureDimension::Texture3D;
+        desc.format = nvrhi::Format::RGBA16_FLOAT;
+        desc.width = 1;
+        desc.height = 1;
+        desc.depth = 1;
+        desc.mipLevels = 1;
+        desc.isUAV = true;
+        desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+        desc.keepInitialState = true;
+        lightShaftVolumeFallback = rhi::createTexture(device, desc, "RhiRtGodRaysPass light-shaft volume fallback");
+        lightShaftVolumeFallbackSampler = rhi::createSampler(
+            device, nvrhi::SamplerDesc()
+                        .setMinFilter(true)
+                        .setMagFilter(true)
+                        .setMipFilter(true)
+                        .setAllAddressModes(nvrhi::SamplerAddressMode::Clamp),
+            "RhiRtGodRaysPass light-shaft volume sampler");
+        lightShaftHistorySampler = rhi::createSampler(
+            device, nvrhi::SamplerDesc()
+                        .setMinFilter(true)
+                        .setMagFilter(true)
+                        .setMipFilter(true)
+                        .setAllAddressModes(nvrhi::SamplerAddressMode::Clamp),
+            "RhiRtGodRaysPass light-shaft history sampler");
+        if (lightShaftVolumeFallback == nullptr || lightShaftVolumeFallbackSampler == nullptr ||
+            lightShaftHistorySampler == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: failed to create the god-rays light-shaft volume fallback");
+            return false;
+        }
+    }
+
     // The trace pipeline, in the engine's set order: 0 shadow, 1 params, 2 framebuffers, 3 uniform,
-    // 4 blue noise, 5 the descriptor-less push-constant layout. The blob declares exactly sets 0-4,
-    // so the list order is also the shader's set numbering (the backend places the regular layouts
-    // into descriptor sets in list order, vulkan-resource-bindings.cpp:1090-1099).
+    // 4 blue noise, 5 the cloud-shadow set, 6 the light-shaft volume, 7 the shaft history. The list
+    // order is also the shader's set numbering.
     {
         if (!cloudShadowBinding.Create(device, frameContext, nvrhi::ShaderType::Compute, GOD_RAYS_PUSH_SIZE))
         {
@@ -390,6 +467,8 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         desc.addBindingLayout(uniformLayout);
         desc.addBindingLayout(blueNoiseLayout);
         desc.addBindingLayout(cloudShadowBinding.GetLayout());
+        desc.addBindingLayout(lightShaftVolumeLayout);
+        desc.addBindingLayout(lightShaftHistoryLayout);
 
         tracePipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass trace");
     }
@@ -424,7 +503,7 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
     }
 
     // The per-slot params buffers and the sets over them. The buffer is created with the shader's
-    // measured element stride 160, not sizeof(Params) = 148, and with the write helper's state
+    // measured element stride 6304, not a reduced CPU size, and with the write helper's state
     // contract: keepInitialState = true and initialState = CopyDest, which `writeBuffer` requires
     // and the SRV binding then transitions out of before the dispatch (RhiResources.h:25-33).
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -550,6 +629,61 @@ void RhiRtGodRaysPass::SetBlueNoiseTexture(nvrhi::ITexture *pBlueNoise)
     blueNoiseTexture = pBlueNoise;
 }
 
+void RhiRtGodRaysPass::SetLightShaftVolume(nvrhi::ITexture *pVolume, nvrhi::ISampler *pVolumeSampler)
+{
+    lightShaftVolumeTexture = pVolume;
+    lightShaftVolumeSampler = pVolumeSampler;
+}
+
+bool RhiRtGodRaysPass::PrepareLightShaftVolumeSet(Target &target, nvrhi::ICommandList *pCommandList)
+{
+    nvrhi::ITexture *texture = lightShaftVolumeTexture != nullptr
+        ? lightShaftVolumeTexture : lightShaftVolumeFallback.Get();
+    nvrhi::ISampler *sampler = lightShaftVolumeSampler != nullptr
+        ? lightShaftVolumeSampler : lightShaftVolumeFallbackSampler.Get();
+
+    if (texture == nullptr || sampler == nullptr)
+    {
+        return false;
+    }
+
+    if (target.lightShaftVolumeSet != nullptr &&
+        target.lightShaftVolumeTexture == texture &&
+        target.lightShaftVolumeSampler == sampler)
+    {
+        return true;
+    }
+
+    if (texture == lightShaftVolumeFallback.Get() && !lightShaftVolumeFallbackCleared)
+    {
+        pCommandList->clearTextureFloat(lightShaftVolumeFallback, nvrhi::AllSubresources,
+                                        nvrhi::Color(0.f, 0.f, 0.f, 0.f));
+        pCommandList->setTextureState(lightShaftVolumeFallback, nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::NonPixelShaderResource);
+        lightShaftVolumeFallbackCleared = true;
+    }
+
+    if (target.lightShaftVolumeSet != nullptr)
+    {
+        frameContext->Retire(target.lightShaftVolumeSet);
+    }
+    target.lightShaftVolumeSet = nullptr;
+
+    nvrhi::BindingSetDesc setDesc;
+    setDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, texture));
+    setDesc.addItem(nvrhi::BindingSetItem::Sampler(1, sampler));
+    target.lightShaftVolumeSet = device->createBindingSet(setDesc, lightShaftVolumeLayout);
+    if (target.lightShaftVolumeSet == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the god-rays light-shaft volume set");
+        return false;
+    }
+
+    target.lightShaftVolumeTexture = texture;
+    target.lightShaftVolumeSampler = sampler;
+    return true;
+}
+
 bool RhiRtGodRaysPass::PrepareShadowSet()
 {
     if (shadowMapTexture == nullptr || shadowMapSampler == nullptr)
@@ -643,6 +777,85 @@ bool RhiRtGodRaysPass::PrepareBlueNoiseSet(nvrhi::ICommandList *pCommandList)
                                             nvrhi::ResourceStates::NonPixelShaderResource);
 
     return true;
+}
+
+bool RhiRtGodRaysPass::PrepareLightShaftHistory(uint32_t width, uint32_t height)
+{
+    const uint32_t halfWidth = (width + 1) / 2;
+    const uint32_t halfHeight = (height + 1) / 2;
+
+    if (lightShaftHistoryTextures[0] != nullptr && lightShaftHistoryWidth == halfWidth &&
+        lightShaftHistoryHeight == halfHeight)
+    {
+        return true;
+    }
+
+    ReleaseLightShaftHistory();
+
+    nvrhi::TextureDesc desc;
+    desc.dimension = nvrhi::TextureDimension::Texture2D;
+    desc.format = nvrhi::Format::RGBA16_FLOAT;
+    desc.width = halfWidth;
+    desc.height = halfHeight;
+    desc.mipLevels = 1;
+    desc.isUAV = true;
+    desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    desc.keepInitialState = true;
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        lightShaftHistoryTextures[i] = rhi::createTexture(
+            device, desc, "RhiRtGodRaysPass light-shaft history " + std::to_string(i));
+        if (lightShaftHistoryTextures[i] == nullptr)
+        {
+            ReleaseLightShaftHistory();
+            return false;
+        }
+    }
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        const uint32_t previous = (i + 1) % MAX_FRAMES_IN_FLIGHT;
+        nvrhi::BindingSetDesc setDesc;
+        setDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, lightShaftHistoryTextures[previous]));
+        setDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
+            1, lightShaftHistoryTextures[i], nvrhi::Format::RGBA16_FLOAT,
+            nvrhi::TextureSubresourceSet(), nvrhi::TextureDimension::Texture2D));
+        setDesc.addItem(nvrhi::BindingSetItem::Sampler(2, lightShaftHistorySampler));
+        lightShaftHistorySets[i] = device->createBindingSet(setDesc, lightShaftHistoryLayout);
+        if (lightShaftHistorySets[i] == nullptr)
+        {
+            ReleaseLightShaftHistory();
+            return false;
+        }
+    }
+
+    lightShaftHistoryWidth = halfWidth;
+    lightShaftHistoryHeight = halfHeight;
+    lightShaftHistoryCleared = false;
+    return true;
+}
+
+void RhiRtGodRaysPass::ReleaseLightShaftHistory()
+{
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (frameContext != nullptr && lightShaftHistorySets[i] != nullptr)
+        {
+            frameContext->Retire(lightShaftHistorySets[i]);
+        }
+        if (frameContext != nullptr && lightShaftHistoryTextures[i] != nullptr)
+        {
+            frameContext->Retire(lightShaftHistoryTextures[i]);
+        }
+
+        lightShaftHistorySets[i] = nullptr;
+        lightShaftHistoryTextures[i] = nullptr;
+    }
+
+    lightShaftHistoryWidth = 0;
+    lightShaftHistoryHeight = 0;
+    lightShaftHistoryCleared = false;
 }
 
 RhiRtGodRaysPass::Target *RhiRtGodRaysPass::PrepareFrame(uint32_t frameIndex,
@@ -757,7 +970,8 @@ RhiRtGodRaysPass::Target *RhiRtGodRaysPass::PrepareFrame(uint32_t frameIndex,
         target.height = height;
     }
 
-    if (!PrepareFramebufferSets(target) || !PrepareUniformSet(target, pUniformBuffer))
+    if (!PrepareFramebufferSets(target) || !PrepareUniformSet(target, pUniformBuffer) ||
+        !PrepareLightShaftHistory(width, height))
     {
         return nullptr;
     }
@@ -941,9 +1155,13 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
 
     Target &target = *pTarget;
 
-    // The frame's params. The buffer is 160 bytes (the shader's element stride); the CPU mirror is
-    // 148, so the stride padding is zeroed here - the shader never reads it (it only reads element
-    // [0] and no member at 144+), but a fully defined buffer keeps the view range deterministic.
+    if (!PrepareLightShaftVolumeSet(target, pCommandList))
+    {
+        return false;
+    }
+
+    // The frame's params. The buffer is 6304 bytes (the shader's element stride) and matches the CPU
+    // mirror; the bytes are fully defined for the structured-buffer view.
     // RenderReflections does not write the buffer again: one write per frame feeds both trace
     // dispatches, the bytes the legacy's two `Trace` copies of the same host struct produce.
     uint8_t paramsBytes[GOD_RAYS_PARAMS_STRIDE] = {};
@@ -951,6 +1169,25 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
     rhi::writeBuffer(pCommandList, paramsBuffers[frameIndex], paramsBytes, sizeof(paramsBytes));
 
     AnnounceFrameImages(pCommandList, target);
+
+    if (!lightShaftHistoryCleared)
+    {
+        pCommandList->clearTextureFloat(lightShaftHistoryTextures[0], nvrhi::AllSubresources,
+                                        nvrhi::Color(0.f, 0.f, 0.f, 0.f));
+        pCommandList->clearTextureFloat(lightShaftHistoryTextures[1], nvrhi::AllSubresources,
+                                        nvrhi::Color(0.f, 0.f, 0.f, 0.f));
+        pCommandList->setTextureState(lightShaftHistoryTextures[0], nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::NonPixelShaderResource);
+        pCommandList->setTextureState(lightShaftHistoryTextures[1], nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::NonPixelShaderResource);
+        lightShaftHistoryCleared = true;
+    }
+
+    const uint32_t historyPrevious = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
+    pCommandList->setTextureState(lightShaftHistoryTextures[frameIndex], nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::UnorderedAccess);
+    pCommandList->setTextureState(lightShaftHistoryTextures[historyPrevious], nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::NonPixelShaderResource);
 
     // The legacy dispatch arithmetic (GodRays.cpp:268-275 and :305-306): the trace covers the
     // shader's own half-resolution bound `((width + 1) / 2, (height + 1) / 2)`, the filter the full
@@ -967,7 +1204,8 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
     const uint32_t passIndexPrimary = 0;
     RecordDispatch(pCommandList, tracePipeline,
                    { shadowSet, paramsSets[frameIndex], target.traceFramebufferSet,
-                     target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet() },
+                     target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet(),
+                     target.lightShaftVolumeSet, lightShaftHistorySets[frameIndex] },
                    traceGroupsX, traceGroupsY, 1, &passIndexPrimary);
 
     // The reflected-segment accumulation (passIndex 1) belongs after the host's reflect/refract
@@ -1079,7 +1317,8 @@ void RhiRtGodRaysPass::RenderReflections(nvrhi::ICommandList *pCommandList,
         const uint32_t passIndexReflections = 1;
         RecordDispatch(pCommandList, tracePipeline,
                        { shadowSet, paramsSets[frameIndex], target.traceFramebufferSet,
-                        target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet() },
+                        target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet(),
+                     target.lightShaftVolumeSet, lightShaftHistorySets[frameIndex] },
                        traceGroupsX, traceGroupsY, 1, &passIndexReflections);
     }
 
@@ -1104,6 +1343,8 @@ void RhiRtGodRaysPass::RenderReflections(nvrhi::ICommandList *pCommandList,
 
 void RhiRtGodRaysPass::ReleaseTargets()
 {
+    ReleaseLightShaftHistory();
+
     for (Target &target : targets)
     {
         ReleaseTarget(target);
@@ -1167,6 +1408,15 @@ void RhiRtGodRaysPass::ReleaseTarget(Target &target)
 
     target.uniformSet = nullptr;
     target.uniformBuffer = nullptr;
+
+    if (frameContext != nullptr && target.lightShaftVolumeSet != nullptr)
+    {
+        frameContext->Retire(target.lightShaftVolumeSet);
+    }
+
+    target.lightShaftVolumeSet = nullptr;
+    target.lightShaftVolumeTexture = nullptr;
+    target.lightShaftVolumeSampler = nullptr;
 
     // A released frame has no recorded input to continue from; a resize between the two entry
     // points therefore disarms the reflected half.
