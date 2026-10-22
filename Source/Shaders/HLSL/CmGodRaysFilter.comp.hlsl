@@ -57,7 +57,10 @@
 
 #define DESC_SET_FRAMEBUFFERS 2
 #define DESC_SET_GLOBAL_UNIFORM 3
+#define DESC_SET_LIGHT_SHAFT_SCATTER 4
 #include "ShaderCommonHLSLFunc.hlsli"
+
+[[vk::binding(0, DESC_SET_LIGHT_SHAFT_SCATTER)]] Texture2D<float4> lightShaftScatter;
 
 [numthreads(16, 16, 1)]
 void main( uint3 dispatchThreadID : SV_DispatchThreadID )
@@ -113,5 +116,6 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         result.rgba = fallbackResult.rgba / 16.0;
     }
 
-    framebufGodRaysFiltered[iPosition] = float4(result.rgb, 0.0);
+    const float3 lightShafts = lightShaftScatter.Load(int3(iPosition, 0)).rgb;
+    framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, 0.0);
 }

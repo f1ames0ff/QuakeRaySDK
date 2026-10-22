@@ -314,6 +314,10 @@ public:
         IMAGE_THROUGHPUT,                          // 26
         IMAGE_Q2_VIEW_DEPTH,                       // 81
         IMAGE_Q2_GODRAYS_THROUGHPUT_DIST,          // 89
+        IMAGE_DEPTH_WORLD_PREV,                    // 10
+        IMAGE_NORMAL,                              // 3
+        IMAGE_NORMAL_PREV,                         // 4
+        IMAGE_MOTION,                              // 13
         IMAGE_COUNT,
     };
 
@@ -439,6 +443,7 @@ private:
         nvrhi::TextureHandle engineTextures[IMAGE_COUNT];
         nvrhi::BindingSetHandle traceFramebufferSet;
         nvrhi::BindingSetHandle filterFramebufferSet;
+        nvrhi::BindingSetHandle accumFramebufferSet;
         nvrhi::IBuffer *uniformBuffer = nullptr;
         nvrhi::BindingSetHandle uniformSet;
         nvrhi::BindingSetHandle lightShaftVolumeSet;
@@ -528,6 +533,7 @@ private:
     // The two engine blobs.
     nvrhi::ShaderHandle traceShader;
     nvrhi::ShaderHandle filterShader;
+    nvrhi::ShaderHandle accumShader;
 
     // The eight layouts this module owns. The trace's mirror the engine's descriptor set numbers
     // (0 shadow, 1 params, 2 framebuffers, 3 uniform, 4 blue noise, 5 the descriptor-less
@@ -537,6 +543,8 @@ private:
     nvrhi::BindingLayoutHandle paramsLayout;
     nvrhi::BindingLayoutHandle traceFramebufferLayout;
     nvrhi::BindingLayoutHandle filterFramebufferLayout;
+    nvrhi::BindingLayoutHandle accumFramebufferLayout;
+    nvrhi::BindingLayoutHandle lightShaftFilterLayout;
     nvrhi::BindingLayoutHandle uniformLayout;
     nvrhi::BindingLayoutHandle blueNoiseLayout;
     nvrhi::BindingLayoutHandle lightShaftVolumeLayout;
@@ -548,6 +556,7 @@ private:
     // push constant (measured).
     nvrhi::ComputePipelineHandle tracePipeline;
     nvrhi::ComputePipelineHandle filterPipeline;
+    nvrhi::ComputePipelineHandle accumPipeline;
 
     // The empty set of the filter's two leading placeholder positions. One set bound at two
     // positions is legal Vulkan; the layouts are the same object (the compose module does the same
@@ -582,6 +591,7 @@ private:
     nvrhi::SamplerHandle lightShaftHistorySampler;
     nvrhi::TextureHandle lightShaftHistoryTextures[MAX_FRAMES_IN_FLIGHT];
     nvrhi::BindingSetHandle lightShaftHistorySets[MAX_FRAMES_IN_FLIGHT];
+    nvrhi::BindingSetHandle lightShaftFilterSets[MAX_FRAMES_IN_FLIGHT];
     uint32_t lightShaftHistoryWidth = 0;
     uint32_t lightShaftHistoryHeight = 0;
     bool lightShaftHistoryCleared = false;

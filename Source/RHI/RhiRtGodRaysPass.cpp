@@ -25,6 +25,7 @@ namespace
 // half resolution, the filter at full resolution.
 const char *const TRACE_SHADER_FILE_NAME = "CmGodRays.comp.spv";
 const char *const FILTER_SHADER_FILE_NAME = "CmGodRaysFilter.comp.spv";
+const char *const ACCUM_SHADER_FILE_NAME = "CmLightShaftAccum.comp.spv";
 
 // The engine's framebuffer binding block: the storage images sit at raw binding = image index, the
 // sampled views at raw binding = 124 + image index (Generated/ShaderCommonCFramebuf.cpp's
@@ -48,8 +49,12 @@ constexpr FramebufferImageIndex GOD_RAYS_IMAGES[GOD_RAYS_IMAGE_COUNT] =
     FB_IMAGE_INDEX_THROUGHPUT,                  // 26
     FB_IMAGE_INDEX_Q2_VIEW_DEPTH,               // 81
     FB_IMAGE_INDEX_Q2_GOD_RAYS_THROUGHPUT_DIST, // 89
+    FB_IMAGE_INDEX_DEPTH_WORLD_PREV,            // 10
+    FB_IMAGE_INDEX_NORMAL,                      // 3
+    FB_IMAGE_INDEX_NORMAL_PREV,                 // 4
+    FB_IMAGE_INDEX_MOTION,                      // 13
 };
-static_assert(GOD_RAYS_IMAGE_COUNT == 8, "RhiRtGodRaysPass::Target is sized by IMAGE_COUNT");
+static_assert(GOD_RAYS_IMAGE_COUNT == 12, "RhiRtGodRaysPass::Target is sized by IMAGE_COUNT");
 
 // One item of a framebuffer set: the image slot of the module's table and the binding kind. The
 // tables below are the exact measured footprints of the two blobs; the raw bindings they produce
@@ -84,12 +89,23 @@ constexpr GodRaysFramebufferBinding FILTER_FRAMEBUFFER_BINDINGS[FILTER_FRAMEBUFF
     { RhiRtGodRaysPass::IMAGE_Q2_VIEW_DEPTH,     false }, // raw 205 framebufQ2ViewDepth_Sampled
 };
 
+constexpr uint32_t ACCUM_FRAMEBUFFER_BINDING_COUNT = 6;
+constexpr GodRaysFramebufferBinding ACCUM_FRAMEBUFFER_BINDINGS[ACCUM_FRAMEBUFFER_BINDING_COUNT] =
+{
+    { RhiRtGodRaysPass::IMAGE_DEPTH_WORLD,      false },
+    { RhiRtGodRaysPass::IMAGE_SURFACE_POSITION, false },
+    { RhiRtGodRaysPass::IMAGE_NORMAL,           false },
+    { RhiRtGodRaysPass::IMAGE_NORMAL_PREV,      false },
+    { RhiRtGodRaysPass::IMAGE_DEPTH_WORLD_PREV, false },
+    { RhiRtGodRaysPass::IMAGE_MOTION,           false },
+};
+
 // The images whose last use in an entry point is a sampled read: the trace reads 9/19/23/26/81/89
 // and the filter reads 63 (image 81 again), so every entry point that binds them moves all of them
 // back to UnorderedAccess before returning (on the deferred path 63's requirement is a same-state
 // one: trace(0)'s own write is its last use there). 64's last use is the filter's write, so it ends
 // in UnorderedAccess already.
-constexpr uint32_t GOD_RAYS_RESTORE_IMAGE_COUNT = 7;
+constexpr uint32_t GOD_RAYS_RESTORE_IMAGE_COUNT = 11;
 constexpr uint32_t GOD_RAYS_RESTORE_IMAGES[GOD_RAYS_RESTORE_IMAGE_COUNT] =
 {
     RhiRtGodRaysPass::IMAGE_GOD_RAYS,
@@ -99,6 +115,10 @@ constexpr uint32_t GOD_RAYS_RESTORE_IMAGES[GOD_RAYS_RESTORE_IMAGE_COUNT] =
     RhiRtGodRaysPass::IMAGE_THROUGHPUT,
     RhiRtGodRaysPass::IMAGE_Q2_VIEW_DEPTH,
     RhiRtGodRaysPass::IMAGE_Q2_GODRAYS_THROUGHPUT_DIST,
+    RhiRtGodRaysPass::IMAGE_DEPTH_WORLD_PREV,
+    RhiRtGodRaysPass::IMAGE_NORMAL,
+    RhiRtGodRaysPass::IMAGE_NORMAL_PREV,
+    RhiRtGodRaysPass::IMAGE_MOTION,
 };
 
 // The shape the shader's `blueNoiseTextures.Load(int4(x, y, layer, 0))` needs (Random.hlsli:257-266):
@@ -219,6 +239,7 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
     {
         target.traceFramebufferSet = nullptr;
         target.filterFramebufferSet = nullptr;
+        target.accumFramebufferSet = nullptr;
 
         for (nvrhi::TextureHandle &texture : target.engineTextures)
         {
@@ -266,11 +287,17 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
     lightShaftVolumeSampler = nullptr;
     uniformLayout = nullptr;
     filterFramebufferLayout = nullptr;
+    accumFramebufferLayout = nullptr;
     traceFramebufferLayout = nullptr;
+    lightShaftFilterLayout = nullptr;
     paramsLayout = nullptr;
     shadowLayout = nullptr;
     filterShader = nullptr;
     traceShader = nullptr;
+    accumShader = nullptr;
+    filterPipeline = nullptr;
+    tracePipeline = nullptr;
+    accumPipeline = nullptr;
 }
 
 bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
@@ -301,7 +328,8 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
     }
 
     if (!LoadShader(TRACE_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, traceShader) ||
-        !LoadShader(FILTER_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, filterShader))
+        !LoadShader(FILTER_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, filterShader) ||
+        !LoadShader(ACCUM_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, accumShader))
     {
         return false;
     }
@@ -335,6 +363,8 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         device, TRACE_FRAMEBUFFER_BINDINGS, TRACE_FRAMEBUFFER_BINDING_COUNT);
     filterFramebufferLayout = CreateFramebufferLayout(
         device, FILTER_FRAMEBUFFER_BINDINGS, FILTER_FRAMEBUFFER_BINDING_COUNT);
+    accumFramebufferLayout = CreateFramebufferLayout(
+        device, ACCUM_FRAMEBUFFER_BINDINGS, ACCUM_FRAMEBUFFER_BINDING_COUNT);
 
     // Set 3: the engine's global uniform at raw binding 0
     // (ShaderCommonHLSL.hlsli:22 spells it with BINDING_GLOBAL_UNIFORM and DESC_SET_GLOBAL_UNIFORM).
@@ -385,6 +415,15 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         lightShaftHistoryLayout = device->createBindingLayout(desc);
     }
 
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setShaderResourceOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+
+        lightShaftFilterLayout = device->createBindingLayout(desc);
+    }
+
     // The trace's push constant. The pinned backend skips a PushConstants item when it builds the
     // Vulkan descriptor set layout and takes the pipeline's single VkPushConstantRange from it
     // (vulkan-resource-bindings.cpp:90-94, :1110-1140), so the layout creates an empty descriptor
@@ -409,8 +448,10 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
     }
 
     if (shadowLayout == nullptr || paramsLayout == nullptr || traceFramebufferLayout == nullptr ||
-        filterFramebufferLayout == nullptr || uniformLayout == nullptr || blueNoiseLayout == nullptr ||
+        filterFramebufferLayout == nullptr || accumFramebufferLayout == nullptr ||
+        uniformLayout == nullptr || blueNoiseLayout == nullptr ||
         lightShaftVolumeLayout == nullptr || lightShaftHistoryLayout == nullptr ||
+        lightShaftFilterLayout == nullptr ||
         pushConstantLayout == nullptr || emptyLayout == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a god-rays pass binding layout");
@@ -467,14 +508,25 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         desc.addBindingLayout(uniformLayout);
         desc.addBindingLayout(blueNoiseLayout);
         desc.addBindingLayout(cloudShadowBinding.GetLayout());
-        desc.addBindingLayout(lightShaftVolumeLayout);
-        desc.addBindingLayout(lightShaftHistoryLayout);
 
         tracePipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass trace");
     }
 
+    {
+        nvrhi::ComputePipelineDesc desc;
+        desc.setComputeShader(accumShader);
+        desc.addBindingLayout(lightShaftVolumeLayout);
+        desc.addBindingLayout(lightShaftHistoryLayout);
+        desc.addBindingLayout(accumFramebufferLayout);
+        desc.addBindingLayout(uniformLayout);
+        desc.addBindingLayout(blueNoiseLayout);
+        desc.addBindingLayout(paramsLayout);
+
+        accumPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass light-shaft accumulation");
+    }
+
     // The filter pipeline: the two placeholder positions (engine sets 0/1, which the blob does not
-    // use) and then the framebuffer set at 2 and the uniform at 3. No push constant.
+    // use), the framebuffer set at 2, the uniform at 3 and the full-resolution shaft scatter at 4.
     {
         nvrhi::ComputePipelineDesc desc;
         desc.setComputeShader(filterShader);
@@ -482,11 +534,12 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         desc.addBindingLayout(emptyLayout);
         desc.addBindingLayout(filterFramebufferLayout);
         desc.addBindingLayout(uniformLayout);
+        desc.addBindingLayout(lightShaftFilterLayout);
 
         filterPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass filter");
     }
 
-    if (tracePipeline == nullptr || filterPipeline == nullptr)
+    if (tracePipeline == nullptr || filterPipeline == nullptr || accumPipeline == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a god-rays pass compute pipeline");
         return false;
@@ -781,11 +834,8 @@ bool RhiRtGodRaysPass::PrepareBlueNoiseSet(nvrhi::ICommandList *pCommandList)
 
 bool RhiRtGodRaysPass::PrepareLightShaftHistory(uint32_t width, uint32_t height)
 {
-    const uint32_t halfWidth = (width + 1) / 2;
-    const uint32_t halfHeight = (height + 1) / 2;
-
-    if (lightShaftHistoryTextures[0] != nullptr && lightShaftHistoryWidth == halfWidth &&
-        lightShaftHistoryHeight == halfHeight)
+    if (lightShaftHistoryTextures[0] != nullptr && lightShaftHistoryWidth == width &&
+        lightShaftHistoryHeight == height)
     {
         return true;
     }
@@ -795,8 +845,8 @@ bool RhiRtGodRaysPass::PrepareLightShaftHistory(uint32_t width, uint32_t height)
     nvrhi::TextureDesc desc;
     desc.dimension = nvrhi::TextureDimension::Texture2D;
     desc.format = nvrhi::Format::RGBA16_FLOAT;
-    desc.width = halfWidth;
-    desc.height = halfHeight;
+    desc.width = width;
+    desc.height = height;
     desc.mipLevels = 1;
     desc.isUAV = true;
     desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
@@ -828,10 +878,19 @@ bool RhiRtGodRaysPass::PrepareLightShaftHistory(uint32_t width, uint32_t height)
             ReleaseLightShaftHistory();
             return false;
         }
+
+        nvrhi::BindingSetDesc filterSetDesc;
+        filterSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, lightShaftHistoryTextures[i]));
+        lightShaftFilterSets[i] = device->createBindingSet(filterSetDesc, lightShaftFilterLayout);
+        if (lightShaftFilterSets[i] == nullptr)
+        {
+            ReleaseLightShaftHistory();
+            return false;
+        }
     }
 
-    lightShaftHistoryWidth = halfWidth;
-    lightShaftHistoryHeight = halfHeight;
+    lightShaftHistoryWidth = width;
+    lightShaftHistoryHeight = height;
     lightShaftHistoryCleared = false;
     return true;
 }
@@ -844,12 +903,17 @@ void RhiRtGodRaysPass::ReleaseLightShaftHistory()
         {
             frameContext->Retire(lightShaftHistorySets[i]);
         }
+        if (frameContext != nullptr && lightShaftFilterSets[i] != nullptr)
+        {
+            frameContext->Retire(lightShaftFilterSets[i]);
+        }
         if (frameContext != nullptr && lightShaftHistoryTextures[i] != nullptr)
         {
             frameContext->Retire(lightShaftHistoryTextures[i]);
         }
 
         lightShaftHistorySets[i] = nullptr;
+        lightShaftFilterSets[i] = nullptr;
         lightShaftHistoryTextures[i] = nullptr;
     }
 
@@ -1040,6 +1104,24 @@ bool RhiRtGodRaysPass::PrepareFramebufferSets(Target &target)
         }
     }
 
+    if (target.accumFramebufferSet == nullptr)
+    {
+        target.accumFramebufferSet = CreateFramebufferSet(device, target.engineTextures,
+                                                          ACCUM_FRAMEBUFFER_BINDINGS,
+                                                          ACCUM_FRAMEBUFFER_BINDING_COUNT,
+                                                          accumFramebufferLayout);
+
+        if (target.accumFramebufferSet == nullptr)
+        {
+            if (!warnedBadTable)
+            {
+                warnedBadTable = true;
+                LogMessage(print, "Warning: RHI: failed to create the god-rays pass accumulation binding set");
+            }
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1198,14 +1280,21 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
     const uint32_t traceGroupsX = Utils::GetWorkGroupCount(halfWidth, GOD_RAYS_GROUP_SIZE);
     const uint32_t traceGroupsY = Utils::GetWorkGroupCount(halfHeight, GOD_RAYS_GROUP_SIZE);
 
+    const uint32_t accumGroupsX = Utils::GetWorkGroupCount(width, GOD_RAYS_GROUP_SIZE);
+    const uint32_t accumGroupsY = Utils::GetWorkGroupCount(height, GOD_RAYS_GROUP_SIZE);
+    RecordDispatch(pCommandList, accumPipeline,
+                   { target.lightShaftVolumeSet, lightShaftHistorySets[frameIndex],
+                     target.accumFramebufferSet, target.uniformSet, blueNoiseSet,
+                     paramsSets[frameIndex] },
+                   accumGroupsX, accumGroupsY, 1, nullptr);
+
     // The primary march (passIndex 0). On the clear path the shader writes zeros to every
     // half-resolution pixel and the filter then zeroes image 64 (the legacy shape,
     // VulkanDevice.cpp:964-969).
     const uint32_t passIndexPrimary = 0;
     RecordDispatch(pCommandList, tracePipeline,
                    { shadowSet, paramsSets[frameIndex], target.traceFramebufferSet,
-                     target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet(),
-                     target.lightShaftVolumeSet, lightShaftHistorySets[frameIndex] },
+                     target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet() },
                    traceGroupsX, traceGroupsY, 1, &passIndexPrimary);
 
     // The reflected-segment accumulation (passIndex 1) belongs after the host's reflect/refract
@@ -1227,7 +1316,8 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
         // engine sets 2 and 3, so the two leading placeholder positions are filled with the empty
         // set.
         RecordDispatch(pCommandList, filterPipeline,
-                       { emptySet, emptySet, target.filterFramebufferSet, target.uniformSet },
+                       { emptySet, emptySet, target.filterFramebufferSet, target.uniformSet,
+                         lightShaftFilterSets[frameIndex] },
                        filterGroupsX, filterGroupsY, 1, nullptr);
     }
 
@@ -1317,8 +1407,7 @@ void RhiRtGodRaysPass::RenderReflections(nvrhi::ICommandList *pCommandList,
         const uint32_t passIndexReflections = 1;
         RecordDispatch(pCommandList, tracePipeline,
                        { shadowSet, paramsSets[frameIndex], target.traceFramebufferSet,
-                        target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet(),
-                     target.lightShaftVolumeSet, lightShaftHistorySets[frameIndex] },
+                         target.uniformSet, blueNoiseSet, cloudShadowBinding.GetSet() },
                        traceGroupsX, traceGroupsY, 1, &passIndexReflections);
     }
 
@@ -1329,7 +1418,8 @@ void RhiRtGodRaysPass::RenderReflections(nvrhi::ICommandList *pCommandList,
     const uint32_t filterGroupsX = Utils::GetWorkGroupCount(width, GOD_RAYS_GROUP_SIZE);
     const uint32_t filterGroupsY = Utils::GetWorkGroupCount(height, GOD_RAYS_GROUP_SIZE);
     RecordDispatch(pCommandList, filterPipeline,
-                   { emptySet, emptySet, target.filterFramebufferSet, target.uniformSet },
+                   { emptySet, emptySet, target.filterFramebufferSet, target.uniformSet,
+                     lightShaftFilterSets[frameIndex] },
                    filterGroupsX, filterGroupsY, 1, nullptr);
 
     // The same restore as the input call: the sampled reads the filter left in a read-only layout go
@@ -1366,10 +1456,15 @@ void RhiRtGodRaysPass::ReleaseFramebufferSets(Target &target)
         {
             frameContext->Retire(target.filterFramebufferSet);
         }
+        if (target.accumFramebufferSet != nullptr)
+        {
+            frameContext->Retire(target.accumFramebufferSet);
+        }
     }
 
     target.traceFramebufferSet = nullptr;
     target.filterFramebufferSet = nullptr;
+    target.accumFramebufferSet = nullptr;
 }
 
 void RhiRtGodRaysPass::ReleaseFramebufferTarget(Target &target)
