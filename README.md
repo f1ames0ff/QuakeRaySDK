@@ -10,10 +10,12 @@ stay in the host repository under `gfx/`.
 
 ## Package contents
 
-- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.04.0000`.
+- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.05.0000`.
 - `Source/` — renderer, RHI passes, lighting, shaders, and the FidelityFX API.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `Tests/` — engine-free GPU and policy tests.
+- `docs/spatial-contract.md` — host units, orientation, and conversion contract.
+- `docs/embedding.md` — host integration guide.
 
 ## Requirements
 
@@ -62,6 +64,15 @@ target_link_libraries(my_host PRIVATE qray::renderer)
 The package config checks for `nvrhi` and `nvrhi_vk`, resolves the installed
 FidelityFX provider, and exposes `qray::renderer`.
 
+## Spatial contract
+
+The renderer normalizes host scene data into a right-handed, `+Z`-up internal
+space with 40 scene units per meter. The host declares its axes, handedness and
+`unitsPerMeter` once after instance creation with
+`qrSetSpatialConvention`; the default is the existing identity Quake
+convention. The full field-by-field conversion rules and the second-host
+checklist are in [docs/spatial-contract.md](docs/spatial-contract.md).
+
 ## Frame readback
 
 The public API exposes asynchronous readback of the final LDR image:
@@ -91,3 +102,10 @@ The SDK is a source-level package. It owns GPU resources and acceleration
 structures; a host supplies scene uploads through the `Qr*` contract in
 `qray.h`. Embedded/device-sharing integration and non-Windows targets are not
 part of the current package.
+
+The current scene envelope uses 10,000 internal scene units (250 m) as the ray
+and sky sentinel. A host with a larger physical draw distance must stay inside
+that envelope until the sentinel becomes configurable. Left-handed worlds,
+arbitrary world rotations and non-uniform instance scale are host-side
+conversion or unsupported cases; the spatial contract supports right-handed
+signed axis permutations with uniform scale.

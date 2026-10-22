@@ -156,6 +156,16 @@ static auto Call(QrInstance qrInstance, Func f, Args&&... args)
     return ReturnType{};
 }
 
+QrResult qrSetSpatialConvention(QrInstance qrInstance, const QrSpatialConvention *pConvention)
+{
+    return Call(qrInstance, &VulkanDevice::SetSpatialConvention, pConvention);
+}
+
+QrResult qrGetSpatialConvention(QrInstance qrInstance, QrSpatialConvention *pConvention)
+{
+    return Call(qrInstance, &VulkanDevice::GetSpatialConvention, pConvention);
+}
+
 QrResult qrUploadGeometry(QrInstance qrInstance, const QrGeometryUploadInfo *pUploadInfo)
 {
     return Call(qrInstance, &VulkanDevice::UploadGeometry, pUploadInfo );

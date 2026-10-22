@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(qray_renderer VERSION 1.4.0 LANGUAGES C CXX)
+    project(qray_renderer VERSION 1.5.0 LANGUAGES C CXX)
     set(QR_RENDERER_STANDALONE ON)
 else()
     set(QR_RENDERER_STANDALONE OFF)
@@ -40,6 +40,7 @@ set(renderer_SOURCES
     Source/Utils.cpp
     Source/Common.cpp
     Source/Matrix.cpp
+    Source/SpatialFrame.cpp
     Source/RasterizedDataCollector.cpp
     Source/Vma/vk_mem_alloc_imp.cpp
     Source/ImageLoader.cpp
@@ -197,6 +198,13 @@ if(QR_BUILD_TESTS)
     target_include_directories(qray_swapchain_policy PRIVATE Source ${Vulkan_INCLUDE_DIRS})
     add_test(NAME qray_swapchain_policy COMMAND qray_swapchain_policy)
     set_tests_properties(qray_swapchain_policy PROPERTIES TIMEOUT 30)
+
+    add_executable(qray_spatial_contract_tests Tests/SpatialContractTests.cpp Source/SpatialFrame.cpp)
+    target_compile_features(qray_spatial_contract_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_spatial_contract_tests PRIVATE QR_STATIC)
+    target_include_directories(qray_spatial_contract_tests PRIVATE Include Source)
+    add_test(NAME qray_spatial_contract_tests COMMAND qray_spatial_contract_tests)
+    set_tests_properties(qray_spatial_contract_tests PROPERTIES TIMEOUT 30)
 
     get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
     find_program(QR_DXC NAMES dxc HINTS "${QR_VULKAN_BIN}" REQUIRED)
@@ -370,7 +378,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 set(QRAY_RENDERER_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/qray_renderer")
-set(QRAY_RENDERER_VERSION "1.4.0")
+set(QRAY_RENDERER_VERSION "1.5.0")
 
 if(WIN32)
     install(TARGETS renderer
@@ -395,6 +403,8 @@ else()
     )
     install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
 endif()
+
+install(FILES docs/spatial-contract.md docs/embedding.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 install(EXPORT qray_rendererTargets
     FILE qray_rendererTargets.cmake
