@@ -71,7 +71,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    const float3 surfacePos = framebufSurfacePosition_Sampled.Load(int3(cbPix, 0)).xyz;
+    const float4 surface = framebufSurfacePosition_Sampled.Load(int3(cbPix, 0));
+    const float3 surfacePos = surface.xyz;
+    const uint surfaceInstanceFlags = asuint(surface.w);
+
+    if ((surfaceInstanceFlags & (INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON |
+                                 INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON_VIEWER)) != 0)
+    {
+        lightShaftHistory[pixelPos] = (float4)0;
+        return;
+    }
+
     const float3 normal = texelFetchNormal(cbPix);
     const uint seed = getRandomSeed(pixelPos, globalUniform.frameId);
     const float3 noise = rndBlueNoise8(seed, 1).xyz;
