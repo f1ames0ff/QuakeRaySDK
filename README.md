@@ -4,9 +4,11 @@ Source-level renderer package for QuakeRay. It owns the Vulkan/NVRHI ray-tracing
 renderer, the public `qray.h` C ABI, and the CMake package interface used by a
 host engine.
 
-The SDK does not include Quake game logic, map loaders, or host assets. The
-QuakeRay engine is the reference host; textures, materials, and cursor artwork
-stay in the host repository under `gfx/`.
+The renderer core does not include Quake game logic, map loaders, or host
+assets. The QuakeRay engine is the reference host; textures, materials, and
+cursor artwork stay in the host repository under `gfx/`. The optional
+`quakerayeditor` target is a separate host around `qray::renderer`; it includes
+a geometry-only OBJ/BSP29 scene path for editor development.
 
 ## Package contents
 
@@ -34,6 +36,19 @@ cmake --build build --config Debug
 
 NVRHI supplies the `nvrhi` and `nvrhi_vk` targets. If they are already present
 in the parent build, `QR_NVRHI_SOURCE_DIR` can be omitted.
+
+## Optional editor build
+
+```powershell
+cmake -S . -B build `
+    -DQR_BUILD_EDITOR=ON `
+    -DQR_NVRHI_SOURCE_DIR=C:/path/to/nvrhi `
+    -DQR_EDITOR_SHADER_DIR=C:/path/to/shaders
+cmake --build build --config Debug --target quakerayeditor
+```
+
+The editor target is `OFF` by default and does not change the renderer package.
+See [editor/README.md](editor/README.md) for its scene path and runtime options.
 
 ## Install and consume
 
