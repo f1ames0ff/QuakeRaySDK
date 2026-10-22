@@ -89,8 +89,10 @@ frame.
 
 ## Geometry
 
-`QrVertex.position` and `QrVertex.normal` are local-space host data.
-`QrTransform` is the existing row-major 3x4 column-vector affine transform.
+`QrVertex.position` and `QrVertex.normal` are local-space host data for
+ordinary geometry. Smoke raster batches use `normal[1]` as a world-space puff
+radius, as described below. `QrTransform` is the existing row-major 3x4
+column-vector affine transform.
 The renderer converts the transform to scene space for static, static-movable,
 dynamic, brush, alias, sky, decal and rasterized geometry. World-light face
 vertices and smoke raster vertices are handled separately as described below.
