@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -953,6 +954,9 @@ void EditorApp::Frame()
     // the game editor's own way of reporting a save without a dialog.
     DrawSessionPrompt();
     DrawNotification();
+    // Last, so the crosshair and the hints sit over everything the panel and the toast drew, and
+    // so the hint block already knows whether a toast shares its corner.
+    DrawViewportOverlay();
     m_ui.EndFrame(m_instance, m_clientWidth, m_clientHeight);
 
     const float cosPitch = std::cos(m_cameraPitch);
@@ -2171,6 +2175,120 @@ void EditorApp::DrawSelectionOverlay()
     }
 }
 
+void EditorApp::DrawViewportOverlay()
+{
+    if (m_clientWidth == 0 || m_clientHeight == 0)
+    {
+        return;
+    }
+
+    ImDrawList *draw = ImGui::GetForegroundDrawList();
+
+    if (draw == nullptr)
+    {
+        return;
+    }
+
+    const float width = float(m_clientWidth);
+    const float height = float(m_clientHeight);
+
+    // The crosshair is what a click picks through while the mouse is captured -- CursorDirection
+    // reads the centre of the viewport then -- so the ticks have to sit on that centre.
+    if (m_looking)
+    {
+        const ImVec2 centre(width * 0.5f, height * 0.5f);
+        const float gap = 4.0f;
+        const float length = 7.0f;
+        const float thickness = 1.6f;
+        const ImU32 shadow = IM_COL32(0, 0, 0, 130);
+        const ImU32 colour = IM_COL32(255, 255, 255, 225);
+        const ImVec2 from[4] = {
+            ImVec2(centre.x - gap - length, centre.y),
+            ImVec2(centre.x + gap, centre.y),
+            ImVec2(centre.x, centre.y - gap - length),
+            ImVec2(centre.x, centre.y + gap),
+        };
+        const ImVec2 to[4] = {
+            ImVec2(centre.x - gap, centre.y),
+            ImVec2(centre.x + gap + length, centre.y),
+            ImVec2(centre.x, centre.y - gap),
+            ImVec2(centre.x, centre.y + gap + length),
+        };
+
+        for (int tick = 0; tick < 4; tick++)
+        {
+            draw->AddLine(from[tick], to[tick], shadow, thickness + 2.0f);
+        }
+
+        for (int tick = 0; tick < 4; tick++)
+        {
+            draw->AddLine(from[tick], to[tick], colour, thickness);
+        }
+    }
+
+    // The hints are an overlay in the game, not panel text, so they stay on screen with the panel
+    // closed. The panel owns the window's bottom-left corner here, which is where the game draws
+    // them, so the block starts at the panel's right edge while the panel is open. A browser is
+    // the game's "choosing" state, which draws no hints at all.
+    static const char *const kHints[] = {
+        "QR EDITOR",
+        "LMB - pick the face or light under the cursor",
+        "RMB drag - look    WASD - fly    Q/E - down/up    Shift - x4",
+        "F1 - the panel    Ctrl+O - reset the camera",
+        "Esc - cancel a drag or dismiss a prompt",
+    };
+
+    const int hintCount = int(std::size(kHints));
+    const float padding = 14.0f;
+    const float lineHeight = ImGui::GetTextLineHeight() + 3.0f;
+
+    if (m_textureBrowserMaterial.empty())
+    {
+        const float left = m_panelVisible ? m_panelRight + padding : padding;
+        // The toast shares this corner when the panel is closed, so the block moves up by its
+        // own height rather than through it.
+        float y = height - padding - lineHeight * float(hintCount);
+
+        if (m_notifyActive)
+        {
+            y -= lineHeight * float(hintCount);
+        }
+
+        for (int line = 0; line < hintCount; line++)
+        {
+            const ImU32 colour =
+                line == 0 ? IM_COL32(140, 205, 255, 235) : IM_COL32(228, 234, 244, 220);
+
+            draw->AddText(ImVec2(left + 1.0f, y + 1.0f), IM_COL32(0, 0, 0, 160), kHints[line]);
+            draw->AddText(ImVec2(left, y), colour, kHints[line]);
+            y += lineHeight;
+        }
+    }
+
+    // A drag in flight is the one state the panel cannot describe: the light sits where the
+    // cursor took it until the button comes up, so the corner names both ways out of it.
+    const char *dragLine = nullptr;
+
+    if (m_grabDragging)
+    {
+        dragLine = "Release LMB to drop the light, Esc to return it";
+    }
+    else if (m_gizmoDragging)
+    {
+        dragLine = "Release LMB to keep the move, Esc to return it";
+    }
+
+    if (dragLine != nullptr)
+    {
+        const ImVec2 size = ImGui::CalcTextSize(dragLine);
+        const ImVec2 position(width - padding - size.x, height - padding - size.y);
+
+        draw->AddText(ImVec2(position.x + 1.0f, position.y + 1.0f), IM_COL32(0, 0, 0, 160),
+                      dragLine);
+        draw->AddText(position, IM_COL32(255, 230, 150, 235), dragLine);
+    }
+}
+
 bool EditorApp::ProjectPoint(const float point[3], float &outX, float &outY) const
 {
     if (m_clientWidth == 0 || m_clientHeight == 0)
@@ -2829,6 +2947,8 @@ namespace
 
 void EditorApp::DrawPanel(float deltaSeconds)
 {
+    m_panelVisible = false;
+
     if (!m_showPanel)
     {
         return;
@@ -2841,6 +2961,13 @@ void EditorApp::DrawPanel(float deltaSeconds)
     // more sections than fit on a 720p screen at once.
     if (ImGui::Begin("QuakeRay Editor", &m_showPanel, ImGuiWindowFlags_NoCollapse))
     {
+        // The overlay anchors its hint block to the panel's right edge, so the rect is taken
+        // after Begin has laid the window out and not from the values the code asked for.
+        const ImVec2 panelPosition = ImGui::GetWindowPos();
+
+        m_panelRight = panelPosition.x + ImGui::GetWindowSize().x;
+        m_panelVisible = true;
+
         const float fps = deltaSeconds > 0.0f ? 1.0f / deltaSeconds : 0.0f;
         ImGui::Text("Frame  %.2f ms  (%.0f FPS)", m_frameTimeMs, fps);
         ImGui::Text("Drawable  %ux%u", m_clientWidth, m_clientHeight);
@@ -3263,10 +3390,6 @@ void EditorApp::DrawPanel(float deltaSeconds)
             m_loggedTabLayout = tabLayout;
             PrintMessage(("panel tabs:" + tabRects).c_str(), this);
         }
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("RMB drag look  WASD move  Q/E down/up  Shift x4");
-        ImGui::TextUnformatted("F1 panel  Ctrl+O reset camera");
     }
 
     ImGui::End();

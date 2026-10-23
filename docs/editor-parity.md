@@ -28,10 +28,10 @@ cluster-light stats, bounds, camera readout and fly speed, one line of session s
 `Apply` / `Cancel` / `Exit` row, then a selection block
 that is either a surface (index, triangle, texture name, kind, cluster) or a light (position,
 radiance, cluster, `Light key`, `Radius`, `Colour`, `Position`), then `At`, `Clear selection`, a
-`Sun` hint that points at the `Render` tab, the scrolling global-settings block
-(`Global`, `Sky`, `Clouds`, `Sun`, `God rays`, `Volumetric fog`, `Tonemap`, `Level fog`) and the
-key hints. The `Scene` tab body itself scrolls: the light block is taller than a 720p window once
-the panel is fixed at 660 px, and the key hints stay pinned below the scroll area.
+`Sun` hint that points at the `Render` tab and the scrolling global-settings block
+(`Global`, `Sky`, `Clouds`, `Sun`, `God rays`, `Volumetric fog`, `Tonemap`, `Level fog`).
+`DrawViewportOverlay` draws the crosshair, the key hints and the drag prompt over the viewport, so
+they stay on screen with the panel closed, the way the game draws them over the map.
 
 ## Gap matrix
 
@@ -73,7 +73,7 @@ no implementation.
 | Save back to `qray.materials.yaml` | done | `EditorMaterialsDocument::WriteMerged` in `EditorSession.cpp`; `--materials <file>` picks the target, and the previous generation is copied to `qray.backup_materials.yaml` before a write |
 | Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded` and `nothing to save`, held six seconds and faded over the last one |
 | Modal dialogs | partial | the save-on-exit prompt (`DrawSessionPrompt`) is the only one; the game's other popups have no counterpart |
-| Crosshair and hint overlay | partial | the hints are panel text, not an overlay |
+| Crosshair and hint overlay | done | `DrawViewportOverlay` in `ImGui::GetForegroundDrawList()`: the game's four-tick crosshair with its shadow, the hint block and the drag prompt below. See [Viewport overlay](#viewport-overlay) |
 
 ## Materials
 
@@ -131,6 +131,34 @@ browser returns: the key's default is empty, so `WriteMerged` drops `texture_bas
 A `texture_base` that names nothing in the scene is kept in the file but not applied, and the panel
 says `not in this scene` beside the row, so a file authored against another map is not silently
 rewritten by opening it here.
+
+### Viewport overlay
+
+`DrawViewportOverlay` is the editor's `QR_GUI_DrawCrosshair` / `QR_GUI_DrawHint` /
+`QR_GUI_LabelBottomRight`, drawn into `ImGui::GetForegroundDrawList()` after the toast so it sits
+over the panel and over everything else the frame drew.
+
+The crosshair is the game's four ticks around the centre of the drawable: inner ends 4 px out,
+7 px long, 1.6 px thick, an `IM_COL32(0,0,0,130)` shadow at thickness + 2 under an
+`IM_COL32(255,255,255,225)` line. It only shows while the right button holds the mouse, because
+that is the state in which a click resolves through `CursorDirection`'s centre ray instead of the
+cursor position -- the game's crosshair always marks where the primary attack goes, and here the
+same mark has to agree with what `Pick` will resolve.
+
+The hint block is one blue title line (`IM_COL32(140,205,255,235)`) and four light ones
+(`IM_COL32(228,234,244,220)`), each with a one-pixel `IM_COL32(0,0,0,160)` shadow, 3 px line
+spacing and 14 px padding from the edges. The game owns the window's bottom-left corner for it;
+here the panel owns that corner, so the block starts 14 px to the right of the panel's measured
+rect and moves into the corner when `F1` closes the panel -- the anchor follows `m_panelVisible`
+rather than a constant. The lines name the editor's keys: LMB picks, RMB drag looks, WASD flies,
+`Q`/`E` drop and rise, `Shift` multiplies by four, `F1` toggles the panel, `Ctrl+O` resets the
+camera and `Escape` cancels. The old copies of the key list in the panel footer are gone.
+
+Two states suppress or replace the block, both of them the game's own: the texture browser is the
+game's `choosing` state and draws no hints over the grid, and a drag in flight prints
+`Release LMB to drop the light, Esc to return it` (or the axis-move wording) in the bottom-right in
+the game's `IM_COL32(255,230,150,235)`, which is the one state the panel cannot describe because
+the light is no longer where the file says.
 
 ## Session
 
@@ -246,8 +274,8 @@ cvar angles, so they round-trip without an angle conversion. `rt_sky_sun_disc`,
 2. **Session lifecycle.** Done. Apply, Cancel, Exit and both writers -- `qray.materials.yaml` and
    the level document (`sky:` / `fog:` / `lights:`) -- plus the whole sky scope, the notify toast
    and the save prompt. Nothing of the write path is left.
-3. **Viewport aids.** The gizmo and the marker drag are done; the crosshair and the hint overlay
-   are still panel text.
+3. **Viewport aids.** The gizmo, the marker drag and the overlay are done: the crosshair, the hint
+   block and the drag prompt are drawn over the viewport and the key list is no longer panel text.
 
 Global settings were the one mechanical block, and they are done: `EditorSettings.cpp` owns the
 table and `DrawGlobalSettings` draws it. The material parameter table is in place and the SDK
@@ -273,6 +301,17 @@ The material panel was verified the same way, with `PrintWindow` captures of the
 | `texture_base` through the browser | `Browse...` on `*slime0` opened the grid; the filter `wall` narrowed it; `Select` logged `texture browser: texture_base '*slime0' -> uwall1_2`, the row's 23x23 preview drew 23 distinct colours, and the live re-upload changed 18914 viewport pixels (mean 7.6188) |
 | Saved `texture_base` | `qray.materials.yaml` gained `texture_base: uwall1_2` directly under `- name: *slime0`, ahead of every other key |
 | `NONE` | the second save left `- name: *slime0` with no keys, so a cleared value is dropped rather than written empty |
+
+The viewport overlay was measured on 1280x720 `PrintWindow` captures of the same scene, with the
+window offset (8, 31) taken into account so client coordinates convert to image ones:
+
+| Check | Measurement |
+| --- | --- |
+| Crosshair while the mouse is held | the centre row reads 7 lit pixels at x-11..x-5 and 7 at x+4..x+11 around a gap of 8, all `218,218,218` -- the game's `255,255,255` at 225 alpha over the dark wall -- with the shadow line 2 px wider |
+| Crosshair after release | the 25x25 box around the centre changed 0 pixels against the held frame, so the mark belongs to the look state and not to the scene |
+| Hint block with the panel open | 4499 glyph pixels starting at image column 415, which is client 407 = the panel's right edge (392) + 14, in five rows 20 px apart (602, 621, 641, 661, 681); the band above it changes 0 pixels, so the block is not scene brightness |
+| Hint block after `F1` | the same 4499 glyph pixels at image column 22 = client 14, the window corner, and 0 at the panel edge -- the anchor follows the panel's measured rect |
+| Drag prompt | a press on map light 7 (`grab: light 7 at 688 96 80`) drew 843 warm pixels inside 969..1256 x 684..697, the bottom-right corner with 14 px padding; `Escape` and the button release both returned it to 0 |
 
 An earlier run of the same `Base factor` measurement showed a delta of 0.122, which was read as a
 dead slider. The cause was the selection, not the field: the drag targeted material index 0, whose
