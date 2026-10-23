@@ -28,10 +28,10 @@ cluster-light stats, bounds, camera readout and fly speed, one line of session s
 `Apply` / `Cancel` / `Exit` row, then a selection block
 that is either a surface (index, triangle, texture name, kind, cluster) or a light (position,
 radiance, cluster, `Light key`, `Radius`, `Colour`, `Position`), then `At`, `Clear selection`, a
-`Sun` block (intensity, azimuth, elevation, angular size), the scrolling global-settings block
-(`Global`, `Clouds`, `Sun disc`, `God rays`, `Volumetric fog`, `Tonemap`, `Level fog`) and the
-key hints. The `Scene` tab body itself scrolls: the light and sun blocks are taller than a 720p
-window once the panel is fixed at 660 px, and the key hints stay pinned below the scroll area.
+`Sun` hint that points at the `Render` tab, the scrolling global-settings block
+(`Global`, `Sky`, `Clouds`, `Sun`, `God rays`, `Volumetric fog`, `Tonemap`, `Level fog`) and the
+key hints. The `Scene` tab body itself scrolls: the light block is taller than a 720p window once
+the panel is fixed at 660 px, and the key hints stay pinned below the scroll area.
 
 ## Gap matrix
 
@@ -47,7 +47,7 @@ no implementation.
 | Selection overlay | done | `DrawSelectionOverlay` |
 | Map light `light` key authoring | done | `SetEditorLightIntensity` via `kEditorLightIntensityScale` |
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
-| Sun intensity, azimuth, elevation, angular size | done | `UploadSun` → `qrUploadDirectionalLight` |
+| Sun intensity, azimuth, elevation, angular size | done | `Sun` group: `Light` (`rt_physical_sun`), `Light strength` (`rt_sky_sun`), `Pitch` / `Yaw` (`rt_sky_sun_pitch` / `rt_sky_sun_yaw`) and `Disc scale` / `Disc colour` / `Disc size`; the direction reaches `QrDrawFrameVolumetricParams::volume.sourceDirection` as the game's `+forward` |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
 | Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 13 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
 | Texture browser with previews and search | missing | `QR_GUI_TextureBrowser` equivalent |
@@ -62,13 +62,13 @@ no implementation.
 | Add / duplicate / clone / remove a custom light | done | `Add light`, `Duplicate`, `Clone`, `Remove` over an editor-side `EditorCustomLight` store. Duplicate copies the light and offsets it by 32 units on Z; Clone reproduces it at the picked surface; Remove drops the newest. Measured on `e1m1`: add changes 9196 viewport pixels (mean 2.00), duplicate 20264 (3.76), clone 6638 (1.24), remove 19565 (2.63) against a 1360/1.01 noise floor |
 | Placement mode (aim and drop a light) | done | `Place at pick` on a surface pick; the light lands 8 units off the surface its cluster comes from |
 | Light drag and axis gizmo | done | Two mechanics, both mirroring `QRE_CustomGizmoBegin`/`QRE_CustomGizmoMove` and `QRE_UpdateLightDrag`. Dragging an arrow moves the light along that axis in whole units: the axis direction is frozen at mouse-down so a straight drag cannot curve, the origin is a dead zone so a click near it reselects instead of grabbing, and axes shorter than 8 px on screen are not grabbable. Dragging the light itself flies it along the pick ray to 8 units in front of the surface, or to 128 units when the ray misses all geometry, and re-resolves the cluster on every step. Escape or focus loss rolls the light back to where the drag started. Measured on `e1m1`: an axis drag of +60 px moves custom light 0 from `480 -256 110` to `490 -256 110` (cluster 1133, 4656 changed viewport pixels, mean 3.73), a grab drag from `490 -256 110` to `550 -103 135` across clusters 1120/1129/1130 changes 183261 pixels (mean 25.11) against a 1360/1.01 noise floor |
-| Global settings table (39 rows) | done | `EditorSettings.cpp` `BuildEditorFrameParams` fills `QrDrawFrameSkyParams`, `QrDrawFrameTonemappingParams`, `QrDrawFrameVolumetricParams` and `QrDrawFrameLevelFogParams`; `DrawGlobalSettings` draws seven groups |
+| Global settings table (39 rows) | done | `EditorSettings.cpp` `BuildEditorFrameParams` fills `QrDrawFrameSkyParams`, `QrDrawFrameTonemappingParams`, `QrDrawFrameVolumetricParams` and `QrDrawFrameLevelFogParams`; `DrawGlobalSettings` draws eight groups, and the sun's cvars live in the `Sun` group |
 | Fog authoring | done | `Level fog` group: colour, density (divided by 64 like the worldspawn key), sky blend |
 | Cloud authoring | done | `Clouds` group, packed into `skyCubemapRotationTransform` per `QrDrawFrameSkyParams` |
-| God rays authoring | done | `God rays` group, gated on the procedural sky like the game |
+| God rays authoring | done | `God rays` group including `Sky threshold`; the shafts follow the authored sun and the panel no longer gates the effect on the procedural sky, which is the game's own condition on the sky texture rather than on the cvar |
 | Tonemap authoring | done | `Tonemap` group including the LPM percentiles the game hard-codes |
 | Volumetric fog authoring | done | `Volumetric fog` group; the scattering source follows the authored sun |
-| Level/global scope switch | partial | the level scope is authored (`fog:` and `lights:` in `qray.lights.yaml`, see [Level document](#level-document)); the switch in the game's Global tab selects the scope of the sky, sun and cloud settings, and those are not written yet |
+| Level/global scope switch | done | the `Sky` group's `Global settings` box selects the scope of the `sky:` block, which is written per key like the game's `CaptureScope`; see [Sky block](#sky-block) |
 | Apply / Cancel / Exit with a dirty prompt | done | `DrawSessionBar`, `ApplySession`, `DiscardSession`, `RequestExit` and `DrawSessionPrompt`. `WM_CLOSE` goes through the same prompt; `Yes` saves and exits, `No` exits without writing, `Escape` or the close box dismisses the prompt and keeps the session |
 | Save back to `qray.materials.yaml` | done | `EditorMaterialsDocument::WriteMerged` in `EditorSession.cpp`; `--materials <file>` picks the target, and the previous generation is copied to `qray.backup_materials.yaml` before a write |
 | Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded` and `nothing to save`, held six seconds and faded over the last one |
@@ -136,10 +136,11 @@ The owned keys are the fields the SDK upload info can express and the panel can 
 
 `--lights <file>` names the level document; without it the editor targets `qray.lights.yaml`
 next to the scene, which is the file the game loads from `<gamedir>`. The file is a root mapping
-keyed by level name (`e1m1`) and the editor owns two blocks inside the level's own section:
+keyed by level name (`e1m1`) and the editor owns three blocks inside the level's own section:
 
 | Block | Keys | Scale |
 | --- | --- | --- |
+| `sky:` | the 25 `rt_sky_names[]` cvars, see [Sky block](#sky-block) | the value text the game's own writer produces |
 | `fog:` | `color:` as `rrggbb`, `density:`, `enabled:` | `density` is the authored value; the frame divides it by 64 |
 | `lights:` | `- origin:` x y z, `radius:`, `intensity:`, `color:`, `spot:`, `dir:`, `angle_inner:`, `angle_outer:`, `style:` | `origin` in scene units (40 per metre), `radius` in metres, `intensity` in file units of 100 editor points |
 
@@ -151,12 +152,12 @@ panel unchanged, and the fog colour starts white because that is what the engine
 level whose section carries no `color:` key.
 
 The level merge follows the material rules, with the level's own section as the unit of the
-write: every block it carries that the editor does not own (`sky:`, comments, a block a hand edit
-added) is copied verbatim at the indent it had, the other levels' sections are not touched, and a
-section the file does not have yet is appended. A level with no custom light left keeps its
-`fog:` block and loses `lights:`, which is how the game reads "no custom lights here"; the editor
-reads it the same way, where a missing `lights:` block leaves the panel's own lights alone and
-only an existing block replaces them.
+write: every block it carries that the editor does not own (a hand-written `hint:`, comments, any
+key the panel has no field for) is copied verbatim at the indent it had, the other levels'
+sections are not touched, and a section the file does not have yet is appended. A level with no
+custom light left keeps its `fog:` and `sky:` blocks and loses `lights:`, which is how the game
+reads "no custom lights here"; the editor reads it the same way, where a missing `lights:` block
+leaves the panel's own lights alone and only an existing block replaces them.
 
 `Apply` writes both documents, reloads them and reports through the toast. The first Apply also
 creates a target that does not exist yet, even when only the level was edited, because the game's
@@ -166,15 +167,61 @@ viewport matching them; `Exit` closes without a prompt when the session is clean
 opens `DrawSessionPrompt`, whose `Yes` saves first and `No` exits without writing. `Escape` and the
 close box dismiss the prompt.
 
+### Sky block
+
+`sky:` carries the cvars the game's light editor drives from its Global tab, in the order
+`Quake/rt_lights.c` `rt_sky_names[]` lists them, and it is written the way
+`RT_SkySettings_WriteLevel` writes it: two-space block indent, four-space key indent, one entry
+per key the level overrides, and no block at all when the level overrides nothing.
+
+```text
+e1m1:
+  sky:
+    rt_sky_brightness: 3.25
+    rt_sky_color: 0 169 255
+  fog:
+    ...
+```
+
+The scope is the game's: the `sky:` block *is* the level's override set, and a level without one
+follows the config. Three rules reproduce that, all of them inside `EditorApp::LevelSky` and
+`AdoptSkyScope`:
+
+| Rule | Behaviour |
+| --- | --- |
+| A key nobody touched | written back with the text the file already holds, so a load and a save of the same level is byte for byte -- `1.5` does not become `1.50000` through the panel's float |
+| A key edited to what the global scope says | dropped from the block, which is the comparison `RT_SkySettings_CaptureScope` makes |
+| Saving in the global scope | drops the level's set, so switching back to the level afterwards has nothing to resurrect -- `RT_SkySettings_CommitSession` |
+
+The scope the file shows is the scope the session is in: a level that carries `sky:` opens with
+`Global settings` off, and a save re-derives the box from the file it just wrote, which is the
+state the game's editor finds when it reopens. The baseline a level key is dropped against is the
+panel's own defaults, because a standalone editor has no config of its own; the game reads the
+same comparison against the user's config, so a level that pins a cvar equal to its default is
+written as an override by the game on a machine whose config differs, and dropped here.
+
+A line inside the block with no slot -- a cvar a newer engine knows, or a comment -- is written
+back after the managed keys exactly as it was spelled, indentation included, which is what a light
+entry's own extra keys already do and why a key that carries children keeps them. It survives only
+while the block does: the block's presence is the level's scope, so a save that drops the block for
+the global scope takes those lines with it, the way the game's `RT_SkySettings_WriteLevel` writes
+only the names it knows.
+
+The sun is part of the block, not a separate control: `Sun / Light` is `rt_physical_sun`,
+`Light strength` is `rt_sky_sun` in units of `kEditorSkySunRadiance` (the 1600 x 0.001 fixup the
+game applies), and `Pitch` / `Yaw` are `rt_sky_sun_pitch` / `rt_sky_sun_yaw` -- the game's own
+cvar angles, so they round-trip without an angle conversion. `rt_sky_sun_disc`,
+`rt_sky_godrays_quality`, `rt_sky_sun_preset` and the two `rt_sky_sun_bounce_*` cvars are not in
+`rt_sky_names[]` and stay out of the block, exactly as the game's writer leaves them out.
+
 ## Order of work
 
 1. **Light authoring.** Colour, offset, the spot cone, the light style, the light list and the
    custom-light store with add/duplicate/clone/remove are done, as are both drags and the axis
    gizmo.
 2. **Session lifecycle.** Done. Apply, Cancel, Exit and both writers -- `qray.materials.yaml` and
-   the level scope (`fog:` / `lights:`) -- plus the notify toast and the save prompt. What remains
-   of the write path is the sky block and the scope switch that decides whether it belongs to the
-   level or to the global settings.
+   the level document (`sky:` / `fog:` / `lights:`) -- plus the whole sky scope, the notify toast
+   and the save prompt. Nothing of the write path is left.
 3. **Viewport aids.** The gizmo and the marker drag are done; the crosshair and the hint overlay
    are still panel text.
 
@@ -287,3 +334,21 @@ that were read rather than with the defaults, kept `sky:` and the whole `e1m2:` 
 and wrote `qray.backup_lights.yaml` as the previous generation. Removing the last light and
 applying again dropped the `lights:` block and left `fog:`, `sky:` and `e1m2:` in place, which is
 the empty-store shape the game reads back as "no custom lights on this level".
+
+The sky block and its scope were accepted on a scratch level document whose `e1m1` section carried
+six `sky:` keys in non-canonical text (`1.5`, `140`, `0 169 255`) plus a `fog:` block, and an
+`other_level:` section the editor does not touch. Every sky control logs its rectangle as
+`panel rect: sky rt_sky_brightness 22,351 354,374`, so a scripted run clicks a field by name:
+
+| Check | Result |
+| --- | --- |
+| Launch on a level with `sky:` | `session: … read, 0 lights for e1m1, sky scope level` -- the box opens off |
+| `Apply` with no edit | refused, the document stays byte-identical |
+| `Sky brightness` 1.25 -> 3.25, `Apply` | only `rt_sky_brightness` changed; `1.5`, `140`, `0 169 255`, `0.6` and `other_level:` stayed verbatim, block still before `fog:` |
+| `Sky scale` -> 2.5 on a level with no `rt_sky` key | `rt_sky: 2.5` inserted first, the other six keys untouched |
+| `Global settings` on, `Apply` | `sky:` removed from `e1m1`, `other_level:` and `fog:` kept, log `sky: global settings` |
+| `Global settings` off again, `Apply` | still no block -- the global save dropped the level's set |
+| `Sky scale` -> 2.5 in level scope after that | a one-key block `rt_sky: 2.5` |
+| `Sky brightness` -> 1, the panel default, `Apply` | `rt_sky_brightness` dropped from the block, the other keys untouched |
+| `Sky brightness` 3.5, `Apply`, on a block holding a comment, `rt_sky_future_key: 7` and `rt_sky_future_group:` with a `child:` under it | all three lines written back after the managed keys at their own indentation; `other_level:` and `fog:` untouched |
+| `Global settings` on with those lines present, `Apply` | the whole `sky:` block goes, unknown lines with it, `other_level:` and `fog:` kept |

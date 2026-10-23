@@ -938,7 +938,8 @@ void EditorApp::Frame()
     float toSun[3];
     SunDirection(toSun);
 
-    BuildEditorFrameParams(m_settings, toSun, m_sunIntensity, eye, m_frameParams);
+    BuildEditorFrameParams(m_settings, toSun, m_sun.enabled ? m_sun.radiance : 0.0f, eye,
+                           m_frameParams);
     draw.pSkyParams = &m_frameParams.sky;
     draw.pTonemappingParams = &m_frameParams.tonemap;
     draw.pVolumetricParams = &m_frameParams.volume;
@@ -1245,25 +1246,35 @@ void EditorApp::UpdateCamera(float deltaSeconds)
 
 void EditorApp::SunDirection(float direction[3]) const
 {
-    const float elevation = m_sunElevation * 0.01745329252f;
-    const float azimuth = m_sunAzimuth * 0.01745329252f;
-    const float cosElevation = std::cos(elevation);
+    // The game reads -forward of rt_sky_sun_pitch/rt_sky_sun_yaw as the direction towards the sun,
+    // so the editor derives it from the same pair and a level the game wrote puts its sun where the
+    // file says. AngleVectors puts -sin(pitch) on forward's z, which flips to +sin here.
+    const float pitch = m_sun.pitch * 0.01745329252f;
+    const float yaw = m_sun.yaw * 0.01745329252f;
+    const float cosPitch = std::cos(pitch);
 
-    direction[0] = cosElevation * std::cos(azimuth);
-    direction[1] = cosElevation * std::sin(azimuth);
-    direction[2] = std::sin(elevation);
+    direction[0] = -cosPitch * std::cos(yaw);
+    direction[1] = -cosPitch * std::sin(yaw);
+    direction[2] = std::sin(pitch);
 }
 
 void EditorApp::UploadSun()
 {
+    // The game uploads the sun light only while rt_physical_sun is on, and the shafts scatter it,
+    // so an off sun leaves the level's own lights alone instead of adding a dark one.
+    if (!m_sun.enabled)
+    {
+        return;
+    }
+
     float toSun[3];
     SunDirection(toSun);
 
     QrDirectionalLightUploadInfo sun = {};
     sun.uniqueID = 2;
-    sun.color = { m_sunIntensity, m_sunIntensity, m_sunIntensity };
+    sun.color = { m_sun.radiance, m_sun.radiance, m_sun.radiance };
     sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
-    sun.angularDiameterDegrees = m_sunAngularDiameter;
+    sun.angularDiameterDegrees = m_sun.angularDiameter;
 
     const QrResult result = qrUploadDirectionalLight(m_instance, &sun);
 
@@ -3153,11 +3164,9 @@ void EditorApp::DrawPanel(float deltaSeconds)
                 }
 
                 ImGui::Separator();
-                ImGui::TextUnformatted("Sun");
-                ImGui::SliderFloat("Intensity", &m_sunIntensity, 0.0f, 64.0f, "%.2f");
-                ImGui::SliderFloat("Azimuth", &m_sunAzimuth, 0.0f, 360.0f, "%.0f deg");
-                ImGui::SliderFloat("Elevation", &m_sunElevation, -89.0f, 89.0f, "%.0f deg");
-                ImGui::SliderFloat("Angular size", &m_sunAngularDiameter, 0.1f, 8.0f, "%.2f deg");
+                // The sun is level-wide and now carries the sky block's scope, so it lives in one
+                // place: the Render tab's Sun group, next to the value it writes to `sky:`.
+                ImGui::TextUnformatted("Sun: Render tab, Sky scope");
 
                 ImGui::EndChild();
                 ImGui::EndTabItem();
@@ -3200,6 +3209,23 @@ void EditorApp::DrawPanel(float deltaSeconds)
     ImGui::End();
 }
 
+void EditorApp::LogRect(const char *name)
+{
+    const ImVec2 minimum = ImGui::GetItemRectMin();
+    const ImVec2 maximum = ImGui::GetItemRectMax();
+    const std::string text = std::string("panel rect: ") + name + " " +
+                             std::to_string(int32_t(minimum.x)) + "," + std::to_string(int32_t(minimum.y)) +
+                             " " + std::to_string(int32_t(maximum.x)) + "," + std::to_string(int32_t(maximum.y));
+    const uint64_t layout = std::hash<std::string>{}(text) | 1u;
+    uint64_t &logged = m_loggedRects[name];
+
+    if (logged != layout)
+    {
+        logged = layout;
+        PrintMessage(text.c_str(), this);
+    }
+}
+
 void EditorApp::DrawGlobalSettings()
 {
     EditorRenderSettings &settings = m_settings;
@@ -3221,17 +3247,40 @@ void EditorApp::DrawGlobalSettings()
 
     if (ImGui::CollapsingHeader("Global", openGroup))
     {
+        // rt_brightness: the one sky value the block does not carry, so it follows the config
+        // whatever scope the panel edits.
         ImGui::SliderFloat("Brightness", &settings.brightness, 0.0f, 3.0f, "%.2f");
+    }
+
+    if (ImGui::CollapsingHeader("Sky", openGroup))
+    {
+        // The scope of the whole block, not just this group: the game's checkbox reads
+        // !LevelHasBlock() at load and false means the level's `sky:` block is written.
+        bool global = m_skyGlobal;
+
+        if (ImGui::Checkbox("Global settings", &global))
+        {
+            SetSkyScope(global);
+        }
+
+        LogRect("sky scope");
 
         const char *skyTypes[] = { "Colour", "Cubemap", "Rasterized", "Procedural" };
         ImGui::Combo("Sky type", &settings.skyType, skyTypes, IM_ARRAYSIZE(skyTypes));
+        LogRect("sky rt_physical_sky");
 
         ImGui::SliderFloat("Sky scale", &settings.skyScale, 0.0f, 8.0f, "%.2f");
+        LogRect("sky rt_sky");
         ImGui::SliderFloat("Sky brightness", &settings.skyBrightness, 0.0f, 10.0f, "%.2f");
+        LogRect("sky rt_sky_brightness");
         ImGui::ColorEdit3("Sky colour", settings.skyColor);
+        LogRect("sky rt_sky_color");
         ImGui::SliderFloat("Sky light mult", &settings.skyLightMultiplier, 0.0f, 8.0f, "%.2f");
+        LogRect("sky rt_sky_light_mult");
         ImGui::SliderInt("Sky ambient lod", &settings.skyAmbientLod, 0, 10);
+        LogRect("sky rt_sky_ambient_lod");
         ImGui::Checkbox("Sky nee", &settings.skyNee);
+        LogRect("sky rt_sky_nee");
     }
 
     if (ImGui::CollapsingHeader("Clouds", openGroup))
@@ -3247,11 +3296,35 @@ void EditorApp::DrawGlobalSettings()
         ImGui::SliderFloat("Thickness", &settings.cloudsThickness, 1.0f, 300000.0f, "%.0f units");
     }
 
-    if (ImGui::CollapsingHeader("Sun disc", openGroup))
+    if (ImGui::CollapsingHeader("Sun", openGroup))
     {
+        // rt_physical_sun, off by default like the shipped config: the disc below is drawn whether
+        // or not anything casts light.
+        ImGui::Checkbox("Light##sun", &m_sun.enabled);
+
+        // The checkbox and this slider are rt_physical_sun and rt_sky_sun; the game's cvar is a
+        // multiplier the light fixup scales by 16, which is the unit this slider shows.
+        float strength = m_sun.radiance / kEditorSkySunRadiance;
+
+        if (ImGui::SliderFloat("Light strength", &strength, 0.0f, 10.0f, "%.2f"))
+        {
+            m_sun.radiance = strength * kEditorSkySunRadiance;
+        }
+
+        LogRect("sun rt_sky_sun");
+
+        // Pitch and yaw are the game's own cvar values: 140 and 120 put the sun where the shipped
+        // config has it, and they round-trip through the block without an angle conversion.
+        ImGui::SliderFloat("Pitch", &m_sun.pitch, -180.0f, 180.0f, "%.1f");
+        LogRect("sun rt_sky_sun_pitch");
+        ImGui::SliderFloat("Yaw", &m_sun.yaw, 0.0f, 360.0f, "%.1f");
+        LogRect("sun rt_sky_sun_yaw");
+
+        ImGui::Separator();
         ImGui::SliderFloat("Disc scale", &settings.sunDiscScale, 0.0f, 20.0f, "%.2f");
         ImGui::ColorEdit3("Disc colour", settings.sunColor);
         ImGui::SliderFloat("Disc size", &settings.sunDiscSize, 0.0f, 10.0f, "%.2f");
+        ImGui::Text("Angular size %.2f deg", double(m_sun.angularDiameter));
     }
 
     if (ImGui::CollapsingHeader("God rays", openGroup))
@@ -3259,6 +3332,9 @@ void EditorApp::DrawGlobalSettings()
         ImGui::Checkbox("God rays##enabled", &settings.godRays);
         ImGui::SliderFloat("Shaft strength", &settings.godRaysIntensity, 0.0f, 4.0f, "%.2f");
         ImGui::SliderInt("Shaft quality", &settings.godRaysQuality, 0, 3);
+        // rt_sky_godrays_sky_threshold: how bright a sky pixel must be before it emits a shaft.
+        ImGui::SliderFloat("Sky threshold", &settings.godRaysSkyThreshold, 0.0f, 1.0f, "%.2f");
+        LogRect("godrays rt_sky_godrays_sky_threshold");
     }
 
     if (ImGui::CollapsingHeader("Volumetric fog", openGroup))
@@ -3452,6 +3528,290 @@ void EditorApp::LoadMaterialsSession()
     PrintMessage(message.c_str(), this);
 }
 
+namespace
+{
+
+// One `sky:` key as the block states it, taken from the values the panel edits. A name the block
+// does not carry leaves `text` alone, so the two lists cannot drift into writing a value to a key
+// that means something else.
+void SkyTextOf(const EditorRenderSettings &settings, const EditorSunState &sun,
+               const std::string &name, std::string &text)
+{
+    if (name == "rt_sky")
+    {
+        text = FormatSkyText(settings.skyScale);
+    }
+    else if (name == "rt_sky_brightness")
+    {
+        text = FormatSkyText(settings.skyBrightness);
+    }
+    else if (name == "rt_sky_light_mult")
+    {
+        text = FormatSkyText(settings.skyLightMultiplier);
+    }
+    else if (name == "rt_sky_color")
+    {
+        text = FormatSkyText(settings.skyColor);
+    }
+    else if (name == "rt_sky_ambient_lod")
+    {
+        text = FormatSkyText(settings.skyAmbientLod);
+    }
+    else if (name == "rt_sky_nee")
+    {
+        text = FormatSkyText(settings.skyNee);
+    }
+    else if (name == "rt_physical_sky")
+    {
+        // The block carries the one sky type it can express: r_fastsky's colour sky has no key.
+        text = FormatSkyText(settings.skyType == QR_SKY_TYPE_PROCEDURAL);
+    }
+    else if (name == "rt_sky_clouds")
+    {
+        text = FormatSkyText(settings.clouds);
+    }
+    else if (name == "rt_sky_clouds_color")
+    {
+        text = FormatSkyText(settings.cloudsColor);
+    }
+    else if (name == "rt_sky_clouds_alpha")
+    {
+        text = FormatSkyText(settings.cloudsAlpha);
+    }
+    else if (name == "rt_sky_clouds_coverage")
+    {
+        text = FormatSkyText(settings.cloudsCoverage);
+    }
+    else if (name == "rt_sky_clouds_density")
+    {
+        text = FormatSkyText(settings.cloudsDensity);
+    }
+    else if (name == "rt_sky_clouds_speed")
+    {
+        text = FormatSkyText(settings.cloudsSpeed);
+    }
+    else if (name == "rt_sky_clouds_quality")
+    {
+        text = FormatSkyText(settings.cloudsQuality);
+    }
+    else if (name == "rt_sky_clouds_height")
+    {
+        text = FormatSkyText(settings.cloudsHeight);
+    }
+    else if (name == "rt_sky_clouds_thickness")
+    {
+        text = FormatSkyText(settings.cloudsThickness);
+    }
+    else if (name == "rt_physical_sun")
+    {
+        text = FormatSkyText(sun.enabled);
+    }
+    else if (name == "rt_sky_sun")
+    {
+        // The panel holds the radiance the light is uploaded with, the block the cvar multiplier.
+        text = FormatSkyText(sun.radiance / kEditorSkySunRadiance);
+    }
+    else if (name == "rt_sky_sun_color")
+    {
+        text = FormatSkyText(settings.sunColor);
+    }
+    else if (name == "rt_sky_sun_size")
+    {
+        text = FormatSkyText(settings.sunDiscSize);
+    }
+    else if (name == "rt_sky_sun_pitch")
+    {
+        text = FormatSkyText(sun.pitch);
+    }
+    else if (name == "rt_sky_sun_yaw")
+    {
+        text = FormatSkyText(sun.yaw);
+    }
+    else if (name == "rt_sky_godrays")
+    {
+        text = FormatSkyText(settings.godRays);
+    }
+    else if (name == "rt_sky_godrays_intensity")
+    {
+        text = FormatSkyText(settings.godRaysIntensity);
+    }
+    else if (name == "rt_sky_godrays_sky_threshold")
+    {
+        text = FormatSkyText(settings.godRaysSkyThreshold);
+    }
+}
+
+// The live state as the block would read it, every key set. This is what a capture compares a
+// key against, so an edit is recognised by the text the file would hold rather than by the float.
+EditorLevelSky RenderedSky(const EditorRenderSettings &settings, const EditorSunState &sun)
+{
+    EditorLevelSky sky;
+
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        SkyTextOf(settings, sun, kEditorSkyKeyNames[i], sky.values[i]);
+        sky.set[i] = !sky.values[i].empty();
+    }
+
+    return sky;
+}
+
+// The value of one `sky:` entry in the live state. A text the game's parser would reject leaves
+// the setting alone, which is what RT_SkySettings_ApplyParsed does with a zero-argument value too.
+void ApplySkyText(const std::string &name, const std::string &text, EditorRenderSettings &settings,
+                  EditorSunState &sun)
+{
+    float value = 0.0f;
+    int32_t integer = 0;
+
+    if (name == "rt_sky_color" || name == "rt_sky_clouds_color" || name == "rt_sky_sun_color")
+    {
+        float color[3] = { 0.0f, 0.0f, 0.0f };
+
+        if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
+        {
+            return;
+        }
+
+        // The block writes 0..255 and the renderer takes 0..1, so a hand-written file may state
+        // either; a channel above 1 can only be the byte form.
+        const float scale = color[0] > 1.0f || color[1] > 1.0f || color[2] > 1.0f ? 1.0f / 255.0f : 1.0f;
+        float *target = name == "rt_sky_color"       ? settings.skyColor
+                        : name == "rt_sky_clouds_color" ? settings.cloudsColor
+                                                        : settings.sunColor;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            target[axis] = color[axis] * scale;
+        }
+
+        return;
+    }
+
+    if (std::sscanf(text.c_str(), "%f", &value) != 1)
+    {
+        return;
+    }
+
+    integer = int32_t(value);
+
+    if (name == "rt_sky")
+    {
+        settings.skyScale = value;
+    }
+    else if (name == "rt_sky_brightness")
+    {
+        settings.skyBrightness = value;
+    }
+    else if (name == "rt_sky_light_mult")
+    {
+        settings.skyLightMultiplier = value;
+    }
+    else if (name == "rt_sky_ambient_lod")
+    {
+        settings.skyAmbientLod = integer;
+    }
+    else if (name == "rt_sky_nee")
+    {
+        settings.skyNee = integer != 0;
+    }
+    else if (name == "rt_physical_sky")
+    {
+        // A file that says 0 leaves the sky type alone instead of forcing the colour sky: the
+        // renderer's r_fastsky branch is not something a level can select here.
+        if (integer != 0)
+        {
+            settings.skyType = QR_SKY_TYPE_PROCEDURAL;
+        }
+        else if (settings.skyType == QR_SKY_TYPE_PROCEDURAL)
+        {
+            settings.skyType = QR_SKY_TYPE_CUBEMAP;
+        }
+    }
+    else if (name == "rt_sky_clouds")
+    {
+        settings.clouds = integer != 0;
+    }
+    else if (name == "rt_sky_clouds_alpha")
+    {
+        settings.cloudsAlpha = value;
+    }
+    else if (name == "rt_sky_clouds_coverage")
+    {
+        settings.cloudsCoverage = value;
+    }
+    else if (name == "rt_sky_clouds_density")
+    {
+        settings.cloudsDensity = value;
+    }
+    else if (name == "rt_sky_clouds_speed")
+    {
+        settings.cloudsSpeed = value;
+    }
+    else if (name == "rt_sky_clouds_quality")
+    {
+        settings.cloudsQuality = integer;
+    }
+    else if (name == "rt_sky_clouds_height")
+    {
+        settings.cloudsHeight = value;
+    }
+    else if (name == "rt_sky_clouds_thickness")
+    {
+        settings.cloudsThickness = value;
+    }
+    else if (name == "rt_physical_sun")
+    {
+        sun.enabled = integer != 0;
+    }
+    else if (name == "rt_sky_sun")
+    {
+        sun.radiance = value * kEditorSkySunRadiance;
+    }
+    else if (name == "rt_sky_sun_size")
+    {
+        settings.sunDiscSize = value;
+    }
+    else if (name == "rt_sky_sun_pitch")
+    {
+        sun.pitch = value;
+    }
+    else if (name == "rt_sky_sun_yaw")
+    {
+        sun.yaw = value;
+    }
+    else if (name == "rt_sky_godrays")
+    {
+        settings.godRays = integer != 0;
+    }
+    else if (name == "rt_sky_godrays_intensity")
+    {
+        settings.godRaysIntensity = value;
+    }
+    else if (name == "rt_sky_godrays_sky_threshold")
+    {
+        settings.godRaysSkyThreshold = value;
+    }
+}
+
+// Lays a scope's keys over the live state. `onlySet` is the level scope, where a key the block
+// does not carry follows the global value, so whatever the panel already holds stands.
+void ApplySkyScope(const EditorLevelSky &sky, bool onlySet, EditorRenderSettings &settings,
+                   EditorSunState &sun)
+{
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        if (sky.values[i].empty() || (onlySet && !sky.set[i]))
+        {
+            continue;
+        }
+
+        ApplySkyText(kEditorSkyKeyNames[i], sky.values[i], settings, sun);
+    }
+}
+
+} // namespace
+
 EditorLevelFog EditorApp::LevelFog() const
 {
     EditorLevelFog fog;
@@ -3502,9 +3862,92 @@ std::vector<EditorLevelLight> EditorApp::LevelLights() const
     return lights;
 }
 
+EditorLevelSky EditorApp::LevelSky() const
+{
+    EditorLevelSky sky;
+
+    // The global scope is the config, so the file carries no block at all; the game's checkbox
+    // reads the same way.
+    if (m_skyGlobal)
+    {
+        return sky;
+    }
+
+    const EditorLevelSky live = RenderedSky(m_settings, m_sun);
+
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        // A key nobody touched writes back the text the file already holds, which is what keeps a
+        // load and save of the same level byte for byte - the panel's float would not survive the
+        // trip through the console's own formatting.
+        const bool edited = live.values[i] != m_skyRendered.values[i];
+        const std::string &text = edited ? live.values[i] : m_skyLevel.values[i];
+
+        // An edited key that says what the global scope says is not an override, so it goes back
+        // to following the config - the comparison RT_SkySettings_CaptureScope makes.
+        if (text.empty() || (edited && text == m_skyGlobals.values[i]))
+        {
+            continue;
+        }
+
+        sky.values[i] = text;
+        sky.set[i] = true;
+    }
+
+    return sky;
+}
+
+void EditorApp::CaptureSky()
+{
+    if (m_skyGlobal)
+    {
+        // The global values are the baseline a level key is dropped against, so the panel's own
+        // numbers become what a level has to differ from to be written.
+        m_skyGlobals = RenderedSky(m_settings, m_sun);
+    }
+    else
+    {
+        m_skyLevel = LevelSky();
+    }
+
+    m_skyRendered = RenderedSky(m_settings, m_sun);
+}
+
+void EditorApp::SetSkyScope(bool global)
+{
+    if (global == m_skyGlobal)
+    {
+        return;
+    }
+
+    // The scope being left keeps whatever the panel holds before the other one is laid over it.
+    CaptureSky();
+    m_skyGlobal = global;
+
+    if (global)
+    {
+        // Every key, because the global scope owns the whole block: the level's overrides do not
+        // stand in for a config value the panel is editing.
+        ApplySkyScope(m_skyGlobals, false, m_settings, m_sun);
+    }
+    else
+    {
+        // The panel already shows the global values, so only the level's own keys change.
+        ApplySkyScope(m_skyLevel, true, m_settings, m_sun);
+    }
+
+    m_skyRendered = RenderedSky(m_settings, m_sun);
+
+    const std::string message =
+        std::string("sky: ") +
+        (global ? std::string("global settings") : "level " + m_sessionPaths.level);
+    PrintMessage(message.c_str(), this);
+    Notify(message);
+}
+
 std::string EditorApp::LevelFingerprint() const
 {
-    return RenderEditorLevelSection(m_sessionPaths.level, LevelFog(), LevelLights());
+    return RenderEditorLevelSection(m_sessionPaths.level, LevelSky(), LevelFog(), LevelLights());
 }
 
 void EditorApp::LoadLightsSession()
@@ -3518,7 +3961,16 @@ void EditorApp::LoadLightsSession()
         return;
     }
 
+    // The values a level key is dropped against are the game's config, which the light editor
+    // reads as its global set. A standalone editor has no config, so the panel's own defaults are
+    // that baseline, and they have to exist before the first level key is compared with them.
+    if (m_skyGlobals.Empty())
+    {
+        m_skyGlobals = RenderedSky(m_settings, m_sun);
+    }
+
     const EditorLevelDocument::ReadResult read = m_levelDocument.ReadLevel(m_sessionPaths.level);
+    AdoptSkyScope(read);
 
     if (read.hasFog)
     {
@@ -3570,8 +4022,22 @@ void EditorApp::LoadLightsSession()
     const std::string message = "session: " + m_sessionPaths.lights +
                                 (m_levelDocument.Exists() ? " read, " : " absent, new file on apply, ") +
                                 std::to_string(m_customLights.size()) + " lights for " +
-                                m_sessionPaths.level;
+                                m_sessionPaths.level + ", sky scope " +
+                                (m_skyGlobal ? "global" : "level");
     PrintMessage(message.c_str(), this);
+}
+
+void EditorApp::AdoptSkyScope(const EditorLevelDocument::ReadResult &read)
+{
+    // A level that carries a `sky:` block opens in level scope, the way the game's editor leaves
+    // its checkbox off for it; one without a block has nothing to override and opens global.
+    m_skyGlobal = !read.hasSky;
+    m_skyLevel = read.hasSky ? read.sky : EditorLevelSky{};
+
+    // The level's keys go over the panel as it stands, which is the global baseline a key the
+    // block does not carry falls back to.
+    ApplySkyScope(m_skyLevel, true, m_settings, m_sun);
+    m_skyRendered = RenderedSky(m_settings, m_sun);
 }
 
 void EditorApp::TouchMaterial(const std::string &name)
@@ -3654,8 +4120,8 @@ bool EditorApp::ApplySession()
 
     if (levelChanged)
     {
-        const std::string merged =
-            m_levelDocument.WriteMerged(m_sessionPaths.level, LevelFog(), LevelLights());
+        const std::string merged = m_levelDocument.WriteMerged(m_sessionPaths.level, LevelSky(),
+                                                              LevelFog(), LevelLights());
         const bool hadFile = m_levelDocument.Exists();
 
         if (hadFile && !CopyEditorFile(m_sessionPaths.lights, m_sessionPaths.lightsBackup, error))
@@ -3681,7 +4147,15 @@ bool EditorApp::ApplySession()
             PrintMessage(("session: " + reloadError).c_str(), this);
         }
 
+        // The scope the write leaves behind is the one the file now shows, which is the state the
+        // game's editor finds when it reopens: RT_SkySettings_CommitSession drops the level's own
+        // set on a global save, so switching back to the level has nothing left to resurrect.
+        AdoptSkyScope(m_levelDocument.ReadLevel(m_sessionPaths.level));
+
         m_levelTouched = false;
+        // The session now matches the file: the text it was written from is the baseline the next
+        // edit is told apart from.
+        CaptureSky();
         m_levelFingerprint = LevelFingerprint();
 
         PrintMessage(("session: level " + m_sessionPaths.level + " written to " +

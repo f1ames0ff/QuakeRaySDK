@@ -36,6 +36,8 @@ struct EditorRenderSettings
 
     // Sun. The disc and the shafts are the same sun as the directional light the
     // editor uploads; `sunDiscScale` only sizes how bright the disc is painted.
+    // The light itself -- whether it is drawn, its strength and its angles -- is
+    // EditorSunState, because the level's `sky:` block owns two of those keys.
     float sunDiscScale = 4.0f;
     float sunColor[3] = { 1.0f, 0.933f, 0.749f };
     float sunDiscSize = 1.0f;
@@ -44,6 +46,11 @@ struct EditorRenderSettings
     bool godRays = true;
     float godRaysIntensity = 1.0f;
     int32_t godRaysQuality = 2;
+    // How bright a sky area must be for the rays to come from it instead of the
+    // centre of everything above the threshold. The search walks the classic sky
+    // texture, which a standalone editor has none of, so the value is authored
+    // and saved for the game rather than changing this preview.
+    float godRaysSkyThreshold = 0.75f;
 
     // Volumetric fog
     int32_t volumeType = 2;
@@ -69,6 +76,38 @@ struct EditorRenderSettings
     float fogDensity = 0.0f;
     float fogSkyBlend = 0.0f;
 };
+
+// The sun the editor draws: the directional light, the disc and the shafts are one
+// sun, and the level's `sky:` block owns two of its keys, so the state lives
+// beside the settings rather than inside them.
+struct EditorSunState
+{
+    // rt_physical_sun: the game uploads no sun light while the cvar is off, and
+    // without it there is nothing for the shafts to scatter.
+    bool enabled = false;
+    // The directional light's radiance before its colour: rt_sky_sun times the
+    // fixup the game applies, so the default cvar value of 1 is
+    // kEditorSkySunRadiance.
+    float radiance = 16.0f;
+    // rt_sky_sun_pitch and rt_sky_sun_yaw, which state the direction towards the
+    // sun the way Quake's AngleVectors does: the game reads -forward as that
+    // direction, so a pitch of 140 is a sun 40 degrees above the horizon and a
+    // pitch of 40 would be the same sun behind the viewer. The values are kept in
+    // the game's own words rather than as elevation and azimuth so a block the
+    // panel captured reads back unchanged.
+    float pitch = 140.0f;
+    float yaw = 120.0f;
+    // Not a cvar: RT_UploadSunLight uploads every sun with this angular size, so
+    // the editor's own light has to be the same disc to shade the same way. The
+    // size the sky shader paints is rt_sky_sun_size, which is EditorRenderSettings'
+    // sunDiscSize because the block owns it.
+    float angularDiameter = 0.05f;
+};
+
+// The radiance one unit of `rt_sky_sun` is worth, matching RT_FIXUP_LIGHT_INTENSITY
+// followed by RT_SUN_LIGHT_INTENSITY_SCALE: rt_globallight_mult (10) times the
+// Quake-to-meter area fix (1600) times 0.001.
+inline constexpr float kEditorSkySunRadiance = 16.0f;
 
 // The four parameter blocks a frame built from EditorRenderSettings carries. Kept
 // together so the pointers handed to QrDrawFrameInfo stay valid for the whole call.

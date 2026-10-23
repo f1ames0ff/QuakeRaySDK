@@ -36,7 +36,9 @@ void BuildEditorFrameParams(const EditorRenderSettings &settings, const float su
     out.sky.skyLightMultiplier = settings.skyLightMultiplier;
     out.sky.skyNee = settings.skyNee ? 1 : 0;
     out.sky.skyViewerPosition = { { viewerPosition[0], viewerPosition[1], viewerPosition[2] } };
-    out.sky.godRaysEnabled = (settings.skyType == QR_SKY_TYPE_PROCEDURAL && settings.godRays) ? 1 : 0;
+    // gl_vidsdl.c passes rt_sky_godrays straight through, whatever the sky type
+    // is; the renderer is what decides a sky has no sun to scatter.
+    out.sky.godRaysEnabled = settings.godRays ? 1 : 0;
     out.sky.godRaysIntensity = settings.godRaysIntensity;
     out.sky.godRaysQuality = uint32_t(settings.godRaysQuality);
     out.sky.godRaysFromSkyTexture = 0;
@@ -92,7 +94,12 @@ void BuildEditorFrameParams(const EditorRenderSettings &settings, const float su
     out.volume.useSimpleDepthBased = settings.volumeType == 1 ? 1 : 0;
     out.volume.volumetricFar = settings.volumeFar;
     out.volume.scaterring = settings.volumeScatter;
-    out.volume.sourceDirection = { { sunDirection[0], sunDirection[1], sunDirection[2] } };
+    // The block takes the direction the light travels, which is how gl_vidsdl.c passes
+    // RT_AnglesToDir's forward: the game reads -forward as the direction towards the sun, so the
+    // shafts of a level look the same here as in the game for the same rt_sky_sun_pitch/yaw.
+    out.volume.sourceDirection = {
+        { -sunDirection[0], -sunDirection[1], -sunDirection[2] }
+    };
     out.volume.sourceAssymetry = settings.volumeAsymmetry;
 
     // The scattering source is the sun the directional light draws, so a scene
