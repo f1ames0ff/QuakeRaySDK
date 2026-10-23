@@ -1104,6 +1104,14 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         light.radius = kDefaultLightRadiusMeters * kQuakeUnitsPerMeter;
         light.cluster = ResolveLightCluster(scene, light.position);
         light.className = className;
+
+        const std::string &styleText = entity.Value("style");
+
+        if (!styleText.empty())
+        {
+            light.style = std::atoi(styleText.c_str());
+        }
+
         SetEditorLightIntensity(light, intensity);
 
         scene.lights.push_back(std::move(light));

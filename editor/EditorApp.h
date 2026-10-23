@@ -48,12 +48,18 @@ private:
     void UploadSun();
     void SunDirection(float direction[3]) const;
     void UploadLights();
+    // Uploads one light under the ID the light lists know it by: a spot when its cone is on,
+    // a sphere otherwise, which is the branch RT_LIGHT_Emit takes.
+    void UploadLight(const EditorLight &light, uint64_t uniqueID, QrResult &lastResult);
     void UploadClusterLightSources();
     // Reports whether one light is listed by the cluster it resolved into.
-    void LogLightCluster(int32_t index);
+    void LogLightCluster(const EditorLight &light, uint64_t uniqueID, const char *label);
     void DrawPanel(float deltaSeconds);
     void DrawGlobalSettings();
     void DrawMaterials();
+    // The Entity tab of the game editor: every light the frame uploads, map lights first, and
+    // the buttons that add, duplicate and remove the ones the level does not have.
+    void DrawLightList();
 
     // Casts a ray through the cursor the way QRE_DoPick resolves a click against the world:
     // the nearest surface along the ray wins, and a light in front of that surface wins over it.
@@ -61,9 +67,39 @@ private:
     void ViewBasis(float side[3], float up[3], float forward[3]) const;
     int32_t PickSurface(const float origin[3], const float direction[3], int32_t &outTriangle,
                         float &outDistance) const;
-    int32_t PickLight(const float origin[3], const float direction[3], float &outDistance) const;
+    int32_t PickLight(const float origin[3], const float direction[3], float &outDistance,
+                      bool &outCustom) const;
     void DrawSelectionOverlay();
     void ClearSelection();
+
+    // The light the panel edits: the map light or the custom one, whichever was picked last.
+    // Null when the selection is a surface or nothing at all.
+    EditorLight *SelectedLight();
+    // "light 8" for one the level carries, "custom 0" for one the editor authored.
+    std::string SelectedLightLabel() const;
+    // The ID the cluster light lists know the selected light by.
+    uint64_t SelectedLightUniqueID() const;
+    // Selects one light and makes its origin the pick point, the way a click on its gizmo does.
+    void SelectLight(int32_t index, bool custom);
+
+    // How a light the editor invents is placed: the game editor's Add, Duplicate and Clone
+    // differ only in where the copy starts.
+    enum class LightSpawn
+    {
+        // In front of the camera, for Add light.
+        Camera,
+        // One step above the light being copied, so the two are told apart at once.
+        Duplicate,
+        // At the pick point, aimed down the pick ray: Clone drops it where the author looks.
+        Clone,
+    };
+
+    // Appends `source`, or a default light when it is null, to the custom list and selects it:
+    // the game editor's Add, Clone (from a map light) and Duplicate (from a custom one).
+    void AddCustomLight(const EditorLight *source, LightSpawn spawn);
+    void DuplicateSelectedLight();
+    void CloneSelectedLight();
+    void RemoveSelectedCustomLight();
 
     void Frame();
     void Shutdown();
@@ -84,6 +120,10 @@ private:
     std::string m_shaderFolder;
     std::string m_blueNoisePath;
     std::string m_fontPath;
+    // --tab opens one panel tab on the first frame. A script cannot click a tab without knowing
+    // where ImGui laid it out, so it names the tab it wants instead.
+    std::string m_initialTab;
+    bool m_initialTabApplied = false;
     std::chrono::steady_clock::time_point m_startTime;
     std::chrono::steady_clock::time_point m_lastFrameTime;
     bool m_running = true;
@@ -130,6 +170,11 @@ private:
     int32_t m_selectedSurface = -1;
     int32_t m_selectedTriangle = -1;
     int32_t m_selectedLight = -1;
+    // Lights the level does not have, uploaded after the map's own and indexed from their own
+    // list: RT_CustomLights keeps them in a file of their own, so a map change cannot lose them
+    // and a map light cannot be removed from the scene by an editor action.
+    std::vector<EditorLight> m_customLights;
+    int32_t m_selectedCustomLight = -1;
     float m_pickPoint[3] = {};
     bool m_hasPickPoint = false;
     uint32_t m_pickCluster = 0;
@@ -138,4 +183,7 @@ private:
     // layout change - including the fields the spot checkbox adds or removes - instead of one per
     // frame. Zero means nothing has been logged yet.
     uint64_t m_loggedLightLayout = 0;
+    uint64_t m_loggedLightListLayout = 0;
+    uint64_t m_loggedTabLayout = 0;
+    uint64_t m_loggedStyleLayout = 0;
 };

@@ -44,8 +44,9 @@ exactly as `Quake/gl_vidsdl.c` does, and `EditorApp::Frame` hands the four
 structs to `qrDrawFrame`, so the panel edits the same fields the game's cvars
 feed.
 
-The panel has three tabs: `Scene` (frame stats, the selection and the light
-authoring above), `Render` (the global settings above) and `Materials`. The
+The panel has four tabs: `Scene` (frame stats, the selection and the light
+authoring above), `Entities` (the map and custom light lists), `Render` (the
+global settings above) and `Materials`. The
 `Scene` body scrolls, because the selection and sun blocks are taller than a
 720p window once the panel is fixed at 660 px; the key hints stay pinned below
 the scroll area. The light fields log their screen rectangle to `editor.log`
@@ -62,6 +63,14 @@ emission. The game's remaining parameters have no SDK field yet and are absent
 rather than dead sliders; [`docs/editor-parity.md`](../docs/editor-parity.md)
 lists them. A change is published by re-uploading the static scene once the
 widget is released, so it shows in the next frame.
+
+`Entities` holds the two light tables the game builds. The `Map` table lists the
+lights the BSP spawned, the `Custom` table the ones added in the session; both
+clip inside a scrolling child so a long list never pushes the selection block
+out of the window. `Add light`, `Duplicate`, `Clone` and `Remove` edit the
+custom store, and `Light style` in the selection block names the style the light
+animates with. A standalone editor has no `d_lightstylevalue[]` feed, so the
+style is authored metadata there and the preview keeps full brightness.
 
 The target is feature parity with the in-game editor (`qr_editor`); the current
 state and the remaining gap are listed in
@@ -102,8 +111,15 @@ options remain available for a different deployment layout:
 .\quakerayeditor.exe `
     --shaders C:\path\to\shaders `
     --blue-noise C:\path\to\textures\BlueNoise_LDR_RGBA_128.png `
-    --scene C:\path\to\e1m1.bsp
+    --scene C:\path\to\e1m1.bsp `
+    --tab Entities
 ```
+
+`--tab` opens that tab on the first frame, so a scripted session does not have to
+click the tab bar. It takes the tab label, not a pixel position, because the tab
+rectangles move with the panel; the panel logs them as `panel tabs:` on the
+first frame, next to the `light list rect:`, `panel rect:` and `style items:`
+lines that let a script find the widgets without reading pixels.
 
 The BSP loader currently accepts Quake BSP29 files directly. Extracting a map
 from a PAK remains an adapter step.
@@ -114,12 +130,11 @@ The remaining gap against the in-game editor is tracked in
 [`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
 is the source of truth for what is left. The global settings block, the
 material parameter table and light authoring - colour, position, the spot cone
-and the aim-and-drop placement - are done as far as the SDK upload info goes;
-the next block is the rest of light authoring (style, the entity list, the
-custom-light store), then the session lifecycle that writes
-`qray.materials.yaml` back. The material parameters the
-game has and the SDK cannot express yet are listed in that document and need new
-upload fields first.
+and the aim-and-drop placement - are done as far as the SDK upload info goes.
+Light style, the two light lists and the custom-light store are done as well, so
+the next block is the session lifecycle that writes `qray.materials.yaml` back,
+then the material parameters the game has and the SDK cannot express yet; those
+need new upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
 remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`

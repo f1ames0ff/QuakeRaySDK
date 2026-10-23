@@ -31,6 +31,43 @@ uint64_t LightUniqueID(size_t index)
     return kFirstLightUniqueID + uint64_t(index);
 }
 
+// The editor's own lights start past the whole range a map could ever fill, so adding or
+// removing one can never collide with a map light - the way the game numbers custom lights
+// from UINT32_MAX + 1 while map lights come from UINT16_MAX.
+constexpr uint64_t kFirstCustomLightUniqueID = kFirstLightUniqueID + 0x10000;
+
+uint64_t CustomLightUniqueID(size_t index)
+{
+    return kFirstCustomLightUniqueID + uint64_t(index);
+}
+
+// The light styles rt_custom_style_names names, in the same order: the index is the engine's
+// own d_lightstylevalue[] slot, so style 3 is the candle the map's `style` key also selects.
+const char *const kEditorStyleNames[] = {
+    "steady",        "flicker",      "slow strong pulse", "candle",       "fast strobe",
+    "gentle pulse",  "flicker B",    "candle B",          "candle C",     "slow strobe",
+    "fluorescent",   "slow pulse",
+};
+
+constexpr int32_t kEditorStyleCount = int32_t(sizeof(kEditorStyleNames) / sizeof(kEditorStyleNames[0]));
+
+// -1 is the Entity tab's NONE: the game's own combo offers it for a map light that must stay
+// unmodulated, so the editor has to name it rather than clamp it to steady.
+const char *EditorStyleName(int32_t style)
+{
+    if (style < 0 || style >= kEditorStyleCount)
+    {
+        return "none";
+    }
+
+    return kEditorStyleNames[style];
+}
+
+// A light the editor invents starts where the game's Custom tab starts: RT_CUSTOM_RADIUS_DEFAULT
+// (0.4 m, 16 units at 40 units per metre) and the 200 the map's `light` key defaults to.
+constexpr float kEditorNewLightRadiusUnits = 0.4f * 40.0f;
+constexpr float kEditorNewLightIntensity = 200.0f;
+
 // A light is picked when the ray passes this close to its origin, the way QRE_LightUnderCrosshair
 // accepts a light the crosshair is near rather than exactly on.
 constexpr float kLightPickRadiusUnits = 24.0f;
@@ -1159,49 +1196,59 @@ void EditorApp::UploadSun()
     }
 }
 
+void EditorApp::UploadLight(const EditorLight &light, uint64_t uniqueID, QrResult &lastResult)
+{
+    // RT_LIGHT_Emit uploads a spot light when the entry's cone is on and its axis is not
+    // zero, and a spherical one otherwise.
+    const bool isSpot = light.spot && (light.direction[0] * light.direction[0] +
+                                       light.direction[1] * light.direction[1] +
+                                       light.direction[2] * light.direction[2]) > 0.0f;
+
+    if (isSpot)
+    {
+        QrSpotLightUploadInfo info = {};
+        info.uniqueID = uniqueID;
+        info.color = { light.color[0], light.color[1], light.color[2] };
+        info.position = { light.position[0], light.position[1], light.position[2] };
+        info.direction = { light.direction[0], light.direction[1], light.direction[2] };
+        info.radius = light.radius;
+        info.angleInner = light.angleInner * 0.01745329252f;
+        info.angleOuter = light.angleOuter * 0.01745329252f;
+
+        lastResult = qrUploadSpotLight(m_instance, &info);
+    }
+    else
+    {
+        QrSphericalLightUploadInfo info = {};
+        // RT_UploadAllElights numbers map lights from UINT16_MAX upwards and
+        // keeps the editor's world geometry IDs (1..N) out of the way.
+        info.uniqueID = uniqueID;
+        info.color = { light.color[0], light.color[1], light.color[2] };
+        info.position = { light.position[0], light.position[1], light.position[2] };
+        info.radius = light.radius;
+
+        lastResult = qrUploadSphericalLight(m_instance, &info);
+    }
+}
+
 void EditorApp::UploadLights()
 {
     QrResult lastResult = QR_SUCCESS;
 
     for (size_t index = 0; index < m_scene.lights.size(); index++)
     {
-        const EditorLight &light = m_scene.lights[index];
-        // RT_LIGHT_Emit uploads a spot light when the entry's cone is on and its axis is not
-        // zero, and a spherical one otherwise.
-        const bool isSpot = light.spot && (light.direction[0] * light.direction[0] +
-                                           light.direction[1] * light.direction[1] +
-                                           light.direction[2] * light.direction[2]) > 0.0f;
-
-        if (isSpot)
-        {
-            QrSpotLightUploadInfo info = {};
-            info.uniqueID = LightUniqueID(index);
-            info.color = { light.color[0], light.color[1], light.color[2] };
-            info.position = { light.position[0], light.position[1], light.position[2] };
-            info.direction = { light.direction[0], light.direction[1], light.direction[2] };
-            info.radius = light.radius;
-            info.angleInner = light.angleInner * 0.01745329252f;
-            info.angleOuter = light.angleOuter * 0.01745329252f;
-
-            lastResult = qrUploadSpotLight(m_instance, &info);
-        }
-        else
-        {
-            QrSphericalLightUploadInfo info = {};
-            // RT_UploadAllElights numbers map lights from UINT16_MAX upwards and
-            // keeps the editor's world geometry IDs (1..N) out of the way.
-            info.uniqueID = LightUniqueID(index);
-            info.color = { light.color[0], light.color[1], light.color[2] };
-            info.position = { light.position[0], light.position[1], light.position[2] };
-            info.radius = light.radius;
-
-            lastResult = qrUploadSphericalLight(m_instance, &info);
-        }
+        UploadLight(m_scene.lights[index], LightUniqueID(index), lastResult);
 
         if (lastResult != QR_SUCCESS)
         {
             break;
         }
+    }
+
+    // The custom lights go in after the map's, like the second block of RT_UploadAllElights.
+    for (size_t index = 0; index < m_customLights.size() && lastResult == QR_SUCCESS; index++)
+    {
+        UploadLight(m_customLights[index], CustomLightUniqueID(index), lastResult);
     }
 
     if (lastResult != QR_SUCCESS)
@@ -1217,21 +1264,15 @@ void EditorApp::UploadLights()
     }
 }
 
-void EditorApp::LogLightCluster(int32_t index)
+void EditorApp::LogLightCluster(const EditorLight &light, uint64_t uniqueID, const char *label)
 {
-    if (index < 0 || size_t(index) >= m_scene.lights.size())
-    {
-        return;
-    }
-
-    const EditorLight &light = m_scene.lights[size_t(index)];
     uint64_t uids[128] = {};
     uint32_t count = 0;
 
     if (qrGetClusterLightList(m_instance, light.cluster, uids, 128, &count) != QR_SUCCESS)
     {
-        PrintMessage(("light " + std::to_string(index) + ": cluster " +
-                      std::to_string(light.cluster) + " unreadable")
+        PrintMessage((std::string(label) + ": cluster " + std::to_string(light.cluster) +
+                      " unreadable")
                          .c_str(),
                      this);
         return;
@@ -1239,17 +1280,15 @@ void EditorApp::LogLightCluster(int32_t index)
 
     // A light its own cluster does not list cannot be shaded there, whatever it was authored to:
     // this is what says so, instead of a dark viewport that looks like a bad radiance value.
-    const uint64_t uid = LightUniqueID(size_t(index));
     bool listed = false;
 
     for (uint32_t slot = 0; slot < count; slot++)
     {
-        listed = listed || uids[slot] == uid;
+        listed = listed || uids[slot] == uniqueID;
     }
 
-    PrintMessage(("light " + std::to_string(index) + ": cluster " +
-                  std::to_string(light.cluster) + " lists " + std::to_string(count) +
-                  (listed ? " with it" : " without it") + ", radiance " +
+    PrintMessage((std::string(label) + ": cluster " + std::to_string(light.cluster) + " lists " +
+                  std::to_string(count) + (listed ? " with it" : " without it") + ", radiance " +
                   std::to_string(light.color[0]) + " " + std::to_string(light.color[1]) + " " +
                   std::to_string(light.color[2]) + ", radius " + std::to_string(light.radius))
                      .c_str(),
@@ -1258,27 +1297,39 @@ void EditorApp::LogLightCluster(int32_t index)
 
 void EditorApp::UploadClusterLightSources()
 {
-    if (m_scene.worldClusters.numLeafs == 0 || m_scene.lights.empty())
+    const size_t lightCount = m_scene.lights.size() + m_customLights.size();
+
+    if (m_scene.worldClusters.numLeafs == 0 || lightCount == 0)
     {
         return;
     }
 
-    std::vector<QrClusterLightSource> sources(m_scene.lights.size());
+    std::vector<QrClusterLightSource> sources(lightCount);
+    size_t index = 0;
 
-    for (size_t index = 0; index < m_scene.lights.size(); index++)
-    {
-        const EditorLight &light = m_scene.lights[index];
-
-        sources[index].uniqueID = LightUniqueID(index);
+    // Both lists are registered the same way: RT_LIGHT_Emit registers a map light with the
+    // static reach and no cluster list, and the top-up pass hands it the clusters around its
+    // own leaf. The custom lights are the same kind of light once they reach the renderer.
+    const auto appendSource = [&](const EditorLight &light, uint64_t uniqueID) {
+        sources[index].uniqueID = uniqueID;
         sources[index].origin = { light.position[0], light.position[1], light.position[2] };
         sources[index].cluster = light.cluster;
-        // RT_LIGHT_Emit registers a map light with the static reach and no cluster list: the
-        // top-up pass is what hands it the clusters around its own leaf.
         sources[index].reach = kLightReachUnits;
         sources[index].radius = 0.0f;
         sources[index].clusterCount = 0;
         sources[index].pClusters = nullptr;
         sources[index].power = 0.0f;
+        index++;
+    };
+
+    for (size_t mapIndex = 0; mapIndex < m_scene.lights.size(); mapIndex++)
+    {
+        appendSource(m_scene.lights[mapIndex], LightUniqueID(mapIndex));
+    }
+
+    for (size_t customIndex = 0; customIndex < m_customLights.size(); customIndex++)
+    {
+        appendSource(m_customLights[customIndex], CustomLightUniqueID(customIndex));
     }
 
     QrClusterLightSourcesUploadInfo info = {};
@@ -1388,16 +1439,51 @@ int32_t EditorApp::PickSurface(const float origin[3], const float direction[3], 
     return bestSurface;
 }
 
-int32_t EditorApp::PickLight(const float origin[3], const float direction[3], float &outDistance) const
+namespace
+{
+// One light of either list, so the pick walks the map's lights and the editor's own in the
+// same pass and reports which list the winner came from.
+struct EditorLightRef
+{
+    const EditorLight *light = nullptr;
+    bool custom = false;
+    int32_t index = -1;
+};
+
+void CollectEditorLights(const std::vector<EditorLight> &mapLights,
+                         const std::vector<EditorLight> &customLights,
+                         std::vector<EditorLightRef> &outLights)
+{
+    outLights.clear();
+    outLights.reserve(mapLights.size() + customLights.size());
+
+    for (size_t index = 0; index < mapLights.size(); index++)
+    {
+        outLights.push_back({ &mapLights[index], false, int32_t(index) });
+    }
+
+    for (size_t index = 0; index < customLights.size(); index++)
+    {
+        outLights.push_back({ &customLights[index], true, int32_t(index) });
+    }
+}
+} // namespace
+
+int32_t EditorApp::PickLight(const float origin[3], const float direction[3], float &outDistance,
+                             bool &outCustom) const
 {
     // QRE_LightUnderCrosshair accepts the light nearest the crosshair ray rather than one exactly
     // under it, because a light is drawn as a small gizmo, not as a surface.
     int32_t bestLight = -1;
+    bool bestCustom = false;
     float bestDistance = 0.0f;
 
-    for (size_t index = 0; index < m_scene.lights.size(); index++)
+    std::vector<EditorLightRef> lights;
+    CollectEditorLights(m_scene.lights, m_customLights, lights);
+
+    for (const EditorLightRef &candidate : lights)
     {
-        const EditorLight &light = m_scene.lights[index];
+        const EditorLight &light = *candidate.light;
         const float toLight[3] = {
             light.position[0] - origin[0],
             light.position[1] - origin[1],
@@ -1429,12 +1515,14 @@ int32_t EditorApp::PickLight(const float origin[3], const float direction[3], fl
 
         if (bestLight < 0 || along < bestDistance)
         {
-            bestLight = int32_t(index);
+            bestLight = candidate.index;
+            bestCustom = candidate.custom;
             bestDistance = along;
         }
     }
 
     outDistance = bestDistance;
+    outCustom = bestCustom;
     return bestLight;
 }
 
@@ -1443,13 +1531,220 @@ void EditorApp::ClearSelection()
     m_selectedSurface = -1;
     m_selectedTriangle = -1;
     m_selectedLight = -1;
+    m_selectedCustomLight = -1;
     m_hasPickPoint = false;
     m_pickCluster = 0;
 }
 
+EditorLight *EditorApp::SelectedLight()
+{
+    if (m_selectedLight >= 0 && size_t(m_selectedLight) < m_scene.lights.size())
+    {
+        return &m_scene.lights[size_t(m_selectedLight)];
+    }
+
+    if (m_selectedCustomLight >= 0 && size_t(m_selectedCustomLight) < m_customLights.size())
+    {
+        return &m_customLights[size_t(m_selectedCustomLight)];
+    }
+
+    return nullptr;
+}
+
+std::string EditorApp::SelectedLightLabel() const
+{
+    if (m_selectedLight >= 0 && size_t(m_selectedLight) < m_scene.lights.size())
+    {
+        return "light " + std::to_string(m_selectedLight);
+    }
+
+    if (m_selectedCustomLight >= 0 && size_t(m_selectedCustomLight) < m_customLights.size())
+    {
+        return "custom " + std::to_string(m_selectedCustomLight);
+    }
+
+    return "no light";
+}
+
+uint64_t EditorApp::SelectedLightUniqueID() const
+{
+    if (m_selectedLight >= 0 && size_t(m_selectedLight) < m_scene.lights.size())
+    {
+        return LightUniqueID(size_t(m_selectedLight));
+    }
+
+    if (m_selectedCustomLight >= 0 && size_t(m_selectedCustomLight) < m_customLights.size())
+    {
+        return CustomLightUniqueID(size_t(m_selectedCustomLight));
+    }
+
+    return 0;
+}
+
+// A copy the author has to find again: the game editor steps a Duplicate 32 units up, which is
+// just enough to see the second light next to the first.
+constexpr float kDuplicateStepUnits = 32.0f;
+
+// Stands a light off the surface it was cloned onto, so it does not sit inside the face.
+constexpr float kCloneOffsetUnits = 8.0f;
+
+void EditorApp::AddCustomLight(const EditorLight *source, LightSpawn spawn)
+{
+    EditorLight light;
+
+    if (source != nullptr)
+    {
+        light = *source;
+        // The copy is a light of its own: it keeps the authored colour, cone and style but gets
+        // its own position slot, so the two can be aimed separately.
+        light.className.clear();
+    }
+    else
+    {
+        SetEditorLightIntensity(light, kEditorNewLightIntensity);
+        light.radius = kEditorNewLightRadiusUnits;
+    }
+
+    float ray[3] = {};
+    float rayLength = 0.0f;
+
+    if (spawn == LightSpawn::Clone && m_hasPickPoint)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            ray[axis] = m_pickPoint[axis] - m_cameraPosition[axis];
+        }
+
+        rayLength = std::sqrt(ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2]);
+    }
+
+    if (rayLength > 1e-4f)
+    {
+        // Clone lands on what the author looks at, aimed the same way as Place at pick: a copy
+        // that kept the original's aim would light the space behind the picked face.
+        for (int axis = 0; axis < 3; axis++)
+        {
+            ray[axis] /= rayLength;
+            light.position[axis] = m_pickPoint[axis] - ray[axis] * kCloneOffsetUnits;
+            light.direction[axis] = ray[axis];
+        }
+    }
+    else if (spawn == LightSpawn::Duplicate && source != nullptr)
+    {
+        // A duplicate is not aimed at anything new, so it keeps the original's direction and
+        // only steps out of it.
+        light.position[2] += kDuplicateStepUnits;
+    }
+    else
+    {
+        // A fresh light lands where the camera looks: inside the map and in front of the
+        // author, rather than at the world origin, where there is usually a wall.
+        float side[3] = {};
+        float up[3] = {};
+        float forward[3] = {};
+        ViewBasis(side, up, forward);
+
+        constexpr float kSpawnDistanceUnits = 96.0f;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            light.position[axis] = m_cameraPosition[axis] + forward[axis] * kSpawnDistanceUnits;
+        }
+    }
+
+    light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+
+    if (light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER && m_pickCluster != 0)
+    {
+        light.cluster = m_pickCluster;
+    }
+
+    m_customLights.push_back(light);
+    SelectLight(int32_t(m_customLights.size()) - 1, true);
+
+    PrintMessage((SelectedLightLabel() + ": added at " + std::to_string(int32_t(light.position[0])) +
+                  " " + std::to_string(int32_t(light.position[1])) + " " +
+                  std::to_string(int32_t(light.position[2])) + " cluster " +
+                  std::to_string(light.cluster))
+                     .c_str(),
+                 this);
+}
+
+void EditorApp::DuplicateSelectedLight()
+{
+    const EditorLight *selected = SelectedLight();
+
+    if (selected == nullptr)
+    {
+        PrintMessage("duplicate: pick a light first", this);
+        return;
+    }
+
+    AddCustomLight(selected, LightSpawn::Duplicate);
+    PrintMessage((SelectedLightLabel() + ": duplicated").c_str(), this);
+}
+
+void EditorApp::CloneSelectedLight()
+{
+    const EditorLight *selected = SelectedLight();
+
+    if (selected == nullptr)
+    {
+        PrintMessage("clone: pick a light first", this);
+        return;
+    }
+
+    AddCustomLight(selected, LightSpawn::Clone);
+    PrintMessage((SelectedLightLabel() + ": cloned").c_str(), this);
+}
+
+void EditorApp::RemoveSelectedCustomLight()
+{
+    if (m_selectedCustomLight < 0 || size_t(m_selectedCustomLight) >= m_customLights.size())
+    {
+        PrintMessage("remove: a map light belongs to the level, pick a custom one", this);
+        return;
+    }
+
+    const std::string label = SelectedLightLabel();
+    const size_t index = size_t(m_selectedCustomLight);
+
+    m_customLights.erase(m_customLights.begin() + std::ptrdiff_t(index));
+    // The lights past the removed one shift down, so an index that named one of them would now
+    // silently name its neighbour: drop the selection rather than point at a different light.
+    ClearSelection();
+
+    PrintMessage((label + ": removed").c_str(), this);
+}
+
+void EditorApp::SelectLight(int32_t index, bool custom)
+{
+    const std::vector<EditorLight> &lights = custom ? m_customLights : m_scene.lights;
+
+    if (index < 0 || size_t(index) >= lights.size())
+    {
+        return;
+    }
+
+    m_selectedLight = custom ? -1 : index;
+    m_selectedCustomLight = custom ? index : -1;
+    m_selectedSurface = -1;
+    m_selectedTriangle = -1;
+
+    const EditorLight &light = lights[size_t(index)];
+
+    m_hasPickPoint = true;
+    m_pickCluster = light.cluster;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        m_pickPoint[axis] = light.position[axis];
+    }
+}
+
 void EditorApp::Pick()
 {
-    if (m_scene.surfaces.empty() && m_scene.lights.empty())
+    if (m_scene.surfaces.empty() && m_scene.lights.empty() && m_customLights.empty())
     {
         return;
     }
@@ -1503,12 +1798,14 @@ void EditorApp::Pick()
     float surfaceDistance = 0.0f;
     const int32_t surface = PickSurface(m_cameraPosition, direction, triangle, surfaceDistance);
     float lightDistance = 0.0f;
-    const int32_t light = PickLight(m_cameraPosition, direction, lightDistance);
+    bool lightCustom = false;
+    const int32_t light = PickLight(m_cameraPosition, direction, lightDistance, lightCustom);
 
     // A light in front of the surface hides it, exactly like a gizmo drawn over the wall behind.
     const bool lightWins = light >= 0 && (surface < 0 || lightDistance < surfaceDistance);
 
-    m_selectedLight = lightWins ? light : -1;
+    m_selectedLight = (lightWins && !lightCustom) ? light : -1;
+    m_selectedCustomLight = (lightWins && lightCustom) ? light : -1;
     m_selectedSurface = (!lightWins && surface >= 0) ? surface : -1;
     m_selectedTriangle = (!lightWins && surface >= 0) ? triangle : -1;
     m_pickCluster = 0;
@@ -1546,33 +1843,34 @@ void EditorApp::Pick()
             m_pickCluster = vertex.cluster;
         }
     }
-    else if (m_selectedLight >= 0)
-    {
-        const EditorLight &picked = m_scene.lights[size_t(m_selectedLight)];
-
-        m_hasPickPoint = true;
-        m_pickCluster = picked.cluster;
-
-        for (int axis = 0; axis < 3; axis++)
-        {
-            m_pickPoint[axis] = picked.position[axis];
-        }
-    }
     else
     {
-        m_hasPickPoint = false;
+        if (EditorLight *picked = SelectedLight())
+        {
+            m_hasPickPoint = true;
+            m_pickCluster = picked->cluster;
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                m_pickPoint[axis] = picked->position[axis];
+            }
+        }
+        else
+        {
+            m_hasPickPoint = false;
+        }
     }
 
-    if (m_selectedSurface < 0 && m_selectedLight < 0)
+    if (m_selectedSurface < 0 && SelectedLight() == nullptr)
     {
         ClearSelection();
         PrintMessage("pick: nothing under the cursor", this);
         return;
     }
 
-    if (m_selectedLight >= 0)
+    if (m_selectedSurface < 0)
     {
-        PrintMessage(("pick: light " + std::to_string(m_selectedLight)).c_str(), this);
+        PrintMessage(("pick: " + SelectedLightLabel()).c_str(), this);
     }
     else
     {
@@ -1676,17 +1974,19 @@ void EditorApp::DrawSelectionOverlay()
         }
     }
 
-    if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
+    const EditorLight *selected = SelectedLight();
+
+    if (selected != nullptr)
     {
         // A three-axis cross at the light's origin stands in for the gizmo the game editor draws
         // with its own overlay path, which the SDK does not expose.
-        const EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
         const float extent = 12.0f;
+        const ImU32 lightMarker = m_selectedCustomLight >= 0 ? accent : marker;
 
         for (int axis = 0; axis < 3; axis++)
         {
-            float from[3] = { light.position[0], light.position[1], light.position[2] };
-            float to[3] = { light.position[0], light.position[1], light.position[2] };
+            float from[3] = { selected->position[0], selected->position[1], selected->position[2] };
+            float to[3] = { selected->position[0], selected->position[1], selected->position[2] };
 
             from[axis] -= extent;
             to[axis] += extent;
@@ -1698,9 +1998,186 @@ void EditorApp::DrawSelectionOverlay()
 
             if (project(from, fromX, fromY) && project(to, toX, toY))
             {
-                drawList->AddLine(ImVec2(fromX, fromY), ImVec2(toX, toY), marker, 2.0f);
+                drawList->AddLine(ImVec2(fromX, fromY), ImVec2(toX, toY), lightMarker, 2.0f);
             }
         }
+    }
+}
+
+void EditorApp::DrawLightList()
+{
+    const bool hasSelection = SelectedLight() != nullptr;
+
+    ImGui::Text("Map lights     %d", int32_t(m_scene.lights.size()));
+    ImGui::Text("Custom lights  %d", int32_t(m_customLights.size()));
+
+    {
+        if (!m_hasPickPoint)
+        {
+            ImGui::TextUnformatted("Nothing picked: a light would land in front of the camera");
+        }
+
+        // Button rects are logged below so a scripted session can press them by name.
+        std::string rects;
+
+        auto appendRect = [&rects](const char *name) {
+            const ImVec2 min = ImGui::GetItemRectMin();
+            const ImVec2 max = ImGui::GetItemRectMax();
+
+            rects += " ";
+            rects += name;
+            rects += " " + std::to_string(int32_t(min.x)) + "," + std::to_string(int32_t(min.y)) + " " +
+                     std::to_string(int32_t(max.x)) + "," + std::to_string(int32_t(max.y));
+        };
+
+        if (ImGui::Button("Add light"))
+        {
+            AddCustomLight(nullptr, LightSpawn::Camera);
+        }
+
+        appendRect("add");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!hasSelection);
+
+        if (ImGui::Button("Duplicate"))
+        {
+            DuplicateSelectedLight();
+        }
+
+        appendRect("duplicate");
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("Clone"))
+        {
+            CloneSelectedLight();
+        }
+
+        appendRect("clone");
+
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_selectedCustomLight < 0);
+
+        if (ImGui::Button("Remove"))
+        {
+            RemoveSelectedCustomLight();
+        }
+
+        appendRect("remove");
+
+        ImGui::EndDisabled();
+
+        auto appendRowRect = [&appendRect](int32_t index) {
+            const std::string name = "row" + std::to_string(index);
+            appendRect(name.c_str());
+        };
+
+        ImGui::Separator();
+
+        auto drawRow = [this, &appendRowRect](int32_t index, bool custom) {
+            const std::vector<EditorLight> &lights = custom ? m_customLights : m_scene.lights;
+            const EditorLight &light = lights[size_t(index)];
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+
+            const std::string rowLabel = (custom ? "custom " : "light ") + std::to_string(index);
+            const bool selected = custom ? m_selectedCustomLight == index : m_selectedLight == index;
+
+            if (ImGui::Selectable(rowLabel.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns))
+            {
+                SelectLight(index, custom);
+                PrintMessage((SelectedLightLabel() + ": selected from the list").c_str(), this);
+            }
+
+            if (custom && index < 8)
+            {
+                appendRowRect(index);
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%.0f %.0f %.0f", light.position[0], light.position[1], light.position[2]);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.1f", light.radius);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(EditorStyleName(light.style));
+            ImGui::TableNextColumn();
+            ImGui::Text("%u", light.cluster);
+        };
+
+        auto drawTable = [&drawRow](const char *id, const char *childId, float height,
+                                    const std::vector<EditorLight> &lights, bool custom) {
+            if (!ImGui::BeginChild(childId, ImVec2(0.0f, height), ImGuiChildFlags_Borders))
+            {
+                ImGui::EndChild();
+                return;
+            }
+
+            const ImGuiTableFlags tableFlags =
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit;
+
+            if (ImGui::BeginTable(id, 5, tableFlags))
+            {
+                ImGui::TableSetupColumn("Light");
+                ImGui::TableSetupColumn("Position");
+                ImGui::TableSetupColumn("Radius");
+                ImGui::TableSetupColumn("Style");
+                ImGui::TableSetupColumn("Cluster");
+                ImGui::TableHeadersRow();
+
+                // A map carries hundreds of lights; only the visible rows are submitted.
+                ImGuiListClipper clipper;
+                clipper.Begin(int32_t(lights.size()));
+
+                while (clipper.Step())
+                {
+                    for (int32_t index = clipper.DisplayStart; index < clipper.DisplayEnd; index++)
+                    {
+                        drawRow(index, custom);
+                    }
+                }
+
+                ImGui::EndTable();
+            }
+
+            ImGui::EndChild();
+        };
+
+        ImGui::TextUnformatted("Map");
+        drawTable("MapLights", "MapLightsChild", 190.0f, m_scene.lights, false);
+
+        ImGui::TextUnformatted("Custom");
+        drawTable("CustomLights", "CustomLightsChild", 150.0f, m_customLights, true);
+
+        const uint64_t layout = std::hash<std::string>{}(rects) | 1u;
+
+        if (m_loggedLightListLayout != layout)
+        {
+            m_loggedLightListLayout = layout;
+            PrintMessage(("light list rect:" + rects).c_str(), this);
+        }
+    }
+}
+
+namespace
+{
+    // Opens a tab and records its rect straight away: ImGui has just submitted the tab's own item,
+    // so this is the only place the rect is still readable.
+    bool BeginLoggedTab(const char *label, ImGuiTabItemFlags flags, std::string &rects)
+    {
+        const bool open = ImGui::BeginTabItem(label, nullptr, flags);
+
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+
+        rects += " ";
+        rects += label;
+        rects += " " + std::to_string(int32_t(min.x)) + "," + std::to_string(int32_t(min.y)) + " " +
+                 std::to_string(int32_t(max.x)) + "," + std::to_string(int32_t(max.y));
+
+        return open;
     }
 }
 
@@ -1722,9 +2199,24 @@ void EditorApp::DrawPanel(float deltaSeconds)
         ImGui::Text("Frame  %.2f ms  (%.0f FPS)", m_frameTimeMs, fps);
         ImGui::Text("Drawable  %ux%u", m_clientWidth, m_clientHeight);
 
+        // Tab rects are logged so a scripted session can click a neighbouring tab instead of
+        // guessing where ImGui laid the bar out.
+        std::string tabRects;
+
         if (ImGui::BeginTabBar("EditorTabs"))
         {
-            if (ImGui::BeginTabItem("Scene"))
+            // --tab <name> opens that tab on the first frame only, so later clicks behave as usual.
+            auto tabFlags = [this](const char *name) -> ImGuiTabItemFlags {
+                if (m_initialTabApplied || m_initialTab != name)
+                {
+                    return ImGuiTabItemFlags_None;
+                }
+
+                m_initialTabApplied = true;
+                return ImGuiTabItemFlags_SetSelected;
+            };
+
+            if (BeginLoggedTab("Scene", tabFlags("Scene"), tabRects))
             {
                 // The selection, light and sun blocks are taller than a 720p window once the
                 // panel is fixed at 660, so the tab scrolls and the key hints stay visible.
@@ -1781,11 +2273,13 @@ void EditorApp::DrawPanel(float deltaSeconds)
                     ImGui::Text("Kind      %s", SurfaceKindName(surface.kind));
                     ImGui::Text("Cluster   %u", m_pickCluster);
                 }
-                else if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
+                else if (EditorLight *selected = SelectedLight())
                 {
-                    EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
+                    EditorLight &light = *selected;
+                    const std::string selectionLabel = SelectedLightLabel();
+                    const uint64_t selectionID = SelectedLightUniqueID();
 
-                    ImGui::Text("Light     %d  %s", m_selectedLight,
+                    ImGui::Text("%s  %s", selectionLabel.c_str(),
                                 light.className.empty() ? "light" : light.className.c_str());
                     ImGui::Text("Position  %.1f %.1f %.1f", light.position[0], light.position[1],
                                 light.position[2]);
@@ -1812,6 +2306,61 @@ void EditorApp::DrawPanel(float deltaSeconds)
                                  std::to_string(int32_t(max.y));
                     };
 
+                    // Style is the map's `style` key. The preview keeps full brightness because a
+                    // standalone editor has no lightstyle feed to modulate it, so this is authored
+                    // metadata: it names the style the light will animate with once saved.
+                    // A map light also offers NONE, which is what the game's Entity tab shows.
+                    // The popup's item rects are logged while it is open, so a scripted session can
+                    // pick a style without reading pixels.
+                    std::string styleItems;
+
+                    if (ImGui::BeginCombo("Light style##light", EditorStyleName(light.style)))
+                    {
+                        for (int32_t style = m_selectedLight >= 0 ? -1 : 0; style < kEditorStyleCount;
+                             style++)
+                        {
+                            const bool current = style == light.style;
+
+                            if (ImGui::Selectable(EditorStyleName(style), current))
+                            {
+                                light.style = style;
+                                PrintMessage((selectionLabel + ": style " + std::to_string(style) + " " +
+                                              EditorStyleName(style))
+                                                 .c_str(),
+                                             this);
+                            }
+
+                            const ImVec2 itemMin = ImGui::GetItemRectMin();
+                            const ImVec2 itemMax = ImGui::GetItemRectMax();
+
+                            styleItems += " " + std::to_string(style) + " " +
+                                          std::to_string(int32_t(itemMin.x)) + "," +
+                                          std::to_string(int32_t(itemMin.y)) + " " +
+                                          std::to_string(int32_t(itemMax.x)) + "," +
+                                          std::to_string(int32_t(itemMax.y));
+
+                            if (current)
+                            {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+
+                        ImGui::EndCombo();
+                    }
+
+                    if (!styleItems.empty())
+                    {
+                        const uint64_t styleLayout = std::hash<std::string>{}(styleItems);
+
+                        if (m_loggedStyleLayout != styleLayout)
+                        {
+                            m_loggedStyleLayout = styleLayout;
+                            PrintMessage(("style items:" + styleItems).c_str(), this);
+                        }
+                    }
+
+                    appendRect("style");
+
                     float intensity = light.intensity;
                     bool intensityDrawn = ImGui::SliderFloat("Light key##light", &intensity, 0.0f, 800.0f,
                                                              "%.0f");
@@ -1821,7 +2370,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
                     if (intensityDrawn)
                     {
                         SetEditorLightIntensity(light, intensity);
-                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": light key " +
+                        PrintMessage((selectionLabel + ": light key " +
                                       std::to_string(int32_t(intensity)))
                                          .c_str(),
                                      this);
@@ -1834,7 +2383,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
 
                     if (radiusDrawn)
                     {
-                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": radius " +
+                        PrintMessage((selectionLabel + ": radius " +
                                       std::to_string(int32_t(light.radius)))
                                          .c_str(),
                                      this);
@@ -1847,7 +2396,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
                     if (colourDrawn)
                     {
                         SetEditorLightTint(light, light.tint);
-                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": colour " +
+                        PrintMessage((selectionLabel + ": colour " +
                                       std::to_string(light.tint[0]) + " " + std::to_string(light.tint[1]) +
                                       " " + std::to_string(light.tint[2]))
                                          .c_str(),
@@ -1863,7 +2412,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
                     if (positionDrawn)
                     {
                         light.cluster = ResolveEditorLightCluster(m_scene, light.position);
-                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": position " +
+                        PrintMessage((selectionLabel + ": position " +
                                       std::to_string(int32_t(light.position[0])) + " " +
                                       std::to_string(int32_t(light.position[1])) + " " +
                                       std::to_string(int32_t(light.position[2])) + " cluster " +
@@ -1911,14 +2460,14 @@ void EditorApp::DrawPanel(float deltaSeconds)
                                 light.cluster = m_pickCluster;
                             }
 
-                            PrintMessage(("light " + std::to_string(m_selectedLight) + ": placed at " +
+                            PrintMessage((selectionLabel + ": placed at " +
                                           std::to_string(int32_t(light.position[0])) + " " +
                                           std::to_string(int32_t(light.position[1])) + " " +
                                           std::to_string(int32_t(light.position[2])) + " cluster " +
                                           std::to_string(light.cluster))
                                              .c_str(),
                                          this);
-                            LogLightCluster(m_selectedLight);
+                            LogLightCluster(light, selectionID, selectionLabel.c_str());
                         }
                     }
 
@@ -1933,11 +2482,11 @@ void EditorApp::DrawPanel(float deltaSeconds)
 
                     if (spotDrawn)
                     {
-                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": spot " +
+                        PrintMessage((selectionLabel + ": spot " +
                                       (light.spot ? "on" : "off"))
                                          .c_str(),
                                      this);
-                        LogLightCluster(m_selectedLight);
+                        LogLightCluster(light, selectionID, selectionLabel.c_str());
                     }
 
                     if (light.spot)
@@ -1971,7 +2520,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
 
                         if (directionDrawn)
                         {
-                            PrintMessage(("light " + std::to_string(m_selectedLight) + ": direction " +
+                            PrintMessage((selectionLabel + ": direction " +
                                           std::to_string(light.direction[0]) + " " +
                                           std::to_string(light.direction[1]) + " " +
                                           std::to_string(light.direction[2]))
@@ -1992,7 +2541,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
                         if (coneDrawn)
                         {
                             ClampEditorLightCone(light);
-                            PrintMessage(("light " + std::to_string(m_selectedLight) + ": cone " +
+                            PrintMessage((selectionLabel + ": cone " +
                                           std::to_string(int32_t(light.angleInner)) + ".." +
                                           std::to_string(int32_t(light.angleOuter)) + " deg")
                                              .c_str(),
@@ -2040,19 +2589,33 @@ void EditorApp::DrawPanel(float deltaSeconds)
                 ImGui::EndTabItem();
             }
 
-            if (ImGui::BeginTabItem("Render"))
+            if (BeginLoggedTab("Entities", tabFlags("Entities"), tabRects))
+            {
+                DrawLightList();
+                ImGui::EndTabItem();
+            }
+
+            if (BeginLoggedTab("Render", tabFlags("Render"), tabRects))
             {
                 DrawGlobalSettings();
                 ImGui::EndTabItem();
             }
 
-            if (ImGui::BeginTabItem("Materials"))
+            if (BeginLoggedTab("Materials", tabFlags("Materials"), tabRects))
             {
                 DrawMaterials();
                 ImGui::EndTabItem();
             }
 
             ImGui::EndTabBar();
+        }
+
+        const uint64_t tabLayout = std::hash<std::string>{}(tabRects) | 1u;
+
+        if (m_loggedTabLayout != tabLayout)
+        {
+            m_loggedTabLayout = tabLayout;
+            PrintMessage(("panel tabs:" + tabRects).c_str(), this);
         }
 
         ImGui::Separator();
@@ -2303,6 +2866,10 @@ int EditorApp::Run(int showCommand)
             else if (i + 1 < argc && argument == L"--gamedir")
             {
                 m_gamePath = Utf8FromWide(argv[++i]);
+            }
+            else if (i + 1 < argc && argument == L"--tab")
+            {
+                m_initialTab = Utf8FromWide(argv[++i]);
             }
         }
 
