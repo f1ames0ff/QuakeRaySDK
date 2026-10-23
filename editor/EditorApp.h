@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <qray/qray.h>
@@ -29,6 +30,9 @@ public:
 private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static void PrintMessage(const char *message, void *userData);
+    // Logs the last ImGui item's screen rectangle as "panel rect: <name> x0,y0 x1,y1" whenever it
+    // moves, which is how the scripted GUI checks find a control.
+    void LogRect(const char *name);
     static void OpenFile(const char *path, void *userData, const void **data, uint32_t *size,
                          void **fileHandle);
     static void CloseFile(void *fileHandle, void *userData);
@@ -61,11 +65,23 @@ private:
     // The session of the game editor: what the panel authored since the last Apply, the file it
     // writes and the prompt an exit with unsaved changes opens.
     void LoadMaterialsSession();
-    // The level scope of the session: the `fog:` and `lights:` blocks of one level in
-    // qray.lights.yaml, read into the fog settings and the custom lights, and written back only
-    // for the blocks the live state no longer matches.
+    // The level scope of the session: the `sky:`, `fog:` and `lights:` blocks of one level in
+    // qray.lights.yaml, read into the sky controls, the fog settings and the custom lights, and
+    // written back only for the blocks the live state no longer matches.
     void LoadLightsSession();
     EditorLevelFog LevelFog() const;
+    // The `sky:` block the live state stands for: the level's own overrides while the panel edits
+    // the level scope, and no block at all in the global scope, which is how
+    // RT_SkySettings_CommitSession drops it.
+    EditorLevelSky LevelSky() const;
+    // Rewrites the active scope's text from the live controls. A level key whose text matches the
+    // global one is dropped rather than written, the comparison RT_SkySettings_CaptureScope makes,
+    // so a scope switch does not pin a copy of the config into the level.
+    void CaptureSky();
+    void SetSkyScope(bool global);
+    // Takes the scope and the level's keys from a section read out of the file, which is what a
+    // load and a save both have to leave the panel agreeing with.
+    void AdoptSkyScope(const EditorLevelDocument::ReadResult &read);
     EditorLevelLight LevelLight(const EditorLight &light) const;
     std::vector<EditorLevelLight> LevelLights() const;
     // Renders the section the live state stands for, which is both what a save writes and how an
@@ -183,10 +199,21 @@ private:
     bool m_keys[256] = {};
     bool m_showPanel = true;
 
-    float m_sunIntensity = 8.0f;
-    float m_sunAzimuth = 32.0f;
-    float m_sunElevation = 45.0f;
-    float m_sunAngularDiameter = 0.5f;
+    // The sun of the level: rt_physical_sun, rt_sky_sun, rt_sky_sun_size and the two angles. Off
+    // uploads no directional light, which is what the game does while rt_physical_sun is 0.
+    EditorSunState m_sun;
+
+    // The two scopes of the sky block. `m_skyGlobals` is the text of the file-wide sky a level
+    // without a block inherits, kept only as the baseline the level scope compares against, and
+    // `m_skyLevel` carries the keys this level overrides. `m_skyGlobal` picks which one the
+    // panel edits: the level scope writes the block, the global one removes it.
+    EditorLevelSky m_skyGlobals;
+    EditorLevelSky m_skyLevel;
+    bool m_skyGlobal = true;
+
+    // The text the panel's own values render to, taken when the session last matched the file. A
+    // key whose text still matches it was not edited and writes back the file's own spelling.
+    EditorLevelSky m_skyRendered;
 
     // The Global tab of the game editor. The frame params derived from it are
     // rebuilt every frame and only live for the duration of the qrDrawFrame call.
@@ -257,6 +284,9 @@ private:
     // frame. Zero means nothing has been logged yet.
     uint64_t m_loggedLightLayout = 0;
     uint64_t m_loggedLightListLayout = 0;
+    // Rectangles the settings panel has already logged, keyed by control name, so a scripted
+    // session can click a control without a pixel guess and the log stays one line per change.
+    std::unordered_map<std::string, uint64_t> m_loggedRects;
     uint64_t m_loggedTabLayout = 0;
     uint64_t m_loggedSessionLayout = 0;
     bool m_loggedPromptLayout = false;

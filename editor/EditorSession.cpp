@@ -709,6 +709,146 @@ std::vector<LightEntryBlock> ParseLightEntries(const std::vector<TextLine> &line
     return entries;
 }
 
+} // namespace
+
+// The `sky:` block's keys in the order RT_SkySettings writes them. Exported because the panel
+// maps the same list onto its own settings.
+const char *const kEditorSkyKeyNames[kEditorSkyKeyCount] = {
+    "rt_sky",
+    "rt_sky_brightness",
+    "rt_sky_light_mult",
+    "rt_sky_color",
+    "rt_sky_ambient_lod",
+    "rt_sky_nee",
+    "rt_physical_sky",
+    "rt_sky_clouds",
+    "rt_sky_clouds_color",
+    "rt_sky_clouds_alpha",
+    "rt_sky_clouds_coverage",
+    "rt_sky_clouds_density",
+    "rt_sky_clouds_speed",
+    "rt_sky_clouds_quality",
+    "rt_sky_clouds_height",
+    "rt_sky_clouds_thickness",
+    "rt_physical_sun",
+    "rt_sky_sun",
+    "rt_sky_sun_color",
+    "rt_sky_sun_size",
+    "rt_sky_sun_pitch",
+    "rt_sky_sun_yaw",
+    "rt_sky_godrays",
+    "rt_sky_godrays_intensity",
+    "rt_sky_godrays_sky_threshold",
+};
+
+// One value as the block spells it: the console's own text, so the game's cvar parser and the
+// editor's reader agree on it. Colours are `r g b` in 0..255, which is how rt_sky_color and
+// rt_sky_sun_color are written; the light blocks' `rrggbb` form is a different reader's.
+std::string FormatSkyText(float value)
+{
+    return FormatFloat(value);
+}
+
+std::string FormatSkyText(int32_t value)
+{
+    return std::to_string(value);
+}
+
+std::string FormatSkyText(bool value)
+{
+    return value ? "1" : "0";
+}
+
+std::string FormatSkyText(const float color[3])
+{
+    char buffer[48];
+    int channels[3];
+
+    for (int i = 0; i < 3; i++)
+    {
+        const float clamped = std::min(1.0f, std::max(0.0f, color[i]));
+        channels[i] = int(clamped * 255.0f + 0.5f);
+    }
+
+    std::snprintf(buffer, sizeof(buffer), "%d %d %d", channels[0], channels[1], channels[2]);
+    return buffer;
+}
+
+int32_t EditorSkyKeyIndex(const std::string &name)
+{
+    const std::string key = Lowercase(name);
+
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        if (key == kEditorSkyKeyNames[i])
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+bool EditorLevelSky::Empty() const
+{
+    // The unknown lines do not count: the block's presence is the level's scope, and a set with no
+    // key overrides nothing, so the writer drops the whole block and the lines in it with it.
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        // An empty value writes no key, so a slot that holds one is as clear as an unset one.
+        if (set[i] && !values[i].empty())
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// The `sky:` block's keys are cvar names and its values are the text the console takes, so a value
+// is kept as the file spelled it: converting it here and back would rewrite a level the game wrote
+// with a different but equal spelling of the same number. A line with no slot is kept as it was,
+// which is how a cvar a newer engine knows survives a session that cannot show it.
+void ParseSkyFields(const std::vector<TextLine> &lines, const std::string &text,
+                    const SubBlock &block, EditorLevelSky &sky)
+{
+    for (size_t i = block.first; i < block.last; i++)
+    {
+        const std::string_view line = lines[i].View(text);
+        const std::string_view key = KeyOf(line);
+        const int32_t index = key.empty() ? -1 : EditorSkyKeyIndex(std::string(key));
+
+        if (index < 0)
+        {
+            const std::string kept = TrimmedLine(line);
+
+            // Blank lines carry nothing; skipping them keeps a re-indented block from growing.
+            for (const char c : kept)
+            {
+                if (!IsSpace(c))
+                {
+                    sky.extra.push_back(kept);
+                    break;
+                }
+            }
+
+            continue;
+        }
+
+        const std::string_view value = ValueOf(line);
+
+        if (value.empty())
+        {
+            continue;
+        }
+
+        sky.values[index] = std::string(value);
+        sky.set[index] = true;
+    }
+}
+
+namespace {
+
 void ParseFogFields(const std::vector<TextLine> &lines, const std::string &text,
                     const SubBlock &block, EditorLevelFog &fog, bool &hasEnabled)
 {
@@ -743,6 +883,46 @@ std::string RenderFogBlock(const EditorLevelFog &fog, size_t childIndent)
     text += field + "color: " + FormatColor(fog.color) + "\n";
     text += field + "density: " + FormatFloat(fog.density) + "\n";
     text += field + "enabled: " + FormatBool(fog.enabled) + "\n";
+    return text;
+}
+
+// The block as RT_SkySettings_WriteLevel lays it out: only the keys the level overrides, in the
+// module's own order, because the game's reader takes the block's presence as the level's scope
+// and a level without overrides has to keep following the config. Lines the panel has no slot for
+// follow the managed keys, where the game's writer would drop them.
+std::string RenderSkyBlock(const EditorLevelSky &sky, size_t childIndent)
+{
+    const std::string head(childIndent, ' ');
+    const std::string field(childIndent + 2, ' ');
+    std::string text;
+
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        if (!sky.set[i] || sky.values[i].empty())
+        {
+            continue;
+        }
+
+        if (text.empty())
+        {
+            text += head + "sky:\n";
+        }
+
+        text += field + kEditorSkyKeyNames[i] + ": " + sky.values[i] + "\n";
+    }
+
+    for (const std::string &line : sky.extra)
+    {
+        if (text.empty())
+        {
+            text += head + "sky:\n";
+        }
+
+        // The line keeps the indentation it was read with, so its own nesting survives: a key the
+        // panel cannot show may still carry children under it.
+        text += line + "\n";
+    }
+
     return text;
 }
 
@@ -1159,11 +1339,13 @@ const char *const kEditorStyleNames[kEditorStyleCount] = {
     "fluorescent",   "slow pulse",
 };
 
-std::string RenderEditorLevelSection(const std::string &level, const EditorLevelFog &fog,
+std::string RenderEditorLevelSection(const std::string &level, const EditorLevelSky &sky,
+                                     const EditorLevelFog &fog,
                                      const std::vector<EditorLevelLight> &lights)
 {
     std::string text = level + ":\n";
 
+    text += RenderSkyBlock(sky, 2);
     text += RenderFogBlock(fog, 2);
 
     if (!lights.empty())
@@ -1221,6 +1403,13 @@ EditorLevelDocument::ReadResult EditorLevelDocument::ReadLevel(const std::string
                 result.hasFog = true;
                 ParseFogFields(lines, m_text, block, result.fog, hasEnabled);
             }
+            else if (block.key == "sky")
+            {
+                ParseSkyFields(lines, m_text, block, result.sky);
+                // An empty block writes no key, so one the file carries but nothing in it means
+                // the level's scope is gone - the same reading RT_SkySettings_ApplyParsed makes.
+                result.hasSky = !result.sky.Empty();
+            }
             else if (block.key == "lights")
             {
                 result.hasLights = true;
@@ -1245,7 +1434,8 @@ EditorLevelDocument::ReadResult EditorLevelDocument::ReadLevel(const std::string
     return result;
 }
 
-std::string EditorLevelDocument::WriteMerged(const std::string &level, const EditorLevelFog &fog,
+std::string EditorLevelDocument::WriteMerged(const std::string &level, const EditorLevelSky &sky,
+                                             const EditorLevelFog &fog,
                                              const std::vector<EditorLevelLight> &lights) const
 {
     const std::vector<TextLine> lines = SplitLines(m_text);
@@ -1272,7 +1462,9 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
         const size_t childIndent = SectionChildIndent(lines, m_text, head + 1, end);
         const std::vector<SubBlock> blocks = SectionBlocks(lines, m_text, head + 1, end);
         const SubBlock *oldLights = nullptr;
+        const SubBlock *oldSky = nullptr;
         bool fogWritten = false;
+        bool skyWritten = false;
         bool lightsWritten = false;
         size_t cursor = head + 1;
 
@@ -1282,6 +1474,10 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             {
                 oldLights = &block;
             }
+            else if (block.key == "sky")
+            {
+                oldSky = &block;
+            }
         }
 
         std::vector<LightEntryBlock> oldEntries;
@@ -1289,6 +1485,17 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
         if (oldLights != nullptr)
         {
             oldEntries = ParseLightEntries(lines, m_text, *oldLights);
+        }
+
+        // The overrides take the panel's numbers, but the block also keeps the lines the panel has
+        // no slot for, the way a light entry keeps the keys the editor cannot express.
+        EditorLevelSky mergedSky = sky;
+
+        if (oldSky != nullptr)
+        {
+            EditorLevelSky previous;
+            ParseSkyFields(lines, m_text, *oldSky, previous);
+            mergedSky.extra = previous.extra;
         }
 
         while (cursor < end)
@@ -1315,6 +1522,17 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             {
                 merged += RenderFogBlock(fog, childIndent);
                 fogWritten = true;
+            }
+            else if (block->key == "sky")
+            {
+                // Same rule as the game's: only the keys the level overrides are written, and a
+                // level with none of them keeps no block at all, so it goes on following the
+                // config instead of pinning a copy of it.
+                if (!mergedSky.Empty())
+                {
+                    merged += RenderSkyBlock(mergedSky, childIndent);
+                    skyWritten = true;
+                }
             }
             else if (block->key == "lights")
             {
@@ -1371,6 +1589,13 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             merged.insert(bodyStart, block);
         }
 
+        if (!skyWritten && !mergedSky.Empty())
+        {
+            // The sky goes in front of the fog, the order QRE_CustomWriteLevel writes them in, so
+            // inserting it at the body's start runs after the fog insert above and lands first.
+            merged.insert(bodyStart, RenderSkyBlock(mergedSky, childIndent));
+        }
+
         if (!lightsWritten && !lights.empty())
         {
             merged += std::string(childIndent, ' ') + "lights:\n";
@@ -1396,7 +1621,7 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             merged += '\n';
         }
 
-        merged += RenderEditorLevelSection(level, fog, lights);
+        merged += RenderEditorLevelSection(level, sky, fog, lights);
     }
 
     return merged;
