@@ -462,7 +462,7 @@ else()
     install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
 endif()
 
-install(FILES docs/spatial-contract.md docs/embedding.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES docs/api.md docs/spatial-contract.md docs/embedding.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 install(EXPORT qray_rendererTargets
     FILE qray_rendererTargets.cmake

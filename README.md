@@ -16,6 +16,7 @@ a geometry-only OBJ/BSP29 scene path for editor development.
 - `Source/` — renderer, RHI passes, lighting, shaders, and the FidelityFX API.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `Tests/` — engine-free GPU and policy tests.
+- `docs/api.md` — concise catalogue of the complete public renderer API.
 - `docs/spatial-contract.md` — meter-valued inputs, orientation, and conversion contract.
 - `docs/embedding.md` — host integration guide.
 
