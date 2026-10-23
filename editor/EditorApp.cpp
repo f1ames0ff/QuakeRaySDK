@@ -1013,6 +1013,7 @@ void EditorApp::Frame()
     draw.pTonemappingParams = &m_frameParams.tonemap;
     draw.pVolumetricParams = &m_frameParams.volume;
     draw.pLevelFogParams = &m_frameParams.fog;
+    draw.pReflectRefractParams = &m_frameParams.reflectRefract;
 
     const QrResult drawResult = qrDrawFrame(m_instance, &draw);
 
@@ -3569,6 +3570,24 @@ void EditorApp::DrawGlobalSettings()
         ImGui::SliderFloat("Max log", &settings.tonemapMaxLog, -4.0f, 4.0f, "%.2f");
         ImGui::SliderFloat("Min log", &settings.tonemapMinLog, -12.0f, 0.0f, "%.2f");
         ImGui::SliderInt("Tonemap type", &settings.tonemapType, 0, 4);
+    }
+
+    if (ImGui::CollapsingHeader("Water / Acid", openGroup))
+    {
+        // The look every `water` and `acid` surface shares: which surface is one is a
+        // property of its material, the way the game splits the two.
+        ImGui::SliderFloat("Wave speed", &settings.waterSpeed, 0.0f, 2.0f, "%.2f");
+        LogRect("water rt_water_speed");
+        ImGui::SliderFloat("Wave strength", &settings.waterNormalStrength, 0.0f, 4.0f, "%.2f");
+        LogRect("water rt_water_normal_strength");
+        ImGui::SliderFloat("Wave sharpness", &settings.waterNormalSharpness, 0.0f, 16.0f, "%.2f");
+        LogRect("water rt_water_normal_sharpness");
+        ImGui::SliderFloat("Wave scale", &settings.waterScale, 0.0f, 4.0f, "%.2f");
+        LogRect("water rt_water_scale");
+        ImGui::ColorEdit3("Water colour", settings.waterColor);
+        LogRect("water rt_water_color");
+        ImGui::ColorEdit3("Acid colour", settings.acidColor);
+        LogRect("water rt_acid_color");
     }
 
     if (ImGui::CollapsingHeader("Level fog", openGroup))

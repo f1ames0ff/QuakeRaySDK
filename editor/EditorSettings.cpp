@@ -1,5 +1,9 @@
 #include "EditorSettings.h"
 
+#include <cmath>
+
+#include "Scene.h"
+
 namespace
 {
 
@@ -118,4 +122,37 @@ void BuildEditorFrameParams(const EditorRenderSettings &settings, const float su
     // scaled it with, so a mid-range 0.05 fades the distance instead of everything.
     out.fog.density = settings.fogDensity > 0.0f ? settings.fogDensity / 64.0f : 0.0f;
     out.fog.skyBlend = settings.fogDensity > 0.0f ? settings.fogSkyBlend : 0.0f;
+
+    out.reflectRefract = {};
+    // The panel authors the water look; the rest of the block is the game's own cvar
+    // defaults, so a frame here refracts and traces glass the way a game frame does.
+    out.reflectRefract.maxReflectRefractDepth = 2;
+    out.reflectRefract.typeOfMediaAroundCamera = QR_MEDIA_TYPE_VACUUM;
+    out.reflectRefract.indexOfRefractionGlass = 1.52f;
+    out.reflectRefract.indexOfRefractionWater = 1.33f;
+    out.reflectRefract.waterWaveNormalStrength = settings.waterNormalStrength;
+    out.reflectRefract.waterWaveTextureDerivativesMultiplier = settings.waterNormalSharpness;
+    // gl_vidsdl.c divides the metres through QUAKEUNIT_IN_METERS, which is the same
+    // factor a scene unit is worth here.
+    out.reflectRefract.waterWaveSpeed = settings.waterSpeed * kEditorUnitsPerMeter;
+    out.reflectRefract.waterTextureAreaScale = settings.waterScale * kEditorUnitsPerMeter;
+    // The colours reach the shader as a per-unit transmittance rather than as a plain
+    // colour, so the game raises them to the 1/40 a scene unit is worth before it
+    // hands them over; the same exponent keeps a water surface the same shade in both.
+    const float colorExponent = 1.0f / kEditorUnitsPerMeter;
+    out.reflectRefract.waterColor = { { std::pow(settings.waterColor[0], colorExponent),
+                                        std::pow(settings.waterColor[1], colorExponent),
+                                        std::pow(settings.waterColor[2], colorExponent) } };
+    out.reflectRefract.acidColor = { { std::pow(settings.acidColor[0], colorExponent),
+                                       std::pow(settings.acidColor[1], colorExponent),
+                                       std::pow(settings.acidColor[2], colorExponent) } };
+    // Two values the game states as zero rather than authoring them: nothing sets an
+    // acid density, and the turbulent warp is off while its editor runs -- which a
+    // standalone editor always is. Traced glass and the portal twirl are on, denoising
+    // is not; the panel has no cvar for any of them either.
+    out.reflectRefract.acidDensity = 0.0f;
+    out.reflectRefract.turbWarpStrength = 0.0f;
+    out.reflectRefract.glassShadows = 1;
+    out.reflectRefract.glassParticles = 1;
+    out.reflectRefract.portalNormalTwirl = 1;
 }

@@ -68,6 +68,18 @@ struct EditorRenderSettings
     float tonemapMinLog = -8.0f;
     int32_t tonemapType = 1;
 
+    // Water / Acid: how every `water` and `acid` surface of the scene looks. The game's
+    // editor keeps these in the System tab rather than on a surface, because they are
+    // one look for the whole level. The speeds and the scale are stated in metres, as
+    // their cvars are, and BuildEditorFrameParams turns them into the scene units the
+    // frame block carries.
+    float waterSpeed = 0.4f;
+    float waterNormalStrength = 1.0f;
+    float waterNormalSharpness = 5.0f;
+    float waterScale = 1.0f;
+    float waterColor[3] = { 171.0f / 255.0f, 193.0f / 255.0f, 210.0f / 255.0f };
+    float acidColor[3] = { 122.0f / 255.0f, 143.0f / 255.0f, 21.0f / 255.0f };
+
     // Level fog: a density of 0 draws none, which is what a map without a `fog`
     // key gets. The colour starts white because that is the engine's own default
     // for a level whose file carries no `color:` key, so the preview of such a
@@ -109,7 +121,7 @@ struct EditorSunState
 // Quake-to-meter area fix (1600) times 0.001.
 inline constexpr float kEditorSkySunRadiance = 16.0f;
 
-// The four parameter blocks a frame built from EditorRenderSettings carries. Kept
+// The five parameter blocks a frame built from EditorRenderSettings carries. Kept
 // together so the pointers handed to QrDrawFrameInfo stay valid for the whole call.
 struct EditorFrameParams
 {
@@ -117,6 +129,7 @@ struct EditorFrameParams
     QrDrawFrameTonemappingParams tonemap = {};
     QrDrawFrameVolumetricParams volume = {};
     QrDrawFrameLevelFogParams fog = {};
+    QrDrawFrameReflectRefractParams reflectRefract = {};
 };
 
 // Fills `out` from `settings`, deriving the values the SDK expects rather than
