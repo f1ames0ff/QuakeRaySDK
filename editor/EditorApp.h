@@ -10,6 +10,7 @@
 
 #include "Assets.h"
 #include "EditorMaterial.h"
+#include "EditorSession.h"
 #include "EditorSettings.h"
 #include "EditorUi.h"
 #include "Scene.h"
@@ -57,6 +58,17 @@ private:
     void DrawPanel(float deltaSeconds);
     void DrawGlobalSettings();
     void DrawMaterials();
+    // The session of the game editor: what the panel authored since the last Apply, the file it
+    // writes and the prompt an exit with unsaved changes opens.
+    void LoadMaterialsSession();
+    void TouchMaterial(const std::string &name);
+    bool ApplySession();
+    void DiscardSession();
+    void RequestExit();
+    void DrawSessionBar();
+    void DrawSessionPrompt();
+    void DrawNotification();
+    void Notify(const std::string &text);
     // The Entity tab of the game editor: every light the frame uploads, map lights first, and
     // the buttons that add, duplicate and remove the ones the level does not have.
     void DrawLightList();
@@ -179,6 +191,25 @@ private:
     // rebuild waits for the pointer to leave the control so a drag does not rebuild per frame.
     bool m_materialsChanged = false;
 
+    // The session. --materials names the target, or the scene's own folder is used; the target is
+    // qray.materials.yaml and its previous generation is qray.backup_materials.yaml, the two names
+    // the game editor saves under.
+    std::string m_materialsOverride;
+    EditorSessionPaths m_sessionPaths;
+    EditorMaterialsDocument m_materialsDocument;
+    // The materials the panel authored since the last Apply, which are the blocks a save
+    // rewrites. Everything else in the file is left exactly as it was.
+    std::vector<std::string> m_touchedMaterials;
+    bool m_sessionDirty = false;
+    // An exit request that found unsaved changes: 1 shows the prompt, 0 means no prompt. Escape
+    // and "No" both return to editing, as QRE_RequestExit's prompt does.
+    int32_t m_sessionPrompt = 0;
+
+    // The toast of the game editor: one line in the corner, gone a few seconds later.
+    std::string m_notifyText;
+    std::chrono::steady_clock::time_point m_notifyTime;
+    bool m_notifyActive = false;
+
     float m_frameTimeMs = 0.0f;
     uint32_t m_clientWidth = 0;
     uint32_t m_clientHeight = 0;
@@ -208,6 +239,8 @@ private:
     uint64_t m_loggedLightLayout = 0;
     uint64_t m_loggedLightListLayout = 0;
     uint64_t m_loggedTabLayout = 0;
+    uint64_t m_loggedSessionLayout = 0;
+    bool m_loggedPromptLayout = false;
     uint64_t m_loggedStyleLayout = 0;
     uint64_t m_loggedGizmoLayout = 0;
 

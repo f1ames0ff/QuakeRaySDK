@@ -24,7 +24,8 @@ back to `qray.materials.yaml`. Its surface is:
 ## Current standalone editor
 
 `EditorApp::DrawPanel` draws one window with these rows: frame/stat readout, scene counts,
-cluster-light stats, bounds, camera readout and fly speed, `Reset camera`, and a selection block
+cluster-light stats, bounds, camera readout and fly speed, one line of session state, then the
+`Apply` / `Cancel` / `Exit` row, then a selection block
 that is either a surface (index, triangle, texture name, kind, cluster) or a light (position,
 radiance, cluster, `Light key`, `Radius`, `Colour`, `Position`), then `At`, `Clear selection`, a
 `Sun` block (intensity, azimuth, elevation, angular size), the scrolling global-settings block
@@ -67,11 +68,11 @@ no implementation.
 | God rays authoring | done | `God rays` group, gated on the procedural sky like the game |
 | Tonemap authoring | done | `Tonemap` group including the LPM percentiles the game hard-codes |
 | Volumetric fog authoring | done | `Volumetric fog` group; the scattering source follows the authored sun |
-| Level/global scope switch | missing | no config file is written yet |
-| Apply / Cancel / Exit with a dirty prompt | missing | |
-| Save back to `qray.materials.yaml` | missing | |
-| Notify toast | missing | `PrintMessage` writes to `editor.log` instead |
-| Modal dialogs | missing | |
+| Level/global scope switch | missing | the session writes the material scope only; the level scope the game adds as `fog:` and `qray_lights:` is not authored yet |
+| Apply / Cancel / Exit with a dirty prompt | done | `DrawSessionBar`, `ApplySession`, `DiscardSession`, `RequestExit` and `DrawSessionPrompt`. `WM_CLOSE` goes through the same prompt; `Yes` saves and exits, `No` exits without writing, `Escape` or the close box dismisses the prompt and keeps the session |
+| Save back to `qray.materials.yaml` | done | `EditorMaterialsDocument::WriteMerged` in `EditorSession.cpp`; `--materials <file>` picks the target, and the previous generation is copied to `qray.backup_materials.yaml` before a write |
+| Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded` and `nothing to save`, held six seconds and faded over the last one |
+| Modal dialogs | partial | the save-on-exit prompt (`DrawSessionPrompt`) is the only one; the game's other popups have no counterpart |
 | Crosshair and hint overlay | partial | the hints are panel text, not an overlay |
 
 ## Materials
@@ -107,13 +108,45 @@ change the picture would be a lie: `bump_scale`, `metalness_from_normal_alpha`, 
 `transparency`, `glass_ior`, `glass_thickness`, `glass_color`, `force_rasterize`, the `light_*`
 group and `luma_blend`. The game's emissive range is 0..5; the SDK clamps emission to [0, 1].
 
+## Session
+
+`--materials <file>` names the document the session reads on start and writes on Apply; without
+it the editor targets `qray.materials.yaml` next to the scene. `EditorMaterialsDocument` reads
+every entry the file carries into the material table, so the panel opens on the file's values
+rather than on the defaults, and `HasMaterial` decides which list rows carry the `*` marker the
+game's list uses for "the file owns this name".
+
+`WriteMerged` is the write path, and its rule is that a save never loses a line it did not write:
+
+| Situation | Behaviour |
+| --- | --- |
+| Entry the session touched | its owned keys are rewritten from the panel values; a key equal to the default is dropped |
+| Key the session does not own (`bump_scale`, `luma:`, `material_glass`, comments) | copied verbatim, at the indent it had |
+| Entry the session did not touch | untouched, including a name the editor never showed |
+| Root written by the game (`materials:`, `lights:`) | migrated to `qray_materials:` / `qray_lights:`, other root keys untouched |
+| File ends without a newline | one is added before the new entry, so an append cannot glue two records together |
+| Target file exists | copied to `qray.backup_materials.yaml` first |
+
+The owned keys are the fields the SDK upload info can express and the panel can edit:
+`texture_scale_u/v`, `texture_offset_u/v`, `roughness_override`, `metalness_factor`,
+`base_factor`, `emissive_factor`, `is_light`, `exact_normals`, `material_glass` and
+`material_water`.
+
+`Apply` writes, reloads the document and reports through the toast; `Cancel` re-reads the file and
+re-uploads the static scene, so a discarded edit leaves the viewport matching the file; `Exit`
+closes without a prompt when the session is clean, and otherwise opens `DrawSessionPrompt`, whose
+`Yes` saves first and `No` exits without writing. `Escape` and the close box dismiss the prompt.
+
 ## Order of work
 
-1. **Light authoring.** Colour and offset are done; what remains is the spot cone, the light
-   style, then the light list, then the custom-light store with add/clone/remove.
-2. **Session lifecycle.** Apply, Cancel, Exit and the `qray.materials.yaml` writer, plus the
-   notify toast and the dialogs they need.
-3. **Viewport aids.** Crosshair, hint overlay, gizmo and drag.
+1. **Light authoring.** Colour, offset, the spot cone, the light style, the light list and the
+   custom-light store with add/duplicate/clone/remove are done, as are both drags and the axis
+   gizmo.
+2. **Session lifecycle.** Done. Apply, Cancel, Exit and the `qray.materials.yaml` writer, plus the
+   notify toast and the save prompt. What remains of the write path is the level scope above the
+   material scope (`fog:` and `qray_lights:`).
+3. **Viewport aids.** The gizmo and the marker drag are done; the crosshair and the hint overlay
+   are still panel text.
 
 Global settings were the one mechanical block, and they are done: `EditorSettings.cpp` owns the
 table and `DrawGlobalSettings` draws it. The material parameter table is in place and the SDK
@@ -163,3 +196,36 @@ The light block sits below the panel fold on a 720p window, so the `Scene` tab s
 fields emit `panel rect: …` into `editor.log` whenever the selection or the scroll offset changes,
 which is how a scripted session finds them without reading pixels. A `DragFloat3` over the panel
 is enough to move a light, and `Ctrl+Click` on a colour channel accepts a typed value.
+
+The session writer was accepted against a hand-written file that carries everything the editor
+does not own: a header comment, `bump_scale`, a nested `luma:` block, a second entry with a
+non-standard three-space indent and its own `material_glass`, and the game's `materials:` /
+`lights:` root keys. One Apply kept every one of those lines, migrated the two root keys to
+`qray_materials:` / `qray_lights:` and wrote `qray.backup_materials.yaml`; a second Apply on the
+result was byte-identical, which is the idempotence the game's merge writer also has.
+
+The reader was checked on the same file: `slime0 read=1 type=0 scaleU=2.0000 offsetU=2.9200`.
+The panel-to-file path was measured through the GUI: selecting `*slime0`, moving `Scale V` to 16
+and pressing `Apply` wrote
+
+```text
+  - name: *slime0
+    texture_scale_u: 2
+    texture_scale_v: 16
+    texture_offset_u: 2.92
+    # the game only: a bump scale and nested luma blocks
+    bump_scale: 0.25
+    luma:
+      - color: ff0000
+```
+
+which is the proof that the write starts from what the file carried (`texture_scale_u: 2`,
+`texture_offset_u: 2.92` survived an Apply that never touched them) and that unchanged keys are
+not rewritten from the defaults.
+
+The exit prompt was driven through `WM_CLOSE` and the panel buttons: `Escape` logged
+`session: prompt dismissed` and kept the session, `No` logged `session: changes discarded` and the
+process exited with the file untouched, `Yes` logged `session: saved <path>` before the exit and
+the file carried the edit. The prompt is a fixed 440x148 window for the reason the panel layout
+logs exist: an `AlwaysAutoResize` prompt moved under the cursor between the capture and the click,
+which made a scripted click miss a button that had rendered in that spot a frame earlier.
