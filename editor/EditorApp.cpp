@@ -72,6 +72,47 @@ constexpr float kEditorNewLightIntensity = 200.0f;
 // accepts a light the crosshair is near rather than exactly on.
 constexpr float kLightPickRadiusUnits = 24.0f;
 
+// The game's QRE_GIZMO_LEN: the drawn length of one axis arrow. The drag divides the frozen
+// screen direction by the pixels this length spans, so dragging a whole arrow moves the light by
+// exactly one arrow length whatever the distance to the camera.
+constexpr float kGizmoLengthUnits = 12.0f;
+
+// The game's grab tolerance around an axis line, in pixels. A click this close to one grabs the
+// axis instead of picking the surface behind it.
+constexpr float kGizmoGrabPixels = 8.0f;
+
+// The length of the arm a drag adds its movement to, as a fraction of one arrow: the game draws
+// its arrow heads at 28% of the arrow back from the tip.
+constexpr float kGizmoHeadLength = 0.28f;
+
+// A drag against this tolerance counts as a click rather than a move, so a press that does not
+// travel leaves the light where the panel typed it.
+constexpr float kGizmoClickPixels = 2.0f;
+
+// QRE_UpdateLightDrag leaves the grabbed light this far in front of whatever the ray hits, and
+// hangs it this far ahead of the camera when the ray hits nothing at all.
+constexpr float kGrabSurfaceOffsetUnits = 8.0f;
+constexpr float kGrabAirDistanceUnits = 128.0f;
+
+// Distance from a point to a segment, in the pixels the gizmo is hit-tested in.
+float DistanceToSegment(float px, float py, float x0, float y0, float x1, float y1)
+{
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+    const float lengthSquared = dx * dx + dy * dy;
+    float t = 0.0f;
+
+    if (lengthSquared > 0.0f)
+    {
+        t = std::clamp(((px - x0) * dx + (py - y0) * dy) / lengthSquared, 0.0f, 1.0f);
+    }
+
+    const float closestX = x0 + dx * t;
+    const float closestY = y0 + dy * t;
+
+    return std::sqrt((px - closestX) * (px - closestX) + (py - closestY) * (py - closestY));
+}
+
 // The vertical field of view the frame is drawn with. Picking and the selection overlay invert it,
 // so they must not carry their own copy.
 constexpr float kEditorFovYRadians = 1.0471975512f;
@@ -835,6 +876,10 @@ void EditorApp::Frame()
         return;
     }
 
+    // A grab follows the ray rather than the mouse: the camera can move under a still cursor, so
+    // the light is re-aimed every frame the drag lasts, the way QRE_UpdateLightDrag runs per frame.
+    UpdateLightGrab();
+
     UploadSun();
     UploadLights();
     UploadClusterLightSources();
@@ -964,6 +1009,9 @@ LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lPara
         {
             m_lastMouse.x = x;
             m_lastMouse.y = y;
+
+            UpdateGizmoDrag(float(x), float(y));
+            UpdateLightGrab();
         }
 
         break;
@@ -973,9 +1021,30 @@ LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lPara
     {
         if (!m_ui.WantsMouse())
         {
-            Pick();
+            // Three presses share the left button: on an axis arrow the gizmo slides the light
+            // along that axis, on the light itself the light flies with the ray, and anywhere
+            // else the press is a pick. The narrowest target wins, so the arrows are tested
+            // before the marker they grow out of.
+            bool handled = !m_looking && BeginGizmoDrag(m_ui.MouseX(), m_ui.MouseY());
+
+            if (!handled)
+            {
+                handled = BeginLightGrab();
+            }
+
+            if (!handled)
+            {
+                Pick();
+            }
         }
 
+        break;
+    }
+
+    case WM_LBUTTONUP:
+    {
+        FinishGizmoDrag(true);
+        FinishLightGrab(true);
         break;
     }
 
@@ -1014,6 +1083,13 @@ LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lPara
         {
             m_showPanel = !m_showPanel;
         }
+        else if (wParam == VK_ESCAPE)
+        {
+            // The game's cancel: a drag in flight goes back to where it started instead of
+            // committing a position the author pulled it to by accident.
+            FinishGizmoDrag(false);
+            FinishLightGrab(false);
+        }
         else if (wParam == 'O' && (m_keys[VK_CONTROL] || (GetKeyState(VK_CONTROL) & 0x8000) != 0))
         {
             ResetCameraToScene();
@@ -1036,6 +1112,11 @@ LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lPara
 
         m_looking = false;
         m_ui.SetCursorVisible(true);
+
+        // A drag cannot survive the focus: the mouse-up that would commit it is delivered to
+        // another window, so the light would stay glued to the last position the cursor had.
+        FinishGizmoDrag(false);
+        FinishLightGrab(false);
         break;
 
     default:
@@ -1749,50 +1830,12 @@ void EditorApp::Pick()
         return;
     }
 
-    float side[3] = {};
-    float up[3] = {};
-    float forward[3] = {};
-    ViewBasis(side, up, forward);
+    float direction[3] = {};
 
-    // A click while the mouse is captured comes from the crosshair, so it uses the centre of the
-    // viewport; otherwise it comes from the cursor.
-    float cursorX = float(m_clientWidth) * 0.5f;
-    float cursorY = float(m_clientHeight) * 0.5f;
-
-    if (!m_looking)
-    {
-        cursorX = m_ui.MouseX();
-        cursorY = m_ui.MouseY();
-    }
-
-    if (m_clientWidth == 0 || m_clientHeight == 0)
+    if (!CursorDirection(direction))
     {
         return;
     }
-
-    const float aspect = float(m_clientWidth) / float(m_clientHeight);
-    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
-    const float ndcX = (cursorX / float(m_clientWidth)) * 2.0f - 1.0f;
-    const float ndcY = 1.0f - (cursorY / float(m_clientHeight)) * 2.0f;
-
-    float direction[3] = {
-        forward[0] + side[0] * (ndcX * tanHalfFov * aspect) + up[0] * (ndcY * tanHalfFov),
-        forward[1] + side[1] * (ndcX * tanHalfFov * aspect) + up[1] * (ndcY * tanHalfFov),
-        forward[2] + side[2] * (ndcX * tanHalfFov * aspect) + up[2] * (ndcY * tanHalfFov),
-    };
-
-    const float directionLength = std::sqrt(direction[0] * direction[0] +
-                                            direction[1] * direction[1] +
-                                            direction[2] * direction[2]);
-
-    if (directionLength <= 1e-6f)
-    {
-        return;
-    }
-
-    direction[0] /= directionLength;
-    direction[1] /= directionLength;
-    direction[2] /= directionLength;
 
     int32_t triangle = -1;
     float surfaceDistance = 0.0f;
@@ -1898,41 +1941,8 @@ void EditorApp::DrawSelectionOverlay()
         return;
     }
 
-    float side[3] = {};
-    float up[3] = {};
-    float forward[3] = {};
-    ViewBasis(side, up, forward);
-
-    const float aspect = float(m_clientWidth) / float(m_clientHeight);
-    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
-
-    // Projects a world point the same way ViewBasis casts a ray, so the outline lands on the
-    // geometry the click resolved. Returns false when the point is behind the camera.
-    const auto project = [&](const float point[3], float &outX, float &outY) -> bool {
-        const float relative[3] = {
-            point[0] - m_cameraPosition[0],
-            point[1] - m_cameraPosition[1],
-            point[2] - m_cameraPosition[2],
-        };
-
-        const float depth = relative[0] * forward[0] + relative[1] * forward[1] +
-                            relative[2] * forward[2];
-
-        if (depth <= 1e-3f)
-        {
-            return false;
-        }
-
-        const float horizontal = relative[0] * side[0] + relative[1] * side[1] +
-                                 relative[2] * side[2];
-        const float vertical = relative[0] * up[0] + relative[1] * up[1] + relative[2] * up[2];
-
-        const float ndcX = horizontal / (depth * tanHalfFov * aspect);
-        const float ndcY = vertical / (depth * tanHalfFov);
-
-        outX = (ndcX * 0.5f + 0.5f) * float(m_clientWidth);
-        outY = (1.0f - (ndcY * 0.5f + 0.5f)) * float(m_clientHeight);
-        return true;
+    const auto project = [this](const float point[3], float &outX, float &outY) -> bool {
+        return ProjectPoint(point, outX, outY);
     };
 
     const ImU32 accent = IM_COL32(255, 170, 40, 255);
@@ -1978,36 +1988,596 @@ void EditorApp::DrawSelectionOverlay()
 
     if (selected != nullptr)
     {
-        // A three-axis cross at the light's origin stands in for the gizmo the game editor draws
-        // with its own overlay path, which the SDK does not expose.
-        const float extent = 12.0f;
-        const ImU32 lightMarker = m_selectedCustomLight >= 0 ? accent : marker;
+        const ImU32 axisColors[3] = {
+            IM_COL32(255, 64, 64, 255),
+            IM_COL32(64, 255, 64, 255),
+            IM_COL32(64, 128, 255, 255),
+        };
 
-        for (int axis = 0; axis < 3; axis++)
+        float originX = 0.0f;
+        float originY = 0.0f;
+
+        if (project(selected->position, originX, originY))
         {
-            float from[3] = { selected->position[0], selected->position[1], selected->position[2] };
-            float to[3] = { selected->position[0], selected->position[1], selected->position[2] };
+            // The game draws a grab-able arrow per axis on a custom light and only a marker on a
+            // map light, because a map light is moved by grabbing it rather than by its gizmo.
+            const bool draggable = m_selectedCustomLight >= 0;
 
-            from[axis] -= extent;
-            to[axis] += extent;
-
-            float fromX = 0.0f;
-            float fromY = 0.0f;
-            float toX = 0.0f;
-            float toY = 0.0f;
-
-            if (project(from, fromX, fromY) && project(to, toX, toY))
+            for (int axis = 0; axis < 3; axis++)
             {
-                drawList->AddLine(ImVec2(fromX, fromY), ImVec2(toX, toY), lightMarker, 2.0f);
+                const float length = draggable ? kGizmoLengthUnits : 12.0f;
+                const ImU32 colour = draggable ? axisColors[axis] : marker;
+
+                float tip[3] = { selected->position[0], selected->position[1], selected->position[2] };
+                tip[axis] += length;
+
+                float tipX = 0.0f;
+                float tipY = 0.0f;
+
+                if (!project(tip, tipX, tipY))
+                {
+                    continue;
+                }
+
+                drawList->AddLine(ImVec2(originX, originY), ImVec2(tipX, tipY), colour,
+                                  draggable ? 4.0f : 2.0f);
+
+                if (!draggable)
+                {
+                    continue;
+                }
+
+                // The arrow head spans the next axis in the pair, so it is visible from the
+                // side the arrow is seen rather than edge-on.
+                float across[3] = { selected->position[0], selected->position[1],
+                                    selected->position[2] };
+                across[(axis + 1) % 3] += length * 0.2f;
+
+                float back[3] = { tip[0], tip[1], tip[2] };
+                back[axis] -= length * kGizmoHeadLength;
+
+                for (int side = 0; side < 2; side++)
+                {
+                    float head[3] = { back[0], back[1], back[2] };
+
+                    for (int component = 0; component < 3; component++)
+                    {
+                        head[component] += (across[component] - tip[component]) *
+                                          (side == 0 ? 1.0f : -1.0f);
+                    }
+
+                    float headX = 0.0f;
+                    float headY = 0.0f;
+
+                    if (project(head, headX, headY))
+                    {
+                        drawList->AddLine(ImVec2(tipX, tipY), ImVec2(headX, headY), colour, 4.0f);
+                    }
+                }
+            }
+
+            if (draggable)
+            {
+                // The axis tip rectangles go to the log so a scripted drag knows where to press
+                // without reading the viewport.
+                std::string axes;
+
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    float tip[3] = { selected->position[0], selected->position[1],
+                                     selected->position[2] };
+                    tip[axis] += kGizmoLengthUnits;
+
+                    float tipX = 0.0f;
+                    float tipY = 0.0f;
+
+                    if (!project(tip, tipX, tipY))
+                    {
+                        continue;
+                    }
+
+                    axes += " " + std::to_string(axis) + " " + std::to_string(int32_t(originX)) + "," +
+                            std::to_string(int32_t(originY)) + " " +
+                            std::to_string(int32_t(tipX)) + "," + std::to_string(int32_t(tipY));
+                }
+
+                const uint64_t layout = std::hash<std::string>{}(axes);
+
+                // A drag re-projects the arrows every frame it moves; logging them then would
+                // bury the one line that explains where the press has to land.
+                if (!m_gizmoDragging && !m_grabDragging && m_loggedGizmoLayout != layout)
+                {
+                    m_loggedGizmoLayout = layout;
+                    PrintMessage(("gizmo axes:" + axes).c_str(), this);
+                }
             }
         }
     }
 }
 
+bool EditorApp::ProjectPoint(const float point[3], float &outX, float &outY) const
+{
+    if (m_clientWidth == 0 || m_clientHeight == 0)
+    {
+        return false;
+    }
+
+    float side[3] = {};
+    float up[3] = {};
+    float forward[3] = {};
+    ViewBasis(side, up, forward);
+
+    const float aspect = float(m_clientWidth) / float(m_clientHeight);
+    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
+    const float relative[3] = {
+        point[0] - m_cameraPosition[0],
+        point[1] - m_cameraPosition[1],
+        point[2] - m_cameraPosition[2],
+    };
+
+    const float depth = relative[0] * forward[0] + relative[1] * forward[1] + relative[2] * forward[2];
+
+    if (depth <= 1e-3f)
+    {
+        return false;
+    }
+
+    const float horizontal = relative[0] * side[0] + relative[1] * side[1] + relative[2] * side[2];
+    const float vertical = relative[0] * up[0] + relative[1] * up[1] + relative[2] * up[2];
+
+    const float ndcX = horizontal / (depth * tanHalfFov * aspect);
+    const float ndcY = vertical / (depth * tanHalfFov);
+
+    outX = (ndcX * 0.5f + 0.5f) * float(m_clientWidth);
+    outY = (1.0f - (ndcY * 0.5f + 0.5f)) * float(m_clientHeight);
+    return true;
+}
+
+bool EditorApp::BeginGizmoDrag(float cursorX, float cursorY)
+{
+    if (m_selectedCustomLight < 0 || m_selectedCustomLight >= int32_t(m_customLights.size()))
+    {
+        return false;
+    }
+
+    const EditorLight &light = m_customLights[size_t(m_selectedCustomLight)];
+    float originX = 0.0f;
+    float originY = 0.0f;
+
+    if (!ProjectPoint(light.position, originX, originY))
+    {
+        return false;
+    }
+
+    // The origin belongs to no axis, so a press on the light itself stays a pick - which is what
+    // re-selects a light the cursor is already near.
+    const float fromOriginX = cursorX - originX;
+    const float fromOriginY = cursorY - originY;
+
+    if (std::sqrt(fromOriginX * fromOriginX + fromOriginY * fromOriginY) < kGizmoGrabPixels)
+    {
+        return false;
+    }
+
+    int32_t bestAxis = -1;
+    float bestDistance = kGizmoGrabPixels;
+    float bestDirection[2] = {};
+    float bestPixelsPerUnit = 0.0f;
+
+    for (int32_t axis = 0; axis < 3; axis++)
+    {
+        float tip[3] = { light.position[0], light.position[1], light.position[2] };
+        tip[axis] += kGizmoLengthUnits;
+
+        float tipX = 0.0f;
+        float tipY = 0.0f;
+
+        if (!ProjectPoint(tip, tipX, tipY))
+        {
+            continue;
+        }
+
+        const float dx = tipX - originX;
+        const float dy = tipY - originY;
+        const float pixelLength = std::sqrt(dx * dx + dy * dy);
+
+        // An axis pointing at the camera projects to a few pixels: it cannot be grabbed, and it
+        // cannot drive a drag either, so it is skipped the way QRE_GizmoAxisScreen rejects one
+        // shorter than a pixel.
+        if (pixelLength < kGizmoGrabPixels)
+        {
+            continue;
+        }
+
+        const float distance = DistanceToSegment(cursorX, cursorY, originX, originY, tipX, tipY);
+
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestAxis = axis;
+            bestDirection[0] = dx / pixelLength;
+            bestDirection[1] = dy / pixelLength;
+            bestPixelsPerUnit = pixelLength / kGizmoLengthUnits;
+        }
+    }
+
+    if (bestAxis < 0)
+    {
+        // A press this far from every arrow is a pick, but the miss is logged so a scripted drag
+        // can tell "I missed the gizmo" from "the gizmo is not responding".
+        std::string distances;
+
+        for (int32_t axis = 0; axis < 3; axis++)
+        {
+            float tip[3] = { light.position[0], light.position[1], light.position[2] };
+            tip[axis] += kGizmoLengthUnits;
+
+            float tipX = 0.0f;
+            float tipY = 0.0f;
+
+            if (!ProjectPoint(tip, tipX, tipY))
+            {
+                distances += " " + std::to_string(axis) + ":offscreen";
+                continue;
+            }
+
+            distances += " " + std::to_string(axis) + ":" +
+                         std::to_string(int32_t(DistanceToSegment(cursorX, cursorY, originX, originY,
+                                                                 tipX, tipY)));
+        }
+
+        PrintMessage(("gizmo miss: cursor " + std::to_string(int32_t(cursorX)) + "," +
+                      std::to_string(int32_t(cursorY)) + " origin " +
+                      std::to_string(int32_t(originX)) + "," + std::to_string(int32_t(originY)) +
+                      " distance" + distances)
+                         .c_str(),
+                     this);
+        return false;
+    }
+
+    m_gizmoDragging = true;
+    m_gizmoAxis = bestAxis;
+    m_gizmoStart[0] = cursorX;
+    m_gizmoStart[1] = cursorY;
+    m_gizmoDirection[0] = bestDirection[0];
+    m_gizmoDirection[1] = bestDirection[1];
+    m_gizmoPixelsPerUnit = bestPixelsPerUnit;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        m_gizmoOrigin[axis] = light.position[axis];
+    }
+
+    PrintMessage(("gizmo: grab custom " + std::to_string(m_selectedCustomLight) + " axis " +
+                  std::to_string(bestAxis) + " at " + std::to_string(int32_t(originX)) + "," +
+                  std::to_string(int32_t(originY)) + " from " +
+                  std::to_string(int32_t(m_gizmoOrigin[0])) + " " +
+                  std::to_string(int32_t(m_gizmoOrigin[1])) + " " +
+                  std::to_string(int32_t(m_gizmoOrigin[2])))
+                     .c_str(),
+                 this);
+    return true;
+}
+
+void EditorApp::UpdateGizmoDrag(float cursorX, float cursorY)
+{
+    if (!m_gizmoDragging || m_selectedCustomLight < 0 ||
+        m_selectedCustomLight >= int32_t(m_customLights.size()) || m_gizmoPixelsPerUnit <= 0.0f)
+    {
+        return;
+    }
+
+    EditorLight &light = m_customLights[size_t(m_selectedCustomLight)];
+
+    // How far the cursor travelled along the axis' frozen screen direction, in world units.
+    const float travelled = (cursorX - m_gizmoStart[0]) * m_gizmoDirection[0] +
+                            (cursorY - m_gizmoStart[1]) * m_gizmoDirection[1];
+
+    // Whole units, like the game's QRE_CustomGizmoMove: the light stays on the integer grid the
+    // map's own entities sit on while the cursor moves by fractions of one arrow length.
+    const float delta = std::round(travelled / m_gizmoPixelsPerUnit);
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        light.position[axis] = m_gizmoOrigin[axis];
+    }
+
+    light.position[m_gizmoAxis] += delta;
+    light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+}
+
+void EditorApp::FinishGizmoDrag(bool kept)
+{
+    if (!m_gizmoDragging)
+    {
+        return;
+    }
+
+    m_gizmoDragging = false;
+
+    if (m_selectedCustomLight < 0 || m_selectedCustomLight >= int32_t(m_customLights.size()))
+    {
+        return;
+    }
+
+    EditorLight &light = m_customLights[size_t(m_selectedCustomLight)];
+    const std::string label = "custom " + std::to_string(m_selectedCustomLight);
+
+    if (!kept)
+    {
+        // Escape or a lost button puts the light back where the press found it, the way
+        // QRE_CustomGizmoCancel restores the origin.
+        for (int axis = 0; axis < 3; axis++)
+        {
+            light.position[axis] = m_gizmoOrigin[axis];
+        }
+
+        light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+        PrintMessage((label + ": gizmo cancelled").c_str(), this);
+        LogLightCluster(light, CustomLightUniqueID(size_t(m_selectedCustomLight)), label.c_str());
+        return;
+    }
+
+    PrintMessage((label + ": gizmo moved to " + std::to_string(int32_t(light.position[0])) + " " +
+                  std::to_string(int32_t(light.position[1])) + " " +
+                  std::to_string(int32_t(light.position[2])) + " axis " +
+                  std::to_string(m_gizmoAxis) + " cluster " + std::to_string(light.cluster))
+                     .c_str(),
+                 this);
+    LogLightCluster(light, CustomLightUniqueID(size_t(m_selectedCustomLight)), label.c_str());
+}
+
+bool EditorApp::CursorDirection(float outDirection[3]) const
+{
+    if (m_clientWidth == 0 || m_clientHeight == 0)
+    {
+        return false;
+    }
+
+    float side[3] = {};
+    float up[3] = {};
+    float forward[3] = {};
+    ViewBasis(side, up, forward);
+
+    // A click while the mouse is captured comes from the crosshair, so it uses the centre of the
+    // viewport; otherwise it comes from the cursor.
+    float cursorX = float(m_clientWidth) * 0.5f;
+    float cursorY = float(m_clientHeight) * 0.5f;
+
+    if (!m_looking)
+    {
+        cursorX = m_ui.MouseX();
+        cursorY = m_ui.MouseY();
+    }
+
+    const float aspect = float(m_clientWidth) / float(m_clientHeight);
+    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
+    const float ndcX = (cursorX / float(m_clientWidth)) * 2.0f - 1.0f;
+    const float ndcY = 1.0f - (cursorY / float(m_clientHeight)) * 2.0f;
+
+    outDirection[0] = forward[0] + side[0] * (ndcX * tanHalfFov * aspect) + up[0] * (ndcY * tanHalfFov);
+    outDirection[1] = forward[1] + side[1] * (ndcX * tanHalfFov * aspect) + up[1] * (ndcY * tanHalfFov);
+    outDirection[2] = forward[2] + side[2] * (ndcX * tanHalfFov * aspect) + up[2] * (ndcY * tanHalfFov);
+
+    const float length = std::sqrt(outDirection[0] * outDirection[0] +
+                                   outDirection[1] * outDirection[1] +
+                                   outDirection[2] * outDirection[2]);
+
+    if (length <= 1e-6f)
+    {
+        return false;
+    }
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        outDirection[axis] /= length;
+    }
+
+    return true;
+}
+
+bool EditorApp::BeginLightGrab()
+{
+    float direction[3] = {};
+
+    if (!CursorDirection(direction))
+    {
+        return false;
+    }
+
+    float distance = 0.0f;
+    bool custom = false;
+    const int32_t index = PickLight(m_cameraPosition, direction, distance, custom);
+
+    if (index < 0)
+    {
+        return false;
+    }
+
+    // Pressing the light is a press on the light, so it becomes the selection before the drag
+    // moves it - the panel follows the light the author grabbed, not the one it had.
+    SelectLight(index, custom);
+
+    const EditorLight *light = SelectedLight();
+
+    if (light == nullptr)
+    {
+        return false;
+    }
+
+    m_grabDragging = true;
+    m_grabMoved = false;
+    m_grabCustom = custom;
+    m_grabIndex = index;
+    m_grabStart[0] = m_ui.MouseX();
+    m_grabStart[1] = m_ui.MouseY();
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        m_grabOrigin[axis] = light->position[axis];
+        m_grabLoggedPosition[axis] = light->position[axis];
+    }
+
+    PrintMessage(("grab: " + SelectedLightLabel() + " at " + std::to_string(int32_t(light->position[0])) +
+                  " " + std::to_string(int32_t(light->position[1])) + " " +
+                  std::to_string(int32_t(light->position[2])))
+                     .c_str(),
+                 this);
+    return true;
+}
+
+void EditorApp::UpdateLightGrab()
+{
+    if (!m_grabDragging)
+    {
+        return;
+    }
+
+    if (!m_grabCustom && (m_grabIndex < 0 || m_grabIndex >= int32_t(m_scene.lights.size())))
+    {
+        return;
+    }
+
+    if (m_grabCustom && (m_grabIndex < 0 || m_grabIndex >= int32_t(m_customLights.size())))
+    {
+        return;
+    }
+
+    // A press that has not travelled yet is still a click, so it selects the light without moving
+    // it: the game separates the two because a grab happens on a different button than a pick,
+    // and a standalone editor has only the one the author presses.
+    if (!m_looking)
+    {
+        const float travel = std::abs(m_ui.MouseX() - m_grabStart[0]) +
+                             std::abs(m_ui.MouseY() - m_grabStart[1]);
+
+        if (travel < kGizmoClickPixels)
+        {
+            return;
+        }
+    }
+
+    float direction[3] = {};
+
+    if (!CursorDirection(direction))
+    {
+        return;
+    }
+
+    m_grabMoved = true;
+
+    int32_t triangle = -1;
+    float surfaceDistance = 0.0f;
+    const int32_t surface = PickSurface(m_cameraPosition, direction, triangle, surfaceDistance);
+
+    float target[3] = {};
+
+    if (surface >= 0)
+    {
+        // QRE_UpdateLightDrag puts the light 8 units in front of the surface under the ray,
+        // along the ray - the same point as pick_impact - 8 * vpn.
+        const float distance = surfaceDistance - kGrabSurfaceOffsetUnits;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            target[axis] = m_cameraPosition[axis] + direction[axis] * distance;
+        }
+    }
+    else
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            target[axis] = m_cameraPosition[axis] + direction[axis] * kGrabAirDistanceUnits;
+        }
+    }
+
+    EditorLight *light = SelectedLight();
+
+    if (light == nullptr)
+    {
+        return;
+    }
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        light->position[axis] = target[axis];
+    }
+
+    light->cluster = ResolveEditorLightCluster(m_scene, light->position);
+
+    // The drag lands on a new position every frame it moves; the log carries the ones that
+    // changed, so a scripted drag can read where the light ended up.
+    float moved = 0.0f;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        moved = std::max(moved, std::abs(light->position[axis] - m_grabLoggedPosition[axis]));
+    }
+
+    if (moved >= 1.0f)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            m_grabLoggedPosition[axis] = light->position[axis];
+        }
+
+        PrintMessage((SelectedLightLabel() + ": drag to " + std::to_string(int32_t(light->position[0])) +
+                      " " + std::to_string(int32_t(light->position[1])) + " " +
+                      std::to_string(int32_t(light->position[2])) + " cluster " +
+                      std::to_string(light->cluster))
+                         .c_str(),
+                     this);
+    }
+}
+
+void EditorApp::FinishLightGrab(bool kept)
+{
+    if (!m_grabDragging)
+    {
+        return;
+    }
+
+    m_grabDragging = false;
+
+    EditorLight *light = SelectedLight();
+
+    if (light == nullptr)
+    {
+        return;
+    }
+
+    const std::string label = SelectedLightLabel();
+
+    if (!kept && m_grabMoved)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            light->position[axis] = m_grabOrigin[axis];
+        }
+
+        light->cluster = ResolveEditorLightCluster(m_scene, light->position);
+        PrintMessage((label + ": drag cancelled").c_str(), this);
+        LogLightCluster(*light, SelectedLightUniqueID(), label.c_str());
+        return;
+    }
+
+    if (!m_grabMoved)
+    {
+        return;
+    }
+
+    PrintMessage((label + ": dropped at " + std::to_string(int32_t(light->position[0])) + " " +
+                  std::to_string(int32_t(light->position[1])) + " " +
+                  std::to_string(int32_t(light->position[2])) + " cluster " +
+                  std::to_string(light->cluster))
+                     .c_str(),
+                 this);
+    LogLightCluster(*light, SelectedLightUniqueID(), label.c_str());
+}
+
 void EditorApp::DrawLightList()
 {
     const bool hasSelection = SelectedLight() != nullptr;
-
     ImGui::Text("Map lights     %d", int32_t(m_scene.lights.size()));
     ImGui::Text("Custom lights  %d", int32_t(m_customLights.size()));
 
