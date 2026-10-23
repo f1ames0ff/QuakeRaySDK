@@ -328,11 +328,123 @@ bool EditorApp::CreateMaterial()
     return result == QR_SUCCESS;
 }
 
+QrGeometryPassThroughType EditorApp::PassThroughTypeForSurface(EditorSurfaceKind kind)
+{
+    switch (kind)
+    {
+    case EditorSurfaceKind::Water:
+        return QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_REFLECT_REFRACT;
+    case EditorSurfaceKind::Slime:
+    case EditorSurfaceKind::Lava:
+        return QR_GEOMETRY_PASS_THROUGH_TYPE_ACID_REFLECT_REFRACT;
+    case EditorSurfaceKind::Fence:
+        return QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED;
+    default:
+        return QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
+    }
+}
+
+QrMaterial EditorApp::SurfaceMaterial(const EditorSurface &surface) const
+{
+    if (surface.texture >= 0 && size_t(surface.texture) < m_textureMaterials.size())
+    {
+        const QrMaterial material = m_textureMaterials[size_t(surface.texture)];
+
+        if (material != QR_NO_MATERIAL)
+        {
+            return material;
+        }
+    }
+
+    return m_material;
+}
+
+bool EditorApp::CreateTextureMaterials()
+{
+    if (m_instance == nullptr)
+    {
+        return false;
+    }
+
+    m_textureMaterials.assign(m_scene.textures.size(), QR_NO_MATERIAL);
+
+    uint32_t created = 0;
+
+    for (size_t i = 0; i < m_scene.textures.size(); i++)
+    {
+        const EditorTexture &texture = m_scene.textures[i];
+
+        if (texture.width == 0 || texture.height == 0 ||
+            texture.rgba.size() != size_t(texture.width) * size_t(texture.height) * 4)
+        {
+            continue;
+        }
+
+        QrMaterialCreateInfo info = {};
+        info.size = { texture.width, texture.height };
+        info.textures.pDataAlbedoAlpha = texture.rgba.data();
+        info.filter = QR_SAMPLER_FILTER_LINEAR;
+        info.addressModeU = QR_SAMPLER_ADDRESS_MODE_REPEAT;
+        info.addressModeV = QR_SAMPLER_ADDRESS_MODE_REPEAT;
+
+        QrMaterial material = QR_NO_MATERIAL;
+
+        if (qrCreateMaterial(m_instance, &info, &material) == QR_SUCCESS)
+        {
+            m_textureMaterials[i] = material;
+            created++;
+        }
+    }
+
+    PrintMessage(("texture materials: " + std::to_string(created) + "/" +
+                  std::to_string(m_scene.textures.size())).c_str(), this);
+
+    return true;
+}
+
 bool EditorApp::LoadScene()
 {
+    const std::string sceneDirectory = EditorDirectoryOf(m_scenePath);
+    const std::string base = sceneDirectory.empty() ? std::string(".") : sceneDirectory;
+
+    const std::string candidates[] = {
+        base,
+        base + "\\id1",
+        base + "\\..",
+        base + "\\..\\id1",
+        base + "\\..\\..",
+        base + "\\..\\..\\id1",
+    };
+
+    if (!m_gamePath.empty())
+    {
+        m_assets.AddDirectory(m_gamePath);
+        m_assets.AddArchiveOrDirectory(m_gamePath + "\\PAK0.PAK");
+        m_assets.AddArchiveOrDirectory(m_gamePath + "\\PAK1.PAK");
+    }
+
+    for (const std::string &candidate : candidates)
+    {
+        m_assets.AddDirectory(candidate);
+        m_assets.AddArchiveOrDirectory(candidate + "\\PAK0.PAK");
+        m_assets.AddArchiveOrDirectory(candidate + "\\PAK1.PAK");
+    }
+
+    std::vector<uint8_t> palette;
+
+    if (m_assets.ReadFile("gfx/palette.lmp", palette) && palette.size() >= 768)
+    {
+        m_palette.assign(palette.begin(), palette.begin() + 768);
+    }
+    else
+    {
+        PrintMessage("palette gfx/palette.lmp not found, using BSP embedded palettes", this);
+    }
+
     std::string error;
 
-    if (!LoadEditorScene(m_scenePath, m_scene, error))
+    if (!LoadEditorScene(m_scenePath, m_palette.empty() ? nullptr : m_palette.data(), m_scene,
+                         error))
     {
         MessageBoxA(m_window, error.c_str(), "QuakeRay Editor", MB_ICONERROR);
         return false;
@@ -349,6 +461,11 @@ bool EditorApp::UploadScene()
         return false;
     }
 
+    if (!CreateTextureMaterials())
+    {
+        return false;
+    }
+
     const QrResult beginResult = qrBeginStaticGeometries(m_instance);
 
     if (beginResult != QR_SUCCESS)
@@ -357,33 +474,82 @@ bool EditorApp::UploadScene()
         return false;
     }
 
-    QrGeometryUploadInfo upload = {};
-    upload.uniqueID = 1;
-    upload.flags = QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
-    upload.geomType = QR_GEOMETRY_TYPE_STATIC;
-    upload.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
-    upload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
-    upload.vertexCount = uint32_t(m_scene.vertices.size());
-    upload.pVertices = m_scene.vertices.data();
-    upload.indexCount = uint32_t(m_scene.indices.size());
-    upload.pIndices = m_scene.indices.data();
-    upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
-    upload.geomMaterial.layerMaterials[0] = m_material;
-    upload.defaultRoughness = 0.7f;
-    upload.defaultMetallicity = 0.0f;
-    upload.defaultEmission = 0.0f;
-    upload.transform.matrix[0][0] = 1.0f;
-    upload.transform.matrix[1][1] = 1.0f;
-    upload.transform.matrix[2][2] = 1.0f;
+    uint32_t uploadedSurfaces = 0;
 
-    const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
-    PrintMessage(("geometry upload: " + std::string(qrGetResultDescription(uploadResult))).c_str(), this);
-
-    if (uploadResult != QR_SUCCESS)
+    for (size_t surfaceIndex = 0; surfaceIndex < m_scene.surfaces.size(); surfaceIndex++)
     {
-        return false;
+        const EditorSurface &surface = m_scene.surfaces[surfaceIndex];
+
+        if (surface.vertices.empty() || surface.indices.empty())
+        {
+            continue;
+        }
+
+        QrGeometryUploadInfo upload = {};
+        upload.uniqueID = uint32_t(surfaceIndex) + 1;
+        upload.flags = QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
+        upload.geomType = QR_GEOMETRY_TYPE_STATIC;
+        upload.passThroughType = PassThroughTypeForSurface(surface.kind);
+        upload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
+        upload.vertexCount = uint32_t(surface.vertices.size());
+        upload.pVertices = surface.vertices.data();
+        upload.indexCount = uint32_t(surface.indices.size());
+        upload.pIndices = surface.indices.data();
+        upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
+        upload.geomMaterial.layerMaterials[0] = SurfaceMaterial(surface);
+        upload.defaultRoughness = 0.7f;
+        upload.defaultMetallicity = 0.0f;
+        upload.defaultEmission = 0.0f;
+        upload.transform.matrix[0][0] = 1.0f;
+        upload.transform.matrix[1][1] = 1.0f;
+        upload.transform.matrix[2][2] = 1.0f;
+
+        const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
+
+        if (uploadResult != QR_SUCCESS)
+        {
+            PrintMessage(("geometry upload for '" + surface.textureName + "': " +
+                          std::string(qrGetResultDescription(uploadResult))).c_str(), this);
+            return false;
+        }
+
+        uploadedSurfaces++;
     }
+
+    if (uploadedSurfaces == 0 && !m_scene.vertices.empty() && !m_scene.indices.empty())
+    {
+        QrGeometryUploadInfo upload = {};
+        upload.uniqueID = 1;
+        upload.flags = QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
+        upload.geomType = QR_GEOMETRY_TYPE_STATIC;
+        upload.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
+        upload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
+        upload.vertexCount = uint32_t(m_scene.vertices.size());
+        upload.pVertices = m_scene.vertices.data();
+        upload.indexCount = uint32_t(m_scene.indices.size());
+        upload.pIndices = m_scene.indices.data();
+        upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
+        upload.geomMaterial.layerMaterials[0] = m_material;
+        upload.defaultRoughness = 0.7f;
+        upload.defaultMetallicity = 0.0f;
+        upload.defaultEmission = 0.0f;
+        upload.transform.matrix[0][0] = 1.0f;
+        upload.transform.matrix[1][1] = 1.0f;
+        upload.transform.matrix[2][2] = 1.0f;
+
+        const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
+
+        if (uploadResult != QR_SUCCESS)
+        {
+            PrintMessage(("geometry upload: " + std::string(qrGetResultDescription(uploadResult))).c_str(), this);
+            return false;
+        }
+    }
+
+    PrintMessage(("geometry upload: " + std::to_string(uploadedSurfaces) + " surfaces").c_str(),
+                 this);
 
     const QrResult submitResult = qrSubmitStaticGeometries(m_instance);
     PrintMessage(("submit static scene: " + std::string(qrGetResultDescription(submitResult))).c_str(), this);
@@ -759,6 +925,8 @@ void EditorApp::DrawPanel(float deltaSeconds)
         ImGui::TextUnformatted("Scene");
         ImGui::Text("Vertices  %zu", m_scene.vertices.size());
         ImGui::Text("Triangles %zu", m_scene.indices.size() / 3);
+        ImGui::Text("Surfaces  %zu  Textures %zu", m_scene.surfaces.size(),
+                    m_scene.textures.size());
 
         if (m_scene.hasBounds)
         {
@@ -822,6 +990,10 @@ int EditorApp::Run(int showCommand)
             else if (i + 1 < argc && argument == L"--blue-noise")
             {
                 m_blueNoisePath = Utf8FromWide(argv[++i]);
+            }
+            else if (i + 1 < argc && argument == L"--gamedir")
+            {
+                m_gamePath = Utf8FromWide(argv[++i]);
             }
         }
 
@@ -894,6 +1066,20 @@ int EditorApp::Run(int showCommand)
 void EditorApp::Shutdown()
 {
     m_ui.Shutdown();
+
+    if (m_instance != nullptr)
+    {
+        for (QrMaterial &material : m_textureMaterials)
+        {
+            if (material != QR_NO_MATERIAL)
+            {
+                qrDestroyMaterial(m_instance, material);
+                material = QR_NO_MATERIAL;
+            }
+        }
+    }
+
+    m_textureMaterials.clear();
 
     if (m_material != QR_NO_MATERIAL && m_instance != nullptr)
     {

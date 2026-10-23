@@ -4,9 +4,11 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 #include <qray/qray.h>
 
+#include "Assets.h"
 #include "EditorUi.h"
 #include "Scene.h"
 
@@ -31,9 +33,12 @@ private:
     bool CreateWindowInstance(int showCommand);
     bool CreateRenderer();
     bool CreateMaterial();
+    bool CreateTextureMaterials();
     bool CreateUi();
     bool LoadScene();
     bool UploadScene();
+    QrMaterial SurfaceMaterial(const EditorSurface &surface) const;
+    static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
     void UploadSun();
@@ -47,9 +52,13 @@ private:
     HINSTANCE m_instanceHandle = nullptr;
     QrInstance m_instance = nullptr;
     QrMaterial m_material = QR_NO_MATERIAL;
+    std::vector<QrMaterial> m_textureMaterials;
+    std::vector<uint8_t> m_palette;
+    EditorAssetSource m_assets;
     EditorUi m_ui;
     EditorScene m_scene;
     std::string m_scenePath;
+    std::string m_gamePath;
     std::string m_shaderFolder;
     std::string m_blueNoisePath;
     std::string m_fontPath;
