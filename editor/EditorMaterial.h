@@ -52,8 +52,9 @@ inline constexpr size_t kEditorEmissiveBlockMax = 10;
 // a packed material texture -- the extra images, bump_scale, transparency, luma_blend -- are
 // baked into the albedo / normal / roughness-metallic-emission set by EditorMaterialBakes, the
 // way the game's texture manager synthesizes a material texture at load. Keys the SDK has no
-// slot for at all (overlay, colored emissive, force_rasterize, light_*) stay absent instead of
-// being sliders that would not change the picture.
+// slot for at all (overlay, colored emissive, force_rasterize) stay absent instead of being
+// sliders that would not change the picture; the light_* group is carried as data, which is
+// what "Regenerate from map" writes.
 struct EditorMaterialParams
 {
     // The game's texture_base: the image the surface shows instead of its own. An embedder that
@@ -131,6 +132,21 @@ struct EditorMaterialParams
     // entry omits them, and the values a block the editor appends starts from.
     float lumaThreshold = 0.02f;
     float lumaFeather = 0.0f;
+
+    // Light: the rest of the group the game's is_light (`luma` above) belongs to. They say what
+    // light the material's own surface casts and how bright and which colour it is. The SDK's
+    // upload path derives a surface's cast light from geometry it does not carry for an alias
+    // model, so the editor authors, reads and re-writes these keys instead of showing sliders
+    // that would not move the picture; the merge then keeps a light material's cast light on the
+    // way back to the game.
+    bool lightStyles = false;
+    bool hasLightColor = false;
+    float lightColor[3] = { 1.0f, 1.0f, 1.0f };
+    float lightBrightness = 1.0f;
+    // The game's RT_MAT default: -1 is "unset", and only a value above 0 is written.
+    float lightFocus = -1.0f;
+    float lightFocusSoft = -1.0f;
+    bool lightProjector = false;
 };
 
 // The roughness the editor has always used for BSP surfaces, kept as the value a
@@ -160,6 +176,12 @@ public:
 
     // Index of the material a texture name maps to, or -1.
     int32_t IndexOf(const std::string &name) const;
+
+    // The index of `name`, appending an entry with default parameters when the scene has no
+    // surface of that name. This is how a material the map does not texture yet -- an alias
+    // model's progs/foo.mdl:frame0, which the editor's scene carries no geometry for -- is
+    // authored: the game's regenerate creates the same entries in its own table.
+    int32_t Ensure(const std::string &name);
 
     // The material of a surface, or the defaults when the table has no entry for its texture.
     const EditorMaterialParams &For(const EditorSurface &surface) const;
