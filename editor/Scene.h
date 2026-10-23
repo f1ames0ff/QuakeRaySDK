@@ -60,6 +60,12 @@ struct EditorLight
     float direction[3] = { 0.0f, 0.0f, 1.0f };
     float angleInner = 0.0f;
     float angleOuter = 30.0f;
+    // The light style index the game animates the light with, the same index the map's `style`
+    // key names and the same one rt_custom_style_names indexes: 0 is steady, 1..11 are the
+    // animated styles. The preview stays at full brightness because a standalone editor has
+    // none of the server's lightstyle strings, and an empty string leaves d_lightstylevalue[]
+    // at 256 - which is exactly what a map light without a style renders as.
+    int32_t style = 0;
     std::string className;
 };
 
