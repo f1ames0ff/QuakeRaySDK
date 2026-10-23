@@ -348,6 +348,11 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("texture_gloss", params.glossTexture);
     }
 
+    if (!params.overlayTexture.empty())
+    {
+        append("texture_overlay", params.overlayTexture);
+    }
+
     if (params.textureScaleU != 1.0f)
     {
         append("texture_scale_u", FormatFloat(params.textureScaleU));
@@ -455,6 +460,11 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     if (params.exactNormals)
     {
         append("exact_normals", "true");
+    }
+
+    if (params.forceRasterize)
+    {
+        append("force_rasterize", "true");
     }
 
     // QRE_WriteMaterial writes the light group's own keys, in this order, after the blocks.
@@ -1625,6 +1635,10 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         {
             params.glossTexture = TextOf(value);
         }
+        else if (key == "texture_overlay")
+        {
+            params.overlayTexture = TextOf(value);
+        }
         else if (key == "texture_scale_u")
         {
             params.textureScaleU = FloatOf(value, params.textureScaleU);
@@ -1681,6 +1695,10 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         else if (key == "exact_normals")
         {
             params.exactNormals = BoolOf(value, params.exactNormals);
+        }
+        else if (key == "force_rasterize")
+        {
+            params.forceRasterize = BoolOf(value, params.forceRasterize);
         }
         else if (key == "light_styles")
         {

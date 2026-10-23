@@ -3764,8 +3764,8 @@ void EditorApp::DrawMaterials()
                 changed = true;
             }
 
-            // The three extra images a packed material set carries. NONE keeps whatever the
-            // source image already puts in that channel.
+            // The extra images a packed material set carries. NONE keeps whatever the source
+            // image already puts in that channel.
             const auto textureCombo = [this, &changed](const char *label, std::string &name) {
                 bool edited = false;
 
@@ -3812,12 +3812,14 @@ void EditorApp::DrawMaterials()
             textureCombo("Gloss##tex", material.glossTexture);
             textureCombo("Normal##tex", material.normalTexture);
             textureCombo("Emissive##tex", material.emissiveTexture);
+            textureCombo("Overlay##tex", material.overlayTexture);
 
             if (ImGui::Button("Reset extra textures"))
             {
                 material.glossTexture.clear();
                 material.normalTexture.clear();
                 material.emissiveTexture.clear();
+                material.overlayTexture.clear();
                 changed = true;
             }
         }
@@ -3880,6 +3882,17 @@ void EditorApp::DrawMaterials()
         if (ImGui::CollapsingHeader("Model", ImGuiTreeNodeFlags_DefaultOpen))
         {
             changed |= ImGui::Checkbox("Exact normals##model", &material.exactNormals);
+
+            // The game's force_rasterize only reaches alias models and sprites, which this editor
+            // does not upload, and the SDK's upload info has no such flag. The checkbox exists so
+            // the key survives a trip through the editor, and the tooltip says it changes nothing.
+            changed |= ImGui::Checkbox("Force rasterize##model", &material.forceRasterize);
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("The game reads this for alias models and sprites only; "
+                                  "BSP surfaces and the traced path ignore it.");
+            }
         }
 
         if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen))
