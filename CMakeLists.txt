@@ -14,6 +14,19 @@ endif()
 
 include(GNUInstallDirs)
 
+# Resolved this early on purpose: the GPU test targets below copy the FidelityFX
+# runtime DLL next to their executables, and a variable that is still unset there
+# expands to an empty prefix silently - the copy is then baked as
+# "/PrebuiltSignedDLL/amd_fidelityfx_vk.dll" and only fails at link time, on the
+# first configure of a fresh build tree. The value is validated further down,
+# next to the rest of the FidelityFX wiring.
+if(WIN32)
+    if(NOT DEFINED QR_FFX_SDK_ROOT OR QR_FFX_SDK_ROOT STREQUAL "")
+        set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
+            CACHE PATH "FidelityFX SDK root (contains ffx-api/include and PrebuiltSignedDLL)")
+    endif()
+endif()
+
 set(renderer_CXX_STANDARD 20)
 
 # The renderer source + public headers + shaders live in this folder.
@@ -227,7 +240,7 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_spatial_twin_gpu COMMAND qray_spatial_twin_gpu
         "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${CMAKE_CURRENT_SOURCE_DIR}/../gfx/textures")
     set_tests_properties(qray_spatial_twin_gpu PROPERTIES TIMEOUT 180
-        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
     get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
     find_program(QR_DXC NAMES dxc HINTS "${QR_VULKAN_BIN}" REQUIRED)
@@ -259,7 +272,7 @@ if(QR_BUILD_TESTS)
         target_link_libraries(qray_clouds_smoke PRIVATE user32)
     endif()
     add_test(NAME qray_clouds_gpu COMMAND qray_clouds_smoke "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_PROBE_DIR}")
-    set_tests_properties(qray_clouds_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+    set_tests_properties(qray_clouds_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
     add_custom_command(OUTPUT "${QR_PROBE_DIR}/LocalExposureProbe.comp.spv"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
@@ -296,7 +309,7 @@ if(QR_BUILD_TESTS)
         target_link_libraries(qray_posteffects_smoke PRIVATE user32)
     endif()
     add_test(NAME qray_posteffects_gpu COMMAND qray_posteffects_smoke "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_PROBE_DIR}")
-    set_tests_properties(qray_posteffects_gpu PROPERTIES TIMEOUT 120 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+    set_tests_properties(qray_posteffects_gpu PROPERTIES TIMEOUT 120 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
     set(QR_DTAL_PROBE "${QR_PROBE_DIR}/DtalPerf.comp.spv")
     add_custom_command(OUTPUT "${QR_DTAL_PROBE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
@@ -320,7 +333,7 @@ if(QR_BUILD_TESTS)
         target_link_libraries(qray_dtal_perf PRIVATE user32)
     endif()
     add_test(NAME qray_dtal_perf COMMAND qray_dtal_perf "${QR_DTAL_PROBE}" "${QR_PROBE_DIR}/DtalPerf.baseline.txt")
-    set_tests_properties(qray_dtal_perf PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+    set_tests_properties(qray_dtal_perf PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
 endif()
 
@@ -368,11 +381,6 @@ target_link_libraries(renderer PRIVATE
 )
 
 if(WIN32)
-    if(NOT DEFINED QR_FFX_SDK_ROOT OR QR_FFX_SDK_ROOT STREQUAL "")
-        set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
-            CACHE PATH "FidelityFX SDK root (contains ffx-api/include and PrebuiltSignedDLL)")
-    endif()
-
     set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include")
     set(QR_FFX_VK_LIBRARY "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib")
 
