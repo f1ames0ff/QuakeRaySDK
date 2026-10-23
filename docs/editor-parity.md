@@ -54,12 +54,12 @@ no implementation.
 | Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; there is no mask texture and no preview |
 | Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type; the parameters are not editable |
 | Light colour authoring | done | `Colour` (`ColorEdit3`) writes `EditorLight::tint`; `SetEditorLightTint` rebuilds radiance as `intensity * kEditorLightIntensityScale * tint` |
-| Light position and offset authoring | done | `Position` (`DragFloat3`) moves the light and re-resolves its cluster through `ResolveEditorLightCluster` |
-| Light spot direction and inner/outer angles | missing | `qrUploadSpotLight` exists in the SDK; the editor never calls it |
+| Light position and offset authoring | done | `Position` (`DragFloat3`) moves the light and re-resolves its cluster through `ResolveEditorLightCluster`; `Place at pick` drops it 8 units in front of the picked surface along the pick ray and aims the cone down that ray |
+| Light spot direction and inner/outer angles | done | `Spot` turns the cone on, `Spot dir` is three separate `##dirx/##diry/##dirz` fields, `Inner deg`/`Outer deg` the falloff, all through `qrUploadSpotLight`. Measured on `e1m1` at radius 300: spot off→on changes 52820 viewport pixels (mean 3.77) against a 1360/1.01 noise floor, direction mean 138.41, outer 0→60° mean 77.19, inner 0→40° mean 43.20 |
 | Light style authoring | missing | |
 | Light list for the Entity tab | missing | needs a list widget and the light table the game builds |
 | Add / duplicate / clone / remove a custom light | missing | the SDK has no custom-light store; this is editor state |
-| Placement mode (aim and drop a light) | missing | |
+| Placement mode (aim and drop a light) | done | `Place at pick` on a surface pick; the light lands 8 units off the surface its cluster comes from |
 | Light drag and axis gizmo | missing | |
 | Global settings table (39 rows) | done | `EditorSettings.cpp` `BuildEditorFrameParams` fills `QrDrawFrameSkyParams`, `QrDrawFrameTonemappingParams`, `QrDrawFrameVolumetricParams` and `QrDrawFrameLevelFogParams`; `DrawGlobalSettings` draws seven groups |
 | Fog authoring | done | `Level fog` group: colour, density (divided by 64 like the worldspawn key), sky blend |

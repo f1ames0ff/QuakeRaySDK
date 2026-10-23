@@ -49,6 +49,8 @@ private:
     void SunDirection(float direction[3]) const;
     void UploadLights();
     void UploadClusterLightSources();
+    // Reports whether one light is listed by the cluster it resolved into.
+    void LogLightCluster(int32_t index);
     void DrawPanel(float deltaSeconds);
     void DrawGlobalSettings();
     void DrawMaterials();
@@ -132,8 +134,8 @@ private:
     bool m_hasPickPoint = false;
     uint32_t m_pickCluster = 0;
 
-    // Last selection and scroll offset the light fields logged their rectangle for, so the log
-    // carries one line per layout change instead of one per frame.
-    int32_t m_loggedLightRect = -1;
-    float m_loggedPanelScroll = -1.0f;
+    // Hash of the light field rectangles the panel last logged, so the log carries one line per
+    // layout change - including the fields the spot checkbox adds or removes - instead of one per
+    // frame. Zero means nothing has been logged yet.
+    uint64_t m_loggedLightLayout = 0;
 };
