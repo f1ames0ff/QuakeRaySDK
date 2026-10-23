@@ -75,6 +75,17 @@ struct EditorLight
 inline constexpr float kEditorLightIntensityScale =
     10.0f * (1.0f / (0.025f * 0.025f)) / 100.0f;
 
+// The scene units a metre is: the SDK's spatial convention maps a metre to forty units, so a
+// length a level file states in metres is forty times as many units here.
+inline constexpr float kEditorUnitsPerMeter = 40.0f;
+
+// The `light` value one unit of a level's custom-light `intensity` key is worth: the game gives
+// such a light RT_FIXUP_LIGHT_INTENSITY alone -- 1600 * 10, its area fix times
+// rt_globallight_mult -- where a map light also divides by rt_elight_normaliz (100). One file unit
+// is therefore a hundred `light` points, and RT_CUSTOM_INTENSITY_DEFAULT's 3 is exactly the
+// editor's own 300 default.
+inline constexpr float kEditorCustomLightIntensityUnits = 100.0f;
+
 // Writes the radiance the uploaded light carries for this `light` key value. Authoring changes
 // light.intensity, so colours must be refreshed through here rather than scaled twice.
 void SetEditorLightIntensity(EditorLight &light, float intensity);

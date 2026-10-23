@@ -77,19 +77,22 @@ uses.
 
 The session bar above the tabs holds `Apply`, `Cancel` and `Exit`, and the line
 above it names the state: `clean`, or `unsaved` with the number of materials
-touched. `Apply` writes the edits into the material document, `Cancel` re-reads
-the file into the panel so the viewport matches what a reload would show, and
-`Exit` closes the window, asking first when there are unsaved edits. The prompt
-answers with `Yes` (save, then exit), `No` (exit without writing) and `Escape`
-or the close box (stay). Every one of those actions reports through the toast
-under the viewport, because the panel is too tall to give the status a row of
-its own.
+touched and the level whose section was edited. `Apply` writes the edits into
+the material document and the level document, `Cancel` re-reads both files into
+the panel so the viewport matches what a reload would show, and `Exit` closes
+the window, asking first when there are unsaved edits. The prompt answers with
+`Yes` (save, then exit), `No` (exit without writing) and `Escape` or the close
+box (stay). Every one of those actions reports through the toast under the
+viewport, because the panel is too tall to give the status a row of its own.
 
 The session also logs its contract, so a scripted run does not have to read
-pixels: `session: <path> read, <n> entries` on startup, `session: touched <name>`
-on the first edit of a material, `session: saved <path>` and
-`session: changes discarded`, and `session: exit requested with unsaved changes`,
-`session: prompt dismissed` around the prompt. The bar logs its three button
+pixels: `session: <path> read, <n> entries` and
+`session: <path> read, <n> lights for <level>` on startup, `session: touched
+<name>` on the first edit of a material, `session: level <level> touched` when
+the level section first differs from the file, `session: saved <path>` and
+`session: level <level> written to <path>` on a save, `session: changes
+discarded`, and `session: exit requested with unsaved changes`, `session:
+prompt dismissed` around the prompt. The bar logs its three button
 rectangles as `panel session: Apply …` and the prompt logs its two as
 `panel prompt: Yes … No …`, both whenever the layout moves.
 
@@ -105,6 +108,33 @@ migrated to `qray_materials:` / `qray_lights:`, an existing target is copied to
 `qray.backup_materials.yaml` first, and a missing final newline is added before
 a new entry so an append cannot glue two records together. `Apply` reloads the
 document afterwards, so the list markers follow the file it just wrote.
+
+The level half of the session writes `qray.lights.yaml`, the root-mapping file
+the game reads by level name. Inside the level's own section the editor owns
+`fog:` (`color:` as `rrggbb`, `density:`, `enabled:`) and `lights:`
+(`origin:`, `radius:`, `intensity:`, `color:` and, for a spot, `dir:`,
+`angle_inner:`, `angle_outer:`) plus `style:` when the light names one, and it
+keeps every other block the section carries - `sky:`, comments, anything a hand
+edit added - verbatim at the indent it had. The other levels' sections are not
+touched and a level the file does not know yet is appended, so one file can hold
+the whole episode.
+
+The numbers are the file's, not the panel's, because the game reads the same
+keys: `origin` is a scene-space position in editor units (40 per metre),
+`radius` is metres, and a custom light's `intensity` reaches
+`RT_FIXUP_LIGHT_INTENSITY` without the `/ rt_elight_normaliz` a map light takes,
+so one file unit is 100 editor points. A light added with the panel defaults
+therefore writes `intensity: 2` and `radius: 0.4` and reads back unchanged.
+`fog.density` is written as authored - the frame divides it by 64 - and the fog
+colour starts white, which is what the engine shows for a level whose section
+has no `color:` key. `enabled:` follows the density, because the panel has one
+slider and no second switch.
+
+A level whose last custom light was removed keeps its `fog:` block and loses
+`lights:`, which is how the game reads "no custom lights here". The read side is
+the same: an existing `lights:` block replaces the panel's custom store, a
+missing one leaves it alone, so a level the file does not know yet keeps the
+lights added before its first save.
 
 `Entities` holds the two light tables the game builds. The `Map` table lists the
 lights the BSP spawned, the `Custom` table the ones added in the session; both
@@ -168,13 +198,18 @@ options remain available for a different deployment layout:
     --blue-noise C:\path\to\textures\BlueNoise_LDR_RGBA_128.png `
     --scene C:\path\to\e1m1.bsp `
     --materials C:\path\to\qray.materials.yaml `
+    --lights C:\path\to\qray.lights.yaml `
     --tab Entities
 ```
 
-`--materials` names the document the session reads on start and writes on
-`Apply`; without it the editor targets `qray.materials.yaml` next to the scene.
-The path is logged as `session: <path> read, <n> entries` on startup, which is
-also how a scripted session tells which entries the file already carried.
+`--materials` names the material document the session reads on start and writes
+on `Apply`; without it the editor targets `qray.materials.yaml` next to the
+scene. `--lights` names the level document the same way, defaulting to
+`qray.lights.yaml` next to the scene, and its previous generation is copied to
+`qray.backup_lights.yaml` before a write. Both paths are logged on startup -
+`session: <path> read, <n> entries` and
+`session: <path> read, <n> lights for <level>` - which is also how a scripted
+session tells what the files already carried.
 
 `--tab` opens that tab on the first frame, so a scripted session does not have to
 click the tab bar. It takes the tab label, not a pixel position, because the tab
@@ -192,10 +227,12 @@ The remaining gap against the in-game editor is tracked in
 is the source of truth for what is left. The global settings block, the
 material parameter table, light authoring - colour, position, the spot cone,
 the aim-and-drop placement and both drags with the axis gizmo - and the session
-lifecycle that writes `qray.materials.yaml` back are done. What the session does
-not write yet is the level scope above the material scope, the `fog:` and
-`qray_lights:` records the game adds; after that come the material parameters
-the game has and the SDK cannot express, which need new upload fields first.
+lifecycle that writes `qray.materials.yaml` and the level's `fog:` / `lights:`
+records back are done. What the session does not write yet is the level's
+`sky:` block and the scope switch that decides whether the sky, sun and cloud
+settings belong to the level or to the global store; after that come the
+material parameters the game has and the SDK cannot express, which need new
+upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
 remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`

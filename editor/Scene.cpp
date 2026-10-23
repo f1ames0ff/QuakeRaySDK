@@ -461,10 +461,9 @@ bool StartsWithLight(const std::string &text)
 
 // Mirrors RT_UploadAllElights + RT_LIGHT_Emit + RT_FIXUP_LIGHT_INTENSITY through
 // kEditorLightIntensityScale. The radius keeps the rt_elight_radius default of one
-// centimetre, which is 40 scene units at the SDK's 40 units per metre. Map light
-// colours stay at the default light colour, exactly as the game ignores
-// `_color`/`color` keys and the stored has_color flag.
-constexpr float kQuakeUnitsPerMeter = 40.0f;
+// centimetre, which is 40 scene units at the SDK's 40 units per metre
+// (kEditorUnitsPerMeter). Map light colours stay at the default light colour, exactly as
+// the game ignores `_color`/`color` keys and the stored has_color flag.
 constexpr float kDefaultLightIntensity = 200.0f;
 constexpr float kDefaultLightRadiusMeters = 0.01f;
 
@@ -1101,7 +1100,7 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         light.position[0] = position[0];
         light.position[1] = position[1];
         light.position[2] = position[2];
-        light.radius = kDefaultLightRadiusMeters * kQuakeUnitsPerMeter;
+        light.radius = kDefaultLightRadiusMeters * kEditorUnitsPerMeter;
         light.cluster = ResolveLightCluster(scene, light.position);
         light.className = className;
 

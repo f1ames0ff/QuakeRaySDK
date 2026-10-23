@@ -41,16 +41,6 @@ uint64_t CustomLightUniqueID(size_t index)
     return kFirstCustomLightUniqueID + uint64_t(index);
 }
 
-// The light styles rt_custom_style_names names, in the same order: the index is the engine's
-// own d_lightstylevalue[] slot, so style 3 is the candle the map's `style` key also selects.
-const char *const kEditorStyleNames[] = {
-    "steady",        "flicker",      "slow strong pulse", "candle",       "fast strobe",
-    "gentle pulse",  "flicker B",    "candle B",          "candle C",     "slow strobe",
-    "fluorescent",   "slow pulse",
-};
-
-constexpr int32_t kEditorStyleCount = int32_t(sizeof(kEditorStyleNames) / sizeof(kEditorStyleNames[0]));
-
 // -1 is the Entity tab's NONE: the game's own combo offers it for a map light that must stay
 // unmodulated, so the editor has to name it rather than clamp it to steady.
 const char *EditorStyleName(int32_t style)
@@ -64,9 +54,10 @@ const char *EditorStyleName(int32_t style)
 }
 
 // A light the editor invents starts where the game's Custom tab starts: RT_CUSTOM_RADIUS_DEFAULT
-// (0.4 m, 16 units at 40 units per metre) and the 200 the map's `light` key defaults to.
-constexpr float kEditorNewLightRadiusUnits = 0.4f * 40.0f;
-constexpr float kEditorNewLightIntensity = 200.0f;
+// (0.4 m, 16 units at 40 units per metre) and twice the unit a level's `intensity` key states,
+// which is the 200 the map's `light` key defaults to.
+constexpr float kEditorNewLightRadiusUnits = 0.4f * kEditorUnitsPerMeter;
+constexpr float kEditorNewLightIntensity = 2.0f * kEditorCustomLightIntensityUnits;
 
 // A light is picked when the ray passes this close to its origin, the way QRE_LightUnderCrosshair
 // accepts a light the crosshair is near rather than exactly on.
@@ -644,6 +635,7 @@ bool EditorApp::LoadScene()
     m_materials.Rebuild(m_scene);
     m_selectedMaterial = m_materials.Empty() ? -1 : 0;
     LoadMaterialsSession();
+    LoadLightsSession();
     return true;
 }
 
@@ -3460,6 +3452,128 @@ void EditorApp::LoadMaterialsSession()
     PrintMessage(message.c_str(), this);
 }
 
+EditorLevelFog EditorApp::LevelFog() const
+{
+    EditorLevelFog fog;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        fog.color[axis] = m_settings.fogColor[axis];
+    }
+
+    fog.density = std::max(0.0f, m_settings.fogDensity);
+    // The panel has one density slider and no second switch, so a non-zero density is what shows
+    // the fog: a file that says `enabled: false` reads back as density 0 rather than as a value
+    // the level does not draw.
+    fog.enabled = fog.density > 0.0f;
+    return fog;
+}
+
+EditorLevelLight EditorApp::LevelLight(const EditorLight &light) const
+{
+    EditorLevelLight level;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        level.origin[axis] = light.position[axis];
+        level.color[axis] = light.tint[axis];
+        level.direction[axis] = light.direction[axis];
+    }
+
+    level.radius = light.radius / kEditorUnitsPerMeter;
+    level.intensity = light.intensity / kEditorCustomLightIntensityUnits;
+    level.spot = light.spot;
+    level.angleInner = light.angleInner;
+    level.angleOuter = light.angleOuter;
+    level.style = light.style;
+    return level;
+}
+
+std::vector<EditorLevelLight> EditorApp::LevelLights() const
+{
+    std::vector<EditorLevelLight> lights;
+    lights.reserve(m_customLights.size());
+
+    for (const EditorLight &light : m_customLights)
+    {
+        lights.push_back(LevelLight(light));
+    }
+
+    return lights;
+}
+
+std::string EditorApp::LevelFingerprint() const
+{
+    return RenderEditorLevelSection(m_sessionPaths.level, LevelFog(), LevelLights());
+}
+
+void EditorApp::LoadLightsSession()
+{
+    std::string error;
+
+    if (!m_levelDocument.Load(m_sessionPaths.lights, error))
+    {
+        PrintMessage(("session: " + error).c_str(), this);
+        Notify(error);
+        return;
+    }
+
+    const EditorLevelDocument::ReadResult read = m_levelDocument.ReadLevel(m_sessionPaths.level);
+
+    if (read.hasFog)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            m_settings.fogColor[axis] = read.fog.color[axis];
+        }
+
+        m_settings.fogDensity = read.fog.enabled ? std::max(0.0f, read.fog.density) : 0.0f;
+    }
+
+    // A section that carries `lights:` owns the level's lights, so the read replaces whatever the
+    // editor holds. A section without the block leaves the panel's own lights alone, which is what
+    // makes a level the file does not know yet keep the lights added before its first save.
+    if (read.hasLights)
+    {
+        m_customLights.clear();
+        m_selectedCustomLight = -1;
+
+        for (const EditorLevelLight &entry : read.lights)
+        {
+            EditorLight light;
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                light.position[axis] = entry.origin[axis];
+                light.direction[axis] = entry.direction[axis];
+            }
+
+            light.radius = entry.radius * kEditorUnitsPerMeter;
+            light.spot = entry.spot;
+            light.angleInner = entry.angleInner;
+            light.angleOuter = entry.angleOuter;
+            light.style = entry.style;
+            light.className = "custom";
+            light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+
+            const float tint[3] = { entry.color[0], entry.color[1], entry.color[2] };
+            SetEditorLightTint(light, tint);
+            SetEditorLightIntensity(light, entry.intensity * kEditorCustomLightIntensityUnits);
+            ClampEditorLightCone(light);
+            m_customLights.push_back(light);
+        }
+    }
+
+    m_levelTouched = false;
+    m_levelFingerprint = LevelFingerprint();
+
+    const std::string message = "session: " + m_sessionPaths.lights +
+                                (m_levelDocument.Exists() ? " read, " : " absent, new file on apply, ") +
+                                std::to_string(m_customLights.size()) + " lights for " +
+                                m_sessionPaths.level;
+    PrintMessage(message.c_str(), this);
+}
+
 void EditorApp::TouchMaterial(const std::string &name)
 {
     if (std::find(m_touchedMaterials.begin(), m_touchedMaterials.end(), name) == m_touchedMaterials.end())
@@ -3473,64 +3587,118 @@ void EditorApp::TouchMaterial(const std::string &name)
 
 bool EditorApp::ApplySession()
 {
-    if (m_touchedMaterials.empty())
+    // Rendering the section rather than trusting the latch also settles an edit that was taken
+    // back: nothing differs from the file, so nothing is written for it.
+    const std::string levelSection = LevelFingerprint();
+    const bool levelChanged = levelSection != m_levelFingerprint;
+
+    if (m_touchedMaterials.empty() && !levelChanged)
     {
         PrintMessage("session: apply with nothing touched", this);
-        Notify("nothing to save: no material was edited");
+        Notify("nothing to save: no material or level was edited");
         return false;
-    }
-
-    std::vector<EditorMaterialEntry> entries;
-    entries.reserve(m_touchedMaterials.size());
-
-    for (const std::string &name : m_touchedMaterials)
-    {
-        const int32_t index = m_materials.IndexOf(name);
-
-        if (index >= 0)
-        {
-            entries.push_back(EditorMaterialEntry{ name, m_materials.At(size_t(index)) });
-        }
     }
 
     std::string error;
-    const std::string merged = m_materialsDocument.WriteMerged(entries);
-    const bool hadFile = m_materialsDocument.Exists();
 
-    // The previous generation is kept beside the target, as the game keeps one on every save, so
-    // a merge that dropped a line can be undone by copying the backup back.
-    if (hadFile && !CopyEditorFile(m_sessionPaths.materials, m_sessionPaths.materialsBackup, error))
+    // The game's apply writes the whole merged session, so a target that does not exist yet is
+    // created by the first save even when only the level was edited.
+    const bool writeMaterials = !m_touchedMaterials.empty() || !m_materialsDocument.Exists();
+
+    if (writeMaterials)
     {
-        PrintMessage(("session: " + error).c_str(), this);
-        Notify(error);
-        return false;
+        std::vector<EditorMaterialEntry> entries;
+        entries.reserve(m_touchedMaterials.size());
+
+        for (const std::string &name : m_touchedMaterials)
+        {
+            const int32_t index = m_materials.IndexOf(name);
+
+            if (index >= 0)
+            {
+                entries.push_back(EditorMaterialEntry{ name, m_materials.At(size_t(index)) });
+            }
+        }
+
+        const std::string merged = m_materialsDocument.WriteMerged(entries);
+        const bool hadFile = m_materialsDocument.Exists();
+
+        // The previous generation is kept beside the target, as the game keeps one on every save,
+        // so a merge that dropped a line can be undone by copying the backup back.
+        if (hadFile && !CopyEditorFile(m_sessionPaths.materials, m_sessionPaths.materialsBackup, error))
+        {
+            PrintMessage(("session: " + error).c_str(), this);
+            Notify(error);
+            return false;
+        }
+
+        if (!WriteEditorFile(m_sessionPaths.materials, merged, error))
+        {
+            PrintMessage(("session: " + error).c_str(), this);
+            Notify(error);
+            return false;
+        }
+
+        m_touchedMaterials.clear();
+
+        std::string reloadError;
+
+        if (!m_materialsDocument.Load(m_sessionPaths.materials, reloadError))
+        {
+            PrintMessage(("session: " + reloadError).c_str(), this);
+        }
+
+        PrintMessage(("session: saved " + m_sessionPaths.materials).c_str(), this);
+        Notify("saved " + m_sessionPaths.materials);
     }
 
-    if (!WriteEditorFile(m_sessionPaths.materials, merged, error))
+    if (levelChanged)
     {
-        PrintMessage(("session: " + error).c_str(), this);
-        Notify(error);
-        return false;
+        const std::string merged =
+            m_levelDocument.WriteMerged(m_sessionPaths.level, LevelFog(), LevelLights());
+        const bool hadFile = m_levelDocument.Exists();
+
+        if (hadFile && !CopyEditorFile(m_sessionPaths.lights, m_sessionPaths.lightsBackup, error))
+        {
+            PrintMessage(("session: " + error).c_str(), this);
+            Notify(error);
+            return false;
+        }
+
+        if (!WriteEditorFile(m_sessionPaths.lights, merged, error))
+        {
+            PrintMessage(("session: " + error).c_str(), this);
+            Notify(error);
+            return false;
+        }
+
+        // The document the next merge starts from has to be the file that was just written, so the
+        // other levels' sections and the keys the editor cannot express stay byte for byte.
+        std::string reloadError;
+
+        if (!m_levelDocument.Load(m_sessionPaths.lights, reloadError))
+        {
+            PrintMessage(("session: " + reloadError).c_str(), this);
+        }
+
+        m_levelTouched = false;
+        m_levelFingerprint = LevelFingerprint();
+
+        PrintMessage(("session: level " + m_sessionPaths.level + " written to " +
+                      m_sessionPaths.lights)
+                         .c_str(),
+                     this);
+        Notify("saved " + m_sessionPaths.lights);
     }
 
-    m_touchedMaterials.clear();
     m_sessionDirty = false;
-
-    std::string reloadError;
-
-    if (!m_materialsDocument.Load(m_sessionPaths.materials, reloadError))
-    {
-        PrintMessage(("session: " + reloadError).c_str(), this);
-    }
-
-    PrintMessage(("session: saved " + m_sessionPaths.materials).c_str(), this);
-    Notify("saved " + m_sessionPaths.materials);
     return true;
 }
 
 void EditorApp::DiscardSession()
 {
     LoadMaterialsSession();
+    LoadLightsSession();
     m_materialsChanged = true;
     PrintMessage("session: changes discarded", this);
     Notify("changes discarded");
@@ -3551,11 +3719,25 @@ void EditorApp::RequestExit()
 
 void EditorApp::DrawSessionBar()
 {
+    // The latch runs the comparison only until the level is first edited: after that the flag is
+    // the answer, and a save or a discard is what clears it.
+    if (!m_levelTouched && LevelFingerprint() != m_levelFingerprint)
+    {
+        m_levelTouched = true;
+        m_sessionDirty = true;
+        PrintMessage(("session: level " + m_sessionPaths.level + " touched").c_str(), this);
+    }
+
     std::string state = m_sessionDirty ? "unsaved" : "clean";
 
     if (!m_touchedMaterials.empty())
     {
         state += ", " + std::to_string(m_touchedMaterials.size()) + " touched";
+    }
+
+    if (m_levelTouched)
+    {
+        state += ", level " + m_sessionPaths.level;
     }
 
     // Only the file name fits the bar; the full path is in the log line the session prints and in
@@ -3591,8 +3773,9 @@ void EditorApp::DrawSessionBar()
 
     if (ImGui::IsItemHovered())
     {
-        ImGui::SetTooltip("Write the touched materials into the session file.\n"
-                          "Every other line of the file is kept as it was.");
+        ImGui::SetTooltip("Write the touched materials into the session file\n"
+                          "and this level's fog and lights into its level file.\n"
+                          "Every other line of both files is kept as it was.");
     }
 
     ImGui::SameLine();
@@ -3606,7 +3789,7 @@ void EditorApp::DrawSessionBar()
 
     if (ImGui::IsItemHovered())
     {
-        ImGui::SetTooltip("Reload the materials from the session file.");
+        ImGui::SetTooltip("Reload the materials, the fog and the lights from the session files.");
     }
 
     ImGui::EndDisabled();
@@ -3808,13 +3991,17 @@ int EditorApp::Run(int showCommand)
             {
                 m_materialsOverride = Utf8FromWide(argv[++i]);
             }
+            else if (i + 1 < argc && argument == L"--lights")
+            {
+                m_lightsOverride = Utf8FromWide(argv[++i]);
+            }
         }
 
         LocalFree(argv);
     }
 
     NormalizeFolder(m_shaderFolder);
-    m_sessionPaths = BuildEditorSessionPaths(m_materialsOverride, m_scenePath);
+    m_sessionPaths = BuildEditorSessionPaths(m_materialsOverride, m_lightsOverride, m_scenePath);
 
     if (!CreateWindowInstance(showCommand))
     {
