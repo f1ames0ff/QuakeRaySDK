@@ -122,7 +122,9 @@ embedding.
   spherical lights, level fog and final readback path.
 - Swapchain/UI geometry is pixel-positioned and never world-transformed.
 - Left-handed hosts keep their native coordinates and view matrix; the
-  renderer mirrors the frame and re-winds triangles. Arbitrarily rotated or
-  non-uniformly scaled instance data remains host-baked.
+  renderer mirrors the frame and re-winds triangles. Only the world convention
+  itself must be an axis-aligned signed permutation; instance transforms may
+  carry arbitrary rotations and non-uniform scales, which the frame converts
+  exactly. Reflected host data still needs its own triangle order reversed.
 - Keep `rayLength` positive and finite. The SDK accepts it up to its 10,000,000
   scene-unit safety ceiling; the depth buffer is `R32_SFLOAT`.
