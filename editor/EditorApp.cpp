@@ -951,8 +951,10 @@ void EditorApp::Frame()
     DrawSelectionOverlay();
     UpdateCamera(deltaSeconds);
     // Both draw over the panel: the prompt is the last thing a session shows, and the toast is
-    // the game editor's own way of reporting a save without a dialog.
+    // the game editor's own way of reporting a save without a dialog. The reset question is the
+    // game's other dialog: it is drawn in the same place, one at a time.
     DrawSessionPrompt();
+    DrawResetPrompt();
     DrawNotification();
     // Last, so the crosshair and the hints sit over everything the panel and the toast drew, and
     // so the hint block already knows whether a toast shares its corner.
@@ -2928,10 +2930,17 @@ void EditorApp::DrawLightList()
 namespace
 {
     // Opens a tab and records its rect straight away: ImGui has just submitted the tab's own item,
-    // so this is the only place the rect is still readable.
-    bool BeginLoggedTab(const char *label, ImGuiTabItemFlags flags, std::string &rects)
+    // so this is the only place the rect is still readable. `clickedTab` names the tab that took a
+    // left click this frame, whichever one is open afterwards.
+    bool BeginLoggedTab(const char *label, ImGuiTabItemFlags flags, std::string &rects,
+                        std::string &clickedTab)
     {
         const bool open = ImGui::BeginTabItem(label, nullptr, flags);
+
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+        {
+            clickedTab = label;
+        }
 
         const ImVec2 min = ImGui::GetItemRectMin();
         const ImVec2 max = ImGui::GetItemRectMax();
@@ -2977,6 +2986,10 @@ void EditorApp::DrawPanel(float deltaSeconds)
         // Tab rects are logged so a scripted session can click a neighbouring tab instead of
         // guessing where ImGui laid the bar out.
         std::string tabRects;
+        // The game's QR_GUI_Tabs reports a click on the tab that is already open as a reset
+        // request; the label open last frame is what tells the two apart.
+        const std::string previousTab = m_activePanelTab;
+        std::string clickedTab;
 
         if (ImGui::BeginTabBar("EditorTabs"))
         {
@@ -2991,8 +3004,9 @@ void EditorApp::DrawPanel(float deltaSeconds)
                 return ImGuiTabItemFlags_SetSelected;
             };
 
-            if (BeginLoggedTab("Scene", tabFlags("Scene"), tabRects))
+            if (BeginLoggedTab("Scene", tabFlags("Scene"), tabRects, clickedTab))
             {
+                m_activePanelTab = "Scene";
                 // The selection, light and sun blocks are taller than a 720p window once the
                 // panel is fixed at 660, so the tab scrolls and the key hints stay visible.
                 const float footerHeight =
@@ -3362,25 +3376,38 @@ void EditorApp::DrawPanel(float deltaSeconds)
                 ImGui::EndTabItem();
             }
 
-            if (BeginLoggedTab("Entities", tabFlags("Entities"), tabRects))
+            if (BeginLoggedTab("Entities", tabFlags("Entities"), tabRects, clickedTab))
             {
+                m_activePanelTab = "Entities";
                 DrawLightList();
                 ImGui::EndTabItem();
             }
 
-            if (BeginLoggedTab("Render", tabFlags("Render"), tabRects))
+            if (BeginLoggedTab("Render", tabFlags("Render"), tabRects, clickedTab))
             {
+                m_activePanelTab = "Render";
                 DrawGlobalSettings();
                 ImGui::EndTabItem();
             }
 
-            if (BeginLoggedTab("Materials", tabFlags("Materials"), tabRects))
+            if (BeginLoggedTab("Materials", tabFlags("Materials"), tabRects, clickedTab))
             {
+                m_activePanelTab = "Materials";
                 DrawMaterials();
                 ImGui::EndTabItem();
             }
 
             ImGui::EndTabBar();
+        }
+
+        // A click on the tab that was already open is the reset gesture, the way the game's tab
+        // bar reports it. The question comes first: this is the one control that removes files.
+        if (!clickedTab.empty() && clickedTab == previousTab && m_resetPrompt == 0 &&
+            m_sessionPrompt == 0)
+        {
+            m_resetPrompt = 1;
+            m_loggedResetLayout = 0;
+            PrintMessage(("session: reset requested from the " + clickedTab + " tab").c_str(), this);
         }
 
         const uint64_t tabLayout = std::hash<std::string>{}(tabRects) | 1u;
@@ -4697,6 +4724,75 @@ void EditorApp::DiscardSession()
     Notify("changes discarded");
 }
 
+namespace
+{
+
+// Removes one file the session wrote. A file that is already gone is the state a reset asks for,
+// so only a removal that fails while the file is still there is an error.
+bool RemoveSessionFile(const std::string &path, std::string &failed)
+{
+    if (path.empty() || std::remove(path.c_str()) == 0)
+    {
+        return true;
+    }
+
+    std::ifstream probe(path, std::ios::binary);
+
+    if (!probe.good())
+    {
+        return true;
+    }
+
+    failed = path;
+    return false;
+}
+
+}
+
+void EditorApp::ResetSession()
+{
+    // QRE_ResetAll with the standalone's file set: a session writes the materials file and the
+    // lights file and keeps one backup of each, and there is no editor file in flight. A removal
+    // that fails aborts the whole reset before anything is reloaded, which is the order the game
+    // uses so a half-removed session never looks reset.
+    std::string failed;
+
+    for (const std::string &path : { m_sessionPaths.materials, m_sessionPaths.lights,
+                                     m_sessionPaths.materialsBackup, m_sessionPaths.lightsBackup })
+    {
+        if (!RemoveSessionFile(path, failed))
+        {
+            const std::string message = "session: cannot remove " + failed + "; reset failed";
+
+            PrintMessage(message.c_str(), this);
+            Notify("cannot remove " + failed);
+            return;
+        }
+    }
+
+    // The panel goes back to the values a first run would have given it. The materials load
+    // themselves from the absent target, and the level-owned state is cleared here because an
+    // absent level section deliberately leaves the panel's own values alone: without this the fog,
+    // the sun and every `sky:` key would keep what the removed file had put there. A default
+    // constructed state is exactly the defaults, since nothing but a session load or the panel
+    // itself ever writes these.
+    m_settings = EditorRenderSettings{};
+    m_sun = EditorSunState{};
+    m_skyGlobals = EditorLevelSky{};
+    m_customLights.clear();
+    m_selectedCustomLight = -1;
+
+    LoadMaterialsSession();
+    LoadLightsSession();
+    m_materialsChanged = true;
+
+    const std::string message = "session: reset, removed " + m_sessionPaths.materials + " and " +
+                                m_sessionPaths.lights;
+
+    PrintMessage(message.c_str(), this);
+    Notify("session reset, defaults restored");
+}
+
 void EditorApp::RequestExit()
 {
     if (!m_sessionDirty)
@@ -4821,9 +4917,10 @@ void EditorApp::DrawSessionPrompt()
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
                                    viewport->Pos.y + viewport->Size.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    // A fixed size keeps the dialog in the same place on the frame it appears: an auto-resizing
-    // window only knows its size after the first layout, which makes it jump.
-    ImGui::SetNextWindowSize(ImVec2(440.0f, 148.0f), ImGuiCond_Always);
+    // A fixed width with a fitted height: the wrapped text and the path decide how tall the dialog
+    // is, and a height that is too small clips the buttons out of the window, where they cannot be
+    // clicked at all.
+    ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_Always);
 
     bool open = true;
     int32_t answer = 0;
@@ -4904,6 +5001,108 @@ void EditorApp::DrawSessionPrompt()
     {
         m_sessionPrompt = 0;
         PrintMessage("session: prompt dismissed", this);
+    }
+}
+
+void EditorApp::DrawResetPrompt()
+{
+    if (m_resetPrompt == 0)
+    {
+        return;
+    }
+
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
+                                   viewport->Pos.y + viewport->Size.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // Fixed width, fitted height: this one names the files so a session cannot remove a file the
+    // author did not expect, and the wrapped paths make the content taller than any height guessed
+    // here would be.
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+
+    bool open = true;
+    int32_t answer = 0;
+    std::string layout;
+
+    const auto noteRect = [&layout](const char *label) {
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        layout += std::string(" ") + label + " " + std::to_string(int(min.x)) + "," +
+                  std::to_string(int(min.y)) + " " + std::to_string(int(max.x)) + "," +
+                  std::to_string(int(max.y));
+    };
+
+    if (ImGui::Begin("Reset the session?", &open,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextWrapped("This removes the saved work of this session and sets the materials, "
+                           "the lights and the fog back to their defaults. The game loads the same "
+                           "files, so its edits go with them.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", m_sessionPaths.materials.c_str());
+        ImGui::TextWrapped("%s", m_sessionPaths.lights.c_str());
+        ImGui::Spacing();
+
+        const float buttonWidth =
+            (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+        if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f)))
+        {
+            answer = 1;
+        }
+
+        noteRect("Yes");
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f)))
+        {
+            answer = 2;
+        }
+
+        noteRect("No");
+
+        // The window rect is part of the line so a script can tell a button that sits inside the
+        // dialog from one the dialog is too small to show.
+        const ImVec2 pos = ImGui::GetWindowPos();
+        const ImVec2 size = ImGui::GetWindowSize();
+        layout = " window " + std::to_string(int(pos.x)) + "," + std::to_string(int(pos.y)) + " " +
+                 std::to_string(int(pos.x + size.x)) + "," + std::to_string(int(pos.y + size.y)) +
+                 layout;
+    }
+
+    ImGui::End();
+
+    const uint64_t layoutKey = std::hash<std::string>{}(layout) | 1u;
+
+    if (layoutKey != m_loggedResetLayout)
+    {
+        m_loggedResetLayout = layoutKey;
+        PrintMessage(("panel reset prompt:" + layout).c_str(), this);
+    }
+
+    // Escape and "No" both return to editing without touching a file, the way the game's Escape
+    // clears its reset flag.
+    if (answer == 0 && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    {
+        answer = 2;
+    }
+
+    if (answer == 0 && !open)
+    {
+        answer = 2;
+    }
+
+    if (answer == 1)
+    {
+        m_resetPrompt = 0;
+        ResetSession();
+    }
+    else if (answer == 2)
+    {
+        m_resetPrompt = 0;
+        PrintMessage("session: reset dismissed", this);
     }
 }
 

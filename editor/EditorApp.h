@@ -100,8 +100,12 @@ private:
     bool ApplySession();
     void DiscardSession();
     void RequestExit();
+    // QRE_ResetAll for a standalone session: removes the files the session saved and puts every
+    // panel back to its default, without touching anything the session did not write.
+    void ResetSession();
     void DrawSessionBar();
     void DrawSessionPrompt();
+    void DrawResetPrompt();
     void DrawNotification();
     void Notify(const std::string &text);
     // The Entity tab of the game editor: every light the frame uploads, map lights first, and
@@ -279,6 +283,12 @@ private:
     // An exit request that found unsaved changes: 1 shows the prompt, 0 means no prompt. Escape
     // and "No" both return to editing, as QRE_RequestExit's prompt does.
     int32_t m_sessionPrompt = 0;
+    // The reset question the game's tab bar opens when the open tab is clicked again: 1 shows the
+    // prompt, 0 means no prompt, and Escape returns to editing like the game's own dialog.
+    int32_t m_resetPrompt = 0;
+    // The panel tab that was open last frame: a click that lands on it again is the reset
+    // gesture rather than a switch to another tab.
+    std::string m_activePanelTab;
 
     // The toast of the game editor: one line in the corner, gone a few seconds later.
     std::string m_notifyText;
@@ -319,6 +329,9 @@ private:
     uint64_t m_loggedTabLayout = 0;
     uint64_t m_loggedSessionLayout = 0;
     bool m_loggedPromptLayout = false;
+    // Hash of the reset dialog's rectangles, so a re-opened dialog logs again when its fitted
+    // height changes with a longer path.
+    uint64_t m_loggedResetLayout = 0;
     uint64_t m_loggedStyleLayout = 0;
     uint64_t m_loggedGizmoLayout = 0;
 

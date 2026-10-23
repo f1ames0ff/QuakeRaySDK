@@ -71,8 +71,9 @@ no implementation.
 | Level/global scope switch | done | the `Sky` group's `Global settings` box selects the scope of the `sky:` block, which is written per key like the game's `CaptureScope`; see [Sky block](#sky-block) |
 | Apply / Cancel / Exit with a dirty prompt | done | `DrawSessionBar`, `ApplySession`, `DiscardSession`, `RequestExit` and `DrawSessionPrompt`. `WM_CLOSE` goes through the same prompt; `Yes` saves and exits, `No` exits without writing, `Escape` or the close box dismisses the prompt and keeps the session |
 | Save back to `qray.materials.yaml` | done | `EditorMaterialsDocument::WriteMerged` in `EditorSession.cpp`; `--materials <file>` picks the target, and the previous generation is copied to `qray.backup_materials.yaml` before a write |
-| Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded` and `nothing to save`, held six seconds and faded over the last one |
-| Modal dialogs | partial | the save-on-exit prompt (`DrawSessionPrompt`) is the only one; the game's other popups have no counterpart |
+| Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded`, `nothing to save` and `session reset, defaults restored`, held six seconds and faded over the last one |
+| Session reset | done | Clicking the tab that is already open asks first, the way `QR_GUI_Tabs` returns `reset = 1` for a re-click in `qr_editor.c`, and `ResetSession` then does what `QRE_ResetAll` does: the materials file, the lights file and both backups are removed, and the panel goes back to a first run's state. The panel's own values are replaced rather than "left alone", because an absent level section deliberately keeps what the panel holds -- fog, the sun and every `sky:` key would otherwise survive the file they came from. See [Reset](#reset) |
+| Modal dialogs | partial | two prompts: the save-on-exit prompt (`DrawSessionPrompt`) and the reset prompt (`DrawResetPrompt`). Both fix the width and let ImGui fit the height, so the buttons cannot end up outside a window that clips them. The game's remaining popups have no counterpart yet: `regen_prompt` ("Regenerate from map") needs a light-model flag `EditorLight` does not carry, and the texture chooser is the browser rather than a modal |
 | Crosshair and hint overlay | done | `DrawViewportOverlay` in `ImGui::GetForegroundDrawList()`: the game's four-tick crosshair with its shadow, the hint block and the drag prompt below. See [Viewport overlay](#viewport-overlay) |
 
 ## Materials
@@ -168,6 +169,11 @@ every entry the file carries into the material table, so the panel opens on the 
 rather than on the defaults, and `HasMaterial` decides which list rows carry the `*` marker the
 game's list uses for "the file owns this name".
 
+The table is keyed by the textures the scene carries, so an entry the file holds for a name this
+map does not use is read but not shown -- a session file shared between levels lists every name
+any of them uses. `LoadMaterialsSession` reports the count it matched (`read, 1 entries`), which is
+the number to compare against the scene's texture list rather than against the file's line count.
+
 `WriteMerged` is the write path, and its rule is that a save never loses a line it did not write:
 
 | Situation | Behaviour |
@@ -218,6 +224,25 @@ apply writes the whole merged session and a scripted run expects the file it nam
 viewport matching them; `Exit` closes without a prompt when the session is clean, and otherwise
 opens `DrawSessionPrompt`, whose `Yes` saves first and `No` exits without writing. `Escape` and the
 close box dismiss the prompt.
+
+### Reset
+
+Clicking the tab that is already open is the game's reset gesture: `QR_GUI_Tabs` returns
+`reset = 1` for a re-click on the selected tab, and `qr_editor.c` answers it with `reset_prompt`,
+the same `Yes`/`No` question `QRE_ResetAll` sits behind. The standalone editor asks with
+`DrawResetPrompt` and, on `Yes`, calls `ResetSession`, which removes the materials file, the lights
+file and both backups and then reports `session: reset, removed …`.
+
+It removes files rather than editing them, so the panel has to be told what a first run would
+show, and that is a default-constructed `EditorRenderSettings`, `EditorSunState` and
+`EditorLevelSky`: nothing but a session load or the panel itself ever writes those members, so
+`{}` is exactly the state a missing file gives. This matters because an absent level section
+deliberately leaves the panel's values alone -- without the assignment the fog, the sun and every
+`sky:` key the removed file had set would survive the file itself, and the viewport would still
+show them.
+
+A removal that fails aborts before anything is reloaded, which is the order the game uses, so a
+half-removed session never looks reset.
 
 ### Sky block
 
@@ -272,8 +297,9 @@ cvar angles, so they round-trip without an angle conversion. `rt_sky_sun_disc`,
    custom-light store with add/duplicate/clone/remove are done, as are both drags and the axis
    gizmo.
 2. **Session lifecycle.** Done. Apply, Cancel, Exit and both writers -- `qray.materials.yaml` and
-   the level document (`sky:` / `fog:` / `lights:`) -- plus the whole sky scope, the notify toast
-   and the save prompt. Nothing of the write path is left.
+   the level document (`sky:` / `fog:` / `lights:`) -- plus the whole sky scope, the notify toast,
+   the save prompt and the reset prompt behind a re-click on the open tab. Nothing of the write
+   path is left.
 3. **Viewport aids.** The gizmo, the marker drag and the overlay are done: the crosshair, the hint
    block and the drag prompt are drawn over the viewport and the key list is no longer panel text.
 
@@ -419,3 +445,23 @@ six `sky:` keys in non-canonical text (`1.5`, `140`, `0 169 255`) plus a `fog:` 
 | `Sky brightness` -> 1, the panel default, `Apply` | `rt_sky_brightness` dropped from the block, the other keys untouched |
 | `Sky brightness` 3.5, `Apply`, on a block holding a comment, `rt_sky_future_key: 7` and `rt_sky_future_group:` with a `child:` under it | all three lines written back after the managed keys at their own indentation; `other_level:` and `fog:` untouched |
 | `Global settings` on with those lines present, `Apply` | the whole `sky:` block goes, unknown lines with it, `other_level:` and `fog:` kept |
+
+The reset was verified with a scripted window session (`scenes/e1m1.bsp`, a materials file holding
+`- name: tech08_1` with `emissive_factor: 2.0` and a lights file with an `e1m1:` `fog:` block at
+density 0.060 in red). The prompt's layout goes to `editor.log` as
+`panel reset prompt: window … Yes … No …`, so a script can click a button by its own rectangle
+instead of by a guessed position:
+
+| Check | Result |
+| --- | --- |
+| Session read | `read, 1 entries` for the `- name:` form the game writes; the entry then reaches the frame (below) |
+| Entry for a name the scene lacks | read as `0 entries`, which is correct: the table is keyed by scene textures, not by file lines |
+| Re-click the open `Materials` tab | `session: reset requested from the Materials tab`, prompt `window 352,218 912,463`, `Yes 362,432 628,455`, `No 636,432 902,455` -- both buttons inside the window |
+| `Escape` | `session: reset dismissed`, both files still on disk |
+| `Yes` | `session: reset, removed …`, both files gone, log line reads the absent target back as `absent, new file on apply, 0 lights for e1m1, sky scope global` |
+| Defaults restored, measured against a defaults-only launch | the post-reset frame differs from a launch with no session files in 6354 of 88080 sampled viewport pixels (mean 2.27), and all of that residual is the bottom-centre region where the toast draws; without the fix the same comparison is 42738 samples (mean 37.75), the fog and the emissive still on screen |
+
+That last row is also the evidence that the loaded values reached the renderer: the frame *before*
+the reset differs from the defaults-only launch by the fog and the emissive the files named, which
+is only possible if the session was applied to the scene.
+
