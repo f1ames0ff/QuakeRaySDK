@@ -389,6 +389,8 @@ typedef struct QrUpdateTexCoordsInfo
     uint32_t        vertexOffset;
     uint32_t        vertexCount;
 
+    // One UV pair per vertex, tightly packed, laid out the way QrVertex holds it. A null entry
+    // leaves that layer's texcoords alone.
     const void      *pTexCoordLayerData[3];
 } QrUpdateTexCoordsInfo;
 
