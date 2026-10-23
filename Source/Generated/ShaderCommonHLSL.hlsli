@@ -337,6 +337,10 @@ struct ShGlobalUniform
     uint glassBlur;
     uint glassDenoise;
     uint glassParticles;
+    float sceneUnitsPerHostUnit;
+    uint __pad7;
+    uint __pad8;
+    uint __pad9;
 };
 
 struct ShGeometryInstance

@@ -228,7 +228,7 @@ ShPayload traceReflectionRefractionRay(float3 origin, float3 direction, uint sur
 
     RayDesc rayDesc;
     rayDesc.Origin = origin;
-    rayDesc.TMin = 0.001;
+    rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
     rayDesc.Direction = direction;
     rayDesc.TMax = globalUniform.rayLength;
 
@@ -253,7 +253,7 @@ ShPayload traceIndirectRay(uint surfInstCustomIndex, float3 surfPosition, float3
 
     RayDesc rayDesc;
     rayDesc.Origin = surfPosition;
-    rayDesc.TMin = 0.001;
+    rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
     rayDesc.Direction = bounceDirection;
     rayDesc.TMax = globalUniform.rayLength;
 
@@ -378,7 +378,7 @@ float evalSkyNeePdf(const float3 n, const float3 direction)
 
 #if LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
 
-#define SHADOW_RAY_EPS       0.01
+#define SHADOW_RAY_EPS       (0.01 * globalUniform.sceneUnitsPerHostUnit)
 #define RAY_ORIGIN_LEAK_BIAS 0.01
 
 /* One segment per pane the light may cross, plus the segment that reaches it. */
@@ -429,7 +429,7 @@ float3 traceShadowRay(uint surfInstCustomIndex, float3 start, float3 end, bool i
 
         RayDesc rayDesc;
         rayDesc.Origin = origin;
-        rayDesc.TMin = 0.001;
+        rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
         rayDesc.Direction = l;
         rayDesc.TMax = maxDistance - SHADOW_RAY_EPS;
 

@@ -61,7 +61,7 @@ Tonemapping::~Tonemapping()
 
 void Tonemapping::PrepareExposureParams(uint32_t frameIndex, const std::shared_ptr<const GlobalUniform> &uniform,
                                         float exposureBias, float tonemapPower, uint32_t tonemapType,
-                                        const QrDrawFrameTonemappingParams &params)
+                                        const QrDrawFrameTonemappingParams &params, bool disableEyeAdaptation)
 {
     assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
 
@@ -112,8 +112,12 @@ void Tonemapping::PrepareExposureParams(uint32_t frameIndex, const std::shared_p
         const float delta = frame->cameraPosition[axis] - frame->cameraPositionPrev[axis];
         cameraDeltaSquared += delta * delta;
     }
-    tm->resetCurve = !exposureReady || frame->restirParams[2] != 0 || frame->time < previousTime ||
-                     frame->timeDelta > 1.0f || cameraDeltaSquared > 10000.0f ? 1u : 0u;
+    // `disableEyeAdaptation` is the host's "this frame stands alone" switch: it forces the reset so
+    // both temporal blends in CmLuminanceAvg (the adapted luminance and the tone curve) are skipped
+    // and the exposure can only depend on the histogram of this frame.
+    tm->resetCurve = disableEyeAdaptation || !exposureReady || frame->restirParams[2] != 0 ||
+                     frame->time < previousTime || frame->timeDelta > 1.0f ||
+                     cameraDeltaSquared > 10000.0f ? 1u : 0u;
 
     const float kneeStart      = tm->tmKneeStart;
     const float kneeWhitePoint = tm->tmWhitePoint;

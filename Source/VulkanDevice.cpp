@@ -97,6 +97,9 @@ QrPolygonalLightUploadInfo SpatialPolygonalLight(const SpatialFrame &frame, cons
 
     if (frame.IsMirrored())
     {
+        // A polygonal light has no normal field: LightManager derives one from the
+        // vertex order, so a mirrored frame has to restore the host's authored side
+        // by putting that order back.
         std::swap(result.positions[1], result.positions[2]);
     }
 
@@ -711,6 +714,21 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->waterTextureDerivativesMultiplier = 1.0f;
         gu->waterTextureAreaScale             = 1.0f;
 
+        // The fallbacks stand for the defaults a host would otherwise send, so
+        // they are expressed in host units and converted through the frame the
+        // same way SpatialFrame::ConvertDrawFrame does for a real draw.
+        if( !spatialFrame.IsIdentity() )
+        {
+            for( int channel = 0; channel < 3; channel++ )
+            {
+                gu->waterColorAndDensity[ channel ] = spatialFrame.Transmittance( gu->waterColorAndDensity[ channel ] );
+                gu->acidColorAndDensity[ channel ] = spatialFrame.Transmittance( gu->acidColorAndDensity[ channel ] );
+            }
+
+            gu->waterWaveSpeed        *= spatialFrame.Scale();
+            gu->waterTextureAreaScale *= spatialFrame.Scale();
+        }
+
         gu->noBackfaceReflForNoMediaChange = false;
         gu->glassBlur                      = false;
         gu->glassDenoise                   = false;
@@ -808,6 +826,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     gu->waterNormalTextureIndex = textureManager->GetWaterNormalTextureIndex();
+
+    gu->sceneUnitsPerHostUnit = std::max( spatialFrame.Scale(), 1e-6f );
 
     gu->cameraRayConeSpreadAngle = atanf( ( 2.0f * tanf( drawInfo.fovYRadians * 0.5f ) ) / ( float )renderResolution.Height() );
 
@@ -1125,6 +1145,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     sky.disableRasterization = drawInfo.disableRasterization;
     sky.uniform = uniform;
     sky.tonemapping = tonemapping.get();
+    sky.disableEyeAdaptation = drawInfo.disableEyeAdaptation != 0;
     if (drawInfo.pTonemappingParams != nullptr)
     {
         sky.exposureBias = drawInfo.pTonemappingParams->exposureBias;
@@ -1980,7 +2001,9 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         converted.transform = SpatialTransform(spatialFrame, uploadInfo->transform);
     }
 
-    if (spatialFrame.IsMirrored())
+    const bool reversesWinding = spatialFrame.ReversesWinding(uploadInfo->transform);
+
+    if (reversesWinding)
     {
         if (uploadInfo->pIndices != nullptr && uploadInfo->indexCount >= 3)
         {
@@ -2006,10 +2029,12 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         }
     }
 
-    if (!spatialFrame.IsIdentity() || spatialFrame.IsMirrored())
+    if (!spatialFrame.IsIdentity() || reversesWinding)
     {
         uploadInfo = &converted;
     }
+
+    geometryWindingFlips[uploadInfo->uniqueID] = reversesWinding;
 
     scene->Upload(currentFrameState.GetFrameIndex(), *uploadInfo);
 }
@@ -2024,6 +2049,14 @@ void VulkanDevice::UpdateGeometryTransform(const QrUpdateTransformInfo *updateIn
     }
 
     QrUpdateTransformInfo converted = *updateInfo;
+    const bool reversesWinding = spatialFrame.ReversesWinding(updateInfo->transform);
+    const auto flipIt = geometryWindingFlips.find(updateInfo->movableStaticUniqueID);
+
+    if (flipIt != geometryWindingFlips.end() && flipIt->second != reversesWinding)
+    {
+        throw QrException(QR_CANT_UPDATE_TRANSFORM, "Transform update of geometry with unique ID=" + std::to_string(updateInfo->movableStaticUniqueID) + " reverses its winding; re-upload the geometry instead");
+    }
+
     if (!spatialFrame.IsIdentity())
     {
         converted.transform = SpatialTransform(spatialFrame, updateInfo->transform);
@@ -2097,11 +2130,20 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
     std::vector<QrVertex> convertedVertices;
     std::vector<uint32_t> convertedIndices;
 
-    if (!spatialFrame.IsIdentity() && pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
+    const bool spatialRenderType =
+        pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
+    const bool spatialConversion = !spatialFrame.IsIdentity() && spatialRenderType;
+    const bool reversesWinding =
+        spatialRenderType && spatialFrame.ReversesWinding(pUploadInfo->transform);
+
+    if (spatialConversion)
     {
         converted.transform = SpatialTransform(spatialFrame, pUploadInfo->transform);
+    }
 
-        if (spatialFrame.IsMirrored() && pUploadInfo->pIndices != nullptr && pUploadInfo->indexCount >= 3)
+    if (reversesWinding)
+    {
+        if (pUploadInfo->pIndices != nullptr && pUploadInfo->indexCount >= 3)
         {
             const uint32_t *sourceIndices = static_cast<const uint32_t *>(pUploadInfo->pIndices);
             convertedIndices.assign(sourceIndices, sourceIndices + pUploadInfo->indexCount);
@@ -2113,17 +2155,31 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
             converted.pIndices = convertedIndices.data();
         }
-
-        if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
+        else if (pUploadInfo->pIndices == nullptr && pUploadInfo->vertexCount >= 3)
         {
             convertedVertices.assign(pUploadInfo->pVertices, pUploadInfo->pVertices + pUploadInfo->vertexCount);
+
+            for (uint32_t vertex = 0; vertex + 2 < pUploadInfo->vertexCount; vertex += 3)
+            {
+                std::swap(convertedVertices[vertex + 1], convertedVertices[vertex + 2]);
+            }
+        }
+    }
+
+    if (spatialConversion)
+    {
+        if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
+        {
+            if (convertedVertices.empty())
+            {
+                convertedVertices.assign(pUploadInfo->pVertices, pUploadInfo->pVertices + pUploadInfo->vertexCount);
+            }
 
             for (QrVertex &vertex : convertedVertices)
             {
                 vertex.normal[1] = spatialFrame.Length(vertex.normal[1]);
             }
 
-            converted.pVertices = convertedVertices.data();
             converted.smokeNoise.data[0] *= spatialFrame.InvScale();
             converted.smokeNoise.data[1] *= spatialFrame.InvScale();
             converted.smokeNoise.data[2] *= spatialFrame.InvScale();
@@ -2135,7 +2191,15 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
             spatialFrame.ViewProjection(pViewProjection, convertedViewProjection);
             pViewProjection = convertedViewProjection;
         }
+    }
 
+    if (!convertedVertices.empty())
+    {
+        converted.pVertices = convertedVertices.data();
+    }
+
+    if (spatialConversion || reversesWinding)
+    {
         pUploadInfo = &converted;
     }
 
@@ -2621,26 +2685,6 @@ void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
                 faceVertices[i].normal[0] = normal.data[0];
                 faceVertices[i].normal[1] = normal.data[1];
                 faceVertices[i].normal[2] = normal.data[2];
-            }
-
-            if (spatialFrame.IsMirrored())
-            {
-                for (uint32_t faceIndex = 0; faceIndex < pInfo->numFaces; faceIndex++)
-                {
-                    const QrWorldLightFace &face = pInfo->pFaces[faceIndex];
-
-                    if (face.firstVertex >= faceVertices.size() ||
-                        face.numVertices > faceVertices.size() - face.firstVertex)
-                    {
-                        continue;
-                    }
-
-                    for (uint32_t i = 0; i < face.numVertices / 2; i++)
-                    {
-                        std::swap(faceVertices[face.firstVertex + i],
-                                  faceVertices[face.firstVertex + face.numVertices - 1 - i]);
-                    }
-                }
             }
 
             converted.pFaceVertices = faceVertices.data();

@@ -26,6 +26,11 @@ public:
     QrTransform Transform(const QrTransform &value) const;
     QrMatrix3D CubemapRotation(const QrMatrix3D &value) const;
 
+    // A negative determinant in the composed scene transform reverses the
+    // geometric winding, so triangle order has to be flipped for the face that
+    // was authored as front-facing to stay front-facing.
+    bool ReversesWinding(const QrTransform &value) const;
+
     void Aabb(const QrFloat3D &minValue, const QrFloat3D &maxValue,
               QrFloat3D &outMin, QrFloat3D &outMax) const;
     uint32_t SoftFace(uint32_t value) const;
@@ -38,6 +43,7 @@ private:
     float sceneToHost[3][3];
     float scale;
     float invScale;
+    float frameDeterminant;
     bool identity;
     bool mirrored;
 };

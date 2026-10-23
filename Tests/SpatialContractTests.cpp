@@ -260,6 +260,32 @@ int main()
         return 1;
     }
 
+    // The winding rule composes the geometry transform with the frame: the host's
+    // authored order survives only when the two flips agree in sign.
+    QrTransform identityTransform = {};
+    identityTransform.matrix[0][0] = 1.0f;
+    identityTransform.matrix[1][1] = 1.0f;
+    identityTransform.matrix[2][2] = 1.0f;
+
+    QrTransform reflectedTransform = identityTransform;
+    reflectedTransform.matrix[0][0] = -1.0f;
+
+    if (!Check(!upY.ReversesWinding(identityTransform), "right-handed frame reversed an authored order"))
+    {
+        return 1;
+    }
+
+    if (!Check(mirroredFrame.ReversesWinding(identityTransform), "mirrored frame kept an authored order"))
+    {
+        return 1;
+    }
+
+    if (!Check(!mirroredFrame.ReversesWinding(reflectedTransform),
+               "mirrored frame and reflected transform did not cancel"))
+    {
+        return 1;
+    }
+
     std::puts("spatial contract tests passed");
     return 0;
 }

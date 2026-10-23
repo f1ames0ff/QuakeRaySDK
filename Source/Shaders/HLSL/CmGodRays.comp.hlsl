@@ -151,7 +151,7 @@ float getDensity(float3 p)
 
 float getStep(float t, float density)
 {
-    return max(1.0, lerp(20.0, 5.0, density));
+    return max(1.0, lerp(20.0, 5.0, density)) * globalUniform.sceneUnitsPerHostUnit;
 }
 
 [numthreads(16, 16, 1)]
@@ -357,7 +357,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         // don't leak through thin walls or at grazing angles. The final step
         // before the surface is not sampled (Q2RTX breaks here), which keeps
         // the surface-facing samples from being pushed behind the geometry.
-        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0;
+        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0 * globalUniform.sceneUnitsPerHostUnit;
         const float shadow = GetShadow(currentPos + shadowBias) *
             getCloudSunTransmittance(currentPos, godRaysParams[0].sunDirection.xyz, true);
 

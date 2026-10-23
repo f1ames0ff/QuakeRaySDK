@@ -53,6 +53,7 @@ SpatialFrame::SpatialFrame()
       }
     , scale(1.0f)
     , invScale(1.0f)
+    , frameDeterminant(1.0f)
     , identity(true)
     , mirrored(false)
 {
@@ -150,6 +151,7 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
 
     scale = candidateScale;
     invScale = candidateInvScale;
+    frameDeterminant = determinant;
     identity = candidateIdentity;
     this->mirrored = mirrored;
 
@@ -205,6 +207,23 @@ QrTransform SpatialFrame::Transform(const QrTransform &value) const
     }
 
     return result;
+}
+
+bool SpatialFrame::ReversesWinding(const QrTransform &value) const
+{
+    const float a = value.matrix[0][0];
+    const float b = value.matrix[0][1];
+    const float c = value.matrix[0][2];
+    const float d = value.matrix[1][0];
+    const float e = value.matrix[1][1];
+    const float f = value.matrix[1][2];
+    const float g = value.matrix[2][0];
+    const float h = value.matrix[2][1];
+    const float i = value.matrix[2][2];
+
+    const float determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+
+    return determinant * frameDeterminant < 0.0f;
 }
 
 QrMatrix3D SpatialFrame::CubemapRotation(const QrMatrix3D &value) const

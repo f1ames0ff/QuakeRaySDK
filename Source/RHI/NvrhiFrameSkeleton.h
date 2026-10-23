@@ -278,6 +278,7 @@ public:
         float tonemapPower = 0.6f;
         uint32_t tonemapType = 1;
         QrDrawFrameTonemappingParams exposureParams = {};
+        bool disableEyeAdaptation = false;
 
         // -- the acceleration-structure stream --
 

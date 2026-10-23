@@ -98,7 +98,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
          globalUniform.levelFogSkyBlend.x + float(globalUniform.restirParams.x) +
          globalUniform.cloudShadowPlacement.x + globalUniform.cloudLayerMotion.x +
          float(globalUniform.glassBlur) + float(globalUniform.glassDenoise) +
-         float(globalUniform.glassParticles);
+         float(globalUniform.glassParticles) + globalUniform.sceneUnitsPerHostUnit +
+         float(globalUniform.__pad7) + float(globalUniform.__pad8) + float(globalUniform.__pad9);
 
     // ShVertPreprocessing
     v += float(pushConstant.push.tlasInstanceCount) + float(pushConstant.push.tlasInstanceIsDynamicBits[0]);
