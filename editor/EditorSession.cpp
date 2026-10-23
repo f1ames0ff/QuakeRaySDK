@@ -15,11 +15,12 @@ namespace {
 // The keys EditorMaterialParams owns. Written in the game writer's own order for the fields the
 // two share, so a block the game wrote and the editor re-writes keeps its shape.
 const char *const kOwnedKeys[] = {
-    "texture_base",      "texture_scale_u",    "texture_scale_v",  "texture_offset_u",
-    "texture_offset_v",  "roughness_override", "metalness_factor", "base_factor",
-    "emissive_factor",   "is_light",           "exact_normals",    "material_glass",
-    "material_water",    "mirror",             "glass_ior",        "glass_thickness",
-    "glass_color",
+    "texture_base",   "texture_normals",    "texture_emissive", "texture_gloss",
+    "texture_scale_u", "texture_scale_v",   "texture_offset_u", "texture_offset_v",
+    "bump_scale",     "roughness_override", "metalness_factor", "metalness_from_normal_alpha",
+    "emissive_factor", "luma_blend",        "base_factor",      "is_light",
+    "mirror",         "material_glass",     "material_water",   "transparency",
+    "glass_ior",      "glass_thickness",    "glass_color",      "exact_normals",
 };
 
 // The header of a target that does not exist yet. A file that does exist keeps its own header:
@@ -261,6 +262,59 @@ std::string TextOf(std::string_view value)
     return Lowercase(text) == "none" ? std::string() : text;
 }
 
+// The blend mode by name or by number, the aliases RT_MAT_ParseEmissiveBlend accepts: "cvar"
+// and anything unknown keep following the global setting.
+int32_t EmissiveBlendOf(std::string_view value, int32_t fallback)
+{
+    const std::string text = Lowercase(value);
+
+    if (text == "cvar")
+    {
+        return -1;
+    }
+
+    if (text == "off" || text == "none")
+    {
+        return 0;
+    }
+
+    if (text == "normal" || text == "coverage")
+    {
+        return 1;
+    }
+
+    if (text == "screen" || text == "add" || text == "additive")
+    {
+        return 2;
+    }
+
+    if (text == "overlay")
+    {
+        return 3;
+    }
+
+    if (text == "hard light" || text == "hard_light" || text == "hardlight")
+    {
+        return 4;
+    }
+
+    if (text == "color dodge" || text == "color_dodge" || text == "colordodge")
+    {
+        return 5;
+    }
+
+    const std::string number(text);
+    char *end = nullptr;
+    const long parsed = std::strtol(number.c_str(), &end, 10);
+
+    if (end == number.c_str())
+    {
+        return fallback;
+    }
+
+    return int32_t(std::clamp<long>(parsed, -1, 5));
+}
+
 // `rrggbb`, the only form RT_CustomColorFromString reads back.
 std::string FormatColor(const float color[3])
 {
@@ -293,6 +347,21 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("texture_base", params.baseTexture);
     }
 
+    if (!params.normalTexture.empty())
+    {
+        append("texture_normals", params.normalTexture);
+    }
+
+    if (!params.emissiveTexture.empty())
+    {
+        append("texture_emissive", params.emissiveTexture);
+    }
+
+    if (!params.glossTexture.empty())
+    {
+        append("texture_gloss", params.glossTexture);
+    }
+
     if (params.textureScaleU != 1.0f)
     {
         append("texture_scale_u", FormatFloat(params.textureScaleU));
@@ -313,6 +382,11 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("texture_offset_v", FormatFloat(params.textureOffsetV));
     }
 
+    if (params.bumpScale != 1.0f)
+    {
+        append("bump_scale", FormatFloat(params.bumpScale));
+    }
+
     if (params.roughnessOverride >= 0.0f)
     {
         append("roughness_override", FormatFloat(params.roughnessOverride));
@@ -323,14 +397,29 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("metalness_factor", FormatFloat(params.metalnessFactor));
     }
 
-    if (params.baseFactor != 1.0f)
+    if (params.metalnessFromNormalAlpha)
     {
-        append("base_factor", FormatFloat(params.baseFactor));
+        append("metalness_from_normal_alpha", "true");
     }
 
     if (params.emissiveFactor != 0.0f)
     {
         append("emissive_factor", FormatFloat(params.emissiveFactor));
+    }
+
+    // The game stores -1 for "follow the global rt_emis_blend" and writes the mode by name, so a
+    // file the game wrote and the editor re-writes keeps reading the same.
+    if (params.lumaBlend >= 0)
+    {
+        const char *const blendNames[] = { "off",  "normal",   "screen",
+                                           "overlay", "hard light", "color dodge" };
+        const int32_t blend = std::min<int32_t>(params.lumaBlend, 5);
+        append("luma_blend", blendNames[blend]);
+    }
+
+    if (params.baseFactor != 1.0f)
+    {
+        append("base_factor", FormatFloat(params.baseFactor));
     }
 
     // The editor's Luma checkbox uploads QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT, and the game
@@ -366,6 +455,11 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         if (params.glassThickness != 2.0f)
         {
             append("glass_thickness", FormatFloat(params.glassThickness));
+        }
+
+        if (params.transparency != 1.0f)
+        {
+            append("transparency", FormatFloat(params.transparency));
         }
 
         if (params.glassColor[0] != 1.0f || params.glassColor[1] != 1.0f ||
@@ -1192,6 +1286,18 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         {
             params.baseTexture = TextOf(value);
         }
+        else if (key == "texture_normals")
+        {
+            params.normalTexture = TextOf(value);
+        }
+        else if (key == "texture_emissive")
+        {
+            params.emissiveTexture = TextOf(value);
+        }
+        else if (key == "texture_gloss")
+        {
+            params.glossTexture = TextOf(value);
+        }
         else if (key == "texture_scale_u")
         {
             params.textureScaleU = FloatOf(value, params.textureScaleU);
@@ -1212,9 +1318,18 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         {
             params.roughnessOverride = FloatOf(value, params.roughnessOverride);
         }
+        else if (key == "bump_scale")
+        {
+            params.bumpScale = FloatOf(value, params.bumpScale);
+        }
         else if (key == "metalness_factor")
         {
             params.metalnessFactor = FloatOf(value, params.metalnessFactor);
+        }
+        else if (key == "metalness_from_normal_alpha")
+        {
+            params.metalnessFromNormalAlpha =
+                BoolOf(value, params.metalnessFromNormalAlpha);
         }
         else if (key == "base_factor")
         {
@@ -1223,6 +1338,14 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         else if (key == "emissive_factor")
         {
             params.emissiveFactor = FloatOf(value, params.emissiveFactor);
+        }
+        else if (key == "luma_blend")
+        {
+            params.lumaBlend = EmissiveBlendOf(value, params.lumaBlend);
+        }
+        else if (key == "transparency")
+        {
+            params.transparency = FloatOf(value, params.transparency);
         }
         else if (key == "is_light")
         {

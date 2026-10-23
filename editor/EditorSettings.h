@@ -121,7 +121,7 @@ struct EditorSunState
 // Quake-to-meter area fix (1600) times 0.001.
 inline constexpr float kEditorSkySunRadiance = 16.0f;
 
-// The five parameter blocks a frame built from EditorRenderSettings carries. Kept
+// The six parameter blocks a frame built from EditorRenderSettings carries. Kept
 // together so the pointers handed to QrDrawFrameInfo stay valid for the whole call.
 struct EditorFrameParams
 {
@@ -130,6 +130,7 @@ struct EditorFrameParams
     QrDrawFrameVolumetricParams volume = {};
     QrDrawFrameLevelFogParams fog = {};
     QrDrawFrameReflectRefractParams reflectRefract = {};
+    QrDrawFrameTexturesParams textures = {};
 };
 
 // Fills `out` from `settings`, deriving the values the SDK expects rather than

@@ -50,9 +50,10 @@ private:
     // The image a material's texture_base names, or -1 when the value is empty or names a
     // texture this scene does not carry.
     int32_t TextureIndexByName(const std::string &name) const;
-    // The surface's own material, replaced by the one texture_base names where it resolves.
+    // The surface's own material, replaced by the one texture_base names where it resolves, or by
+    // a bake of the parameters that only a packed material texture can carry.
     QrMaterial SurfaceMaterialWithOverride(const EditorSurface &surface,
-                                           const EditorMaterialParams &params) const;
+                                           const EditorMaterialParams &params);
     static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
@@ -188,6 +189,9 @@ private:
     QrInstance m_instance = nullptr;
     QrMaterial m_material = QR_NO_MATERIAL;
     std::vector<QrMaterial> m_textureMaterials;
+    // The materials the authored keys that need a packed texture set produce, kept alive for as
+    // long as a geometry still points at them.
+    EditorMaterialBakes m_materialBakes;
     // Lowercased scene texture name to its index, the lookup a texture_base override and the
     // browser both need.
     std::unordered_map<std::string, int32_t> m_textureIndexByName;

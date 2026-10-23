@@ -66,14 +66,18 @@ miss is told apart from a gizmo that never armed. A successful grab logs
 drag ends.
 `Materials` lists one material per texture name, the way the game keys
 `rt_material_t`, and selects the material of a picked surface. Its parameter
-block covers what the SDK upload info can express today: the texcoord transform,
-the material type, roughness, metalness, base factor, exact normals, luma and
-emission. The game's remaining parameters have no SDK field yet and are absent
-rather than dead sliders; [`docs/editor-parity.md`](../docs/editor-parity.md)
-lists them. A change is published by re-uploading the static scene once the
-widget is released, so it shows in the next frame. A row carrying a `*` is a
-name the session file already owns, which is the same marker the game's list
-uses.
+block covers the game's `Textures`, `Surface` and `Luma` groups: the texcoord
+transform, the three extra textures, bump scale, the material type, roughness,
+metalness and its normal-alpha source, base factor, exact normals, transparency,
+luma, emission and the emission blend mode. The six parameters the game folds
+into a synthesised texture rather than into an upload field are baked by
+`EditorMaterialBakes`, which reproduces `gl_texmgr.c`'s synthesis, so they reach
+the renderer the way they do in the game. The remaining game parameters have no
+SDK field at all and are absent rather than dead sliders;
+[`docs/editor-parity.md`](../docs/editor-parity.md) lists them. A change is
+published by re-uploading the static scene once the widget is released, so it
+shows in the next frame. A row carrying a `*` is a name the session file already
+owns, which is the same marker the game's list uses.
 
 The session bar above the tabs holds `Apply`, `Cancel` and `Exit`, and the line
 above it names the state: `clean`, or `unsaved` with the number of materials
@@ -96,14 +100,19 @@ prompt dismissed` around the prompt. The bar logs its three button
 rectangles as `panel session: Apply …` and the prompt logs its two as
 `panel prompt: Yes … No …`, both whenever the layout moves.
 
-The writer never loses a line it did not write. It owns twelve keys -
-`texture_scale_u/v`, `texture_offset_u/v`, `roughness_override`,
-`metalness_factor`, `base_factor`, `emissive_factor`, `is_light`,
-`exact_normals`, `material_glass` and `material_water` - and rewrites only those
-in the entries the session touched, dropping a key that equals its default.
-Comments, the game-only `bump_scale`, nested `luma:` blocks, the entries the
-session never opened and unrelated root keys are copied through verbatim at the
-indent they came with. A file whose root still says `materials:` or `lights:` is
+The writer never loses a line it did not write. It owns twenty-four keys -
+`texture_base`, `texture_normals`, `texture_emissive`, `texture_gloss`,
+`texture_scale_u/v`, `texture_offset_u/v`, `bump_scale`, `roughness_override`,
+`metalness_factor`, `metalness_from_normal_alpha`, `emissive_factor`,
+`luma_blend`, `base_factor`, `is_light`, `mirror`, `material_glass`,
+`material_water`, `transparency`, `glass_ior`, `glass_thickness`,
+`glass_color` and `exact_normals` - and rewrites only those in the entries the
+session touched, dropping a key that equals its default. Comments,
+`texture_overlay`, nested `luma:` blocks, the entries the session never opened and
+unrelated root keys are copied through verbatim at the indent they came with. A
+`luma_blend` is written by name (`off`, `normal`, `screen`, `overlay`,
+`hard light`, `color dodge`), the same spellings `RT_MAT_EmissiveBlendName`
+writes. A file whose root still says `materials:` or `lights:` is
 migrated to `qray_materials:` / `qray_lights:`, an existing target is copied to
 `qray.backup_materials.yaml` first, and a missing final newline is added before
 a new entry so an append cannot glue two records together. `Apply` reloads the
@@ -227,12 +236,12 @@ The remaining gap against the in-game editor is tracked in
 is the source of truth for what is left. The global settings block, the
 material parameter table, light authoring - colour, position, the spot cone,
 the aim-and-drop placement and both drags with the axis gizmo - and the session
-lifecycle that writes `qray.materials.yaml` and the level's `fog:` / `lights:`
-records back are done. What the session does not write yet is the level's
-`sky:` block and the scope switch that decides whether the sky, sun and cloud
-settings belong to the level or to the global store; after that come the
-material parameters the game has and the SDK cannot express, which need new
-upload fields first.
+lifecycle that writes `qray.materials.yaml` and the level's `fog:`, `sky:` and
+`lights:` records back are done, including the scope switch that decides whether
+the sky, sun and cloud settings belong to the level or to the global store.
+What is left of the material table is the handful of parameters the SDK has no
+field for - `texture_overlay`, `force_rasterize`, the `luma:` colour blocks and
+the `light_*` emitter group - which need new upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
 remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`

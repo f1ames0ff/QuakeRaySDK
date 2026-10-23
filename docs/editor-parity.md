@@ -50,11 +50,11 @@ no implementation.
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
 | Sun intensity, azimuth, elevation, angular size | done | `Sun` group: `Light` (`rt_physical_sun`), `Light strength` (`rt_sky_sun`), `Pitch` / `Yaw` (`rt_sky_sun_pitch` / `rt_sky_sun_yaw`) and `Disc scale` / `Disc colour` / `Disc size`; the direction reaches `QrDrawFrameVolumetricParams::volume.sourceDirection` as the game's `+forward` |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
-| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 16 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
+| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 23 of the game's parameters, one material per texture name, applied by re-uploading the static scene. The six that need a texture the SDK cannot carry are baked by `EditorMaterialBakes`, which synthesises the albedo/normal/roughness-metallic-emission triplet the way `gl_texmgr.c` does. The nine that remain are listed under [Materials](#materials) |
 | Texture browser with previews and search | done | `DrawTextureBrowser`; a grid of the scene's own textures with a name filter, the picked texture outlined in the game's orange, and `Select` / `NONE` writing `texture_base` |
 | Texture UV scale/offset authoring | partial | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`); `qrUpdateGeometryTexCoords` is not used because `VertexCollector::UpdateTexCoords` still asserts |
-| Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; there is no mask texture and no preview |
-| Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type and, with `Material` set to `glass`, `Glass IOR`, `Glass thickness` and `Glass colour` are the pane's own parameters; `Mirror` is the surface's. Water has no per-material parameters in the game either -- its look is the System tab's `Water / Acid` group, which the editor's `Water / Acid` group carries |
+| Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT`, `Emissive` sets the emission scale and the `Luma blend` combo picks the composite mode. There is no colour-keyed mask block and no preview: the game's `luma` key is a list of per-colour threshold/feather/blend blocks with no SDK field behind it |
+| Glass and water pass-through parameters | done | `PassThroughTypeForSurface` picks the type and, with `Material` set to `glass`, `Glass IOR`, `Glass thickness`, `Glass colour` and `Transparency` are the pane's own parameters; `Mirror` is the surface's. Water has no per-material parameters in the game either -- its look is the System tab's `Water / Acid` group, which the editor's `Water / Acid` group carries |
 | Light colour authoring | done | `Colour` (`ColorEdit3`) writes `EditorLight::tint`; `SetEditorLightTint` rebuilds radiance as `intensity * kEditorLightIntensityScale * tint` |
 | Light position and offset authoring | done | `Position` (`DragFloat3`) moves the light and re-resolves its cluster through `ResolveEditorLightCluster`; `Place at pick` drops it 8 units in front of the picked surface along the pick ray and aims the cone down that ray |
 | Light spot direction and inner/outer angles | done | `Spot` turns the cone on, `Spot dir` is three separate `##dirx/##diry/##dirz` fields, `Inner deg`/`Outer deg` the falloff, all through `qrUploadSpotLight`. Measured on `e1m1` at radius 300: spot off→on changes 52820 viewport pixels (mean 3.77) against a 1360/1.01 noise floor, direction mean 138.41, outer 0→60° mean 77.19, inner 0→40° mean 43.20 |
@@ -94,6 +94,13 @@ parameter block below it is a second scrolling child with the `Textures`, `Surfa
 | --- | --- | --- |
 | `texture_base` | `Browse...` over the texture browser, `NONE` to clear | `geomMaterial.layerMaterials[0]`, but only when the name resolves to a texture the loaded scene carries; an unknown name leaves the material as the BSP loader derived it |
 | `texture_scale_u/v`, `texture_offset_u/v` | `Scale U/V`, `Offset U/V` | layer-0 texcoord transform, with `QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT` asserted only when the transform is not identity |
+| `texture_normals` | `Normal##tex` combo over the scene's textures | the baked normal map handed to `QrMaterialCreateInfo::pDataNormal`, with `bump_scale` folded into its XY |
+| `texture_emissive` | `Emissive##tex` combo | the baked emission channel of the RME texture |
+| `texture_gloss` | `Gloss##tex` combo | the baked roughness channel of the RME texture, `1-gloss/255` |
+| `bump_scale` | `Bump scale##surf` | scales the normal map's XY about the 128 midpoint, as `gl_texmgr.c` resamples it |
+| `metalness_from_normal_alpha` | `Metalness from normal alpha##surf` | fills the baked metalness from the normal map's alpha times `Metalness` |
+| `transparency` | `Transparency##surf` | the baked normal texture's alpha, which `HitInfo.hlsli` reads as `h.transparency` |
+| `luma_blend` | `Luma blend##luma` combo `Cvar`..`Color dodge` | the RME alpha as `emissive_blend + 1`, so `Cvar` writes 0 and the shader falls back to `emissionBlendMode` |
 | `material` | type combo `none`/`glass`/`water` | `QrGeometryPassThroughType`; `none` keeps the kind the BSP loader derived |
 | `roughness_override` | `Roughness override` | `defaultRoughness`; the checkbox writes `kEditorDefaultRoughness`, clearing it returns the `-1` sentinel. A mirror pins it to 0 whatever the override says, which is the tooltip's "mirror forces 0; glass keeps its override" |
 | `metalness_factor` | `Metalness` | `defaultMetallicity` |
@@ -116,15 +123,36 @@ time, so an edit is published by rebuilding the static scene: `EditorApp::Frame`
 change (`materials applied: static scene re-uploaded` in `editor.log`).
 
 Deliberately absent, because the SDK upload info has no field for them and a slider that cannot
-change the picture would be a lie: `texture_normals`, `texture_emissive`, `texture_overlay`,
-`texture_gloss`, `bump_scale`, `metalness_from_normal_alpha`, `transparency`,
-`force_rasterize`, `luma`, `luma_blend` and the `light_*` group. The game's emissive range is
-0..5; the SDK clamps emission to [0, 1].
+change the picture would be a lie: `texture_overlay`, `force_rasterize`, `luma` and the `light_*`
+group (`light_styles`, `light_color`, `light_brightness`, `light_emissive_focus`,
+`light_emissive_soften`, `light_emissive_projection`). The game's emissive range is 0..5; the SDK
+clamps emission to [0, 1].
 
-Three of those absences are not upload gaps at all but texture ones, which is why the editor does
-not grow a slider for them: `metalness_from_normal_alpha` is baked into the RM texture when the
-game synthesises a material, `transparency` rides in the alpha of that same synthesised normal
-texture, and `bump_scale` scales the normal map the editor has no handle for.
+### Material bakes
+
+Six of the game's parameters are not upload fields at all: the game folds them into the three
+textures it hands the tracer. `texture_normals`, `texture_emissive` and `texture_gloss` name extra
+images, `bump_scale` scales the normal map's XY, `metalness_from_normal_alpha` fills the billed
+metalness from that map's alpha, `transparency` rides in that same alpha, and `luma_blend` is the
+RME texture's alpha. `EditorMaterialBakes` reproduces the synthesis `gl_texmgr.c` performs, so
+these reach the renderer exactly as they do in the game.
+
+The bakes are keyed by everything they read, so two materials that differ only in `bump_scale` do
+not share one. `Get` returns `QR_NO_MATERIAL` when a material keeps the scene's own textures, so a
+scene with no extra textures allocates nothing. The cache is rebuilt around
+`qrBeginStaticGeometries`/`qrSubmitStaticGeometries`: `BeginPass` clears the used flags, `EndPass`
+destroys the entries the pass did not ask for, and the frame logs `material bakes: N` so a change
+that stops baking is visible in `editor.log`.
+
+The source images come from the loaded scene, so a name the scene does not carry resolves to
+nothing and the bake is skipped rather than substituted with a placeholder. A material with no
+`texture_base` of its own uses its surface's texture as albedo, which is what the game's
+`TexMgr_ReloadImagesForMaterial` does for a material that never named one.
+
+The editor also passes `pTexturesParams` now, which it used not to: it sets
+`emissionBlendMode = 1` where the game's `rt_emis_blend` defaults to 1, and leaves the rest at the
+SDK's fallback defaults. Without the block the renderer forced the blend to 0, so every material
+whose `luma_blend` is `Cvar` came out unblended where the game draws it normal.
 
 ### Texture browser
 
