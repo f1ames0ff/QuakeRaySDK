@@ -5,8 +5,9 @@ square meters, and inverse lengths per meter. The host declares only its axis
 orientation and handedness once, immediately after `qrCreateInstance`, with
 `qrSetSpatialConvention`; there is no host-unit scale in the API. Each host
 converts its native units to meters before calling the SDK. The renderer then
-normalizes the data into its private right-handed, `+Z`-up scene space, which
-uses 40 scene units per meter. Hosts must not pass internal scene units.
+maps the data into its private right-handed, `+Z`-up scene space at a 1:1
+scale. Internal spatial quantities are meters as well; hosts must not pass
+values in another unit.
 
 The convention is immutable for the lifetime of the spatial scene. Calling
 `qrSetSpatialConvention` after a spatial upload, a fog upload, or the first
@@ -104,10 +105,10 @@ translation is expressed in meters. Camera space is right-handed, `+Y` up,
 render-resolution aspect, `cameraNear` and `cameraFar`. The host does not
 provide a projection matrix.
 
-The host passes camera near/far and `rayLength` in meters. The renderer converts
-them to scene units. `rayLength` is host-controlled up to the safety ceiling of
-10,000,000 scene units (250 km); the shader sky sentinel follows
-`2 * rayLength`. The world-depth buffer is `R32_SFLOAT`, so the ray envelope
+The host passes camera near/far and `rayLength` in meters. The renderer keeps
+them in meters. `rayLength` is host-controlled up to the safety ceiling of
+250,000 m; the shader sky sentinel follows `2 * rayLength`. The world-depth
+buffer is `R32_SFLOAT`, so the ray envelope
 does not rely on a 16-bit depth range. A host still has to keep its scene
 inside the declared ray length and provide a finite positive value.
 
@@ -125,7 +126,7 @@ for the axis convention.
 dimensionless direction. Smoke raster batches use `normal[1]` as a puff radius
 in meters, as described below. `QrTransform` is the existing row-major 3x4
 column-vector affine transform: its linear part is dimensionless and its
-translation is in meters. The renderer converts it to scene space for static,
+translation is in meters. The renderer maps it into the scene orientation for static,
 static-movable, dynamic, brush, alias, sky, decal and rasterized geometry.
 World-light face vertices and smoke raster vertices are handled separately as
 described below.
@@ -145,8 +146,8 @@ rotated as directions. Particle point clusters are topology identifiers and
 are never changed.
 
 Smoke raster batches additionally carry puff radii in meters in the vertex
-normal channel and spatial noise scales in `smokeNoise`. The renderer converts
-those fields to internal scene units; `smokeLook` remains dimensionless. The
+normal channel and spatial noise scales in `smokeNoise`. The renderer consumes
+those fields as meters; `smokeLook` remains dimensionless. The
 smoke wind direction is host-supplied through
 `qrSetSmokeWindDirection`; it is passed in host scene space, rotated by the
 frame, and normalized internally. If the setter is never called, the existing
@@ -161,16 +162,16 @@ not converted.
 Light color follows the existing per-type convention:
 
 - directional: irradiance/radiance, not scaled;
-- spherical, spot and polygonal: relative power, multiplied by the frame
-  scale squared;
-- textured area and DTAL: radiance, not multiplied; their `area` is scaled
-  by the frame scale squared. A second host must pass radiance for these
-  types, not a Quake-style area-fixed power.
+- spherical, spot and polygonal: relative power; the SDK encodes the emitting
+  area on a meter basis, so the host must not pre-divide it;
+- textured area and DTAL: radiance, unchanged; their `area` is square meters.
+  A second host must pass radiance for these types, not a Quake-style
+  area-fixed power.
 
-The Quake host adapter removes the legacy `RT_QUAKE_LIGHT_AREA_INTENSITY_FIX`
-from spherical, spot and polygonal light colors before upload; the SDK applies
-the fixed meter-to-scene area factor. Other hosts provide relative light
-values directly and must not apply the Quake 1600 factor.
+The Quake host adapter removes its legacy `RT_QUAKE_LIGHT_AREA_INTENSITY_FIX`
+from spherical, spot and polygonal light colors before upload. That factor
+belongs to Quake's unit-area calibration, not to the SDK contract. Other
+hosts pass relative power directly and must not apply the Quake 1600 factor.
 
 Cluster light source origins, reaches and radii are converted, as is
 `topUpReach` even when the dynamic source array is empty. `power` is a relative
@@ -201,15 +202,15 @@ twin frame cannot make the light visible.
 `cellWorldSize`, `sunBounceRange`, `volumetricFar`, fog volume corners and
 `halfExtinctionDistance` are meter-valued lengths.
 
-Level fog density and volumetric scattering are per meter; the SDK converts
-them to its scene-unit basis. Fog volume `pointA` and `pointB` keep their
+Level fog density and volumetric scattering are per meter; the SDK keeps them
+on that meter basis. Fog volume `pointA` and `pointB` keep their
 order; `softface` parity continues to name the `pointA`/`pointB` side while its
 axis is remapped to canonical space. The `acidDensity` coefficient is an
 artistic dimensionless density multiplier; it is not converted. Hosts that
 need physical unit invariance must author it together with the acid color.
 
-Water and acid colors are transmittance over one meter. The renderer raises
-them to the reciprocal meter-to-scene scale. `waterWaveSpeed` is meters per
+Water and acid colors are transmittance over one meter. The 1:1 scene scale
+leaves them unchanged apart from the lower clamp. `waterWaveSpeed` is meters per
 second and `waterTextureAreaScale` is a meter-valued length.
 
 Procedural cloud altitude and thickness are meters, carried in the existing
@@ -222,8 +223,8 @@ uses separate.
 The host owns the cluster partition. Cluster indices, PVS rows and
 `clusterGeneration` are independent of the spatial convention. Cluster bounds
 are converted as AABBs, with the axis mapping applied per component. The
-renderer’s cluster constants (16 internal scene units = 0.4 m per grid cell
-and source quantum; 32 units = 0.8 m margin) remain fixed and therefore
+renderer’s cluster constants (0.4 m per grid cell and source quantum; 0.8 m
+margin) remain fixed and therefore
 represent the same physical dimensions for every host.
 
 A non-BSP host still has to provide clusters, but it may omit both the PVS

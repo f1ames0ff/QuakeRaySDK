@@ -355,12 +355,13 @@ uint32_t RhiCloudsPass::GetViewSteps(uint32_t quality)
 
 float RhiCloudsPass::GetWindSpeed(float setting, float altitude)
 {
-    return setting * altitude / 1400.0f;
+    constexpr float kReferenceAltitude = 35.0f;
+    return setting * altitude / kReferenceAltitude;
 }
 
 std::array<float, 4> RhiCloudsPass::MakeShadowPlacement(const LayerParams &params)
 {
-    const float extent = std::max(params.cloudLayer[0] * SHADOW_VOLUME_EXTENT_PER_ALTITUDE, 1.0f);
+    const float extent = std::max(params.cloudLayer[0] * SHADOW_VOLUME_EXTENT_PER_ALTITUDE, 0.025f);
     const bool enabled = params.sunDirection[3] > 0.5f && params.sunDirection[2] > 0.05f;
     return { enabled ? 1.0f : 0.0f, params.cloudAnchor[0] - extent * 0.5f,
              params.cloudAnchor[1] - extent * 0.5f, extent };

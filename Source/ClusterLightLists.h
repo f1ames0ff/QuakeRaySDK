@@ -320,7 +320,7 @@ private:
     std::vector<int32_t> gridNext;
     int   gridDims[3] = { 1, 1, 1 };
     float gridMins[3] = {};
-    float gridCell = 1.0f;
+    float gridCell = 0.025f;
 
     std::vector<uint32_t> offsets;    // numClusters + 1
     std::vector<uint64_t> list;

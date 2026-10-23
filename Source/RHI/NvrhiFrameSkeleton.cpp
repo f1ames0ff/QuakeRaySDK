@@ -1807,7 +1807,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                 const float dx = cur[0] - prev[0];
                 const float dy = cur[1] - prev[1];
                 const float dz = cur[2] - prev[2];
-                constexpr float kTeleportDist = 100.0f;
+                constexpr float kTeleportDist = 2.5f;
                 const bool reset = resetHistory || (dx * dx + dy * dy + dz * dz) > (kTeleportDist * kTeleportDist);
 
                 upscaledByFsr = fsrPass->Render(

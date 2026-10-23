@@ -10,7 +10,10 @@ namespace qray
 namespace
 {
 
-constexpr float kInternalSceneUnitsPerMeter = 40.0f;
+// Internal scene space is metric. The scale remains as the single seam for
+// host-space conversion, but it is an identity factor now that hosts already
+// hand the SDK meters.
+constexpr float kSceneUnitsPerMeter = 1.0f;
 
 int AxisIndex(QrAxis axis)
 {
@@ -53,8 +56,8 @@ SpatialFrame::SpatialFrame()
           { 0.0f, 1.0f, 0.0f },
           { 0.0f, 0.0f, 1.0f },
       }
-    , scale(kInternalSceneUnitsPerMeter)
-    , invScale(1.0f / kInternalSceneUnitsPerMeter)
+    , scale(kSceneUnitsPerMeter)
+    , invScale(1.0f / kSceneUnitsPerMeter)
     , frameDeterminant(1.0f)
     , identity(false)
     , mirrored(false)
@@ -116,7 +119,7 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
         return false;
     }
 
-    const float candidateScale = kInternalSceneUnitsPerMeter;
+    const float candidateScale = kSceneUnitsPerMeter;
     const float candidateInvScale = 1.0f / candidateScale;
 
     if (!std::isfinite(candidateInvScale))

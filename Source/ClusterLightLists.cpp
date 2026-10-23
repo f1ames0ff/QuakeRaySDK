@@ -46,20 +46,23 @@ constexpr uint32_t kTopUpSources = 8;
 
 // The top-up pass indexes light origins on a coarse grid so that a cluster looks at the cells
 // its bounds expanded by the reach touch instead of at every light of the frame.
-constexpr float    kMinGridCell = 16.0f;      // internal scene units
+constexpr float    kMinGridCell = 0.4f;       // meters
 constexpr uint32_t kMaxGridCells = 262144;
 
-/* How far a light may drift before the composition counts it as moved, in internal scene units. The
+/* How far a light may drift before the composition counts it as moved, in meters. The
    clusters a light holds are a function of where it stands, so a light that moves freely would
    call for a composition on every frame it moves on. A light that stays inside one quantum of
    the origin the lists were built from keeps them instead. */
-constexpr float kSourceQuantum = 16.0f;       // internal scene units
+constexpr float kSourceQuantum = 0.4f;        // meters
 
 /* How far past its own reach a light is granted a cluster, so that the lists built for one
    origin are still right for every origin inside a quantum of it: the grant is kept while the
    light is gated out against the reach of the position it stands at now. The margin covers the
    diagonal of a quantum, which is the farthest two origins of one quantum can be apart. */
-constexpr float kSourceMargin = 32.0f;        // internal scene units
+constexpr float kSourceMargin = 0.8f;         // meters
+
+constexpr float kReachSameEpsilon = 2.5e-5f;  // 25 um
+constexpr float kReachChangeEpsilon = 0.0125f; // 12.5 mm
 
 static_assert(kSourceMargin >= kSourceQuantum * 1.7320508f, "the source margin must cover a whole quantum");
 
@@ -355,7 +358,7 @@ void ClusterLightLists::BeginSources(const WorldLights &worldLightsRef,
        they say that much, and they are what says it because the sources also hold the places of
        the lights that left and are longer than the frame for it. */
     const bool sameSet = stats.addedSources == 0 && stats.removedSources == 0;
-    const bool sameReach = std::abs(topUpReach - uploadInfo.topUpReach) < 0.001f;
+    const bool sameReach = std::abs(topUpReach - uploadInfo.topUpReach) < kReachSameEpsilon;
     const bool allowOverflow = uploadInfo.allowOverflow != 0;
 
     if (allowOverflow != overflowEnabled)
@@ -2563,7 +2566,7 @@ void ClusterLightLists::CountSourceChanges()
             // The quantum is what keeps a light that walks from re-running the map on every
             // frame of the walk, and the margin the passes grant the light with is what keeps
             // the lists right while it stays inside one.
-            if (drift > kSourceQuantum || std::abs(prevSource.reach - curSource.reach) > 0.5f)
+            if (drift > kSourceQuantum || std::abs(prevSource.reach - curSource.reach) > kReachChangeEpsilon)
             {
                 stats.movedSources++;
                 movedIndices.push_back(prevUidIndex[prev].second);

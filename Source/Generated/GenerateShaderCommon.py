@@ -385,7 +385,7 @@ CONST = {
 
     "RAY_STATS_CATEGORY_COUNT"              : 6,
 
-    "MAX_RAY_LENGTH"                        : "1.0e7",
+    "MAX_RAY_LENGTH"                        : "2.5e5",
 
     "MEDIA_TYPE_VACUUM"                     : 0,
     "MEDIA_TYPE_WATER"                      : 1,
@@ -438,7 +438,7 @@ CONST = {
 }
 
 CONST_SHADER_ONLY = {
-    "SURFACE_POSITION_INCORRECT"            : 10000000.0,
+    "SURFACE_POSITION_INCORRECT"            : 250000.0,
 }
 
 
