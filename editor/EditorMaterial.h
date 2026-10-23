@@ -26,6 +26,12 @@ enum class EditorMaterialType
 // that would not change the picture.
 struct EditorMaterialParams
 {
+    // The game's texture_base: the image the surface shows instead of its own. An embedder that
+    // can decode files resolves it as a path; the editor reads its images out of the scene, so
+    // the value names one of those textures and a name the scene does not carry changes nothing.
+    // Empty is the game's NONE: the map's own image.
+    std::string baseTexture;
+
     // Textures. Quake's texture_scale_* / texture_offset_* feed the layer-0 texcoord
     // transform; the SDK applies them under QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT.
     float textureScaleU = 1.0f;

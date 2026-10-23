@@ -31,6 +31,23 @@ uint64_t LightUniqueID(size_t index)
     return kFirstLightUniqueID + uint64_t(index);
 }
 
+// Texture names are matched without case: Quake data mixes "FLOOR1_1" and "floor1_1" spellings
+// for the same image.
+std::string LowercaseName(const std::string &name)
+{
+    std::string lowered(name);
+
+    for (char &character : lowered)
+    {
+        if (character >= 'A' && character <= 'Z')
+        {
+            character = char(character - 'A' + 'a');
+        }
+    }
+
+    return lowered;
+}
+
 // The editor's own lights start past the whole range a map could ever fill, so adding or
 // removing one can never collide with a map light - the way the game numbers custom lights
 // from UINT32_MAX + 1 while map lights come from UINT16_MAX.
@@ -533,6 +550,39 @@ QrMaterial EditorApp::SurfaceMaterial(const EditorSurface &surface) const
     return m_material;
 }
 
+int32_t EditorApp::TextureIndexByName(const std::string &name) const
+{
+    if (name.empty())
+    {
+        return -1;
+    }
+
+    const auto found = m_textureIndexByName.find(LowercaseName(name));
+
+    return found == m_textureIndexByName.end() ? -1 : found->second;
+}
+
+// A material's texture_base replaces the image the map put on the surface, so the surface's own
+// material is swapped out before ApplyEditorMaterial sets the rest of the parameters. A name the
+// scene does not carry, or NONE, keeps the map's image: the override only wins where it resolves.
+QrMaterial EditorApp::SurfaceMaterialWithOverride(const EditorSurface &surface,
+                                                 const EditorMaterialParams &params) const
+{
+    const int32_t index = TextureIndexByName(params.baseTexture);
+
+    if (index >= 0 && size_t(index) < m_textureMaterials.size())
+    {
+        const QrMaterial material = m_textureMaterials[size_t(index)];
+
+        if (material != QR_NO_MATERIAL)
+        {
+            return material;
+        }
+    }
+
+    return SurfaceMaterial(surface);
+}
+
 bool EditorApp::CreateTextureMaterials()
 {
     if (m_instance == nullptr)
@@ -541,6 +591,18 @@ bool EditorApp::CreateTextureMaterials()
     }
 
     m_textureMaterials.assign(m_scene.textures.size(), QR_NO_MATERIAL);
+
+    m_textureIndexByName.clear();
+
+    for (size_t i = 0; i < m_scene.textures.size(); i++)
+    {
+        const std::string key = LowercaseName(m_scene.textures[i].name);
+
+        if (!key.empty())
+        {
+            m_textureIndexByName.emplace(key, int32_t(i));
+        }
+    }
 
     uint32_t created = 0;
 
@@ -691,7 +753,8 @@ bool EditorApp::UploadStaticGeometry()
         upload.pIndices = surface.indices.data();
         upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
         upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
-        upload.geomMaterial.layerMaterials[0] = SurfaceMaterial(surface);
+        upload.geomMaterial.layerMaterials[0] =
+            SurfaceMaterialWithOverride(surface, m_materials.For(surface));
         ApplyEditorMaterial(m_materials.For(surface), PassThroughTypeForSurface(surface.kind),
                             upload);
         upload.transform.matrix[0][0] = 1.0f;
@@ -3406,6 +3469,8 @@ void EditorApp::DrawMaterials()
     if (m_selectedMaterial < 0 || size_t(m_selectedMaterial) >= m_materials.Count())
     {
         m_selectedMaterial = -1;
+        // A browser opened on the row that has just been deselected still has to be closable.
+        DrawTextureBrowser();
         return;
     }
 
@@ -3422,6 +3487,53 @@ void EditorApp::DrawMaterials()
 
         if (ImGui::CollapsingHeader("Textures", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            // The game lists texture_base first, before the scale and offset pair: it is the
+            // image the other three transform.
+            const int32_t baseIndex = TextureIndexByName(material.baseTexture);
+            const bool baseResolved = baseIndex >= 0 &&
+                                      size_t(baseIndex) < m_textureMaterials.size() &&
+                                      m_textureMaterials[size_t(baseIndex)] != QR_NO_MATERIAL;
+
+            if (baseResolved)
+            {
+                const EditorTexture &texture = m_scene.textures[size_t(baseIndex)];
+                const float side = ImGui::GetFrameHeight();
+
+                ImGui::Image(
+                    ImTextureRef(ImTextureID(uintptr_t(m_textureMaterials[size_t(baseIndex)]))),
+                    ImVec2(side, side));
+                LogRect("material base preview");
+                ImGui::SameLine();
+                ImGui::Text("%s  %ux%u", texture.name.c_str(), texture.width, texture.height);
+            }
+            else if (material.baseTexture.empty())
+            {
+                ImGui::TextUnformatted("Base  NONE - the map's own image");
+            }
+            else
+            {
+                // The name is kept as written even though nothing here can show it: the file
+                // still has to carry what the author put there, and the embedder may resolve it.
+                ImGui::Text("Base  %s - not in this scene", material.baseTexture.c_str());
+            }
+
+            if (ImGui::Button("Browse...##base"))
+            {
+                m_textureBrowserRequested = true;
+            }
+
+            LogRect("material base browse");
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("NONE##base"))
+            {
+                material.baseTexture.clear();
+                changed = true;
+            }
+
+            LogRect("material base none");
+
             changed |= ImGui::SliderFloat("Scale U##tex", &material.textureScaleU, 0.05f, 16.0f, "%.2f");
             changed |= ImGui::SliderFloat("Scale V##tex", &material.textureScaleV, 0.05f, 16.0f, "%.2f");
             changed |= ImGui::SliderFloat("Offset U##tex", &material.textureOffsetU, -8.0f, 8.0f, "%.2f");
@@ -3490,6 +3602,290 @@ void EditorApp::DrawMaterials()
     }
 
     ImGui::EndChild();
+
+    // Drawn from the tab that owns the Base row, so the browser sits over the panel it was
+    // opened from and closes back into it.
+    DrawTextureBrowser();
+}
+
+void EditorApp::DrawTextureBrowser()
+{
+    if (m_textureBrowserRequested && m_selectedMaterial >= 0)
+    {
+        m_textureBrowserRequested = false;
+        m_textureBrowserMaterial = m_materials.NameAt(size_t(m_selectedMaterial));
+        // The game opens the browser on the image the parameter already holds; a material with no
+        // override shows the map's own image, which is the texture the material is keyed by.
+        m_textureBrowserSelection = TextureIndexByName(m_materials.At(size_t(m_selectedMaterial)).baseTexture);
+
+        if (m_textureBrowserSelection < 0)
+        {
+            m_textureBrowserSelection = TextureIndexByName(m_textureBrowserMaterial);
+        }
+
+        m_textureBrowserSearch[0] = '\0';
+        m_textureBrowserFocus = true;
+        PrintMessage(("texture browser: base of '" + m_textureBrowserMaterial + "'").c_str(), this);
+    }
+    else
+    {
+        m_textureBrowserRequested = false;
+    }
+
+    if (m_textureBrowserMaterial.empty())
+    {
+        return;
+    }
+
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + 16.0f, viewport->Pos.y + 16.0f),
+                            ImGuiCond_Appearing);
+    // The game's browser is 72% of the display wide and all but 32 pixels tall; the same window
+    // here keeps the grid and the footer on screen whatever the scene holds.
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x * 0.72f, viewport->Size.y - 32.0f),
+                             ImGuiCond_Appearing);
+
+    bool open = true;
+    int32_t action = 0;
+
+    if (ImGui::Begin("Texture Browser", &open,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings))
+    {
+        ImGui::TextUnformatted("TEXTURE BROWSER");
+        ImGui::SameLine();
+        ImGui::TextDisabled("scene textures of this level");
+
+        const float closeWidth = ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - closeWidth);
+
+        if (ImGui::Button("Close"))
+        {
+            action = 2;
+        }
+
+        ImGui::Separator();
+
+        if (m_textureBrowserFocus)
+        {
+            ImGui::SetKeyboardFocusHere();
+            m_textureBrowserFocus = false;
+        }
+
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##texture_filter", "filter textures by name...",
+                                 m_textureBrowserSearch, IM_ARRAYSIZE(m_textureBrowserSearch));
+        LogRect("texbrowse filter");
+
+        // Only the tiles that pass the filter exist as far as the grid is concerned, and the
+        // filter is a case-insensitive substring the way the game's QRGuiTextHas is.
+        const std::string filter = LowercaseName(m_textureBrowserSearch);
+        std::vector<int32_t> visible;
+
+        for (size_t i = 0; i < m_scene.textures.size(); i++)
+        {
+            if (m_textureMaterials[i] == QR_NO_MATERIAL)
+            {
+                continue;
+            }
+
+            if (!filter.empty() &&
+                LowercaseName(m_scene.textures[i].name).find(filter) == std::string::npos)
+            {
+                continue;
+            }
+
+            visible.push_back(int32_t(i));
+        }
+
+        ImGui::TextDisabled("%d of %d textures", int(visible.size()),
+                            int(m_scene.textures.size()));
+
+        const float footerHeight = ImGui::GetFrameHeightWithSpacing() +
+                                   ImGui::GetTextLineHeightWithSpacing() + 8.0f;
+        const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
+
+        if (ImGui::BeginChild("##texture_list", ImVec2(0.0f, contentHeight < 100.0f ? 100.0f : contentHeight),
+                              true))
+        {
+            if (visible.empty())
+            {
+                ImGui::TextDisabled("no textures match");
+            }
+            else
+            {
+                // The game's tile: 128 pixels of preview, a 10 pixel gap and the name under it,
+                // its selection an orange rectangle and its hover a pale one.
+                const float imageSize = 128.0f;
+                const float tileGap = 10.0f;
+                const float rowStep =
+                    imageSize + ImGui::GetTextLineHeight() + 10.0f + ImGui::GetStyle().ItemSpacing.y;
+                const float availableWidth = ImGui::GetContentRegionAvail().x;
+                const ImVec2 start = ImGui::GetCursorPos();
+                int32_t columns = int((availableWidth + tileGap) / (imageSize + tileGap));
+
+                if (columns < 1)
+                {
+                    columns = 1;
+                }
+
+                for (size_t index = 0; index < visible.size(); index++)
+                {
+                    const int32_t texture = visible[index];
+                    const int column = int(index) % columns;
+                    const int row = int(index) / columns;
+
+                    if (column == 0)
+                    {
+                        ImGui::SetCursorPos(ImVec2(start.x, start.y + row * rowStep));
+                    }
+                    else
+                    {
+                        ImGui::SameLine(0.0f, tileGap);
+                    }
+
+                    ImGui::PushID(texture);
+                    ImGui::BeginGroup();
+
+                    const ImVec2 tile = ImGui::GetCursorScreenPos();
+                    const ImVec2 tileMax(tile.x + imageSize, tile.y + imageSize);
+
+                    // An invisible button owns the tile's rectangle: the preview is drawn over it,
+                    // so the click, the hover and the selection all belong to the button.
+                    ImGui::InvisibleButton("##tile", ImVec2(imageSize, imageSize));
+
+                    if (ImGui::IsItemClicked())
+                    {
+                        m_textureBrowserSelection = texture;
+
+                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                        {
+                            action = 1;
+                        }
+                    }
+
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip("%s", m_scene.textures[size_t(texture)].name.c_str());
+                    }
+
+                    if (index == 0)
+                    {
+                        LogRect("texbrowse first tile");
+                    }
+
+                    ImDrawList *drawList = ImGui::GetWindowDrawList();
+
+                    drawList->AddImage(
+                        ImTextureRef(ImTextureID(uintptr_t(m_textureMaterials[size_t(texture)]))),
+                        tile, tileMax);
+
+                    if (texture == m_textureBrowserSelection)
+                    {
+                        drawList->AddRect(tile, tileMax, IM_COL32(255, 180, 60, 255), 0.0f, 0, 2.5f);
+                    }
+                    else if (ImGui::IsItemHovered())
+                    {
+                        drawList->AddRect(tile, tileMax, IM_COL32(210, 215, 230, 255), 0.0f, 0, 1.0f);
+                    }
+
+                    const std::string &name = m_scene.textures[size_t(texture)].name;
+                    std::string label = name;
+
+                    if (ImGui::CalcTextSize(label.c_str()).x > imageSize)
+                    {
+                        while (!label.empty() &&
+                               ImGui::CalcTextSize((label + "...").c_str()).x > imageSize)
+                        {
+                            label.pop_back();
+                        }
+
+                        label += "...";
+                    }
+
+                    ImGui::TextUnformatted(label.c_str());
+                    ImGui::EndGroup();
+                    ImGui::PopID();
+                }
+            }
+        }
+
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        if (m_textureBrowserSelection >= 0 &&
+            size_t(m_textureBrowserSelection) < m_scene.textures.size())
+        {
+            ImGui::TextUnformatted(m_scene.textures[size_t(m_textureBrowserSelection)].name.c_str());
+        }
+        else
+        {
+            ImGui::TextDisabled("no texture selected");
+        }
+
+        const bool anySelected = m_textureBrowserSelection >= 0 &&
+                                 size_t(m_textureBrowserSelection) < m_scene.textures.size();
+
+        if (!anySelected)
+        {
+            ImGui::BeginDisabled();
+        }
+
+        if (ImGui::Button("Select"))
+        {
+            action = 1;
+        }
+
+        if (!anySelected)
+        {
+            ImGui::EndDisabled();
+        }
+
+        LogRect("texbrowse select");
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("Cancel"))
+        {
+            action = 2;
+        }
+
+        LogRect("texbrowse cancel");
+    }
+
+    ImGui::End();
+
+    if (action == 0 && (!open || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+    {
+        action = 2;
+    }
+
+    if (action == 0)
+    {
+        return;
+    }
+
+    if (action == 1 && m_textureBrowserSelection >= 0 &&
+        size_t(m_textureBrowserSelection) < m_scene.textures.size())
+    {
+        const int32_t materialIndex = m_materials.IndexOf(m_textureBrowserMaterial);
+
+        if (materialIndex >= 0)
+        {
+            m_materials.At(size_t(materialIndex)).baseTexture =
+                m_scene.textures[size_t(m_textureBrowserSelection)].name;
+            m_materialsChanged = true;
+            TouchMaterial(m_textureBrowserMaterial);
+            PrintMessage(("texture browser: texture_base '" + m_textureBrowserMaterial + "' -> " +
+                          m_scene.textures[size_t(m_textureBrowserSelection)].name)
+                             .c_str(),
+                         this);
+        }
+    }
+
+    m_textureBrowserMaterial.clear();
+    m_textureBrowserSelection = -1;
 }
 
 void EditorApp::LoadMaterialsSession()
