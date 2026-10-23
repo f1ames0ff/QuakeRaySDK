@@ -71,7 +71,40 @@ the material type, roughness, metalness, base factor, exact normals, luma and
 emission. The game's remaining parameters have no SDK field yet and are absent
 rather than dead sliders; [`docs/editor-parity.md`](../docs/editor-parity.md)
 lists them. A change is published by re-uploading the static scene once the
-widget is released, so it shows in the next frame.
+widget is released, so it shows in the next frame. A row carrying a `*` is a
+name the session file already owns, which is the same marker the game's list
+uses.
+
+The session bar above the tabs holds `Apply`, `Cancel` and `Exit`, and the line
+above it names the state: `clean`, or `unsaved` with the number of materials
+touched. `Apply` writes the edits into the material document, `Cancel` re-reads
+the file into the panel so the viewport matches what a reload would show, and
+`Exit` closes the window, asking first when there are unsaved edits. The prompt
+answers with `Yes` (save, then exit), `No` (exit without writing) and `Escape`
+or the close box (stay). Every one of those actions reports through the toast
+under the viewport, because the panel is too tall to give the status a row of
+its own.
+
+The session also logs its contract, so a scripted run does not have to read
+pixels: `session: <path> read, <n> entries` on startup, `session: touched <name>`
+on the first edit of a material, `session: saved <path>` and
+`session: changes discarded`, and `session: exit requested with unsaved changes`,
+`session: prompt dismissed` around the prompt. The bar logs its three button
+rectangles as `panel session: Apply …` and the prompt logs its two as
+`panel prompt: Yes … No …`, both whenever the layout moves.
+
+The writer never loses a line it did not write. It owns twelve keys -
+`texture_scale_u/v`, `texture_offset_u/v`, `roughness_override`,
+`metalness_factor`, `base_factor`, `emissive_factor`, `is_light`,
+`exact_normals`, `material_glass` and `material_water` - and rewrites only those
+in the entries the session touched, dropping a key that equals its default.
+Comments, the game-only `bump_scale`, nested `luma:` blocks, the entries the
+session never opened and unrelated root keys are copied through verbatim at the
+indent they came with. A file whose root still says `materials:` or `lights:` is
+migrated to `qray_materials:` / `qray_lights:`, an existing target is copied to
+`qray.backup_materials.yaml` first, and a missing final newline is added before
+a new entry so an append cannot glue two records together. `Apply` reloads the
+document afterwards, so the list markers follow the file it just wrote.
 
 `Entities` holds the two light tables the game builds. The `Map` table lists the
 lights the BSP spawned, the `Custom` table the ones added in the session; both
@@ -134,8 +167,14 @@ options remain available for a different deployment layout:
     --shaders C:\path\to\shaders `
     --blue-noise C:\path\to\textures\BlueNoise_LDR_RGBA_128.png `
     --scene C:\path\to\e1m1.bsp `
+    --materials C:\path\to\qray.materials.yaml `
     --tab Entities
 ```
+
+`--materials` names the document the session reads on start and writes on
+`Apply`; without it the editor targets `qray.materials.yaml` next to the scene.
+The path is logged as `session: <path> read, <n> entries` on startup, which is
+also how a scripted session tells which entries the file already carried.
 
 `--tab` opens that tab on the first frame, so a scripted session does not have to
 click the tab bar. It takes the tab label, not a pixel position, because the tab
@@ -151,12 +190,12 @@ from a PAK remains an adapter step.
 The remaining gap against the in-game editor is tracked in
 [`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
 is the source of truth for what is left. The global settings block, the
-material parameter table and light authoring - colour, position, the spot cone,
-the aim-and-drop placement and both drags with the axis gizmo - are done as far
-as the SDK upload info goes. Light style, the two light lists and the
-custom-light store are done as well, so the next block is the session lifecycle
-that writes `qray.materials.yaml` back, then the material parameters the game
-has and the SDK cannot express yet; those need new upload fields first.
+material parameter table, light authoring - colour, position, the spot cone,
+the aim-and-drop placement and both drags with the axis gizmo - and the session
+lifecycle that writes `qray.materials.yaml` back are done. What the session does
+not write yet is the level scope above the material scope, the `fog:` and
+`qray_lights:` records the game adds; after that come the material parameters
+the game has and the SDK cannot express, which need new upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
 remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`

@@ -72,6 +72,11 @@ constexpr float kEditorNewLightIntensity = 200.0f;
 // accepts a light the crosshair is near rather than exactly on.
 constexpr float kLightPickRadiusUnits = 24.0f;
 
+// The game's DrawNotification lifetime: six seconds, fading out over the last one. The editor
+// keeps the same numbers so a toast does not outlive the save it reports.
+constexpr float kNotifySeconds = 6.0f;
+constexpr float kNotifyFadeSeconds = 1.0f;
+
 // The game's QRE_GIZMO_LEN: the drawn length of one axis arrow. The drag divides the frozen
 // screen direction by the pixels this length spans, so dragging a whole arrow moves the light by
 // exactly one arrow length whatever the distance to the camera.
@@ -379,7 +384,7 @@ LRESULT CALLBACK EditorApp::WindowProc(HWND hwnd, UINT message, WPARAM wParam, L
         case WM_CLOSE:
             if (app != nullptr)
             {
-                app->m_running = false;
+                app->RequestExit();
             }
             return 0;
 
@@ -638,6 +643,7 @@ bool EditorApp::LoadScene()
 
     m_materials.Rebuild(m_scene);
     m_selectedMaterial = m_materials.Empty() ? -1 : 0;
+    LoadMaterialsSession();
     return true;
 }
 
@@ -888,6 +894,10 @@ void EditorApp::Frame()
     DrawPanel(deltaSeconds);
     DrawSelectionOverlay();
     UpdateCamera(deltaSeconds);
+    // Both draw over the panel: the prompt is the last thing a session shows, and the toast is
+    // the game editor's own way of reporting a save without a dialog.
+    DrawSessionPrompt();
+    DrawNotification();
     m_ui.EndFrame(m_instance, m_clientWidth, m_clientHeight);
 
     const float cosPitch = std::cos(m_cameraPitch);
@@ -2768,6 +2778,8 @@ void EditorApp::DrawPanel(float deltaSeconds)
         const float fps = deltaSeconds > 0.0f ? 1.0f / deltaSeconds : 0.0f;
         ImGui::Text("Frame  %.2f ms  (%.0f FPS)", m_frameTimeMs, fps);
         ImGui::Text("Drawable  %ux%u", m_clientWidth, m_clientHeight);
+        // Above the tabs, so the save controls never depend on how tall the open tab is.
+        DrawSessionBar();
 
         // Tab rects are logged so a scripted session can click a neighbouring tab instead of
         // guessing where ImGui laid the bar out.
@@ -3308,9 +3320,13 @@ void EditorApp::DrawMaterials()
     {
         for (size_t i = 0; i < m_materials.Count(); i++)
         {
+            const std::string &name = m_materials.NameAt(i);
+            // The marker is the game list's "the file carries this entry": the tick is what a
+            // save would rewrite here, so it tells an edit apart from a name the file lacks.
+            const std::string label = m_materialsDocument.HasMaterial(name) ? name + "  *" : name;
             const bool selected = int32_t(i) == m_selectedMaterial;
 
-            if (ImGui::Selectable(m_materials.NameAt(i).c_str(), selected))
+            if (ImGui::Selectable(label.c_str(), selected))
             {
                 m_selectedMaterial = int32_t(i);
             }
@@ -3390,19 +3406,366 @@ void EditorApp::DrawMaterials()
             changed |= ImGui::Checkbox("Exact normals##model", &material.exactNormals);
         }
 
-        if (ImGui::CollapsingHeader("Luma", ImGuiTreeNodeFlags_DefaultOpen))
+        if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen))
         {
             changed |= ImGui::SliderFloat("Emissive factor##luma", &material.emissiveFactor, 0.0f, 1.0f,
                                           "%.3f");
-            changed |= ImGui::Checkbox("Luma##luma", &material.luma);
+            // The checkbox uploads EMISSION_RAY_ONLY, which the game's is_light key also reaches,
+            // so the label and the file key agree on what the flag means.
+            changed |= ImGui::Checkbox("Is light##luma", &material.luma);
         }
 
     if (changed)
     {
         m_materialsChanged = true;
+        TouchMaterial(m_materials.NameAt(size_t(m_selectedMaterial)));
     }
 
     ImGui::EndChild();
+}
+
+void EditorApp::LoadMaterialsSession()
+{
+    std::string error;
+
+    m_touchedMaterials.clear();
+    m_sessionDirty = false;
+
+    if (!m_materialsDocument.Load(m_sessionPaths.materials, error))
+    {
+        PrintMessage(("session: " + error).c_str(), this);
+        Notify(error);
+        return;
+    }
+
+    size_t loaded = 0;
+
+    for (size_t i = 0; i < m_materials.Count(); i++)
+    {
+        EditorMaterialParams params;
+
+        // A name the file carries starts from the file rather than from the defaults, so an Apply
+        // that does not touch it writes back what the session read.
+        if (m_materialsDocument.ReadMaterial(m_materials.NameAt(i), params))
+        {
+            loaded++;
+        }
+
+        m_materials.At(i) = params;
+    }
+
+    const std::string message = "session: " + m_sessionPaths.materials +
+                                (m_materialsDocument.Exists() ? " read, " : " absent, new file on apply, ") +
+                                std::to_string(loaded) + " entries";
+    PrintMessage(message.c_str(), this);
+}
+
+void EditorApp::TouchMaterial(const std::string &name)
+{
+    if (std::find(m_touchedMaterials.begin(), m_touchedMaterials.end(), name) == m_touchedMaterials.end())
+    {
+        m_touchedMaterials.push_back(name);
+        PrintMessage(("session: touched " + name).c_str(), this);
+    }
+
+    m_sessionDirty = true;
+}
+
+bool EditorApp::ApplySession()
+{
+    if (m_touchedMaterials.empty())
+    {
+        PrintMessage("session: apply with nothing touched", this);
+        Notify("nothing to save: no material was edited");
+        return false;
+    }
+
+    std::vector<EditorMaterialEntry> entries;
+    entries.reserve(m_touchedMaterials.size());
+
+    for (const std::string &name : m_touchedMaterials)
+    {
+        const int32_t index = m_materials.IndexOf(name);
+
+        if (index >= 0)
+        {
+            entries.push_back(EditorMaterialEntry{ name, m_materials.At(size_t(index)) });
+        }
+    }
+
+    std::string error;
+    const std::string merged = m_materialsDocument.WriteMerged(entries);
+    const bool hadFile = m_materialsDocument.Exists();
+
+    // The previous generation is kept beside the target, as the game keeps one on every save, so
+    // a merge that dropped a line can be undone by copying the backup back.
+    if (hadFile && !CopyEditorFile(m_sessionPaths.materials, m_sessionPaths.materialsBackup, error))
+    {
+        PrintMessage(("session: " + error).c_str(), this);
+        Notify(error);
+        return false;
+    }
+
+    if (!WriteEditorFile(m_sessionPaths.materials, merged, error))
+    {
+        PrintMessage(("session: " + error).c_str(), this);
+        Notify(error);
+        return false;
+    }
+
+    m_touchedMaterials.clear();
+    m_sessionDirty = false;
+
+    std::string reloadError;
+
+    if (!m_materialsDocument.Load(m_sessionPaths.materials, reloadError))
+    {
+        PrintMessage(("session: " + reloadError).c_str(), this);
+    }
+
+    PrintMessage(("session: saved " + m_sessionPaths.materials).c_str(), this);
+    Notify("saved " + m_sessionPaths.materials);
+    return true;
+}
+
+void EditorApp::DiscardSession()
+{
+    LoadMaterialsSession();
+    m_materialsChanged = true;
+    PrintMessage("session: changes discarded", this);
+    Notify("changes discarded");
+}
+
+void EditorApp::RequestExit()
+{
+    if (!m_sessionDirty)
+    {
+        m_running = false;
+        return;
+    }
+
+    m_sessionPrompt = 1;
+    m_loggedPromptLayout = false;
+    PrintMessage("session: exit requested with unsaved changes", this);
+}
+
+void EditorApp::DrawSessionBar()
+{
+    std::string state = m_sessionDirty ? "unsaved" : "clean";
+
+    if (!m_touchedMaterials.empty())
+    {
+        state += ", " + std::to_string(m_touchedMaterials.size()) + " touched";
+    }
+
+    // Only the file name fits the bar; the full path is in the log line the session prints and in
+    // the save toast.
+    const size_t slash = m_sessionPaths.materials.find_last_of("\\/");
+    const char *target = slash == std::string::npos ? m_sessionPaths.materials.c_str()
+                                                    : m_sessionPaths.materials.c_str() + slash + 1;
+
+    ImGui::Text("Session %s  Target %s", state.c_str(), target);
+
+    const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+
+    // Button rects are logged like the tab rects, so a scripted session can click Apply without
+    // guessing where the bar landed.
+    std::string buttonRects;
+
+    auto noteRect = [&buttonRects](const char *name) {
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        buttonRects += " " + std::string(name) + " " + std::to_string(int(min.x)) + "," +
+                       std::to_string(int(min.y)) + " " + std::to_string(int(max.x)) + "," +
+                       std::to_string(int(max.y));
+    };
+
+    ImGui::BeginDisabled(!m_sessionDirty);
+
+    if (ImGui::Button("Apply", ImVec2(width, 0.0f)))
+    {
+        ApplySession();
+    }
+
+    noteRect("Apply");
+
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("Write the touched materials into the session file.\n"
+                          "Every other line of the file is kept as it was.");
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("Cancel", ImVec2(width, 0.0f)))
+    {
+        DiscardSession();
+    }
+
+    noteRect("Cancel");
+
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("Reload the materials from the session file.");
+    }
+
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("Exit", ImVec2(width, 0.0f)))
+    {
+        RequestExit();
+    }
+
+    noteRect("Exit");
+
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("Close the editor, asking about unsaved changes first.");
+    }
+
+    const uint64_t buttonLayout = std::hash<std::string>{}(buttonRects) | 1u;
+
+    if (m_loggedSessionLayout != buttonLayout)
+    {
+        m_loggedSessionLayout = buttonLayout;
+        PrintMessage(("panel session:" + buttonRects).c_str(), this);
+    }
+}
+
+void EditorApp::DrawSessionPrompt()
+{
+    if (m_sessionPrompt == 0)
+    {
+        return;
+    }
+
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
+                                   viewport->Pos.y + viewport->Size.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // A fixed size keeps the dialog in the same place on the frame it appears: an auto-resizing
+    // window only knows its size after the first layout, which makes it jump.
+    ImGui::SetNextWindowSize(ImVec2(440.0f, 148.0f), ImGuiCond_Always);
+
+    bool open = true;
+    int32_t answer = 0;
+    std::string buttonRects;
+
+    const auto noteRect = [&buttonRects](const char *label) {
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        buttonRects += std::string(" ") + label + " " + std::to_string(int(min.x)) + "," +
+                       std::to_string(int(min.y)) + " " + std::to_string(int(max.x)) + "," +
+                       std::to_string(int(max.y));
+    };
+
+    if (ImGui::Begin("Save your changes?", &open,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextWrapped("The session has unsaved material changes. Save them to");
+        ImGui::TextWrapped("%s", m_sessionPaths.materials.c_str());
+        ImGui::Spacing();
+
+        const float buttonWidth =
+            (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+        if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f)))
+        {
+            answer = 1;
+        }
+
+        noteRect("Yes");
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f)))
+        {
+            answer = 2;
+        }
+
+        noteRect("No");
+    }
+
+    ImGui::End();
+
+    if (!m_loggedPromptLayout)
+    {
+        m_loggedPromptLayout = true;
+        PrintMessage(("panel prompt:" + buttonRects).c_str(), this);
+    }
+
+    // Escape dismisses the prompt and returns to editing, the way the game's prompt does; it does
+    // not save and does not quit.
+    if (answer == 0 && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    {
+        answer = 3;
+    }
+
+    if (answer == 0 && !open)
+    {
+        answer = 3;
+    }
+
+    if (answer == 1)
+    {
+        m_sessionPrompt = 0;
+
+        if (ApplySession())
+        {
+            m_running = false;
+        }
+    }
+    else if (answer == 2)
+    {
+        m_sessionPrompt = 0;
+        DiscardSession();
+        m_running = false;
+    }
+    else if (answer == 3)
+    {
+        m_sessionPrompt = 0;
+        PrintMessage("session: prompt dismissed", this);
+    }
+}
+
+void EditorApp::DrawNotification()
+{
+    if (!m_notifyActive)
+    {
+        return;
+    }
+
+    const float elapsed =
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - m_notifyTime).count();
+
+    if (elapsed >= kNotifySeconds)
+    {
+        m_notifyActive = false;
+        return;
+    }
+
+    const float fade = kNotifySeconds - elapsed;
+    const float alpha = fade < kNotifyFadeSeconds ? fade / kNotifyFadeSeconds : 1.0f;
+
+    // The game draws its toast over everything at 14,14; the editor's panel owns that corner, so
+    // the line sits in the viewport's bottom-left instead, still over the whole window.
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const ImVec2 position(viewport->Pos.x + 14.0f, viewport->Pos.y + viewport->Size.y - 58.0f);
+    ImDrawList *draw = ImGui::GetForegroundDrawList();
+
+    draw->AddText(ImVec2(position.x + 1.0f, position.y + 1.0f),
+                  IM_COL32(0, 0, 0, int32_t(170.0f * alpha)), m_notifyText.c_str());
+    draw->AddText(position, IM_COL32(255, 226, 138, int32_t(235.0f * alpha)), m_notifyText.c_str());
+}
+
+void EditorApp::Notify(const std::string &text)
+{
+    m_notifyText = text;
+    m_notifyTime = std::chrono::steady_clock::now();
+    m_notifyActive = true;
 }
 
 int EditorApp::Run(int showCommand)
@@ -3441,12 +3804,17 @@ int EditorApp::Run(int showCommand)
             {
                 m_initialTab = Utf8FromWide(argv[++i]);
             }
+            else if (i + 1 < argc && argument == L"--materials")
+            {
+                m_materialsOverride = Utf8FromWide(argv[++i]);
+            }
         }
 
         LocalFree(argv);
     }
 
     NormalizeFolder(m_shaderFolder);
+    m_sessionPaths = BuildEditorSessionPaths(m_materialsOverride, m_scenePath);
 
     if (!CreateWindowInstance(showCommand))
     {

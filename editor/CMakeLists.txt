@@ -19,7 +19,7 @@ target_compile_features(quakerayeditor_imgui PRIVATE cxx_std_20)
 target_compile_definitions(quakerayeditor_imgui PRIVATE UNICODE _UNICODE)
 
 add_executable(quakerayeditor WIN32 Main.cpp EditorApp.cpp EditorMaterial.cpp EditorSettings.cpp
-    EditorUi.cpp Scene.cpp Assets.cpp)
+    EditorSession.cpp EditorUi.cpp Scene.cpp Assets.cpp)
 target_compile_features(quakerayeditor PRIVATE cxx_std_20)
 target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
 target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui user32 gdi32 shell32)
