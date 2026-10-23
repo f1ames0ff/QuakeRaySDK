@@ -117,6 +117,9 @@ private:
     int32_t PickLight(const float origin[3], const float direction[3], float &outDistance,
                       bool &outCustom) const;
     void DrawSelectionOverlay();
+    // The game's viewport overlay: the crosshair a look-mode click picks from, the hint block
+    // that says what the keys do, and the line a drag in flight shows.
+    void DrawViewportOverlay();
     void ClearSelection();
 
     // Projects a world point the way ViewBasis casts a ray, so an overlay marker or a gizmo grab
@@ -210,6 +213,12 @@ private:
     POINT m_lastMouse = {};
     bool m_keys[256] = {};
     bool m_showPanel = true;
+
+    // Where the panel's right edge landed this frame, so the overlay can put its hint block beside
+    // the panel instead of under it. Cleared when the panel is closed, which is when the block
+    // takes the window corner the game draws it in.
+    bool m_panelVisible = false;
+    float m_panelRight = 0.0f;
 
     // The sun of the level: rt_physical_sun, rt_sky_sun, rt_sky_sun_size and the two angles. Off
     // uploads no directional light, which is what the game does while rt_physical_sun is 0.
