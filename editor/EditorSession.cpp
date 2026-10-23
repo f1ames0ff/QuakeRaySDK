@@ -12,17 +12,6 @@
 
 namespace {
 
-// The keys EditorMaterialParams owns. Written in the game writer's own order for the fields the
-// two share, so a block the game wrote and the editor re-writes keeps its shape.
-const char *const kOwnedKeys[] = {
-    "texture_base",   "texture_normals",    "texture_emissive", "texture_gloss",
-    "texture_scale_u", "texture_scale_v",   "texture_offset_u", "texture_offset_v",
-    "bump_scale",     "roughness_override", "metalness_factor", "metalness_from_normal_alpha",
-    "emissive_factor", "luma_blend",        "base_factor",      "is_light",
-    "mirror",         "material_glass",     "material_water",   "transparency",
-    "glass_ior",      "glass_thickness",    "glass_color",      "exact_normals",
-};
-
 // The header of a target that does not exist yet. A file that does exist keeps its own header:
 // the merge never touches a line it does not own.
 const char kMaterialsHeader[] =
@@ -143,19 +132,6 @@ std::string_view KeyOf(std::string_view line)
     }
 
     return line.substr(start, end - start);
-}
-
-bool IsOwnedKey(std::string_view key)
-{
-    for (const char *owned : kOwnedKeys)
-    {
-        if (key == owned)
-        {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 // A root key the game's writer renamed in the current format: an old file is migrated while it is
@@ -315,6 +291,16 @@ int32_t EmissiveBlendOf(std::string_view value, int32_t fallback)
     return int32_t(std::clamp<long>(parsed, -1, 5));
 }
 
+// The name RT_MAT_EmissiveBlendName reports for a stored mode, so a re-written file reads back
+// as the same mode whether it came from the game or from here.
+const char *BlendNameOf(int32_t blend)
+{
+    const char *const names[] = { "off",        "normal", "screen",
+                                  "overlay",    "hard light", "color dodge" };
+
+    return blend >= 0 && blend <= 5 ? names[blend] : "cvar";
+}
+
 // `rrggbb`, the only form RT_CustomColorFromString reads back.
 std::string FormatColor(const float color[3])
 {
@@ -411,10 +397,7 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     // file the game wrote and the editor re-writes keeps reading the same.
     if (params.lumaBlend >= 0)
     {
-        const char *const blendNames[] = { "off",  "normal",   "screen",
-                                           "overlay", "hard light", "color dodge" };
-        const int32_t blend = std::min<int32_t>(params.lumaBlend, 5);
-        append("luma_blend", blendNames[blend]);
+        append("luma_blend", BlendNameOf(params.lumaBlend));
     }
 
     if (params.baseFactor != 1.0f)
@@ -474,7 +457,76 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("exact_normals", "true");
     }
 
+    // QRE_WriteEmissiveBlocks writes the list, then QRE_WriteMaterial writes the two material
+    // defaults the blocks inherit, and only when they differ from the file's own defaults.
+    if (!params.emissiveBlocks.empty())
+    {
+        append("luma", std::string());
+    }
+
+    if (params.lumaThreshold != 0.02f)
+    {
+        append("luma_threshold", FormatFloat(params.lumaThreshold));
+    }
+
+    if (params.lumaFeather != 0.0f)
+    {
+        append("luma_feather", FormatFloat(params.lumaFeather));
+    }
+
     return values;
+}
+
+// One owned key as YAML. Every key but `luma` is a scalar on its own line; `luma` is the list of
+// colour blocks, so it lays them out under the key the way QRE_WriteEmissiveBlocks does.
+void AppendOwnedValue(std::string &out, const std::string &indent, const char *key,
+                      const std::string &value, const EditorMaterialParams &params)
+{
+    if (std::string_view(key) != "luma")
+    {
+        out += indent;
+        out += key;
+        out += ": ";
+        out += value;
+        out += '\n';
+        return;
+    }
+
+    out += indent + "luma:\n";
+
+    for (const EditorEmissiveBlock &block : params.emissiveBlocks)
+    {
+        char buffer[64];
+
+        if (block.polyUv.size() >= 6)
+        {
+            out += indent + "  - polygon:";
+
+            for (size_t p = 0; p + 1 < block.polyUv.size(); p += 2)
+            {
+                std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", block.polyUv[p],
+                              block.polyUv[p + 1]);
+                out += buffer;
+            }
+
+            out += '\n';
+        }
+        else
+        {
+            out += indent + "  - color: " + FormatColor(block.color) + "\n";
+            out += indent + "    threshold: " + FormatFloat(block.threshold) + "\n";
+        }
+
+        out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
+        out += indent + "    emissive_factor: " + FormatFloat(block.factor) + "\n";
+        out += indent + "    blend: " + BlendNameOf(block.blend) + "\n";
+    }
+}
+
+// A line holding nothing but whitespace: inside a nested block it belongs to that block.
+bool IsBlankLine(std::string_view line)
+{
+    return line.find_first_not_of(" \t\r") == std::string_view::npos;
 }
 
 struct TextLine
@@ -536,6 +588,248 @@ void ParseColor(std::string_view value, float color[3])
     color[0] = float(red) / 255.0f;
     color[1] = float(green) / 255.0f;
     color[2] = float(blue) / 255.0f;
+}
+
+// The item of a `luma` list, key by key, the way rt_material.c reads a mapping node: a colour or a
+// polygon selects the pixels and the four tone controls replace what the item inherited. `has`
+// records which of those the file authored, so an omitted one can inherit the material's after the
+// whole entry has been read.
+enum EmissiveBlockOwned : uint32_t
+{
+    kOwnedThreshold = 1u << 0,
+    kOwnedFeather = 1u << 1,
+    kOwnedFactor = 1u << 2,
+    kOwnedBlend = 1u << 3,
+};
+
+std::string_view Trimmed(std::string_view text)
+{
+    while (!text.empty() && (IsSpace(text.front()) || text.front() == '{' || text.front() == '\t'))
+    {
+        text.remove_prefix(1);
+    }
+
+    while (!text.empty() &&
+           (IsSpace(text.back()) || text.back() == '}' || text.back() == '\r'))
+    {
+        text.remove_suffix(1);
+    }
+
+    return text;
+}
+
+// RT_MAT_EMIS_POLY_MAX points of a `- polygon:` value, clamped to the unit square; fewer than
+// three of them are no polygon at all, which is the reset the loader does.
+void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
+{
+    block.polyUv.clear();
+
+    const std::string text(value);
+    const char *cursor = text.c_str();
+
+    while (*cursor && block.polyUv.size() < 32)
+    {
+        char *end = nullptr;
+        const float u = std::strtof(cursor, &end);
+
+        if (end == cursor)
+        {
+            break;
+        }
+
+        cursor = end;
+
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == ',')
+        {
+            cursor++;
+        }
+
+        const float v = std::strtof(cursor, &end);
+
+        if (end == cursor)
+        {
+            break;
+        }
+
+        cursor = end;
+        block.polyUv.push_back(std::clamp(u, 0.0f, 1.0f));
+        block.polyUv.push_back(std::clamp(v, 0.0f, 1.0f));
+
+        while (*cursor == ' ' || *cursor == '\t')
+        {
+            cursor++;
+        }
+    }
+
+    if (block.polyUv.size() < 6)
+    {
+        block.polyUv.clear();
+    }
+}
+
+void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorEmissiveBlock &block,
+                           uint32_t &has)
+{
+    if (key == "color")
+    {
+        ParseColor(value, block.color);
+    }
+    else if (key == "polygon")
+    {
+        ReadEmissivePolygon(value, block);
+    }
+    else if (key == "threshold")
+    {
+        block.threshold = FloatOf(value, block.threshold);
+        has |= kOwnedThreshold;
+    }
+    else if (key == "feather")
+    {
+        // The loader rounds to whole pixels and clamps to the 16 the blur can reach.
+        const float pixels = FloatOf(value, block.feather);
+        block.feather = std::clamp(float(int(pixels + 0.5f)), 0.0f, 16.0f);
+        has |= kOwnedFeather;
+    }
+    else if (key == "emissive_factor" || key == "factor")
+    {
+        block.factor = FloatOf(value, block.factor);
+        has |= kOwnedFactor;
+    }
+    else if (key == "blend")
+    {
+        const int32_t blend = EmissiveBlendOf(value, -2);
+
+        if (blend != -2)
+        {
+            block.blend = blend;
+            has |= kOwnedBlend;
+        }
+    }
+}
+
+// Reads the `luma` key of one entry in either of its authored forms: the list of colour / polygon
+// blocks, or the legacy `luma: ff0000,00ff00` scalar the game still accepts.
+void ReadEmissiveBlocks(const std::string &text, const std::vector<TextLine> &lines, size_t begin,
+                        size_t end, size_t keyIndent, EditorMaterialParams &params)
+{
+    std::vector<uint32_t> has;
+
+    for (size_t i = begin; i < end; i++)
+    {
+        const std::string_view line = lines[i].View(text);
+
+        if (LeadingWhitespace(line) != keyIndent || KeyOf(line) != "luma")
+        {
+            continue;
+        }
+
+        const std::string_view scalar = Trimmed(ValueOf(line));
+
+        if (!scalar.empty())
+        {
+            size_t start = 0;
+
+            while (start < scalar.size() && params.emissiveBlocks.size() < kEditorEmissiveBlockMax)
+            {
+                size_t stop = scalar.find_first_of(", \t", start);
+
+                if (stop == std::string_view::npos)
+                {
+                    stop = scalar.size();
+                }
+
+                if (stop > start)
+                {
+                    EditorEmissiveBlock block;
+                    ParseColor(scalar.substr(start, stop - start), block.color);
+                    params.emissiveBlocks.push_back(block);
+                    has.push_back(0);
+                }
+
+                start = stop + 1;
+            }
+
+            continue;
+        }
+
+        size_t current = size_t(-1);
+
+        for (size_t k = i + 1; k < end; k++)
+        {
+            const std::string_view nested = lines[k].View(text);
+
+            if (IsBlankLine(nested))
+            {
+                continue;
+            }
+
+            const size_t indent = LeadingWhitespace(nested);
+
+            if (indent <= keyIndent)
+            {
+                break;
+            }
+
+            std::string_view item = nested.substr(indent);
+
+            if (item.size() >= 2 && item.front() == '-' && IsSpace(item[1]))
+            {
+                // Past the loader's cap the items are skipped rather than written into a block the
+                // game would not read anyway.
+                if (params.emissiveBlocks.size() >= kEditorEmissiveBlockMax)
+                {
+                    current = size_t(-1);
+                    continue;
+                }
+
+                params.emissiveBlocks.emplace_back();
+                has.push_back(0);
+                current = params.emissiveBlocks.size() - 1;
+                item = Trimmed(item.substr(1));
+            }
+
+            if (current == size_t(-1))
+            {
+                continue;
+            }
+
+            const size_t colon = item.find(':');
+
+            if (colon != std::string_view::npos)
+            {
+                ApplyEmissiveBlockKey(Trimmed(item.substr(0, colon)),
+                                     Trimmed(item.substr(colon + 1)),
+                                     params.emissiveBlocks[current], has[current]);
+            }
+        }
+    }
+
+    // A block that carries no tone control of its own takes the material-level one, which is what
+    // the loader does once it has read every key of the entry.
+    for (size_t b = 0; b < params.emissiveBlocks.size() && b < has.size(); b++)
+    {
+        EditorEmissiveBlock &block = params.emissiveBlocks[b];
+
+        if ((has[b] & kOwnedThreshold) == 0)
+        {
+            block.threshold = params.lumaThreshold;
+        }
+
+        if ((has[b] & kOwnedFeather) == 0)
+        {
+            block.feather = params.lumaFeather;
+        }
+
+        if ((has[b] & kOwnedFactor) == 0)
+        {
+            block.factor = params.emissiveFactor;
+        }
+
+        if ((has[b] & kOwnedBlend) == 0)
+        {
+            block.blend = params.lumaBlend;
+        }
+    }
 }
 
 std::string FormatVector(const float value[3])
@@ -1230,6 +1524,8 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
     bool glass = false;
     bool water = false;
 
+    params.emissiveBlocks.clear();
+
     size_t end = head + 1;
 
     for (; end < lines.size(); end++)
@@ -1379,7 +1675,18 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         {
             water = BoolOf(value, water);
         }
+        else if (key == "luma_threshold")
+        {
+            params.lumaThreshold = FloatOf(value, params.lumaThreshold);
+        }
+        else if (key == "luma_feather")
+        {
+            params.lumaFeather = FloatOf(value, params.lumaFeather);
+        }
     }
+
+    // The blocks inherit the material-level tone controls, so they are read once those are known.
+    ReadEmissiveBlocks(m_text, lines, head + 1, end, keyIndent, params);
 
     // a material that asks for both is glass, as the loader decides
     params.type = glass ? EditorMaterialType::Glass
@@ -1480,18 +1787,53 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
         // shape; an entry with no keys at all gets the writer's own two spaces deeper.
         const std::string indent(keyIndent != size_t(-1) ? keyIndent : LeadingWhitespace(line) + 2, ' ');
 
-        for (const auto &[key, value] : OwnedValues(entries[entry].params))
+        const std::vector<std::pair<const char *, std::string>> values =
+            OwnedValues(entries[entry].params);
+
+        for (const auto &[key, value] : values)
         {
-            merged += indent + key + ": " + value + "\n";
+            AppendOwnedValue(merged, indent, key, value, entries[entry].params);
         }
 
         for (size_t k = i + 1; k < body; k++)
         {
             const std::string_view bodyLine = lines[k].View(m_text);
             const std::string_view key = KeyOf(bodyLine);
+            bool emitted = false;
 
-            if (!key.empty() && LeadingWhitespace(bodyLine) == keyIndent && IsOwnedKey(key))
+            // Only a key the writer just wrote is taken out of the body: one it left at its file
+            // default stays where it was, so an untouched value keeps its own line.
+            if (!key.empty() && LeadingWhitespace(bodyLine) == keyIndent)
             {
+                for (const auto &[emittedKey, emittedValue] : values)
+                {
+                    if (key == emittedKey)
+                    {
+                        emitted = true;
+                        break;
+                    }
+                }
+            }
+
+            if (emitted)
+            {
+                // A list-valued key carries everything nested under it, so the block goes with the
+                // key line; leaving it behind would duplicate the blocks the writer just wrote.
+                for (k++; k < body; k++)
+                {
+                    const std::string_view nested = lines[k].View(m_text);
+
+                    if (!IsBlankLine(nested) && LeadingWhitespace(nested) <= keyIndent)
+                    {
+                        break;
+                    }
+                }
+
+                if (k < body)
+                {
+                    k--;
+                }
+
                 continue;
             }
 
@@ -1519,7 +1861,7 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
 
         for (const auto &[key, value] : OwnedValues(entries[e].params))
         {
-            merged += std::string(4, ' ') + key + ": " + value + "\n";
+            AppendOwnedValue(merged, std::string(4, ' '), key, value, entries[e].params);
         }
     }
 

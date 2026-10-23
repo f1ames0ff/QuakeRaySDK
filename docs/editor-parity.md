@@ -50,10 +50,10 @@ no implementation.
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
 | Sun intensity, azimuth, elevation, angular size | done | `Sun` group: `Light` (`rt_physical_sun`), `Light strength` (`rt_sky_sun`), `Pitch` / `Yaw` (`rt_sky_sun_pitch` / `rt_sky_sun_yaw`) and `Disc scale` / `Disc colour` / `Disc size`; the direction reaches `QrDrawFrameVolumetricParams::volume.sourceDirection` as the game's `+forward` |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
-| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 23 of the game's parameters, one material per texture name, applied by re-uploading the static scene. The six that need a texture the SDK cannot carry are baked by `EditorMaterialBakes`, which synthesises the albedo/normal/roughness-metallic-emission triplet the way `gl_texmgr.c` does. The nine that remain are listed under [Materials](#materials) |
+| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 24 of the game's parameters, one material per texture name, applied by re-uploading the static scene. The six that need a texture the SDK cannot carry are baked by `EditorMaterialBakes`, which synthesises the albedo/normal/roughness-metallic-emission triplet the way `gl_texmgr.c` does. The eight that remain are listed under [Materials](#materials) |
 | Texture browser with previews and search | done | `DrawTextureBrowser`; a grid of the scene's own textures with a name filter, the picked texture outlined in the game's orange, and `Select` / `NONE` writing `texture_base` |
 | Texture UV scale/offset authoring | done | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`), which is one pass with the geometry it changes. `qrUpdateGeometryTexCoords` is implemented for an embedder that already has its vertices uploaded: it writes the layers into the collector's staging buffer, and the values reach the device at the next static submit, the same contract `qrUpdateGeometryTransform` has |
-| Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT`, `Emissive` sets the emission scale and the `Luma blend` combo picks the composite mode. There is no colour-keyed mask block and no preview: the game's `luma` key is a list of per-colour threshold/feather/blend blocks with no SDK field behind it |
+| Luma mask authoring and preview | done | The game's `luma` key is a list of colour-keyed blocks, and `EditorMaterial.h` carries it as `EditorEmissiveBlock`: a colour, a `threshold` and a `feather` that key the mask, a `factor`, a `blend`, and an optional polygon mask in UV space, up to `kEditorEmissiveBlockMax` = 10 blocks per material. `EditorSession.cpp` reads the block list back out of a nested `luma:` block and writes it with the rest of the material, so a round trip through `Apply` reproduces the file byte for byte. The SDK still has no per-block field to upload, so `EditorMaterialBakes` synthesises the colour-keyed mask and the polygon into the emission texture the way `gl_texmgr.c` composites it, and re-uploads the static scene, which is also the preview: dragging a mask corner changes the traced glow of the surface. Two widgets do the authoring, both ported from `qr_gui.cpp`: `EditorPolygonEdit` draws the material's own texture under the outline and drags a point, a side or the whole outline with an 18 px grab radius, shifts a side along its normal with `Shift`, inserts a point on a side with `Ctrl`+click, removes one with a right click while more than three remain, and zooms with `Ctrl`+wheel around the cursor up to 5x; `EditorImagePick` is the eyedropper, a preview of the same texture that returns the UV under the click so `Luma` samples a `rgba` texel from `EditorTexture` and writes it as the block colour. `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; the `Luma blend` combo picks the composite mode. Measured on `e1m1` material `*slime0`: a point drag rewrote `0.1754,0.1723`, a `Ctrl`+click on a side produced a fifth point, a right click took it back to four, an eyedropper click in the middle of the texture wrote `ab04ab` and one near a corner `221314` |
 | Glass and water pass-through parameters | done | `PassThroughTypeForSurface` picks the type and, with `Material` set to `glass`, `Glass IOR`, `Glass thickness`, `Glass colour` and `Transparency` are the pane's own parameters; `Mirror` is the surface's. Water has no per-material parameters in the game either -- its look is the System tab's `Water / Acid` group, which the editor's `Water / Acid` group carries |
 | Light colour authoring | done | `Colour` (`ColorEdit3`) writes `EditorLight::tint`; `SetEditorLightTint` rebuilds radiance as `intensity * kEditorLightIntensityScale * tint` |
 | Light position and offset authoring | done | `Position` (`DragFloat3`) moves the light and re-resolves its cluster through `ResolveEditorLightCluster`; `Place at pick` drops it 8 units in front of the picked surface along the pick ray and aims the cone down that ray |
@@ -101,6 +101,7 @@ parameter block below it is a second scrolling child with the `Textures`, `Surfa
 | `metalness_from_normal_alpha` | `Metalness from normal alpha##surf` | fills the baked metalness from the normal map's alpha times `Metalness` |
 | `transparency` | `Transparency##surf` | the baked normal texture's alpha, which `HitInfo.hlsli` reads as `h.transparency` |
 | `luma_blend` | `Luma blend##luma` combo `Cvar`..`Color dodge` | the RME alpha as `emissive_blend + 1`, so `Cvar` writes 0 and the shader falls back to `emissionBlendMode` |
+| `luma` (block list) | `Luma blocks`: `Add colour block` / `Add mask block`, per-block `Colour`, `Threshold`, `Feather`, `Factor`, `Blend`, the mask polygon and `Copy` / `Paste` / `Remove block` | the baked emission texture: `EmissiveMaskOf` keys the material's own albedo by each block's colour and threshold, feathers it, and intersects it with the polygon rasterised from the block's UV points |
 | `material` | type combo `none`/`glass`/`water` | `QrGeometryPassThroughType`; `none` keeps the kind the BSP loader derived |
 | `roughness_override` | `Roughness override` | `defaultRoughness`; the checkbox writes `kEditorDefaultRoughness`, clearing it returns the `-1` sentinel. A mirror pins it to 0 whatever the override says, which is the tooltip's "mirror forces 0; glass keeps its override" |
 | `metalness_factor` | `Metalness` | `defaultMetallicity` |
@@ -123,8 +124,8 @@ time, so an edit is published by rebuilding the static scene: `EditorApp::Frame`
 change (`materials applied: static scene re-uploaded` in `editor.log`).
 
 Deliberately absent, because the SDK upload info has no field for them and a slider that cannot
-change the picture would be a lie: `texture_overlay`, `force_rasterize`, `luma` and the `light_*`
-group (`light_styles`, `light_color`, `light_brightness`, `light_emissive_focus`,
+change the picture would be a lie: `texture_overlay`, `force_rasterize` and the `light_*` group
+(`light_styles`, `light_color`, `light_brightness`, `light_emissive_focus`,
 `light_emissive_soften`, `light_emissive_projection`). The game's emissive range is 0..5; the SDK
 clamps emission to [0, 1].
 
@@ -223,16 +224,21 @@ the number to compare against the scene's texture list rather than against the f
 | Situation | Behaviour |
 | --- | --- |
 | Entry the session touched | its owned keys are rewritten from the panel values; a key equal to the default is dropped |
-| Key the session does not own (`bump_scale`, `luma:`, `material_glass`, comments) | copied verbatim, at the indent it had |
+| Key the session does not own (`texture_overlay`, `force_rasterize`, `light_*`, comments) | copied verbatim, at the indent it had |
 | Entry the session did not touch | untouched, including a name the editor never showed |
 | Root written by the game (`materials:`, `lights:`) | migrated to `qray_materials:` / `qray_lights:`, other root keys untouched |
 | File ends without a newline | one is added before the new entry, so an append cannot glue two records together |
 | Target file exists | copied to `qray.backup_materials.yaml` first |
 
 The owned keys are the fields the SDK upload info can express and the panel can edit:
-`texture_base`, `texture_scale_u/v`, `texture_offset_u/v`, `roughness_override`,
-`metalness_factor`, `base_factor`, `emissive_factor`, `is_light`, `exact_normals`,
-`material_glass` and `material_water`.
+`texture_base`, `texture_normals`, `texture_emissive`, `texture_gloss`, `texture_scale_u/v`,
+`texture_offset_u/v`, `bump_scale`, `roughness_override`, `metalness_factor`,
+`metalness_from_normal_alpha`, `emissive_factor`, `luma_blend`, `base_factor`, `is_light`,
+`mirror`, `material_glass`, `material_water`, `glass_ior`, `glass_thickness`, `transparency`,
+`glass_color`, `exact_normals` and the `luma` block list with its `luma_threshold` /
+`luma_feather` defaults. `luma` is the one key whose body is not a scalar: the list of colour
+blocks is laid out under it the way `QRE_WriteEmissiveBlocks` writes it, and a material whose
+block list is empty drops the key.
 
 ### Level document
 
@@ -412,11 +418,14 @@ which is how a scripted session finds them without reading pixels. A `DragFloat3
 is enough to move a light, and `Ctrl+Click` on a colour channel accepts a typed value.
 
 The session writer was accepted against a hand-written file that carries everything the editor
-does not own: a header comment, `bump_scale`, a nested `luma:` block, a second entry with a
-non-standard three-space indent and its own `material_glass`, and the game's `materials:` /
-`lights:` root keys. One Apply kept every one of those lines, migrated the two root keys to
-`qray_materials:` / `qray_lights:` and wrote `qray.backup_materials.yaml`; a second Apply on the
-result was byte-identical, which is the idempotence the game's merge writer also has.
+does not own: a header comment, a `texture_overlay`, a `force_rasterize` and a `light_color`, a
+second entry with a non-standard three-space indent and its own `material_glass`, and the game's
+`materials:` / `lights:` root keys. One Apply kept every one of those lines, migrated the two root
+keys to `qray_materials:` / `qray_lights:` and wrote `qray.backup_materials.yaml`; a second Apply
+on the result was byte-identical, which is the idempotence the game's merge writer also has. The
+same round trip now holds for the `luma` block list, which the editor does own: a file carrying a
+mask polygon and an eyedropped colour came back byte-identical from a reopen and an Apply that
+changed nothing.
 
 The reader was checked on the same file: `slime0 read=1 type=0 scaleU=2.0000 offsetU=2.9200`.
 The panel-to-file path was measured through the GUI: selecting `*slime0`, moving `Scale V` to 16
@@ -427,10 +436,9 @@ and pressing `Apply` wrote
     texture_scale_u: 2
     texture_scale_v: 16
     texture_offset_u: 2.92
-    # the game only: a bump scale and nested luma blocks
-    bump_scale: 0.25
-    luma:
-      - color: ff0000
+    # the game only: an overlay layer and a forced rasterizer path
+    texture_overlay: 3
+    force_rasterize: true
 ```
 
 which is the proof that the write starts from what the file carried (`texture_scale_u: 2`,

@@ -471,3 +471,548 @@ bool EditorUi::EndFrame(QrInstance instance, uint32_t clientWidth, uint32_t clie
 
     return true;
 }
+
+namespace
+{
+
+// The preview zoom the game keeps per widget: the state storage is keyed by the widget's ImGuiID,
+// so two open mask blocks each keep their own view.
+struct EditorPreviewView
+{
+    float zoom = 1.0f;
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+};
+
+constexpr float kEditorPreviewZoomMax = 5.0f;
+
+EditorPreviewView LoadEditorPreviewView(ImGuiID id)
+{
+    ImGuiStorage *storage = ImGui::GetStateStorage();
+    EditorPreviewView view;
+
+    view.zoom = std::clamp(storage->GetFloat(id, 1.0f), 1.0f, kEditorPreviewZoomMax);
+    view.u0 = std::clamp(storage->GetFloat(id + 1, 0.0f), 0.0f, 1.0f - 1.0f / view.zoom);
+    view.v0 = std::clamp(storage->GetFloat(id + 2, 0.0f), 0.0f, 1.0f - 1.0f / view.zoom);
+
+    return view;
+}
+
+void StoreEditorPreviewView(ImGuiID id, const EditorPreviewView &view)
+{
+    ImGuiStorage *storage = ImGui::GetStateStorage();
+
+    storage->SetFloat(id, view.zoom);
+    storage->SetFloat(id + 1, view.u0);
+    storage->SetFloat(id + 2, view.v0);
+}
+
+// Zooms about the pointer, so the texel under the cursor stays under it.
+EditorPreviewView WheelEditorPreviewView(EditorPreviewView view, const ImVec2 &origin,
+                                         const ImVec2 &size, float wheel)
+{
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const float width = size.x > 1.0f ? size.x : 1.0f;
+    const float height = size.y > 1.0f ? size.y : 1.0f;
+    const float fractionU = std::clamp((mouse.x - origin.x) / width, 0.0f, 1.0f);
+    const float fractionV = std::clamp((mouse.y - origin.y) / height, 0.0f, 1.0f);
+    const float centreU = view.u0 + fractionU / view.zoom;
+    const float centreV = view.v0 + fractionV / view.zoom;
+
+    view.zoom = std::clamp(view.zoom * std::pow(1.4f, wheel), 1.0f, kEditorPreviewZoomMax);
+    view.u0 = std::clamp(centreU - fractionU / view.zoom, 0.0f, 1.0f - 1.0f / view.zoom);
+    view.v0 = std::clamp(centreV - fractionV / view.zoom, 0.0f, 1.0f - 1.0f / view.zoom);
+
+    return view;
+}
+
+} // namespace
+
+bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
+                     float &outU, float &outV)
+{
+    ImGui::PushID(id);
+
+    float width = ImGui::GetContentRegionAvail().x;
+
+    if (width < 32.0f)
+    {
+        width = 32.0f;
+    }
+
+    const float height = (textureWidth > 0 && textureHeight > 0)
+                             ? width * float(textureHeight) / float(textureWidth)
+                             : width;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 size(width, height);
+    const ImGuiID viewId = ImGui::GetID("##preview_view");
+    EditorPreviewView view = LoadEditorPreviewView(viewId);
+    const bool over =
+        ImGui::IsMouseHoveringRect(origin, ImVec2(origin.x + width, origin.y + height));
+
+    if (over && ImGui::GetIO().KeyCtrl && ImGui::GetIO().MouseWheel != 0.0f)
+    {
+        view = WheelEditorPreviewView(view, origin, size, ImGui::GetIO().MouseWheel);
+        StoreEditorPreviewView(viewId, view);
+    }
+
+    const float span = 1.0f / view.zoom;
+
+    if (texture != 0)
+    {
+        ImGui::Image(ImTextureRef(ImTextureID(uintptr_t(texture))), size, ImVec2(view.u0, view.v0),
+                     ImVec2(view.u0 + span, view.v0 + span));
+    }
+    else
+    {
+        ImGui::Dummy(size);
+    }
+
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::InvisibleButton("##pick", size, ImGuiButtonFlags_MouseButtonLeft);
+
+    // While the pointer is on the image and Ctrl is down the wheel is the zoom's, not the panel's
+    // scroll, so the picker claims it before the scroll does.
+    if (ImGui::IsItemHovered() && ImGui::GetIO().KeyCtrl)
+    {
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+    }
+
+    const bool hovered = ImGui::IsItemHovered();
+    bool picked = false;
+
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+        outU = std::clamp(
+            view.u0 + (mouse.x - origin.x) / (width > 1.0f ? width : 1.0f) * span, 0.0f, 1.0f);
+        outV = std::clamp(
+            view.v0 + (mouse.y - origin.y) / (height > 1.0f ? height : 1.0f) * span, 0.0f, 1.0f);
+        picked = true;
+    }
+
+    ImGui::PopID();
+
+    return picked;
+}
+
+bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth,
+                       uint32_t textureHeight, std::vector<float> &uv, int32_t maxPoints)
+{
+    ImGui::PushID(id);
+
+    int32_t points = int32_t(uv.size() / 2);
+
+    if (maxPoints > 32)
+    {
+        maxPoints = 32;
+    }
+
+    if (textureWidth == 0 || textureHeight == 0 || points < 3 || points > maxPoints)
+    {
+        ImGui::PopID();
+
+        return false;
+    }
+
+    // The gesture outlives a frame, so it is kept between calls and tied to the widget's item ID:
+    // two open mask blocks must not act on each other's drag.
+    static int32_t dragIndex = -1;
+    static int32_t dragEdge = -1;
+    static bool dragAll = false;
+    static ImGuiID dragItem = 0;
+    static float dragAnchorU = 0.0f;
+    static float dragAnchorV = 0.0f;
+    static float dragEdgeBase[2][2] = {};
+    static bool dragEdgePerpendicular = false;
+    static std::vector<float> dragBase;
+
+    float width = ImGui::GetContentRegionAvail().x;
+
+    if (width < 32.0f)
+    {
+        width = 32.0f;
+    }
+
+    // The grab radius is in pixels, the polygon is in uv: an 18 pixel halo around a drawn point.
+    constexpr float grab = 18.0f;
+    const float height = width * float(textureHeight) / float(textureWidth);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const ImVec2 size(width, height);
+    const ImGuiID viewId = ImGui::GetID("##preview_view");
+    EditorPreviewView view = LoadEditorPreviewView(viewId);
+
+    if (ImGui::IsMouseHoveringRect(origin, ImVec2(origin.x + width, origin.y + height)) &&
+        ImGui::GetIO().KeyCtrl && ImGui::GetIO().MouseWheel != 0.0f)
+    {
+        view = WheelEditorPreviewView(view, origin, size, ImGui::GetIO().MouseWheel);
+        StoreEditorPreviewView(viewId, view);
+    }
+
+    const float span = 1.0f / view.zoom;
+
+    // The view maps the texture through the zoom, so a point of the polygon follows it and the
+    // pointer keeps reading the texel it is on.
+    const auto screenX = [&](float u) { return origin.x + (u - view.u0) / span * width; };
+    const auto screenY = [&](float v) { return origin.y + (v - view.v0) / span * height; };
+
+    ImGui::Image(ImTextureRef(ImTextureID(uintptr_t(texture))), size, ImVec2(view.u0, view.v0),
+                 ImVec2(view.u0 + span, view.v0 + span));
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::InvisibleButton("##mask", size,
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+
+    if (ImGui::IsMouseHoveringRect(origin, ImVec2(origin.x + width, origin.y + height)) &&
+        ImGui::GetIO().KeyCtrl)
+    {
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+    }
+
+    const ImGuiID item = ImGui::GetItemID();
+    bool changed = false;
+    int32_t hover = -1;
+
+    const auto pointAt = [&](int32_t index, float &u, float &v) {
+        u = uv[size_t(index) * 2];
+        v = uv[size_t(index) * 2 + 1];
+    };
+
+    if (ImGui::IsItemHovered())
+    {
+        for (int32_t p = 0; p < points; ++p)
+        {
+            const float px = screenX(uv[size_t(p) * 2]);
+            const float py = screenY(uv[size_t(p) * 2 + 1]);
+
+            if (mouse.x >= px - grab && mouse.x <= px + grab && mouse.y >= py - grab &&
+                mouse.y <= py + grab)
+            {
+                hover = p;
+                break;
+            }
+        }
+
+        ImGui::SetMouseCursor(hover >= 0 ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Hand);
+    }
+
+    // The side nearest a uv position, with the point on it, so inserting and framing share it.
+    const auto nearestEdge = [&](float u, float v, float &edgeU, float &edgeV) {
+        int32_t best = 0;
+        float bestDistance = 0.0f;
+
+        for (int32_t p = 0; p < points; ++p)
+        {
+            const int32_t q = (p + 1) % points;
+            float ax, ay, bx, by;
+            pointAt(p, ax, ay);
+            pointAt(q, bx, by);
+
+            const float dx = bx - ax;
+            const float dy = by - ay;
+            const float lengthSquared = dx * dx + dy * dy;
+            float t = 0.0f;
+
+            if (lengthSquared > 1e-8f)
+            {
+                t = std::clamp(((u - ax) * dx + (v - ay) * dy) / lengthSquared, 0.0f, 1.0f);
+            }
+
+            const float ex = ax + t * dx;
+            const float ey = ay + t * dy;
+            const float d = (u - ex) * (u - ex) + (v - ey) * (v - ey);
+
+            if (p == 0 || d < bestDistance)
+            {
+                bestDistance = d;
+                best = p;
+                edgeU = ex;
+                edgeV = ey;
+            }
+        }
+
+        return best;
+    };
+
+    const auto insidePolygon = [&](float u, float v) {
+        bool inside = false;
+
+        for (int32_t p = 0, q = points - 1; p < points; q = p++)
+        {
+            float ux, uy, vx, vy;
+            pointAt(p, ux, uy);
+            pointAt(q, vx, vy);
+
+            if ((uy > v) != (vy > v) && u < (vx - ux) * (v - uy) / (vy - uy) + ux)
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
+    };
+
+    int32_t hoverEdge = -1;
+    float hoverEdgeU = 0.0f;
+    float hoverEdgeV = 0.0f;
+
+    if (ImGui::IsItemHovered() && hover < 0)
+    {
+        const float u = std::clamp(view.u0 + (mouse.x - origin.x) / (width > 1.0f ? width : 1.0f) * span,
+                                   0.0f, 1.0f);
+        const float v =
+            std::clamp(view.v0 + (mouse.y - origin.y) / (height > 1.0f ? height : 1.0f) * span, 0.0f, 1.0f);
+        float edgeU = 0.0f;
+        float edgeV = 0.0f;
+        const int32_t edge = nearestEdge(u, v, edgeU, edgeV);
+        const float reach = 9.0f * span / (width > 1.0f ? width : 1.0f);
+        const float dx = u - edgeU;
+        const float dy = v - edgeV;
+
+        if (std::sqrt(dx * dx + dy * dy) < reach)
+        {
+            hoverEdge = edge;
+            hoverEdgeU = edgeU;
+            hoverEdgeV = edgeV;
+        }
+
+        if (hoverEdge >= 0)
+        {
+            if (ImGui::GetIO().KeyShift)
+            {
+                // Shift slides the side along its own normal, so the cursor says which way it steps.
+                float ax, ay, bx, by;
+                const int32_t q = (hoverEdge + 1) % points;
+                pointAt(hoverEdge, ax, ay);
+                pointAt(q, bx, by);
+
+                const bool moreVertical = std::fabs(by - ay) >= std::fabs(bx - ax);
+
+                ImGui::SetMouseCursor(moreVertical ? ImGuiMouseCursor_ResizeEW
+                                                   : ImGuiMouseCursor_ResizeNS);
+            }
+            else
+            {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            }
+        }
+    }
+
+    const float pointerU =
+        std::clamp(view.u0 + (mouse.x - origin.x) / (width > 1.0f ? width : 1.0f) * span, 0.0f, 1.0f);
+    const float pointerV =
+        std::clamp(view.v0 + (mouse.y - origin.y) / (height > 1.0f ? height : 1.0f) * span, 0.0f, 1.0f);
+    const bool inside = insidePolygon(pointerU, pointerV);
+
+    if (ImGui::IsItemActivated())
+    {
+        if (ImGui::GetIO().MouseDown[ImGuiMouseButton_Right])
+        {
+            if (hover >= 0 && points > 3)
+            {
+                uv.erase(uv.begin() + hover * 2, uv.begin() + hover * 2 + 2);
+                changed = true;
+                points--;
+            }
+        }
+        else if (hover >= 0)
+        {
+            dragIndex = hover;
+            dragEdge = -1;
+            dragAll = false;
+            dragItem = item;
+        }
+        else if (ImGui::GetIO().KeyCtrl && points < maxPoints)
+        {
+            float edgeU = 0.0f;
+            float edgeV = 0.0f;
+            const int32_t edge = nearestEdge(pointerU, pointerV, edgeU, edgeV);
+            const int32_t at = (edge + 1) % points;
+
+            uv.insert(uv.begin() + at * 2, { pointerU, pointerV });
+            changed = true;
+            points++;
+            dragIndex = at;
+            dragEdge = -1;
+            dragAll = false;
+            dragItem = item;
+        }
+        else if (hoverEdge >= 0)
+        {
+            const int32_t q = (hoverEdge + 1) % points;
+            float ax, ay, bx, by;
+            pointAt(hoverEdge, ax, ay);
+            pointAt(q, bx, by);
+
+            dragEdge = hoverEdge;
+            dragEdgePerpendicular = ImGui::GetIO().KeyShift;
+            dragEdgeBase[0][0] = ax;
+            dragEdgeBase[0][1] = ay;
+            dragEdgeBase[1][0] = bx;
+            dragEdgeBase[1][1] = by;
+            dragAnchorU = pointerU;
+            dragAnchorV = pointerV;
+            dragIndex = -1;
+            dragAll = false;
+            dragItem = item;
+        }
+        else if (inside)
+        {
+            dragAnchorU = pointerU;
+            dragAnchorV = pointerV;
+            dragBase = uv;
+            dragIndex = -1;
+            dragEdge = -1;
+            dragAll = true;
+            dragItem = item;
+        }
+    }
+
+    if (dragItem == item && dragAll)
+    {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            const float deltaU = pointerU - dragAnchorU;
+            const float deltaV = pointerV - dragAnchorV;
+
+            for (int32_t p = 0; p < points && size_t(p) * 2 + 1 < dragBase.size(); ++p)
+            {
+                const float u = std::clamp(dragBase[size_t(p) * 2] + deltaU, 0.0f, 1.0f);
+                const float v = std::clamp(dragBase[size_t(p) * 2 + 1] + deltaV, 0.0f, 1.0f);
+
+                if (uv[size_t(p) * 2] != u || uv[size_t(p) * 2 + 1] != v)
+                {
+                    uv[size_t(p) * 2] = u;
+                    uv[size_t(p) * 2 + 1] = v;
+                    changed = true;
+                }
+            }
+        }
+        else
+        {
+            dragAll = false;
+            dragItem = 0;
+        }
+    }
+    else if (dragItem == item && dragEdge >= 0 && dragEdge < points)
+    {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            const int32_t q = (dragEdge + 1) % points;
+            float deltaU = pointerU - dragAnchorU;
+            float deltaV = pointerV - dragAnchorV;
+
+            if (dragEdgePerpendicular)
+            {
+                // The side steps along its own normal, so the motion is projected on the
+                // perpendicular and the side keeps the direction it had.
+                const float edgeU = dragEdgeBase[1][0] - dragEdgeBase[0][0];
+                const float edgeV = dragEdgeBase[1][1] - dragEdgeBase[0][1];
+                const float length = std::sqrt(edgeU * edgeU + edgeV * edgeV);
+
+                if (length > 1e-8f)
+                {
+                    const float normalU = -edgeV / length;
+                    const float normalV = edgeU / length;
+                    const float projection = deltaU * normalU + deltaV * normalV;
+
+                    deltaU = normalU * projection;
+                    deltaV = normalV * projection;
+                }
+                else
+                {
+                    deltaU = 0.0f;
+                    deltaV = 0.0f;
+                }
+            }
+
+            const float moved[2][2] = {
+                { std::clamp(dragEdgeBase[0][0] + deltaU, 0.0f, 1.0f),
+                  std::clamp(dragEdgeBase[0][1] + deltaV, 0.0f, 1.0f) },
+                { std::clamp(dragEdgeBase[1][0] + deltaU, 0.0f, 1.0f),
+                  std::clamp(dragEdgeBase[1][1] + deltaV, 0.0f, 1.0f) },
+            };
+
+            for (int32_t pair = 0; pair < 2; ++pair)
+            {
+                const int32_t index = pair == 0 ? dragEdge : q;
+
+                if (uv[size_t(index) * 2] != moved[pair][0] ||
+                    uv[size_t(index) * 2 + 1] != moved[pair][1])
+                {
+                    uv[size_t(index) * 2] = moved[pair][0];
+                    uv[size_t(index) * 2 + 1] = moved[pair][1];
+                    changed = true;
+                }
+            }
+        }
+        else
+        {
+            dragEdge = -1;
+            dragItem = 0;
+        }
+    }
+    else if (dragItem == item && dragIndex >= 0 && dragIndex < points)
+    {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            if (uv[size_t(dragIndex) * 2] != pointerU ||
+                uv[size_t(dragIndex) * 2 + 1] != pointerV)
+            {
+                uv[size_t(dragIndex) * 2] = pointerU;
+                uv[size_t(dragIndex) * 2 + 1] = pointerV;
+                changed = true;
+            }
+        }
+        else
+        {
+            dragIndex = -1;
+            dragItem = 0;
+        }
+    }
+
+    ImDrawList *drawList = ImGui::GetWindowDrawList();
+    std::vector<ImVec2> shape(static_cast<size_t>(points));
+
+    for (int32_t p = 0; p < points; ++p)
+    {
+        shape[size_t(p)] =
+            ImVec2(screenX(uv[size_t(p) * 2]), screenY(uv[size_t(p) * 2 + 1]));
+    }
+
+    // A zoomed view may carry points outside the preview, so the mask and its handles are clipped.
+    drawList->PushClipRect(origin, ImVec2(origin.x + width, origin.y + height), true);
+    drawList->AddConcavePolyFilled(shape.data(), points, IM_COL32(255, 255, 255, 128));
+    drawList->AddPolyline(shape.data(), points, IM_COL32(255, 255, 255, 220), ImDrawFlags_Closed,
+                          1.5f);
+
+    {
+        const int32_t edge = (dragItem == item && dragEdge >= 0) ? dragEdge : hoverEdge;
+
+        if (edge >= 0 && edge < points)
+        {
+            const int32_t q = (edge + 1) % points;
+
+            drawList->AddLine(shape[size_t(edge)], shape[size_t(q)], IM_COL32(255, 210, 120, 255),
+                              2.5f);
+        }
+    }
+
+    for (int32_t p = 0; p < points; ++p)
+    {
+        const ImU32 fill = (p == hover || (dragItem == item && p == dragIndex))
+                               ? IM_COL32(255, 210, 120, 255)
+                               : IM_COL32(255, 255, 255, 255);
+
+        drawList->AddCircleFilled(shape[size_t(p)], 9.0f, fill);
+        drawList->AddCircle(shape[size_t(p)], 9.0f, IM_COL32(0, 0, 0, 180), 16, 1.5f);
+    }
+
+    drawList->PopClipRect();
+    drawList->AddRect(origin, ImVec2(origin.x + width, origin.y + height), IM_COL32(150, 160, 185, 255));
+
+    ImGui::PopID();
+
+    return changed;
+}

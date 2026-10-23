@@ -8,6 +8,19 @@
 
 #include <qray/qray.h>
 
+// The game's QR_GUI_ImagePick: the image a colour is taken from, at the panel's full width and the
+// texture's aspect, with Ctrl+wheel zoom. Returns true when the author clicked it, with outU/outV
+// carrying the position in [0,1] as it is drawn on screen.
+bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
+                     float &outU, float &outV);
+
+// The game's QR_GUI_PolygonEdit: a uv polygon painted over the image it selects. Dragging a point
+// moves it, dragging a side slides that side (Shift keeps its direction), dragging inside moves the
+// whole outline, Ctrl+click inserts a point on the nearest side, right-click removes one and
+// Ctrl+wheel zooms. Returns true when the polygon changed.
+bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
+                       std::vector<float> &uv, int32_t maxPoints);
+
 // Dear ImGui host used by the editor. The draw lists are rasterized through the
 // renderer's rasterized-geometry path, so ImGui's own Vulkan backend and
 // pipelines are not used.
