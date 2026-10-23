@@ -983,6 +983,7 @@ void EditorApp::Frame()
     // game's other dialog: it is drawn in the same place, one at a time.
     DrawSessionPrompt();
     DrawResetPrompt();
+    DrawRegenPrompt();
     DrawNotification();
     // Last, so the crosshair and the hints sit over everything the panel and the toast drew, and
     // so the hint block already knows whether a toast shares its corner.
@@ -3624,6 +3625,23 @@ void EditorApp::DrawGlobalSettings()
         ImGui::ColorEdit3("Fog colour", settings.fogColor);
         ImGui::SliderFloat("Density", &settings.fogDensity, 0.0f, 1.0f, "%.4f");
         ImGui::SliderFloat("Sky blend", &settings.fogSkyBlend, 0.0f, 1.0f, "%.2f");
+
+        // The game's button sits at the bottom of the same fog group, because regenerate is a
+        // level-wide action of the tab the fog belongs to rather than a material edit.
+        ImGui::Separator();
+
+        if (ImGui::Button("Regenerate from map"))
+        {
+            m_regenPrompt = 1;
+        }
+
+        LogRect("regenerate from map");
+
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Mark the level's light models as light materials and write their "
+                              "entries to the materials file (created if missing).");
+        }
     }
 
     ImGui::EndChild();
@@ -3871,6 +3889,33 @@ void EditorApp::DrawMaterials()
             // The checkbox uploads EMISSION_RAY_ONLY, which the game's is_light key also reaches,
             // so the label and the file key agree on what the flag means.
             changed |= ImGui::Checkbox("Is light##luma", &material.luma);
+
+            // The rest of the light group is what the surface casts in the game, which builds it
+            // from the geometry of the surface itself. Shown, not edited: a slider here would
+            // write the file but change nothing on screen, and "Regenerate from map" is what
+            // fills the values in.
+            if (material.hasLightColor || material.lightBrightness != 1.0f || material.lightStyles ||
+                material.lightFocus > 0.0f || material.lightProjector)
+            {
+                char cast[160];
+
+                if (material.hasLightColor)
+                {
+                    std::snprintf(cast, sizeof(cast), "casts a light: %d %d %d, brightness %.3g%s",
+                                  int(material.lightColor[0] * 255.0f + 0.5f),
+                                  int(material.lightColor[1] * 255.0f + 0.5f),
+                                  int(material.lightColor[2] * 255.0f + 0.5f),
+                                  material.lightBrightness,
+                                  material.lightStyles ? ", animated styles" : "");
+                }
+                else
+                {
+                    std::snprintf(cast, sizeof(cast), "no cast light: the material has no "
+                                                      "light_color");
+                }
+
+                ImGui::TextDisabled("%s", cast);
+            }
 
             // luma_blend picks how the emissive layer is composited: the game stores -1 for "use
             // the global setting" and 0..5 for a style this material forces.
@@ -5493,6 +5538,185 @@ void EditorApp::DrawResetPrompt()
         m_resetPrompt = 0;
         PrintMessage("session: reset dismissed", this);
     }
+}
+
+void EditorApp::DrawRegenPrompt()
+{
+    if (m_regenPrompt == 0)
+    {
+        return;
+    }
+
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
+                                   viewport->Pos.y + viewport->Size.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+
+    bool open = true;
+    int32_t answer = 0;
+    std::string layout;
+
+    const auto noteRect = [&layout](const char *label) {
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        layout += std::string(" ") + label + " " + std::to_string(int(min.x)) + "," +
+                  std::to_string(int(min.y)) + " " + std::to_string(int(max.x)) + "," +
+                  std::to_string(int(max.y));
+    };
+
+    if (ImGui::Begin("Regenerate from map?", &open,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextWrapped("This marks the level's light models as light materials and writes "
+                           "their entries to the materials file (created if missing). A name "
+                           "reaches the map's own frames when it is already how the game spells "
+                           "the model's texture.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", m_sessionPaths.materials.c_str());
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Level light models");
+        LogRect("regen models label");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##regen_models", "models, separated by spaces", m_regenModels,
+                                 IM_ARRAYSIZE(m_regenModels));
+        noteRect("models");
+        ImGui::Spacing();
+
+        const float buttonWidth =
+            (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+        if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f)))
+        {
+            answer = 1;
+        }
+
+        noteRect("Yes");
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f)))
+        {
+            answer = 2;
+        }
+
+        noteRect("No");
+
+        const ImVec2 pos = ImGui::GetWindowPos();
+        const ImVec2 size = ImGui::GetWindowSize();
+        layout = " window " + std::to_string(int(pos.x)) + "," + std::to_string(int(pos.y)) + " " +
+                 std::to_string(int(pos.x + size.x)) + "," + std::to_string(int(pos.y + size.y)) +
+                 layout;
+    }
+
+    ImGui::End();
+
+    const uint64_t layoutKey = std::hash<std::string>{}(layout) | 1u;
+
+    if (layoutKey != m_loggedRegenLayout)
+    {
+        m_loggedRegenLayout = layoutKey;
+        PrintMessage(("panel regen prompt:" + layout).c_str(), this);
+    }
+
+    if (answer == 0 && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    {
+        answer = 2;
+    }
+
+    if (answer == 0 && !open)
+    {
+        answer = 2;
+    }
+
+    if (answer == 1)
+    {
+        m_regenPrompt = 0;
+        RegenerateLightModels();
+    }
+    else if (answer == 2)
+    {
+        m_regenPrompt = 0;
+        PrintMessage("session: regenerate dismissed", this);
+    }
+}
+
+void EditorApp::RegenerateLightModels()
+{
+    const std::string list(m_regenModels);
+    size_t start = 0;
+    int32_t count = 0;
+
+    while (start < list.size())
+    {
+        size_t end = list.find_first_of(" \t\r\n", start);
+
+        if (end == std::string::npos)
+        {
+            end = list.size();
+        }
+
+        const std::string token = list.substr(start, end - start);
+        start = end + 1;
+
+        if (token.empty())
+        {
+            continue;
+        }
+
+        // The game's spelling of a model's material: a token with a path is taken as it is, one
+        // without is a progs/ model, and both name frame 0.
+        std::string name = token;
+
+        if (name.find('/') == std::string::npos && name.find('\\') == std::string::npos)
+        {
+            name = "progs/" + name;
+        }
+
+        name += ":frame0";
+
+        EditorMaterialParams &params = m_materials.At(size_t(m_materials.Ensure(name)));
+
+        params.luma = true;
+
+        if (params.lightBrightness <= 0.0f)
+        {
+            params.lightBrightness = 1.0f;
+        }
+
+        // RT_GetGlobalLightColor is the game's rt_globallight cvar, whose default a fresh config
+        // carries; the editor has no cvar store, so the default is what it writes.
+        if (!params.hasLightColor && params.emissiveTexture.empty())
+        {
+            params.hasLightColor = true;
+            params.lightColor[0] = 1.0f;
+            params.lightColor[1] = 1.0f;
+            params.lightColor[2] = 1.0f;
+        }
+
+        if (std::find(m_touchedMaterials.begin(), m_touchedMaterials.end(), name) !=
+            m_touchedMaterials.end())
+        {
+            continue;
+        }
+
+        TouchMaterial(name);
+        count++;
+    }
+
+    if (count == 0)
+    {
+        // The game's own wording for a list that named nothing new.
+        Notify("rt_level_light_models is empty");
+        PrintMessage("panel regenerate: nothing to mark", this);
+        return;
+    }
+
+    PrintMessage(("session: regenerated " + std::to_string(count) + " light materials").c_str(),
+                 this);
+    Notify("marked " + std::to_string(count) + " light materials");
+    ApplySession();
 }
 
 void EditorApp::DrawNotification()

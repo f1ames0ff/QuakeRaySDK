@@ -457,6 +457,37 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("exact_normals", "true");
     }
 
+    // QRE_WriteMaterial writes the light group's own keys, in this order, after the blocks.
+    if (params.lightStyles)
+    {
+        append("light_styles", "true");
+    }
+
+    if (params.hasLightColor)
+    {
+        append("light_color", FormatColor(params.lightColor));
+    }
+
+    if (params.lightBrightness != 1.0f)
+    {
+        append("light_brightness", FormatFloat(params.lightBrightness));
+    }
+
+    if (params.lightFocus > 0.0f)
+    {
+        append("light_focus", FormatFloat(params.lightFocus));
+    }
+
+    if (params.lightFocusSoft >= 0.0f)
+    {
+        append("light_focus_soft", FormatFloat(params.lightFocusSoft));
+    }
+
+    if (params.lightProjector)
+    {
+        append("light_projector", "true");
+    }
+
     // QRE_WriteEmissiveBlocks writes the list, then QRE_WriteMaterial writes the two material
     // defaults the blocks inherit, and only when they differ from the file's own defaults.
     if (!params.emissiveBlocks.empty())
@@ -1650,6 +1681,31 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         else if (key == "exact_normals")
         {
             params.exactNormals = BoolOf(value, params.exactNormals);
+        }
+        else if (key == "light_styles")
+        {
+            params.lightStyles = BoolOf(value, params.lightStyles);
+        }
+        else if (key == "light_color")
+        {
+            params.hasLightColor = true;
+            ParseColor(value, params.lightColor);
+        }
+        else if (key == "light_brightness")
+        {
+            params.lightBrightness = FloatOf(value, params.lightBrightness);
+        }
+        else if (key == "light_focus")
+        {
+            params.lightFocus = FloatOf(value, params.lightFocus);
+        }
+        else if (key == "light_focus_soft")
+        {
+            params.lightFocusSoft = FloatOf(value, params.lightFocusSoft);
+        }
+        else if (key == "light_projector")
+        {
+            params.lightProjector = BoolOf(value, params.lightProjector);
         }
         else if (key == "mirror")
         {

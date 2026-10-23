@@ -107,6 +107,10 @@ private:
     void DrawSessionBar();
     void DrawSessionPrompt();
     void DrawResetPrompt();
+    // The game's regen_prompt: a question whose "Yes" marks every model in the list as a light
+    // material and writes their entries, the way QRE_RegenerateLights does.
+    void DrawRegenPrompt();
+    void RegenerateLightModels();
     void DrawNotification();
     void Notify(const std::string &text);
     // The Entity tab of the game editor: every light the frame uploads, map lights first, and
@@ -295,6 +299,11 @@ private:
     // The reset question the game's tab bar opens when the open tab is clicked again: 1 shows the
     // prompt, 0 means no prompt, and Escape returns to editing like the game's own dialog.
     int32_t m_resetPrompt = 0;
+    // The regenerate question: 1 shows it, 0 means none. `m_regenModels` is the list it asks
+    // about -- the game reads rt_level_light_models, and this editor has no cvars, so the dialog
+    // carries the same default list and lets the author state the models it must mark.
+    int32_t m_regenPrompt = 0;
+    char m_regenModels[256] = "flame.mdl flame2.mdl lavaball.mdl proj_balllava.mdl";
     // The panel tab that was open last frame: a click that lands on it again is the reset
     // gesture rather than a switch to another tab.
     std::string m_activePanelTab;
@@ -341,6 +350,7 @@ private:
     // Hash of the reset dialog's rectangles, so a re-opened dialog logs again when its fitted
     // height changes with a longer path.
     uint64_t m_loggedResetLayout = 0;
+    uint64_t m_loggedRegenLayout = 0;
     uint64_t m_loggedStyleLayout = 0;
     uint64_t m_loggedGizmoLayout = 0;
 

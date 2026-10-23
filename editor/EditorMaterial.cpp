@@ -383,6 +383,20 @@ int32_t EditorMaterialTable::IndexOf(const std::string &name) const
     return it == m_indexByName.end() ? -1 : int32_t(it->second);
 }
 
+int32_t EditorMaterialTable::Ensure(const std::string &name)
+{
+    const auto it = m_indexByName.find(name);
+
+    if (it != m_indexByName.end())
+    {
+        return int32_t(it->second);
+    }
+
+    m_indexByName[name] = m_entries.size();
+    m_entries.push_back(Entry{ name, EditorMaterialParams{} });
+    return int32_t(m_entries.size() - 1);
+}
+
 const EditorMaterialParams &EditorMaterialTable::For(const EditorSurface &surface) const
 {
     const auto it = m_indexByName.find(surface.textureName);
