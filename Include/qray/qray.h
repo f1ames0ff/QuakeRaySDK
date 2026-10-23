@@ -32,10 +32,9 @@
     #define QRCONV
 #endif
 
-#define QR_API_VERSION "1.05.0000"
+#define QR_API_VERSION "1.06.0000"
 
-#define QR_SCENE_UNITS_PER_METER 40.0f
-#define QR_SPATIAL_CONVENTION_VERSION 1
+#define QR_SPATIAL_CONVENTION_VERSION 2
 
 typedef enum QrAxis
 {
@@ -69,6 +68,8 @@ typedef uint32_t QrMaterial;
 typedef uint32_t QrCubemap;
 typedef uint32_t QrFlags;
 
+/* Spatial values use meters, square meters and inverse meters. The host converts
+   its native units before calling the SDK; this convention describes axes only. */
 typedef struct QrSpatialConvention
 {
     uint32_t    size;
@@ -79,7 +80,7 @@ typedef struct QrSpatialConvention
     QrAxis      sceneZAxis;
 
     QrBool32    hostIsRightHanded;
-    float       unitsPerMeter;
+    uint32_t    reserved0;
 
     uint32_t    reserved[4];
 } QrSpatialConvention;
@@ -268,6 +269,7 @@ typedef enum QrGeometryMaterialBlendType
 
 typedef struct QrTransform
 {
+    /* Row-major 3x4 affine transform: dimensionless linear part, meter translation. */
     float       matrix[3][4];
 } QrTransform;
 
@@ -301,8 +303,8 @@ QRAPI QrResult QRCONV qrGetSmokeWindDirection(
 
 typedef struct QrVertex
 {
-    float       position[3];        uint32_t _padding0;
-    float       normal[3];          uint32_t _padding1;
+    float       position[3];        uint32_t _padding0; /* local-space meters */
+    float       normal[3];          uint32_t _padding1; /* dimensionless direction */
     float       texCoord[2];
     float       texCoordLayer1[2];
     float       texCoordLayer2[2];
@@ -1238,8 +1240,8 @@ typedef struct QrDrawFrameSkyParams
     //     [1][1]     density
     //     [1][2]     wind speed
     //     [2][0]     1 when the cloud layer is drawn, 0 when it is not
-    //     [2][1]     layer base height, scene units
-    //     [2][2]     layer thickness, scene units
+    //     [2][1]     layer base height, meters
+    //     [2][2]     layer thickness, meters
     //
     // The packing keeps the struct layout stable; a host that fills this field
     // for a procedural sky must fill the whole block, because an unset coverage
@@ -1361,10 +1363,10 @@ typedef struct QrDrawFrameVolumetricParams
 
     QrBool32    useSimpleDepthBased;
 
-    float       volumetricFar;
+    float       volumetricFar; /* meters */
     QrFloat3D   ambientColor;
 
-    float       scaterring;
+    float       scaterring; /* inverse meters */
 
     QrFloat3D   sourceColor;
     QrFloat3D   sourceDirection;
@@ -1376,7 +1378,7 @@ typedef struct QrDrawFrameLevelFogParams
 {
     QrFloat3D   color;
 
-    float       density;
+    float       density; /* inverse meters */
 
     float       skyBlend;
 } QrDrawFrameLevelFogParams;
@@ -1385,12 +1387,13 @@ typedef struct QrDrawFrameLevelFogParams
 
 typedef struct QrFogVolume
 {
+    /* World-space coordinates in meters. */
     QrFloat3D   pointA;
     QrFloat3D   pointB;
 
     QrFloat3D   color;
 
-    float       halfExtinctionDistance;
+    float       halfExtinctionDistance; /* meters */
 
     uint32_t    softface;
 } QrFogVolume;
@@ -1483,7 +1486,7 @@ typedef struct QrPostEffectsBloomParams
 typedef struct QrPostEffectsNearDofParams
 {
     float       strength;
-    float       focusDistance;
+    float       focusDistance; /* meters */
     float       maxRadius;
 } QrPostEffectsNearDofParams;
 
@@ -1556,19 +1559,19 @@ typedef struct QrDrawFrameReflectRefractParams
 
     float       indexOfRefractionWater;
     QrBool32    forceNoWaterRefraction;
-    float       waterWaveSpeed;
+    float       waterWaveSpeed; /* meters per second */
     float       waterWaveNormalStrength;
 
     float       turbWarpStrength;
 
-    QrFloat3D   waterColor;
+    QrFloat3D   waterColor; /* transmittance over one meter */
 
-    QrFloat3D   acidColor;
+    QrFloat3D   acidColor; /* transmittance over one meter */
     float       acidDensity;
 
     float       waterWaveTextureDerivativesMultiplier;
 
-    float       waterTextureAreaScale;
+    float       waterTextureAreaScale; /* meters */
 
     QrBool32    disableBackfaceReflectionsForNoMediaChange;
 
@@ -1627,16 +1630,16 @@ typedef QrFlags QrDrawFrameRayCullFlags;
 
 typedef struct QrDrawFrameInfo
 {
-    float                   view[16];
+    float                   view[16]; /* column-major world-to-view; translation in meters */
 
     QrFloat3D               worldUpVector;
 
     float                   fovYRadians;
 
-    float                   cameraNear;
-    float                   cameraFar;
+    float                   cameraNear; /* meters */
+    float                   cameraFar; /* meters */
 
-    float                   rayLength;
+    float                   rayLength; /* meters */
 
     QrDrawFrameRayCullFlags rayCullMaskWorld;
 

@@ -1,9 +1,10 @@
 # Embedding QuakeRaySDK renderer
 
 This guide is for a Win32 host that links `qray::renderer` and owns its window,
-swapchain, assets and scene. The host may use its own units and a right-handed
-or left-handed Z-up or Y-up frame; the renderer converts its inputs into the
-internal spatial frame described in [spatial-contract.md](spatial-contract.md).
+swapchain, assets and scene. The host may use a right-handed or left-handed
+Z-up or Y-up frame, but it must convert all spatial values to meters before
+calling the SDK. The renderer maps meter inputs into its private scene frame as
+described in [spatial-contract.md](spatial-contract.md).
 
 ## 1. Build and link
 
@@ -36,29 +37,33 @@ QrSpatialConvention spatial = {
     .sceneYAxis = QR_AXIS_NEGATIVE_Z,
     .sceneZAxis = QR_AXIS_POSITIVE_Y,
     .hostIsRightHanded = QR_TRUE,
-    .unitsPerMeter = 1.0f,
+    .reserved0 = 0,
 };
 QrResult result = qrSetSpatialConvention(instance, &spatial);
 ```
 
-The axes above describe a right-handed Y-up host. QuakeRay uses
-`POSITIVE_X`, `POSITIVE_Y`, `POSITIVE_Z` and `QR_SCENE_UNITS_PER_METER`.
-Omitting this call selects the identity convention and preserves the legacy
-Quake-compatible path. The call must happen before the first spatial upload or
-drawn frame.
+The axes above describe a right-handed Y-up host. QuakeRay's reference host
+uses `POSITIVE_X`, `POSITIVE_Y`, `POSITIVE_Z`; its adapter converts Quake units
+to meters. There is no scale field in the convention. If this call is omitted,
+the SDK assumes identity axes and meter-valued inputs. The call must happen
+before the first spatial upload or drawn frame.
 
 ## 3. Upload the scene
 
-Geometry, light, cluster and fog calls take host-space values. The SDK converts
-them at the API boundary:
+Geometry, light, cluster and fog calls take meter-valued spatial inputs. The
+SDK converts them to its internal scene scale and axis orientation:
 
-- upload geometry in local space with a row-major 3x4 `QrTransform`;
-- upload cluster bounds, light positions/radii/reaches and fog distances in
-  host units;
+- convert all positions, translations, radii, reaches, fog distances and
+  camera distances to meters; convert areas to square meters and inverse
+  lengths to per-meter values;
+- upload geometry in meter-valued local space with a row-major 3x4
+  `QrTransform` whose linear part is dimensionless and translation is in
+  meters;
 - use the per-type light color convention from the spatial contract;
 - build the view as a column-major world-to-view matrix in the host world's
-  handedness, with `-Z` forward and `+Y` up in view space;
-- keep `QrDrawFrameInfo.cameraNear`, `cameraFar` and `rayLength` in host units;
+  handedness, with meter-valued translation, `-Z` forward and `+Y` up in view
+  space;
+- keep `QrDrawFrameInfo.cameraNear`, `cameraFar` and `rayLength` in meters;
 - pass the smoke wind direction with `qrSetSmokeWindDirection` in host scene
   space;
 - use `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN` for HUD, menus and other
@@ -104,27 +109,28 @@ path is not a scene inspection API and includes the composited UI.
 
 ## 5. QuakeRay as the reference adapter
 
-QuakeRay is the reference host. It keeps Quake units, Z-up and the existing
-light calibration, declares the identity convention, and uses the current
-shader/asset pipeline. Treat it as a regression oracle, not as the definition
-of the public spatial contract.
+QuakeRay is the reference host. Its game code keeps Quake units and Z-up, while
+`Quake/qr_spatial_adapter.*` converts spatial API payloads to meters, including
+the legacy positional-light calibration. `SWAPCHAIN` UI geometry remains in
+pixels. Treat the adapter and its identity-frame output as a regression oracle,
+not as the definition of the public spatial contract.
 
 The standalone editor is a parked workstream. It is not required for renderer
 embedding.
 
 ## 6. Validation checklist
 
-- Identity convention: QuakeRay's fixed camera, cluster lists and final image
-  remain unchanged.
-- Y-up/meter scene: compare against an independently authored Z-up/Quake-unit
-  twin; check clusters, area lights, fog, water, particles, clouds and raster
-  overlays. `qray_spatial_twin_gpu` covers the geometry, camera, directed and
-  spherical lights, level fog and final readback path.
+- Identity, Y-up and mirrored meter scenes must produce equivalent results.
+  `qray_spatial_twin_gpu` covers geometry, camera, directional and spherical
+  lights, level fog, particles, clouds, water and final readback.
+- The Quake adapter must preserve the existing game image while converting its
+  native data at the API boundary.
 - Swapchain/UI geometry is pixel-positioned and never world-transformed.
 - Left-handed hosts keep their native coordinates and view matrix; the
   renderer mirrors the frame and re-winds triangles. Only the world convention
   itself must be an axis-aligned signed permutation; instance transforms may
   carry arbitrary rotations and non-uniform scales, which the frame converts
   exactly. Reflected host data still needs its own triangle order reversed.
-- Keep `rayLength` positive and finite. The SDK accepts it up to its 10,000,000
-  scene-unit safety ceiling; the depth buffer is `R32_SFLOAT`.
+- Keep `rayLength` positive and finite. It is expressed in meters and is
+  bounded by the 10,000,000 internal-scene-unit safety ceiling (250,000 m);
+  the depth buffer is `R32_SFLOAT`.

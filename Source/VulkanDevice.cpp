@@ -715,7 +715,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->waterTextureAreaScale             = 1.0f;
 
         // The fallbacks stand for the defaults a host would otherwise send, so
-        // they are expressed in host units and converted through the frame the
+        // they are expressed in meters and converted through the frame the
         // same way SpatialFrame::ConvertDrawFrame does for a real draw.
         if( !spatialFrame.IsIdentity() )
         {
@@ -1998,7 +1998,7 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
 
     if (!spatialFrame.IsIdentity())
     {
-        converted.transform = SpatialTransform(spatialFrame, uploadInfo->transform);
+        converted = spatialFrame.Geometry(*uploadInfo);
     }
 
     const bool reversesWinding = spatialFrame.ReversesWinding(uploadInfo->transform);

@@ -46,20 +46,20 @@ constexpr uint32_t kTopUpSources = 8;
 
 // The top-up pass indexes light origins on a coarse grid so that a cluster looks at the cells
 // its bounds expanded by the reach touch instead of at every light of the frame.
-constexpr float    kMinGridCell = 16.0f;      // Quake units
+constexpr float    kMinGridCell = 16.0f;      // internal scene units
 constexpr uint32_t kMaxGridCells = 262144;
 
-/* How far a light may drift before the composition counts it as moved, in Quake units. The
+/* How far a light may drift before the composition counts it as moved, in internal scene units. The
    clusters a light holds are a function of where it stands, so a light that moves freely would
    call for a composition on every frame it moves on. A light that stays inside one quantum of
    the origin the lists were built from keeps them instead. */
-constexpr float kSourceQuantum = 16.0f;       // Quake units
+constexpr float kSourceQuantum = 16.0f;       // internal scene units
 
 /* How far past its own reach a light is granted a cluster, so that the lists built for one
    origin are still right for every origin inside a quantum of it: the grant is kept while the
    light is gated out against the reach of the position it stands at now. The margin covers the
    diagonal of a quantum, which is the farthest two origins of one quantum can be apart. */
-constexpr float kSourceMargin = 32.0f;        // Quake units
+constexpr float kSourceMargin = 32.0f;        // internal scene units
 
 static_assert(kSourceMargin >= kSourceQuantum * 1.7320508f, "the source margin must cover a whole quantum");
 

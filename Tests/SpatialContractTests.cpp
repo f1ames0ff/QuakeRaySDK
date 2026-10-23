@@ -56,7 +56,7 @@ QrTransform MakeLinearTransform(float xx, float xy, float xz, float yx, float yy
     return result;
 }
 
-QrSpatialConvention MakeConvention(QrAxis x, QrAxis y, QrAxis z, float unitsPerMeter)
+QrSpatialConvention MakeConvention(QrAxis x, QrAxis y, QrAxis z)
 {
     return {
         sizeof(QrSpatialConvention),
@@ -65,7 +65,7 @@ QrSpatialConvention MakeConvention(QrAxis x, QrAxis y, QrAxis z, float unitsPerM
         y,
         z,
         QR_TRUE,
-        unitsPerMeter,
+        0,
         {},
     };
 }
@@ -74,34 +74,34 @@ QrSpatialConvention MakeConvention(QrAxis x, QrAxis y, QrAxis z, float unitsPerM
 
 int main()
 {
-    if (!Check(std::strcmp(QR_API_VERSION, "1.05.0000") == 0, "unexpected QR_API_VERSION") ||
+    if (!Check(std::strcmp(QR_API_VERSION, "1.06.0000") == 0, "unexpected QR_API_VERSION") ||
         !Check(sizeof(QrSpatialConvention) == 44, "unexpected QrSpatialConvention size") ||
-        !Check(offsetof(QrSpatialConvention, unitsPerMeter) == 24, "unexpected QrSpatialConvention layout"))
+        !Check(offsetof(QrSpatialConvention, reserved0) == 24, "unexpected QrSpatialConvention layout"))
     {
         return 1;
     }
 
     qray::SpatialFrame identity;
-    if (!Check(identity.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z,
-                                                QR_SCENE_UNITS_PER_METER)),
+    if (!Check(identity.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z)),
                "identity convention rejected") ||
-        !Check(identity.IsIdentity(), "identity convention is not identity"))
+        !Check(!identity.IsIdentity(), "meter convention skipped internal scene scaling") ||
+        !Check(NearlyEqual(identity.Scale(), 40.0f), "meter convention did not map to internal scene units"))
     {
         return 1;
     }
 
     const QrFloat3D identityPoint = identity.Point({ { 1.0f, 2.0f, 3.0f } });
-    if (!Check(identityPoint.data[0] == 1.0f && identityPoint.data[1] == 2.0f && identityPoint.data[2] == 3.0f,
-               "identity point changed"))
+    if (!Check(identityPoint.data[0] == 40.0f && identityPoint.data[1] == 80.0f &&
+               identityPoint.data[2] == 120.0f, "meter point conversion failed"))
     {
         return 1;
     }
 
     qray::SpatialFrame upY;
-    if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Z, QR_AXIS_POSITIVE_Y, 1.0f)),
+    if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Z, QR_AXIS_POSITIVE_Y)),
                "Y-up convention rejected") ||
         !Check(!upY.IsIdentity(), "Y-up convention marked identity") ||
-        !Check(NearlyEqual(upY.Scale(), QR_SCENE_UNITS_PER_METER), "unexpected scale"))
+        !Check(NearlyEqual(upY.Scale(), 40.0f), "unexpected scale"))
     {
         return 1;
     }
@@ -151,6 +151,27 @@ int main()
                NearlyEqual(convertedTransform.matrix[1][3], -120.0f) &&
                NearlyEqual(convertedTransform.matrix[2][3], 80.0f),
                "transform conversion failed"))
+    {
+        return 1;
+    }
+
+    QrGeometryUploadInfo glassGeometry = {};
+    glassGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT;
+    glassGeometry.transform = transform;
+    glassGeometry.layerColors[2].data[0] = 1.5f;
+    glassGeometry.layerColors[2].data[1] = 0.25f;
+    const QrGeometryUploadInfo convertedGlass = upY.Geometry(glassGeometry);
+    if (!Check(NearlyEqual(convertedGlass.layerColors[2].data[0], 1.5f) &&
+               NearlyEqual(convertedGlass.layerColors[2].data[1], 10.0f) &&
+               NearlyEqual(convertedGlass.transform.matrix[0][3], 40.0f),
+               "glass thickness conversion failed"))
+    {
+        return 1;
+    }
+
+    glassGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
+    if (!Check(NearlyEqual(upY.Geometry(glassGeometry).layerColors[2].data[1], 0.25f),
+               "non-glass material color was changed"))
     {
         return 1;
     }
@@ -285,10 +306,21 @@ int main()
         return 1;
     }
 
-    if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Z, 1.0f)) == false,
+    QrSpatialConvention invalidReserved = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y,
+                                                         QR_AXIS_POSITIVE_Z);
+    invalidReserved.reserved0 = 1;
+    QrSpatialConvention oldConvention = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y,
+                                                       QR_AXIS_POSITIVE_Z);
+    oldConvention.version = 1;
+
+    if (!Check(NearlyEqual(upY.Transmittance(0.0f), 0.000001f),
+               "zero transmittance did not remain opaque") ||
+        !Check(NearlyEqual(upY.Transmittance(0.000001f), std::pow(0.000001f, 0.025f)),
+               "small meter transmittance was clamped before unit conversion") ||
+        !Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Z)) == false,
                "duplicate axes accepted") ||
-        !Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z, 0.0f)) == false,
-               "zero units accepted"))
+        !Check(!upY.Configure(invalidReserved), "nonzero reserved field accepted") ||
+        !Check(!upY.Configure(oldConvention), "old spatial convention version accepted"))
     {
         return 1;
     }
@@ -302,7 +334,7 @@ int main()
         return 1;
     }
 
-    if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Y, QR_AXIS_POSITIVE_Z, 1.0f)) == false,
+    if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Y, QR_AXIS_POSITIVE_Z)) == false,
                "reflected permutation accepted"))
     {
         return 1;
@@ -318,7 +350,7 @@ int main()
     }
 
     qray::SpatialFrame mirroredFrame;
-    QrSpatialConvention leftHanded = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Y, QR_AXIS_POSITIVE_Z, 1.0f);
+    QrSpatialConvention leftHanded = MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Y, QR_AXIS_POSITIVE_Z);
     leftHanded.hostIsRightHanded = QR_FALSE;
     if (!Check(mirroredFrame.Configure(leftHanded), "left-handed convention rejected") ||
         !Check(mirroredFrame.IsMirrored(), "left-handed convention not mirrored"))
