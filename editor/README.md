@@ -54,7 +54,16 @@ whenever the selection or the scroll offset changes, so a scripted session can
 find them without reading pixels. Selecting or re-aiming a light also logs the
 cluster list it landed in and the radiance the upload carries
 (`EditorApp::LogLightCluster`), which is what tells a dark viewport apart from a
-light that never reached a cluster.
+light that never reached a cluster. The gizmo logs its projected axes as
+`gizmo axes:` whenever the layout moves and neither drag is running, so a
+scripted drag can read the segment it has to grab from the log instead of
+guessing; a mouse-down that found no axis within reach logs `gizmo miss:` with
+the cursor, the origin and the distance to each axis, which is how a scripted
+miss is told apart from a gizmo that never armed. A successful grab logs
+`gizmo: grab custom <n> axis <a>` and the light follows with
+`gizmo moved to ...`; the marker drag logs `grab:`, each step as
+`drag to ... cluster <c>`, and `dropped at ...` or `drag cancelled` when the
+drag ends.
 `Materials` lists one material per texture name, the way the game keys
 `rt_material_t`, and selects the material of a picked surface. Its parameter
 block covers what the SDK upload info can express today: the texcoord transform,
@@ -71,6 +80,19 @@ out of the window. `Add light`, `Duplicate`, `Clone` and `Remove` edit the
 custom store, and `Light style` in the selection block names the style the light
 animates with. A standalone editor has no `d_lightstylevalue[]` feed, so the
 style is authored metadata there and the preview keeps full brightness.
+
+A selected light carries a three-axis gizmo, and the light itself can be dragged
+through the viewport. The two drags are deliberately different, because the game
+offers both. Dragging an arrow moves the light along that axis in whole units:
+the axis direction is frozen at mouse-down so the drag cannot curve away from
+the axis it started on, a click within 8 px of the gizmo origin reselects
+instead of grabbing, and an axis shorter than 8 px on screen is not grabbable at
+all. Dragging the light marker flies it along the pick ray to 8 units in front
+of the surface under the cursor, or to 128 units in front of the camera when the
+ray hits nothing, mirroring `QRE_UpdateLightDrag`. Every step re-resolves the
+cluster the light contributes to. `Escape` or losing focus rolls the light back
+to where the drag started. The order at mouse-down is gizmo, then marker, then
+surface pick, so the narrow arrows win over the larger marker beneath them.
 
 The target is feature parity with the in-game editor (`qr_editor`); the current
 state and the remaining gap are listed in
@@ -129,12 +151,12 @@ from a PAK remains an adapter step.
 The remaining gap against the in-game editor is tracked in
 [`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
 is the source of truth for what is left. The global settings block, the
-material parameter table and light authoring - colour, position, the spot cone
-and the aim-and-drop placement - are done as far as the SDK upload info goes.
-Light style, the two light lists and the custom-light store are done as well, so
-the next block is the session lifecycle that writes `qray.materials.yaml` back,
-then the material parameters the game has and the SDK cannot express yet; those
-need new upload fields first.
+material parameter table and light authoring - colour, position, the spot cone,
+the aim-and-drop placement and both drags with the axis gizmo - are done as far
+as the SDK upload info goes. Light style, the two light lists and the
+custom-light store are done as well, so the next block is the session lifecycle
+that writes `qray.materials.yaml` back, then the material parameters the game
+has and the SDK cannot express yet; those need new upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
 remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`

@@ -72,6 +72,29 @@ private:
     void DrawSelectionOverlay();
     void ClearSelection();
 
+    // Projects a world point the way ViewBasis casts a ray, so an overlay marker or a gizmo grab
+    // lands on the geometry the click resolved. False when the point is behind the camera.
+    bool ProjectPoint(const float point[3], float &outX, float &outY) const;
+
+    // The axis gizmo of the selected custom light. The press freezes the axis' screen direction,
+    // the way QRE_GizmoAxisScreen does, so the drag slides the light along one axis instead of
+    // re-aiming it at the cursor every frame.
+    bool BeginGizmoDrag(float cursorX, float cursorY);
+    void UpdateGizmoDrag(float cursorX, float cursorY);
+    void FinishGizmoDrag(bool kept);
+
+    // The direction of the ray the author aims with: the centre of the viewport while the camera
+    // is captured and the cursor otherwise. Shared by picking and by every drag, so a drag lands
+    // where a click would.
+    bool CursorDirection(float outDirection[3]) const;
+
+    // Grabbing the light itself, the way QRE_UpdateLightDrag moves one: the light follows the
+    // surface under the ray, 8 units in front of it, and hangs 128 units ahead of the camera when
+    // the ray hits nothing. A press that does not travel stays a selection.
+    bool BeginLightGrab();
+    void UpdateLightGrab();
+    void FinishLightGrab(bool kept);
+
     // The light the panel edits: the map light or the custom one, whichever was picked last.
     // Null when the selection is a surface or nothing at all.
     EditorLight *SelectedLight();
@@ -186,4 +209,26 @@ private:
     uint64_t m_loggedLightListLayout = 0;
     uint64_t m_loggedTabLayout = 0;
     uint64_t m_loggedStyleLayout = 0;
+    uint64_t m_loggedGizmoLayout = 0;
+
+    // The axis gizmo drag. The light's position at the press, the axis it moves along, the mouse
+    // position and the axis' screen direction are all frozen there: an axis whose screen
+    // direction is re-measured per frame turns a straight drag into a curve as the light moves.
+    bool m_gizmoDragging = false;
+    int32_t m_gizmoAxis = 0;
+    float m_gizmoOrigin[3] = {};
+    float m_gizmoStart[2] = {};
+    float m_gizmoDirection[2] = {};
+    float m_gizmoPixelsPerUnit = 0.0f;
+
+    // The light grab. The cursor position is frozen at the press so a click that only selects
+    // does not also fly the light to the pick point, and the origin is kept so Escape can put the
+    // light back the way QRE_CancelLightDrag does.
+    bool m_grabDragging = false;
+    bool m_grabMoved = false;
+    bool m_grabCustom = false;
+    int32_t m_grabIndex = -1;
+    float m_grabOrigin[3] = {};
+    float m_grabStart[2] = {};
+    float m_grabLoggedPosition[3] = {};
 };
