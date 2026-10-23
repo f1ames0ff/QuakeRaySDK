@@ -379,7 +379,7 @@ float evalSkyNeePdf(const float3 n, const float3 direction)
 #if LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
 
 #define SHADOW_RAY_EPS       (0.01 * globalUniform.sceneUnitsPerHostUnit)
-#define RAY_ORIGIN_LEAK_BIAS 0.01
+#define RAY_ORIGIN_LEAK_BIAS 2.5e-4
 
 /* One segment per pane the light may cross, plus the segment that reaches it. */
 #define GLASS_SHADOW_MAX_SEGMENTS 3
@@ -549,7 +549,7 @@ float3 traceSunVisibility(const Surface surf, const LightSample sunLight, out bo
 
 float3 traceSkyVisibility(const Surface surf, const float3 skyDirection)
 {
-    const float3 start = surf.position + surf.normalGeom * 0.01;
+    const float3 start = surf.position + surf.normalGeom * 2.5e-4;
     const float3 end   = start + skyDirection * globalUniform.rayLength;
 
     return traceShadowRay(surf.instCustomIndex, start, end, false);

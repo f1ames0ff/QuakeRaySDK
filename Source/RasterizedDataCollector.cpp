@@ -467,7 +467,7 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
                                              leg[0][2] * leg[0][2]);
             const float legUp = std::sqrt(leg[1][0] * leg[1][0] + leg[1][1] * leg[1][1] +
                                           leg[1][2] * leg[1][2]);
-            if (!(legRight > 1e-4f) || !(legUp > 1e-4f))
+            if (!(legRight > 2.5e-6f) || !(legUp > 2.5e-6f))
             {
                 continue;
             }
@@ -577,7 +577,7 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
             halfExtent[k]   = 0.5f * (maximum[k] - minimum[k]);
         }
         proxy.radius = std::sqrt(halfExtent[0] * halfExtent[0] + halfExtent[1] * halfExtent[1] +
-                                 halfExtent[2] * halfExtent[2]) + 1e-3f;
+                                 halfExtent[2] * halfExtent[2]) + 2.5e-5f;
 
         proxy.uv0[0] = a.texCoord[0];
         proxy.uv0[1] = a.texCoord[1];
@@ -624,7 +624,7 @@ bool RasterizedDataCollector::CaptureParticlePointProxies(const QrParticleUpload
     {
         const QrParticlePoint &point = info.pPoints[i];
         const float leg = PARTICLE_POINT_LEG_SCALE * point.size;
-        if (!(leg > 1e-4f))
+        if (!(leg > 2.5e-6f))
         {
             continue;
         }

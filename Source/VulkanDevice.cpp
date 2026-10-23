@@ -577,7 +577,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->polyLightSpotlightFactor   = std::max( 0.0f, drawInfo.pIlluminationParams->polygonalLightSpotlightFactor );
         gu->indirSecondBounce          = !!drawInfo.pIlluminationParams->enableSecondBounceForIndirect;
         gu->lightIndexIgnoreFPVShadows = scene->GetLightManager()->GetLightIndexIgnoreFPVShadows( currentFrameState.GetFrameIndex(), drawInfo.pIlluminationParams->lightUniqueIdIgnoreFirstPersonViewerShadows );
-        gu->cellWorldSize              = std::max( drawInfo.pIlluminationParams->cellWorldSize, 0.001f );
+        gu->cellWorldSize              = std::max( drawInfo.pIlluminationParams->cellWorldSize, 2.5e-5f );
         gu->gradientMultDiffuse        = std::clamp( drawInfo.pIlluminationParams->directDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultIndirect       = std::clamp( drawInfo.pIlluminationParams->indirectDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultSpecular       = std::clamp( drawInfo.pIlluminationParams->specularSensitivityToChange, 0.0f, 1.0f );
@@ -600,7 +600,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->polyLightSpotlightFactor   = 2.0f;
         gu->indirSecondBounce          = false;
         gu->lightIndexIgnoreFPVShadows = LIGHT_INDEX_NONE;
-        gu->cellWorldSize              = 1.0f;
+        gu->cellWorldSize              = 0.025f;
         gu->gradientMultDiffuse        = 0.5f;
         gu->gradientMultIndirect       = 0.2f;
         gu->gradientMultSpecular       = 0.5f;
@@ -615,7 +615,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;
-        gu->sunBounce[0]               = 2000.0f;
+        gu->sunBounce[0]               = 50.0f;
         gu->sunBounce[1]               = 1.0f;
     }
 
@@ -738,8 +738,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     gu->rayCullBackFaces  = rayCullBackFacingTriangles ? 1 : 0;
-    gu->rayLength         = clamp( drawInfo.rayLength, 0.1f, ( float )MAX_RAY_LENGTH );
-    gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 0.001f, gu->rayLength );
+    gu->rayLength         = clamp( drawInfo.rayLength, 0.0025f, ( float )MAX_RAY_LENGTH );
+    gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 2.5e-5f, gu->rayLength );
 
     {
         if( !smokeWindDirectionSet )
@@ -845,10 +845,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     {
-        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 0.001f );
+        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 2.5e-5f );
         gu->volumeCameraFar  = std::min(
             drawInfo.cameraFar,
-            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 100.0f );
+            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 2.5f );
 
         if( drawInfo.pVolumetricParams )
         {
@@ -1281,8 +1281,8 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const uint32_t cloudsQuality = drawInfo.pSkyParams != nullptr
             ? std::min(drawInfo.pSkyParams->skyCloudsQuality, uint32_t(QR_SKY_CLOUDS_MAX_QUALITY))
             : 2;
-        float cloudAltitude = 140000.0f;
-        float cloudThickness = 90000.0f;
+        float cloudAltitude = 3500.0f;
+        float cloudThickness = 2250.0f;
 
         p.cloudColor[3] = globalUniform->time;
         if (drawInfo.pSkyParams)

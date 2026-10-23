@@ -26,7 +26,7 @@ float4 accumulateGlass(int2 pix, float4 mask)
     const float2 previous = float2(pix) + guide.xy * float2(extent);
     const int2 base = int2(floor(previous));
     const float2 fraction = frac(previous);
-    const float predictedDepth = max(guide.z + guide.w, 0.001);
+    const float predictedDepth = max(guide.z + guide.w, 2.5e-5);
     const float3 paneNormal = rtGlassNormal(mask);
     float3 history = (float3)0.0;
     float historyLength = 0.0;
@@ -44,7 +44,7 @@ float4 accumulateGlass(int2 pix, float4 mask)
             const float4 previousGuide = framebufQ2GlassReflection_Prev_Sampled.Load(int3(tap, 0));
             if (!isRtGlass(previousMask) || abs(abs(mask.a) - abs(previousMask.a)) > 0.03 ||
                 mask.b != previousMask.b || dot(paneNormal, rtGlassNormal(previousMask)) < 0.95 ||
-                abs(predictedDepth - previousGuide.z) > max(0.5, predictedDepth * 0.02))
+                abs(predictedDepth - previousGuide.z) > max(0.0125, predictedDepth * 0.02))
             {
                 continue;
             }
@@ -104,7 +104,7 @@ float3 spatialGlass(int2 pix, float4 mask)
     const int2 ipos = getCheckerboardPix(pix);
     const float depth = framebufQ2ViewDepth_Sampled.Load(int3(ipos, 0)).r;
     const float3 normal = texelFetchNormalGeometry(ipos);
-    const float depthScale = max(1.0, abs(depth) * 0.05);
+    const float depthScale = max(0.025, abs(depth) * 0.05);
     const float3 paneNormal = rtGlassNormal(mask);
     float3 sum = center * 4.0;
     float weightSum = 4.0;

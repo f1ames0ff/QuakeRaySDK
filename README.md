@@ -81,8 +81,8 @@ FidelityFX provider, and exposes `qray::renderer`.
 
 ## Spatial contract
 
-The renderer normalizes meter-valued host data into a right-handed, `+Z`-up
-internal space with 40 scene units per meter. The host declares only its axes
+The renderer maps meter-valued host data into a right-handed, `+Z`-up internal
+space at a 1:1 scale. The host declares only its axes
 and handedness with `qrSetSpatialConvention`; all reserved fields must be
 zero, and there is no configurable unit scale. Omitting the call selects
 identity axes and still requires meter-valued inputs. Right-handed and
@@ -91,7 +91,7 @@ converts native Quake units to meters before spatial SDK calls;
 `SWAPCHAIN` uploads remain pixel-based. `qrSetSmokeWindDirection` supplies
 smoke wind in host scene space, and a cluster upload that omits both PVS tables
 is treated as all-visible. The world-depth target is `R32_SFLOAT`;
-`rayLength` is bounded by the 10,000,000 internal-scene-unit safety ceiling.
+`rayLength` is bounded by the 250,000 m safety ceiling.
 The full field-by-field conversion rules and the second-host checklist are in
 [docs/spatial-contract.md](docs/spatial-contract.md).
 
@@ -125,8 +125,8 @@ structures; a host supplies scene uploads through the `Qr*` contract in
 `qray.h`. Embedded/device-sharing integration and non-Windows targets are not
 part of the current package.
 
-`rayLength` is expressed in meters up to 250,000 m (the 10,000,000 internal
-scene-unit safety ceiling); the shader sky sentinel follows `2 * rayLength`,
+`rayLength` is expressed in meters up to 250,000 m; the shader sky sentinel
+follows `2 * rayLength`,
 and the world-depth target is `R32_SFLOAT`. Right-handed and left-handed signed axis permutations with
 uniform scale are supported. Arbitrary world rotations and non-uniform
 instance scale remain host-side conversion; the spatial contract is in

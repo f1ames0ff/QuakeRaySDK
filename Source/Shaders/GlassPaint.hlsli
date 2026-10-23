@@ -36,7 +36,7 @@ float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 ra
     Surface surf = hitInfoToSurface_Indirect(pane, rayDir);
     surf.normalGeom = dot(surf.normalGeom, rayDir) > 0.0 ? -surf.normalGeom : surf.normalGeom;
     surf.normal = surf.normalGeom;
-    surf.position += surf.normalGeom * 0.02;
+    surf.position += surf.normalGeom * 5e-4;
     surf.albedo = paint.rgb;
     surf.roughness = 1.0;
     float3 direct = (float3)0.0;

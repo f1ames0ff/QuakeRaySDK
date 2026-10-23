@@ -18,7 +18,7 @@
 #ifndef RAY_CLEARANCE_H_
 #define RAY_CLEARANCE_H_
 
-#define RAY_CLEARANCE_BIAS 0.01
+#define RAY_CLEARANCE_BIAS 2.5e-4
 
 /* How far the ray runs before it meets the first surface it would otherwise
    hide behind, no farther than maxDistance: the virtual point past that
@@ -31,7 +31,7 @@ float traceClearance(vec3 origin, vec3 direction, float maxDistance, uint cullMa
                           getAdditionalRayFlags() | gl_RayFlagsOpaqueEXT,
                           cullMask,
                           origin,
-                          0.001,
+                          2.5e-5,
                           direction,
                           maxDistance);
 

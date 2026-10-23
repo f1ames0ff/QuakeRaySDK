@@ -51,7 +51,8 @@ before the first spatial upload or drawn frame.
 ## 3. Upload the scene
 
 Geometry, light, cluster and fog calls take meter-valued spatial inputs. The
-SDK converts them to its internal scene scale and axis orientation:
+SDK applies only the axis/handedness conversion; its internal scene scale is
+1:1:
 
 - convert all positions, translations, radii, reaches, fog distances and
   camera distances to meters; convert areas to square meters and inverse
@@ -132,5 +133,4 @@ embedding.
   carry arbitrary rotations and non-uniform scales, which the frame converts
   exactly. Reflected host data still needs its own triangle order reversed.
 - Keep `rayLength` positive and finite. It is expressed in meters and is
-  bounded by the 10,000,000 internal-scene-unit safety ceiling (250,000 m);
-  the depth buffer is `R32_SFLOAT`.
+  bounded by the 250,000 m safety ceiling; the depth buffer is `R32_SFLOAT`.

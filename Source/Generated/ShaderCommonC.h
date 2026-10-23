@@ -162,7 +162,7 @@ namespace qray
 #define DEBUG_SHOW_FLAG_RAY_STATS (1 << 10)
 #define DEBUG_SHOW_FLAG_LUMA (1 << 11)
 #define RAY_STATS_CATEGORY_COUNT (6)
-#define MAX_RAY_LENGTH (1.0e7)
+#define MAX_RAY_LENGTH (2.5e5)
 #define MEDIA_TYPE_VACUUM (0)
 #define MEDIA_TYPE_WATER (1)
 #define MEDIA_TYPE_GLASS (2)

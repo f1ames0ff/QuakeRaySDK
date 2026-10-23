@@ -45,7 +45,7 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
     if (rasterizerFragInfo.particleProxy != 0u && globalUniform.glassParticles != 0u)
     {
         const float4 glassMask = framebufQ2GlassFilter_Sampled.Load(int3(cbPix, 0));
-        if (abs(glassMask.a) >= 4.0 && inViewDepth > glassMask.z + max(0.01, glassMask.z * 1e-4))
+        if (abs(glassMask.a) >= 4.0 && inViewDepth > glassMask.z + max(2.5e-4, glassMask.z * 1e-4))
         {
             discard;
         }

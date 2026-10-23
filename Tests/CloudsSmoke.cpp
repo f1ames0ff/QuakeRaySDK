@@ -296,15 +296,15 @@ int main(int argc, char **argv)
             p.sunDirection[3] = 1;
             qray::RhiCloudsPass::LayerParams layer{};
             std::memcpy(&layer, &p, sizeof(p));
-            layer.cloudLayer[0] = 140000;
-            layer.cloudLayer[1] = 90000;
+            layer.cloudLayer[0] = 3500;
+            layer.cloudLayer[1] = 2250;
             layer.cloudLayer[2] = layer.cloudLayer[3] = 1;
             layer.cloudMarch[0] = 48;
             layer.cloudMarch[2] = 0.35f;
             layer.cloudMarch[3] = 0.75f;
-            layer.cloudAnchor[0] = 123;
-            layer.cloudAnchor[1] = 456;
-            layer.cloudAnchor[2] = 78;
+            layer.cloudAnchor[0] = 3.075f;
+            layer.cloudAnchor[1] = 11.4f;
+            layer.cloudAnchor[2] = 1.95f;
             qray::RhiCloudsPass::ShadowParams shadow{};
             std::memcpy(shadow.sunDirection, p.sunDirection, sizeof(shadow.sunDirection));
             shadow.sunDirection[3] = layer.cloudLayer[0];
@@ -336,7 +336,7 @@ int main(int argc, char **argv)
             Require(render(2, 1), "stopping the wind must update the layer");
             layer.cloudColor[3] = p.cloudColor[3] = shadow.cloudMarch[0] = 30;
             Require(!render(2, 0), "a stopped wind must ignore the clock");
-            layer.cloudAnchor[0] += 1000;
+            layer.cloudAnchor[0] += 25;
             Require(render(2, 1), "camera translation must update a stationary layer");
             std::cout << "Stationary cache, clock freeze and camera translation passed\n";
 
@@ -365,7 +365,7 @@ int main(int argc, char **argv)
             uniform.cameraPosition[0] = column[0] + p.sunDirection[0] * baseHeight / p.sunDirection[2];
             uniform.cameraPosition[1] = column[1] + p.sunDirection[1] * baseHeight / p.sunDirection[2];
             std::memcpy(uniform.cameraPositionPrev, uniform.cameraPosition, 12);
-            uniform.cloudLayerMotion[0] = 1000;
+            uniform.cloudLayerMotion[0] = 25;
             uniform.cloudLayerMotion[1] = layer.cloudLayer[0];
             uniform.cloudLayerMotion[2] = layer.cloudLayer[1];
             uniform.cloudLayerMotion[3] = 1;
@@ -383,8 +383,8 @@ int main(int argc, char **argv)
                     "the march seed must differ from its neighbours, not be a field they share");
             const float centre = layer.cloudLayer[0] + 0.3f * layer.cloudLayer[1];
             Require(std::abs(result[0]) < 1e-6 && std::abs(result[1]) < 1e-6, "stationary camera has infinite-sky motion");
-            Require(std::abs(result[2] - 0.5f * uniform.timeDelta * 1000 * 30 / centre) < 1e-6 &&
-                    std::abs(result[3] - 0.5f * uniform.timeDelta * 1000 * 12 / centre) < 1e-6, "cloud wind motion disagrees with projected displacement");
+            Require(std::abs(result[2] - 0.5f * uniform.timeDelta * 25 * 30 / centre) < 1e-6 &&
+                    std::abs(result[3] - 0.5f * uniform.timeDelta * 25 * 12 / centre) < 1e-6, "cloud wind motion disagrees with projected displacement");
             Require(result[4] >= 0 && result[4] <= result[5] + 1e-4f && result[5] <= 1 &&
                     std::abs(result[6] - 1) < 1e-4 && std::abs(result[7] - 1) < 1e-4, "shadow height interpolation or map fade is wrong");
             Require(result[4] < 0.98f && std::abs(result[4] - std::exp(-column[2])) < 0.003f,
@@ -408,10 +408,10 @@ int main(int argc, char **argv)
             Require(probe()[4] < litVisibility * 0.9f, "sun activation reused a shadow from before the density edit");
             std::cout << "Sun toggle and density edit rebuilt the shadow volume\n";
             uniform.cloudLayerMotion[0] = 0;
-            uniform.cameraPositionPrev[0] -= 100;
-            uniform.cameraPositionPrev[1] += 50;
+            uniform.cameraPositionPrev[0] -= 2.5f;
+            uniform.cameraPositionPrev[1] += 1.25f;
             result = probe();
-            Require(std::abs(result[2] - 50 / centre) < 1e-6 && std::abs(result[3] + 25 / centre) < 1e-6,
+            Require(std::abs(result[2] - 1.25f / centre) < 1e-6 && std::abs(result[3] + 0.625f / centre) < 1e-6,
                     "stationary clouds lost camera parallax");
             uniform.cloudLayerMotion[1] = uniform.cloudLayerMotion[2] = 0;
             uniform.cloudShadowPlacement[0] = 0;
@@ -427,7 +427,10 @@ int main(int argc, char **argv)
 
             std::memcpy(uniform.cameraPositionPrev, uniform.cameraPosition, 12);
             uniform.cloudLayerMotion[3] = 1;
-            const float windCases[][3] = {{0.3f, 140000, 90000}, {4, 10000, 5000}, {-0.7f, 1400, 900}};
+            Require(std::abs(qray::RhiCloudsPass::GetWindSpeed(1.0f, 35.0f) - 1.0f) < 1e-6f &&
+                    std::abs(qray::RhiCloudsPass::GetWindSpeed(2.0f, 35.0f) - 2.0f) < 1e-6f,
+                    "cloud wind reference altitude is not metric");
+            const float windCases[][3] = {{0.3f, 3500, 2250}, {4, 250, 125}, {-0.7f, 35, 22.5f}};
             const float directions[][3] = {{0, 0, 1}, {0.6f, 0.2f, 1}, {1, 0.5f, 0.2f}};
             for (const auto &setting : windCases)
             {
@@ -447,18 +450,18 @@ int main(int argc, char **argv)
             }
             std::cout << "Volume wind passed at zenith and grazing angles for three layer scales\n";
 
-            layer.cloudLayer[0] = shadow.sunDirection[3] = 10000;
-            layer.cloudLayer[1] = shadow.cloudLayer[0] = 5000;
+            layer.cloudLayer[0] = shadow.sunDirection[3] = 250;
+            layer.cloudLayer[1] = shadow.cloudLayer[0] = 125;
             p.cloudParams[0] = layer.cloudParams[0] = shadow.cloudLayer[1] = 0;
             p.cloudParams[1] = layer.cloudParams[1] = shadow.cloudLayer[2] = 8;
-            uniform.cloudLayerMotion[1] = 10000;
-            uniform.cloudLayerMotion[2] = 5000;
+            uniform.cloudLayerMotion[1] = 250;
+            uniform.cloudLayerMotion[2] = 125;
             std::memcpy(uniform.cameraPositionPrev, uniform.cameraPosition, 12);
             for (uint32_t quality : {0u, 2u})
             {
                 for (float speed : {2.0f, 4.0f})
                 {
-                    const float wind = qray::RhiCloudsPass::GetWindSpeed(speed, 10000);
+                    const float wind = qray::RhiCloudsPass::GetWindSpeed(speed, 250);
                     p.cloudParams[2] = layer.cloudParams[2] = shadow.cloudMarch[1] = wind;
                     uniform.cloudLayerMotion[0] = wind;
                     for (uint32_t frame = 0; frame < 3; ++frame)
@@ -523,7 +526,7 @@ int main(int argc, char **argv)
             p.cloudParams[0] = layer.cloudParams[0] = shadow.cloudLayer[1] = 0.4f;
             p.cloudParams[2] = layer.cloudParams[2] = shadow.cloudMarch[1] = 0;
             p.cloudParams[1] = layer.cloudParams[1] = shadow.cloudLayer[2] = 0.8f;
-            const float scales[][2] = {{140000, 90000}, {10000, 5000}, {1400, 900}};
+            const float scales[][2] = {{3500, 2250}, {250, 125}, {35, 22.5f}};
             for (const auto &scale : scales)
             {
                 layer.cloudLayer[0] = shadow.sunDirection[3] = scale[0];

@@ -47,7 +47,7 @@ float3 cloudSunSample(float3 p, float3 sunDir, float dist, float stepSize)
     float3 tangent = normalize(cross(helper, sunDir));
     float3 bitangent = cross(sunDir, tangent);
 
-    float angle = dist / max(stepSize, 1.0e-3) * 2.39996323;
+    float angle = dist / max(stepSize, 2.5e-5) * 2.39996323;
     float radius = CLOUD_LIGHT_CONE * dist * 0.5;
 
     return p + sunDir * dist + (cos(angle) * tangent + sin(angle) * bitangent) * radius;
