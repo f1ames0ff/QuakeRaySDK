@@ -24,6 +24,38 @@ bool Check(bool condition, const char *message)
     return condition;
 }
 
+float LinearDeterminant(const QrTransform &value)
+{
+    const float a = value.matrix[0][0];
+    const float b = value.matrix[0][1];
+    const float c = value.matrix[0][2];
+    const float d = value.matrix[1][0];
+    const float e = value.matrix[1][1];
+    const float f = value.matrix[1][2];
+    const float g = value.matrix[2][0];
+    const float h = value.matrix[2][1];
+    const float i = value.matrix[2][2];
+
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+}
+
+QrTransform MakeLinearTransform(float xx, float xy, float xz, float yx, float yy, float yz,
+                                float zx, float zy, float zz)
+{
+    QrTransform result = {};
+    result.matrix[0][0] = xx;
+    result.matrix[0][1] = xy;
+    result.matrix[0][2] = xz;
+    result.matrix[1][0] = yx;
+    result.matrix[1][1] = yy;
+    result.matrix[1][2] = yz;
+    result.matrix[2][0] = zx;
+    result.matrix[2][1] = zy;
+    result.matrix[2][2] = zz;
+
+    return result;
+}
+
 QrSpatialConvention MakeConvention(QrAxis x, QrAxis y, QrAxis z, float unitsPerMeter)
 {
     return {
@@ -119,6 +151,49 @@ int main()
                NearlyEqual(convertedTransform.matrix[1][3], -120.0f) &&
                NearlyEqual(convertedTransform.matrix[2][3], 80.0f),
                "transform conversion failed"))
+    {
+        return 1;
+    }
+
+    // The conversion is the same linear map the frame applies to points, so an
+    // instance transform that is neither axis aligned nor uniform composes with
+    // the frame instead of being rejected: the rotation about host Z lands in
+    // scene rows (X, -Z, Y) and the scale stays per host axis.
+    const float angle = 0.5235987755982988f;
+    const float cosAngle = std::cos(angle);
+    const float sinAngle = std::sin(angle);
+
+    const QrTransform rotation = MakeLinearTransform(cosAngle, -sinAngle, 0.0f,
+                                                     sinAngle, cosAngle, 0.0f,
+                                                     0.0f, 0.0f, 1.0f);
+    const QrTransform convertedRotation = upY.Transform(rotation);
+
+    if (!Check(NearlyEqual(convertedRotation.matrix[0][0], 40.0f * cosAngle) &&
+               NearlyEqual(convertedRotation.matrix[0][1], -40.0f * sinAngle) &&
+               NearlyEqual(convertedRotation.matrix[1][2], -40.0f) &&
+               NearlyEqual(convertedRotation.matrix[2][0], 40.0f * sinAngle) &&
+               NearlyEqual(convertedRotation.matrix[2][1], 40.0f * cosAngle),
+               "arbitrary rotation conversion failed"))
+    {
+        return 1;
+    }
+
+    const QrTransform nonUniformScale = MakeLinearTransform(2.0f, 0.0f, 0.0f,
+                                                            0.0f, 3.0f, 0.0f,
+                                                            0.0f, 0.0f, 4.0f);
+    const QrTransform convertedNonUniformScale = upY.Transform(nonUniformScale);
+
+    if (!Check(NearlyEqual(convertedNonUniformScale.matrix[0][0], 80.0f) &&
+               NearlyEqual(convertedNonUniformScale.matrix[1][2], -160.0f) &&
+               NearlyEqual(convertedNonUniformScale.matrix[2][1], 120.0f),
+               "non-uniform scale conversion failed"))
+    {
+        return 1;
+    }
+
+    if (!Check(LinearDeterminant(convertedRotation) > 0.0f &&
+               LinearDeterminant(convertedNonUniformScale) > 0.0f,
+               "orientation-preserving transform lost its orientation"))
     {
         return 1;
     }
@@ -282,6 +357,46 @@ int main()
 
     if (!Check(!mirroredFrame.ReversesWinding(reflectedTransform),
                "mirrored frame and reflected transform did not cancel"))
+    {
+        return 1;
+    }
+
+    // Any negative determinant counts, not only an axis reflection: a host may
+    // mirror one instance by scaling an axis, and the frame still owns its own
+    // flip, so the two signs decide the order together.
+    const QrTransform mirroredInstance = MakeLinearTransform(-2.0f, 0.0f, 0.0f,
+                                                            0.0f, 3.0f, 0.0f,
+                                                            0.0f, 0.0f, 4.0f);
+
+    if (!Check(upY.ReversesWinding(mirroredInstance),
+               "right-handed frame kept the order of a mirrored instance"))
+    {
+        return 1;
+    }
+
+    if (!Check(!mirroredFrame.ReversesWinding(mirroredInstance),
+               "mirrored instance and mirrored frame did not cancel"))
+    {
+        return 1;
+    }
+
+    if (!Check(!upY.ReversesWinding(rotation), "rotation reversed an authored order") ||
+        !Check(!upY.ReversesWinding(nonUniformScale),
+               "orientation-preserving non-uniform scale reversed an authored order") ||
+        !Check(mirroredFrame.ReversesWinding(nonUniformScale),
+               "mirrored frame kept the order of an orientation-preserving instance"))
+    {
+        return 1;
+    }
+
+    // The composed determinant is what the rule reads, so the converted matrix
+    // has to keep the product's sign, and its magnitude scales with the cube of
+    // the frame scale for a unit-determinant frame permutation.
+    const float expectedDet = upY.Scale() * upY.Scale() * upY.Scale() * LinearDeterminant(nonUniformScale);
+    if (!Check(LinearDeterminant(upY.Transform(mirroredInstance)) < 0.0f &&
+               LinearDeterminant(mirroredFrame.Transform(nonUniformScale)) < 0.0f &&
+               NearlyEqual(LinearDeterminant(convertedNonUniformScale) / expectedDet, 1.0f, 0.0001f),
+               "composed determinant did not scale with the frame"))
     {
         return 1;
     }
