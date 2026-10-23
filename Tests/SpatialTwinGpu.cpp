@@ -417,6 +417,20 @@ public:
         return Check(qrSetSpatialConvention(instance, &convention), "set spatial convention");
     }
 
+    bool CheckFailedUploadKeepsConventionMutable(const QrSpatialConvention &convention)
+    {
+        const QrResult invalid = qrUploadGeometry(instance, nullptr);
+
+        if (invalid != QR_WRONG_ARGUMENT)
+        {
+            std::fprintf(stderr, "null geometry upload returned %s instead of QR_WRONG_ARGUMENT\n",
+                         qrGetResultDescription(invalid));
+            return false;
+        }
+
+        return SetConvention(convention);
+    }
+
     bool CreateMaterial()
     {
         const uint8_t albedo[16] = {
@@ -1109,7 +1123,7 @@ bool RunPass(HWND window, const std::string &shaderFolder, const std::string &bl
         return false;
     }
 
-    if (!renderer.SetConvention(convention))
+    if (!renderer.CheckFailedUploadKeepsConventionMutable(convention))
     {
         return false;
     }

@@ -1207,7 +1207,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
             for (int k = 0; k < 3; k++)
             {
-                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 1.0f);
+                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
                 sky.godRays.aabbMin[k] = aabbMin[k];
                 sky.godRays.aabbMax[k] = aabbMax[k];
                 sky.godRays.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
@@ -1902,7 +1902,6 @@ void VulkanDevice::GetUploadLockStats(QrUploadLockStats *pStats) const
 void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
 {
     UploadLockScope geometryLock(*this, g_uploadLane);
-    LockSpatialFrame();
     statsApiCallsGeometry.fetch_add(1, std::memory_order_relaxed);
 
     using namespace std::string_literals;
@@ -1992,6 +1991,8 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Geometry's portal index must be in [0, 62]");
     }
 
+    LockSpatialFrame();
+
     QrGeometryUploadInfo converted = *uploadInfo;
     std::vector<uint32_t> convertedIndices;
     std::vector<QrVertex> convertedVertices;
@@ -2042,11 +2043,12 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
 void VulkanDevice::UpdateGeometryTransform(const QrUpdateTransformInfo *updateInfo)
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
-    LockSpatialFrame();
     if (updateInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrUpdateTransformInfo converted = *updateInfo;
     const bool reversesWinding = spatialFrame.ReversesWinding(updateInfo->transform);
@@ -2095,11 +2097,6 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         throw QrException(QR_WRONG_ARGUMENT, "Incorrect render type of rasterized geometry");
     }
 
-    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
-    {
-        LockSpatialFrame();
-    }
-
     if (pUploadInfo->pVertices == nullptr || pUploadInfo->vertexCount == 0)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Vertex data / count is null");
@@ -2125,6 +2122,11 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         return;
     }
 
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
+    {
+        LockSpatialFrame();
+    }
+
     QrRasterizedGeometryUploadInfo converted = *pUploadInfo;
     float convertedViewProjection[16] = {};
     std::vector<QrVertex> convertedVertices;
@@ -2133,8 +2135,9 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
     const bool spatialRenderType =
         pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
     const bool spatialConversion = !spatialFrame.IsIdentity() && spatialRenderType;
-    const bool reversesWinding =
-        spatialRenderType && spatialFrame.ReversesWinding(pUploadInfo->transform);
+    const bool reversesWinding = spatialRenderType &&
+        ShouldReverseRasterizedWinding(
+            spatialFrame.ReversesWinding(pUploadInfo->transform), pUploadInfo->pipelineState);
 
     if (spatialConversion)
     {
@@ -2215,7 +2218,6 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
 QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 {
-    LockSpatialFrame();
     statsApiCallsRasterized++;
 
     if (pUploadInfo == nullptr)
@@ -2237,6 +2239,8 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
         }
         return QR_SUCCESS;
     }
+
+    LockSpatialFrame();
 
     QrParticleUploadInfo converted = *pUploadInfo;
     std::vector<QrParticlePoint> convertedPoints;
@@ -2274,11 +2278,12 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
-    LockSpatialFrame();
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrDecalUploadInfo converted = *pUploadInfo;
     if (!spatialFrame.IsIdentity())
@@ -2293,11 +2298,12 @@ void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
 void VulkanDevice::UploadPortal(const QrPortalUploadInfo *pUploadInfo)
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
-    LockSpatialFrame();
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrPortalUploadInfo converted = *pUploadInfo;
     if (!spatialFrame.IsIdentity())
@@ -2323,13 +2329,14 @@ void VulkanDevice::StartNewStaticScene()
 
 void VulkanDevice::UploadDirectionalLight(const QrDirectionalLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrDirectionalLightUploadInfo converted = SpatialDirectionalLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2337,13 +2344,14 @@ void VulkanDevice::UploadDirectionalLight(const QrDirectionalLightUploadInfo *pL
 
 void VulkanDevice::UploadSphericalLight(const QrSphericalLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrSphericalLightUploadInfo converted = SpatialSphericalLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2384,13 +2392,14 @@ void VulkanDevice::SetParticleProxyGate(uint32_t gate, uint32_t glassParticles)
 
 void VulkanDevice::UploadSpotlight(const QrSpotLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrSpotLightUploadInfo converted = SpatialSpotLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2398,13 +2407,14 @@ void VulkanDevice::UploadSpotlight(const QrSpotLightUploadInfo *pLightInfo)
 
 void VulkanDevice::UploadPolygonalLight(const QrPolygonalLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrPolygonalLightUploadInfo converted = SpatialPolygonalLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2412,13 +2422,14 @@ void VulkanDevice::UploadPolygonalLight(const QrPolygonalLightUploadInfo *pLight
 
 void VulkanDevice::UploadTexturedAreaLight(const QrTexturedAreaLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     const MaterialTextures textures = textureManager->GetMaterialTextures(pLightInfo->material);
     const uint32_t textureIndex = textures.indices[MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX];
@@ -2429,13 +2440,14 @@ void VulkanDevice::UploadTexturedAreaLight(const QrTexturedAreaLightUploadInfo *
 
 void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo *pLightInfos, uint32_t count)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfos == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     const uint32_t materialCacheSize = 512;
     uint32_t cachedMaterial[materialCacheSize];
@@ -2471,12 +2483,12 @@ void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo 
 
 void VulkanDevice::UploadDtalGroups(const QrDtalGroupUploadBatch *pUploadInfo)
 {
-    LockSpatialFrame();
-
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     if (pUploadInfo->groupCount == 0 || pUploadInfo->pGroups == nullptr || pUploadInfo->pMembers == nullptr)
     {
@@ -2550,13 +2562,14 @@ void VulkanDevice::UploadClusterLightSources(const QrClusterLightSourcesUploadIn
 
 void VulkanDevice::BeginClusterLightSources(const QrClusterLightSourcesUploadInfo *pInfo, uint32_t sliceCount)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     std::vector<QrClusterLightSource> convertedSources;
     QrClusterLightSourcesUploadInfo converted = *pInfo;
@@ -2633,15 +2646,16 @@ void VulkanDevice::GetClusterLightTail(uint32_t cluster, uint64_t *pLightUniqueI
 
 void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
 {
-    LockSpatialFrame();
-
     if (pInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    LockSpatialFrame();
+
     std::vector<QrFloat3D> clusterMins;
     std::vector<QrFloat3D> clusterMaxs;
+    std::vector<QrWorldLightFace> faceRecords;
     std::vector<QrVertex> faceVertices;
     QrWorldLightsUploadInfo converted = *pInfo;
 
@@ -2689,6 +2703,23 @@ void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
 
             converted.pFaceVertices = faceVertices.data();
         }
+    }
+
+    if (spatialFrame.IsMirrored() && pInfo->numFaces > 0)
+    {
+        if (pInfo->pFaces == nullptr || faceVertices.empty())
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Mirrored world-light faces require both face and vertex arrays");
+        }
+
+        faceRecords.assign(pInfo->pFaces, pInfo->pFaces + pInfo->numFaces);
+
+        if (!ReverseWorldLightFaceOrder(faceRecords, faceVertices))
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "World-light face range is outside the vertex array");
+        }
+
+        converted.pFaces = faceRecords.data();
     }
 
     worldLights->Upload(converted, userPrint.get());

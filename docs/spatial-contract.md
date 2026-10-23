@@ -14,7 +14,8 @@ The convention is immutable for the lifetime of the spatial scene. Calling
 drawn frame returns `QR_WRONG_FUNCTION_CALL`. Calling it twice before any
 spatial upload replaces the convention. Call the setter on the thread that
 created the instance and before worker uploads or frames begin; the convention
-is not synchronized for concurrent replacement.
+is not synchronized for concurrent replacement. A call rejected before it
+uploads data does not lock the convention.
 
 ## Declaration
 
@@ -71,9 +72,12 @@ own axes have to be a signed permutation of the scene axes, so a world whose
 "up" is an arbitrary rotated vector cannot be expressed and has to be rotated
 into one before it is handed over. Instance transforms are not restricted.
 `SpatialFrame::Transform` evaluates the linear map `scale * hostToScene * M`,
-which is exact for any `M`, so arbitrary instance rotations and non-uniform
-instance scales are converted without loss and the host does not have to bake
-them. Likewise `ReversesWinding` compares `det(M3x3)` against the frame
+which is exact for any finite, non-singular `M`, so arbitrary instance rotations
+and non-uniform instance scales are converted without loss and the host does
+not have to bake them. Normals use the inverse-transpose of `M3x3`; tangents use the linear map,
+are re-orthonormalized against the transformed normal and flip their
+handedness with a negative model determinant. Likewise `ReversesWinding`
+compares `det(M3x3)` against the frame
 determinant, so an instance whose own determinant is negative — mirrored
 geometry, or a non-uniform scale with an odd number of negative factors — is
 handled by the same rule regardless of how the frame is oriented. What the
@@ -104,6 +108,11 @@ translation is expressed in meters. Camera space is right-handed, `+Y` up,
 `-Z` forward. The renderer builds the projection from `fovYRadians`, the
 render-resolution aspect, `cameraNear` and `cameraFar`. The host does not
 provide a projection matrix.
+
+`QrMatrix3D` is row-major. For a cubemap sky,
+`skyCubemapRotationTransform` maps host-world directions to cubemap lookup
+directions; the renderer composes it as `R_host * H^T`, where `H` maps
+host-world directions into the canonical scene frame.
 
 The host passes camera near/far and `rayLength` in meters. The renderer keeps
 them in meters. `rayLength` is host-controlled up to the safety ceiling of
@@ -139,6 +148,10 @@ Rasterized geometry follows its render type:
   `pViewProjection` and viewport must remain null.
 - `SWAPCHAIN` is screen-space pixels and is never converted. HUD, menus, the
   console and other 2D geometry must use this type.
+
+`QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST` is exempt from triangle winding
+reversal: line segments have no front face, so their uploaded pair order is
+preserved even when the frame or transform mirrors the scene.
 
 Particle points are world-space positions and sizes in meters. Their
 positions are converted and sizes are scaled; `viewRight` and `viewUp` are

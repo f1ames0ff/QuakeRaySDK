@@ -1,5 +1,6 @@
 #include <qray/qray.h>
 
+#include "ClusterCandidateRanking.h"
 #include "SpatialFrame.h"
 
 #include <cmath>
@@ -77,6 +78,13 @@ int main()
     if (!Check(std::strcmp(QR_API_VERSION, "1.06.0000") == 0, "unexpected QR_API_VERSION") ||
         !Check(sizeof(QrSpatialConvention) == 44, "unexpected QrSpatialConvention size") ||
         !Check(offsetof(QrSpatialConvention, reserved0) == 24, "unexpected QrSpatialConvention layout"))
+    {
+        return 1;
+    }
+
+    qray::SpatialFrame defaultIdentity;
+    if (!Check(defaultIdentity.IsIdentity(), "default spatial frame is not identity") ||
+        !Check(NearlyEqual(defaultIdentity.Scale(), 1.0f), "default spatial frame is not metric"))
     {
         return 1;
     }
@@ -414,6 +422,17 @@ int main()
         return 1;
     }
 
+    if (!Check(!qray::ShouldReverseRasterizedWinding(
+                   true, QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST),
+               "line-list topology was treated as triangle winding") ||
+        !Check(qray::ShouldReverseRasterizedWinding(true, 0),
+               "mirrored triangle winding was not reversed") ||
+        !Check(!qray::ShouldReverseRasterizedWinding(false, 0),
+               "unflipped triangle winding was reversed"))
+    {
+        return 1;
+    }
+
     if (!Check(!upY.ReversesWinding(rotation), "rotation reversed an authored order") ||
         !Check(!upY.ReversesWinding(nonUniformScale),
                "orientation-preserving non-uniform scale reversed an authored order") ||
@@ -431,6 +450,34 @@ int main()
                LinearDeterminant(mirroredFrame.Transform(nonUniformScale)) < 0.0f &&
                NearlyEqual(LinearDeterminant(convertedNonUniformScale) / expectedDet, 1.0f, 0.0001f),
                "composed determinant did not scale with the frame"))
+    {
+        return 1;
+    }
+
+    const struct
+    {
+        double radius;
+        double expectedScore;
+    } radiusCases[] = {
+        { 0.0, 1600.0 },
+        { 0.001, 1600.0 },
+        { 0.025, 1600.0 },
+        { 0.1, 100.0 },
+        { 1.0, 1.0 },
+    };
+
+    for (const auto &test : radiusCases)
+    {
+        const double score = qray::ClusterCandidateScore(1.0, test.radius, 0.0);
+        if (!Check(std::fabs(score - test.expectedScore) <= 0.0001,
+                   "cluster candidate radius floor is not metric"))
+        {
+            return 1;
+        }
+    }
+
+    if (!Check(std::fabs(qray::ClusterCandidateScore(1.0, 0.0, 0.01) - 100.0) <= 0.0001,
+               "cluster candidate distance was clamped to the legacy square unit"))
     {
         return 1;
     }

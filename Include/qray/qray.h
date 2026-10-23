@@ -220,6 +220,8 @@ QRAPI QrResult QRCONV qrSetSpatialConvention(
     QrInstance                          qrInstance,
     const QrSpatialConvention           *pConvention);
 
+/* pConvention->size and pConvention->version must be initialized by the caller;
+   the function treats them as an in/out ABI header. */
 QRAPI QrResult QRCONV qrGetSpatialConvention(
     QrInstance                          qrInstance,
     QrSpatialConvention                 *pConvention);
@@ -275,6 +277,9 @@ typedef struct QrTransform
 
 typedef struct QrMatrix3D
 {
+    /* Row-major 3x3. A cubemap rotation maps host-world directions to cubemap
+       lookup directions: the renderer composes it as R_host * H^T, where H maps
+       host-world directions into the canonical scene frame. */
     float       matrix[3][3];
 } QrMatrix3D;
 
@@ -366,6 +371,9 @@ typedef struct QrGeometryUploadInfo
 
     QrFloat4D                       layerColors[3];
     QrGeometryMaterialBlendType     layerBlendingTypes[3];
+
+    /* Glass reflect/refract uses layerColors[2].data[1] as the pane thickness
+       in meters. The slot is unused for other pass-through types. */
 
     float                           texCoordScale[2];
     float                           texCoordOffset[2];
@@ -519,6 +527,8 @@ typedef enum QrRasterizedGeometryStateFlagBits
     QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE       = 2,
     QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST         = 4,
     QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE        = 8,
+    /* Consecutive vertex/index pairs form line segments; triangle winding
+       reversal does not apply to this topology. */
     QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST    = 16,
     QR_RASTERIZED_GEOMETRY_STATE_SMOKE              = 32,
     QR_RASTERIZED_GEOMETRY_STATE_PARTICLE           = 64,
@@ -552,6 +562,8 @@ typedef struct QrRasterizedGeometryUploadInfo
     QrBlendFactor                           blendFuncSrc;
     QrBlendFactor                           blendFuncDst;
 
+    /* Smoke only: xyz are spatial noise frequencies in inverse meters and w is
+       the wind/advection rate in meters per second. */
     QrFloat4D                               smokeNoise;
     QrFloat4D                               smokeLook;
 
@@ -1258,6 +1270,8 @@ typedef struct QrDrawFrameSkyParams
 
     uint32_t    skyCloudsQuality;
     uint32_t    godRaysQuality;
+
+    /* Multiplier for the baseline 0.025-radian sun-disc angular radius. */
     float       sunDiscSize;
 } QrDrawFrameSkyParams;
 
@@ -1487,7 +1501,7 @@ typedef struct QrPostEffectsNearDofParams
 {
     float       strength;
     float       focusDistance; /* meters */
-    float       maxRadius;
+    float       maxRadius;      /* screen-space pixels */
 } QrPostEffectsNearDofParams;
 
 typedef struct QrPostEffectsSharpenParams
