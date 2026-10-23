@@ -24,6 +24,22 @@ the light entity. The selection is outlined in the viewport and shown in the
 panel. Picking walks the uploaded surfaces rather than the BSP, which is enough
 for one pick per click.
 
+A picked light is authored from the panel with the two map entity keys the game
+honours: `light`, which becomes the radiance through the same scale the game
+applies, and `rt_elight_radius`. Both values reach the renderer through the
+per-frame upload, so a change shows in the next frame.
+
+Global render settings are authored from the scrolling block below the sun:
+`Global`, `Clouds`, `Sun disc`, `God rays`, `Volumetric fog`, `Tonemap` and
+`Level fog`. `EditorSettings.cpp` derives the frame parameters from those values
+exactly as `Quake/gl_vidsdl.c` does, and `EditorApp::Frame` hands the four
+structs to `qrDrawFrame`, so the panel edits the same fields the game's cvars
+feed.
+
+The target is feature parity with the in-game editor (`qr_editor`); the current
+state and the remaining gap are listed in
+[`docs/editor-parity.md`](../docs/editor-parity.md).
+
 ## Build
 
 ```powershell
@@ -67,7 +83,14 @@ from a PAK remains an adapter step.
 
 ## Next work
 
-Material and light authoring panels, PAK handling, wal textures from the game
-archive and sidecar persistence remain. The current loader uses Quake units and
-Z-up; `QrSpatialConvention` already accepts that as a host convention, but the
-editor does not yet author in a different one.
+The remaining gap against the in-game editor is tracked in
+[`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
+is the source of truth for what is left. The global settings block is done; the
+next block is the material parameter table, followed by light authoring beyond
+the `light` key and the radius, and the session lifecycle that writes
+`qray.materials.yaml` back.
+
+PAK handling, wal textures from the game archive and sidecar persistence also
+remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`
+already accepts that as a host convention, but the editor does not yet author in
+a different one.
