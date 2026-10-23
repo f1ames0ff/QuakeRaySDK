@@ -3729,6 +3729,19 @@ void EditorApp::DrawMaterials()
                 material.type = EditorMaterialType(type);
                 changed = true;
             }
+
+            changed |= ImGui::Checkbox("Mirror##surf", &material.mirror);
+
+            // The game locks the pane's own fields off a material that is not glass, which is
+            // also why they only reach the layer colors when material_glass is set.
+            const bool glassPane = material.type == EditorMaterialType::Glass;
+
+            ImGui::BeginDisabled(!glassPane);
+            changed |= ImGui::SliderFloat("Glass IOR##surf", &material.glassIor, 0.0f, 5.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Glass thickness##surf", &material.glassThickness, 0.0f,
+                                          64.0f, "%.1f");
+            changed |= ImGui::ColorEdit3("Glass colour##surf", material.glassColor);
+            ImGui::EndDisabled();
         }
 
         if (ImGui::CollapsingHeader("Model", ImGuiTreeNodeFlags_DefaultOpen))

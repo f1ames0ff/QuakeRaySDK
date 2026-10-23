@@ -49,11 +49,11 @@ no implementation.
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
 | Sun intensity, azimuth, elevation, angular size | done | `Sun` group: `Light` (`rt_physical_sun`), `Light strength` (`rt_sky_sun`), `Pitch` / `Yaw` (`rt_sky_sun_pitch` / `rt_sky_sun_yaw`) and `Disc scale` / `Disc colour` / `Disc size`; the direction reaches `QrDrawFrameVolumetricParams::volume.sourceDirection` as the game's `+forward` |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
-| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 14 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
+| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 16 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
 | Texture browser with previews and search | done | `DrawTextureBrowser`; a grid of the scene's own textures with a name filter, the picked texture outlined in the game's orange, and `Select` / `NONE` writing `texture_base` |
 | Texture UV scale/offset authoring | partial | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`); `qrUpdateGeometryTexCoords` is not used because `VertexCollector::UpdateTexCoords` still asserts |
 | Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; there is no mask texture and no preview |
-| Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type; the parameters are not editable |
+| Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type and, with `Material` set to `glass`, `Glass IOR`, `Glass thickness` and `Glass colour` are the pane's own parameters; `Mirror` is the surface's. Water has no per-material parameters in the game either -- its look is the System tab's `Water / Acid` group, which the editor's global settings do not carry yet |
 | Light colour authoring | done | `Colour` (`ColorEdit3`) writes `EditorLight::tint`; `SetEditorLightTint` rebuilds radiance as `intensity * kEditorLightIntensityScale * tint` |
 | Light position and offset authoring | done | `Position` (`DragFloat3`) moves the light and re-resolves its cluster through `ResolveEditorLightCluster`; `Place at pick` drops it 8 units in front of the picked surface along the pick ray and aims the cone down that ray |
 | Light spot direction and inner/outer angles | done | `Spot` turns the cone on, `Spot dir` is three separate `##dirx/##diry/##dirz` fields, `Inner deg`/`Outer deg` the falloff, all through `qrUploadSpotLight`. Measured on `e1m1` at radius 300: spot off→on changes 52820 viewport pixels (mean 3.77) against a 1360/1.01 noise floor, direction mean 138.41, outer 0→60° mean 77.19, inner 0→40° mean 43.20 |
@@ -93,12 +93,20 @@ parameter block below it is a second scrolling child with the `Textures`, `Surfa
 | `texture_base` | `Browse...` over the texture browser, `NONE` to clear | `geomMaterial.layerMaterials[0]`, but only when the name resolves to a texture the loaded scene carries; an unknown name leaves the material as the BSP loader derived it |
 | `texture_scale_u/v`, `texture_offset_u/v` | `Scale U/V`, `Offset U/V` | layer-0 texcoord transform, with `QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT` asserted only when the transform is not identity |
 | `material` | type combo `none`/`glass`/`water` | `QrGeometryPassThroughType`; `none` keeps the kind the BSP loader derived |
-| `roughness_override` | `Roughness override` | `defaultRoughness`; the checkbox writes `kEditorDefaultRoughness`, clearing it returns the `-1` sentinel |
+| `roughness_override` | `Roughness override` | `defaultRoughness`; the checkbox writes `kEditorDefaultRoughness`, clearing it returns the `-1` sentinel. A mirror pins it to 0 whatever the override says, which is the tooltip's "mirror forces 0; glass keeps its override" |
 | `metalness_factor` | `Metalness` | `defaultMetallicity` |
 | `base_factor` | `Base factor` | `layerColors[0]` as a grey albedo tint |
+| `mirror` | `Mirror` | `QR_GEOMETRY_PASS_THROUGH_TYPE_MIRROR` plus `QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_MULTIPLY_BIT`; glass and water outrank it, exactly as `r_world.c`'s `is_mirror` does |
+| `glass_ior` | `Glass IOR` | `layerColors[2].x`, the field `RtAlphaTest.rahit.hlsl` reads; 0 keeps the engine's `rt_refr_glass` |
+| `glass_thickness` | `Glass thickness` | `layerColors[2].y`, shifted view and light through the pane |
+| `glass_color` | `Glass colour` | `layerColors[1].xyz`, multiplied into the transmitted view |
 | `exact_normals` | `Exact normals` | `QR_GEOMETRY_UPLOAD_EXACT_NORMALS_BIT` |
-| `luma` | `Luma` | `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` |
-| `default_emission` | `Emissive` | `defaultEmission` |
+| `is_light` | `Luma` | `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT`; this is the one key the panel reaches the traced-glow flag through, so it writes the file's `is_light` |
+| `emissive_factor` | `Emissive` | `defaultEmission`, clamped to [0, 1] by the renderer |
+
+The three glass rows are gated on the material being `glass`, and they write nothing otherwise:
+the game's pane reads them out of the layer colors only under `material_glass`, and a stray
+index of refraction on a solid surface would only bend light through a wall.
 
 `ApplyEditorMaterial` writes those fields into a `QrGeometryUploadInfo`. They are read at upload
 time, so an edit is published by rebuilding the static scene: `EditorApp::Frame` watches
@@ -106,9 +114,15 @@ time, so an edit is published by rebuilding the static scene: `EditorApp::Frame`
 change (`materials applied: static scene re-uploaded` in `editor.log`).
 
 Deliberately absent, because the SDK upload info has no field for them and a slider that cannot
-change the picture would be a lie: `bump_scale`, `metalness_from_normal_alpha`, `mirror`,
-`transparency`, `glass_ior`, `glass_thickness`, `glass_color`, `force_rasterize`, the `light_*`
-group and `luma_blend`. The game's emissive range is 0..5; the SDK clamps emission to [0, 1].
+change the picture would be a lie: `texture_normals`, `texture_emissive`, `texture_overlay`,
+`texture_gloss`, `bump_scale`, `metalness_from_normal_alpha`, `transparency`,
+`force_rasterize`, `luma`, `luma_blend` and the `light_*` group. The game's emissive range is
+0..5; the SDK clamps emission to [0, 1].
+
+Three of those absences are not upload gaps at all but texture ones, which is why the editor does
+not grow a slider for them: `metalness_from_normal_alpha` is baked into the RM texture when the
+game synthesises a material, `transparency` rides in the alpha of that same synthesised normal
+texture, and `bump_scale` scales the normal map the editor has no handle for.
 
 ### Texture browser
 
