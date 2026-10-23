@@ -18,7 +18,8 @@ const char *const kOwnedKeys[] = {
     "texture_base",      "texture_scale_u",    "texture_scale_v",  "texture_offset_u",
     "texture_offset_v",  "roughness_override", "metalness_factor", "base_factor",
     "emissive_factor",   "is_light",           "exact_normals",    "material_glass",
-    "material_water",
+    "material_water",    "mirror",             "glass_ior",        "glass_thickness",
+    "glass_color",
 };
 
 // The header of a target that does not exist yet. A file that does exist keeps its own header:
@@ -260,6 +261,22 @@ std::string TextOf(std::string_view value)
     return Lowercase(text) == "none" ? std::string() : text;
 }
 
+// `rrggbb`, the only form RT_CustomColorFromString reads back.
+std::string FormatColor(const float color[3])
+{
+    char buffer[16];
+    int channels[3];
+
+    for (int i = 0; i < 3; i++)
+    {
+        const float clamped = std::min(1.0f, std::max(0.0f, color[i]));
+        channels[i] = int(clamped * 255.0f + 0.5f) & 0xff;
+    }
+
+    std::snprintf(buffer, sizeof(buffer), "%02x%02x%02x", channels[0], channels[1], channels[2]);
+    return buffer;
+}
+
 // The owned keys of `params`, in canonical order, as `key`/`value` pairs. A key at its file
 // default is left out, which is what keeps a save from growing the file by eleven dead lines.
 std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMaterialParams &params)
@@ -323,9 +340,11 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("is_light", "true");
     }
 
-    if (params.exactNormals)
+    // The game writes the mirror next to the pass-through it overrides, then the pane's own
+    // fields under material_glass only -- the same conditions its QRE_WriteMaterial uses.
+    if (params.mirror)
     {
-        append("exact_normals", "true");
+        append("mirror", "true");
     }
 
     if (params.type == EditorMaterialType::Glass)
@@ -335,6 +354,30 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     else if (params.type == EditorMaterialType::Water)
     {
         append("material_water", "true");
+    }
+
+    if (params.type == EditorMaterialType::Glass)
+    {
+        if (params.glassIor > 0.0f)
+        {
+            append("glass_ior", FormatFloat(params.glassIor));
+        }
+
+        if (params.glassThickness != 2.0f)
+        {
+            append("glass_thickness", FormatFloat(params.glassThickness));
+        }
+
+        if (params.glassColor[0] != 1.0f || params.glassColor[1] != 1.0f ||
+            params.glassColor[2] != 1.0f)
+        {
+            append("glass_color", FormatColor(params.glassColor));
+        }
+    }
+
+    if (params.exactNormals)
+    {
+        append("exact_normals", "true");
     }
 
     return values;
@@ -373,22 +416,7 @@ std::vector<TextLine> SplitLines(const std::string &text)
     return lines;
 }
 
-// `rrggbb`, the only form RT_CustomColorFromString reads back.
-std::string FormatColor(const float color[3])
-{
-    char buffer[16];
-    int channels[3];
-
-    for (int i = 0; i < 3; i++)
-    {
-        const float clamped = std::min(1.0f, std::max(0.0f, color[i]));
-        channels[i] = int(clamped * 255.0f + 0.5f) & 0xff;
-    }
-
-    std::snprintf(buffer, sizeof(buffer), "%02x%02x%02x", channels[0], channels[1], channels[2]);
-    return buffer;
-}
-
+// The inverse of FormatColor: six hex digits, and anything else leaves `color` untouched.
 void ParseColor(std::string_view value, float color[3])
 {
     size_t start = 0;
@@ -1203,6 +1231,22 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         else if (key == "exact_normals")
         {
             params.exactNormals = BoolOf(value, params.exactNormals);
+        }
+        else if (key == "mirror")
+        {
+            params.mirror = BoolOf(value, params.mirror);
+        }
+        else if (key == "glass_ior")
+        {
+            params.glassIor = FloatOf(value, params.glassIor);
+        }
+        else if (key == "glass_thickness")
+        {
+            params.glassThickness = FloatOf(value, params.glassThickness);
+        }
+        else if (key == "glass_color")
+        {
+            ParseColor(value, params.glassColor);
         }
         else if (key == "material_glass")
         {

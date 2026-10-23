@@ -21,8 +21,8 @@ enum class EditorMaterialType
 };
 
 // The subset of the game's rt_material_t that the SDK carries per geometry. Anything the
-// upload info cannot express yet (bump_scale, glass_ior, glass_thickness, transparency,
-// metalness_from_normal_alpha, light_*) is deliberately absent instead of being a slider
+// upload info cannot express (bump_scale, transparency, metalness_from_normal_alpha,
+// force_rasterize, light_*, luma_blend) is deliberately absent instead of being a slider
 // that would not change the picture.
 struct EditorMaterialParams
 {
@@ -45,6 +45,17 @@ struct EditorMaterialParams
     float metalnessFactor = 0.0f;
     float baseFactor = 1.0f;
     EditorMaterialType type = EditorMaterialType::None;
+
+    // Surface, mirror: a mirror-smooth reflection. The game gives it roughness 0 and the
+    // multiplicative albedo-over-refl/refr flag, and lets glass and water win over it.
+    bool mirror = false;
+
+    // Surface, glass: the pane's own tint, index of refraction and thickness. The renderer
+    // reads them out of layer colors 1 and 2, which is why they need no extra upload field.
+    // ior 0 keeps the engine's rt_refr_glass; thickness 2 and white are the game's defaults.
+    float glassIor = 0.0f;
+    float glassThickness = 2.0f;
+    float glassColor[3] = { 1.0f, 1.0f, 1.0f };
 
     // Model
     bool exactNormals = false;

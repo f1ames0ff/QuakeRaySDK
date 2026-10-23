@@ -10,6 +10,9 @@ void ApplyEditorMaterial(const EditorMaterialParams &material,
 {
     QrGeometryPassThroughType passThrough = derivedPassThrough;
 
+    const bool glass = material.type == EditorMaterialType::Glass;
+    const bool water = material.type == EditorMaterialType::Water;
+
     switch (material.type)
     {
     case EditorMaterialType::Glass:
@@ -22,15 +25,38 @@ void ApplyEditorMaterial(const EditorMaterialParams &material,
         break;
     }
 
+    // The game's is_mirror: glass and water outrank a mirror, and only a surface neither of
+    // them claimed keeps the mirror pass-through. A water or acid surface arrives here as a
+    // derived pass-through, not as the material type, so both spellings have to be checked.
+    const bool waterFamily = passThrough == QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_REFLECT_REFRACT ||
+                             passThrough == QR_GEOMETRY_PASS_THROUGH_TYPE_ACID_REFLECT_REFRACT;
+    const bool mirror = material.mirror && !glass && !water && !waterFamily;
+
+    if (mirror)
+    {
+        passThrough = QR_GEOMETRY_PASS_THROUGH_TYPE_MIRROR;
+        upload.flags |= QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_MULTIPLY_BIT;
+    }
+
     upload.passThroughType = passThrough;
 
-    upload.defaultRoughness = material.roughnessOverride < 0.0f ? kEditorDefaultRoughness
-                                                                : material.roughnessOverride;
+    // Mirror forces roughness to 0; glass keeps its own override, as the game's tooltip says.
+    const float roughness =
+        material.roughnessOverride < 0.0f ? kEditorDefaultRoughness : material.roughnessOverride;
+
+    upload.defaultRoughness = mirror ? 0.0f : roughness;
     upload.defaultMetallicity = material.metalnessFactor;
     upload.defaultEmission = material.emissiveFactor;
 
     const float base = material.baseFactor;
     upload.layerColors[0] = { base, base, base, 1.0f };
+
+    if (glass)
+    {
+        upload.layerColors[1] = { material.glassColor[0], material.glassColor[1],
+                                  material.glassColor[2], 0.0f };
+        upload.layerColors[2] = { material.glassIor, material.glassThickness, 0.0f, 0.0f };
+    }
 
     upload.texCoordScale[0] = material.textureScaleU;
     upload.texCoordScale[1] = material.textureScaleV;
