@@ -59,7 +59,7 @@ SpatialFrame::SpatialFrame()
     , scale(kSceneUnitsPerMeter)
     , invScale(1.0f / kSceneUnitsPerMeter)
     , frameDeterminant(1.0f)
-    , identity(false)
+    , identity(true)
     , mirrored(false)
 {
 }

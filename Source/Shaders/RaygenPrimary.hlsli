@@ -194,7 +194,7 @@ float3 getWaterNormal(const RayCone rayCone, const float3 rayDir, const float3 n
     float2 flowSpeedHorizontal = (float2)1.0;
 
 
-    const float uvScale = 0.00125 / globalUniform.waterTextureAreaScale;
+    const float uvScale = 0.05 / globalUniform.waterTextureAreaScale;
     float2 speed0 = uvScale * lerp(flowSpeedHorizontal, flowSpeedVertical, verticality) * globalUniform.waterWaveSpeed;
     float2 speed1 = -0.9 * speed0 * lerp(1.0, -0.1, verticality);
 

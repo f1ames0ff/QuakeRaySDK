@@ -5,6 +5,13 @@
 namespace qray
 {
 
+inline bool ShouldReverseRasterizedWinding(bool reversesWinding,
+                                           QrRasterizedGeometryStateFlags pipelineState)
+{
+    return reversesWinding &&
+           (pipelineState & QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST) == 0;
+}
+
 class SpatialFrame
 {
 public:

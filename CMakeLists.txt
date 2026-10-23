@@ -246,6 +246,30 @@ if(QR_BUILD_TESTS)
     get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
     find_program(QR_DXC NAMES dxc HINTS "${QR_VULKAN_BIN}" REQUIRED)
     set(QR_PROBE_DIR "${CMAKE_CURRENT_BINARY_DIR}/Tests")
+
+    set(QR_VERTEX_TRANSFORM_PROBE "${QR_PROBE_DIR}/VertexTransformProbe.comp.spv")
+    add_custom_command(OUTPUT "${QR_VERTEX_TRANSFORM_PROBE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
+        COMMAND "${QR_DXC}" -spirv -fspv-target-env=vulkan1.2 -T cs_6_2 -E main
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Shaders"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Tests/VertexTransformProbe.comp.hlsl"
+            -Fo "${QR_VERTEX_TRANSFORM_PROBE}"
+        DEPENDS
+            Tests/VertexTransformProbe.comp.hlsl
+            Source/Shaders/VertexTransform.hlsli
+        VERBATIM)
+    add_executable(qray_vertex_transform_gpu Tests/VertexTransformProbe.cpp
+        "${QR_VERTEX_TRANSFORM_PROBE}")
+    target_compile_features(qray_vertex_transform_gpu PRIVATE cxx_std_20)
+    target_include_directories(qray_vertex_transform_gpu PRIVATE Source)
+    target_link_libraries(qray_vertex_transform_gpu PRIVATE renderer nvrhi nvrhi_vk)
+    if(WIN32)
+        target_link_libraries(qray_vertex_transform_gpu PRIVATE user32)
+    endif()
+    add_test(NAME qray_vertex_transform_gpu COMMAND qray_vertex_transform_gpu "${QR_VERTEX_TRANSFORM_PROBE}")
+    set_tests_properties(qray_vertex_transform_gpu PROPERTIES TIMEOUT 60
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
+
     set(QR_PROBE_DEPENDENCIES
         Tests/CloudsProbe.comp.hlsl
         Source/Shaders/SkyMotion.hlsli

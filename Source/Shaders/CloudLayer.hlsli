@@ -125,7 +125,7 @@ float cloudDensity(CloudLayer layer, float3 p, bool detail)
         return 0.0;
     }
 
-    float2 wind = float2(layer.time * layer.speed * 30.0, layer.time * layer.speed * 12.0);
+    float2 wind = float2(layer.time * layer.speed * 0.75, layer.time * layer.speed * 0.30);
     float frequency = CLOUD_FREQUENCY / layer.thickness;
 
     float shape = cloudShape(float3(p.xy + wind, p.z / CLOUD_VERTICAL_STRETCH) * frequency, CLOUD_OCTAVES);

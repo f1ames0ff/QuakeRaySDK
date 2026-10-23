@@ -128,6 +128,7 @@ part of the current package.
 `rayLength` is expressed in meters up to 250,000 m; the shader sky sentinel
 follows `2 * rayLength`,
 and the world-depth target is `R32_SFLOAT`. Right-handed and left-handed signed axis permutations with
-uniform scale are supported. Arbitrary world rotations and non-uniform
-instance scale remain host-side conversion; the spatial contract is in
+arbitrary instance rotations and non-uniform scale are supported. Only a
+world whose declared up axis is not an axis permutation has to be rotated by
+the host before upload; the spatial contract is in
 [docs/spatial-contract.md](docs/spatial-contract.md).

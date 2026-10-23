@@ -29,6 +29,11 @@ namespace qray
 
 class UserPrint;
 
+// Reverses the authored vertex order of every face range for a mirrored host.
+// Returns false without modifying the tables when a range is outside the vertex array.
+bool ReverseWorldLightFaceOrder(std::vector<QrWorldLightFace> &faces,
+                                std::vector<QrVertex> &vertices);
+
 // Owns the world tables of a map: the clusters (BSP leafs), the compressed PVS and the
 // emissive faces with their corners. The host builds them once per map load and stops
 // touching them; the light polygons are collected from these tables by this module

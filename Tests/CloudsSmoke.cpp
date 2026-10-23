@@ -359,6 +359,12 @@ int main(int argc, char **argv)
             uniform.worldUpVector[2] = 1;
             const auto placement = qray::RhiCloudsPass::MakeShadowPlacement(layer);
             std::memcpy(uniform.cloudShadowPlacement, placement.data(), 16);
+            qray::RhiCloudsPass::LayerParams tinyLayer = layer;
+            tinyLayer.cloudLayer[0] = 0.0f;
+            tinyLayer.sunDirection[2] = tinyLayer.sunDirection[3] = 1.0f;
+            const auto tinyPlacement = qray::RhiCloudsPass::MakeShadowPlacement(tinyLayer);
+            Require(std::abs(tinyPlacement[3] - 0.025f) < 1e-6f,
+                    "cloud shadow extent was not floored in meters");
             std::memcpy(uniform.cameraPosition, layer.cloudAnchor, 12);
             const auto column = PickShadowColumn(device, clouds.GetShadowTexture(), placement.data());
             const float baseHeight = uniform.cameraPosition[2] + layer.cloudLayer[0];
@@ -383,8 +389,9 @@ int main(int argc, char **argv)
                     "the march seed must differ from its neighbours, not be a field they share");
             const float centre = layer.cloudLayer[0] + 0.3f * layer.cloudLayer[1];
             Require(std::abs(result[0]) < 1e-6 && std::abs(result[1]) < 1e-6, "stationary camera has infinite-sky motion");
-            Require(std::abs(result[2] - 0.5f * uniform.timeDelta * 25 * 30 / centre) < 1e-6 &&
-                    std::abs(result[3] - 0.5f * uniform.timeDelta * 25 * 12 / centre) < 1e-6, "cloud wind motion disagrees with projected displacement");
+            Require(std::abs(result[2] - 0.5f * uniform.timeDelta * 25 * 0.75f / centre) < 1e-6 &&
+                    std::abs(result[3] - 0.5f * uniform.timeDelta * 25 * 0.30f / centre) < 1e-6,
+                    "cloud wind motion disagrees with projected displacement");
             Require(result[4] >= 0 && result[4] <= result[5] + 1e-4f && result[5] <= 1 &&
                     std::abs(result[6] - 1) < 1e-4 && std::abs(result[7] - 1) < 1e-4, "shadow height interpolation or map fade is wrong");
             Require(result[4] < 0.98f && std::abs(result[4] - std::exp(-column[2])) < 0.003f,
@@ -443,8 +450,8 @@ int main(int argc, char **argv)
                     uniform.cloudLayerMotion[2] = setting[2];
                     const auto volumeMotion = probe();
                     const float centreHeight = setting[1] + 0.3f * setting[2];
-                    Require(std::abs(volumeMotion[2] - 0.5f * uniform.timeDelta * wind * 30 / centreHeight) < 1e-6 &&
-                            std::abs(volumeMotion[3] - 0.5f * uniform.timeDelta * wind * 12 / centreHeight) < 1e-6,
+                    Require(std::abs(volumeMotion[2] - 0.5f * uniform.timeDelta * wind * 0.75f / centreHeight) < 1e-6 &&
+                            std::abs(volumeMotion[3] - 0.5f * uniform.timeDelta * wind * 0.30f / centreHeight) < 1e-6,
                             "volumetric wind motion disagrees with the projected layer displacement");
                 }
             }

@@ -16,6 +16,7 @@
 //
 
 #include "ClusterLightLists.h"
+#include "ClusterCandidateRanking.h"
 
 #include "rt_alias.h"
 
@@ -1887,18 +1888,13 @@ void ClusterLightLists::RecordCandidate(uint32_t cluster, uint32_t sourceIndex, 
     word |= mask;
 
     const Source &source = sources[sourceIndex];
-    double        distance = double(dist2);
-    double        scale = double(source.radius) * double(source.radius);
-
-    if (!(scale > 1.0))
-        scale = 1.0;
-
-    if (!(distance > scale))
-        distance = scale;
-
     const double power = source.power > 0.0f ? double(source.power) : 0.0;
 
-    candidates[cluster].push_back({ source.uid, float(power / distance), sourceIndex });
+    candidates[cluster].push_back({
+        source.uid,
+        float(ClusterCandidateScore(power, double(source.radius), double(dist2))),
+        sourceIndex,
+    });
     MarkTailDirty(cluster);
 }
 
