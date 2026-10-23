@@ -51,10 +51,10 @@ inline constexpr size_t kEditorEmissiveBlockMax = 10;
 // The subset of the game's rt_material_t the editor expresses. The keys whose only consumer is
 // a packed material texture -- the extra images, bump_scale, transparency, luma_blend -- are
 // baked into the albedo / normal / roughness-metallic-emission set by EditorMaterialBakes, the
-// way the game's texture manager synthesizes a material texture at load. Keys the SDK has no
-// slot for at all (overlay, colored emissive, force_rasterize) stay absent instead of being
-// sliders that would not change the picture; the light_* group is carried as data, which is
-// what "Regenerate from map" writes.
+// way the game's texture manager synthesizes a material texture at load. force_rasterize has no
+// slot in the SDK upload at all: its consumers are alias models and sprites, not the surfaces
+// this editor uploads, so it is carried as data and changes nothing; the light_* group is
+// carried the same way, because that is what "Regenerate from map" writes.
 struct EditorMaterialParams
 {
     // The game's texture_base: the image the surface shows instead of its own. An embedder that
@@ -69,6 +69,13 @@ struct EditorMaterialParams
     std::string normalTexture;
     std::string emissiveTexture;
     std::string glossTexture;
+
+    // The game's texture_overlay: an image stamped over the albedo by its own alpha, which is
+    // how the map paints decals and grime onto a shared texture. gl_texmgr.c composites it into
+    // the albedo of every non-glass surface and into a separate auxiliary texture for glass; the
+    // traced path reads only the albedo, so a glass pane here keeps its base image and the
+    // overlay is a border rather than a lie about what the picture shows.
+    std::string overlayTexture;
 
     // Textures. Quake's texture_scale_* / texture_offset_* feed the layer-0 texcoord
     // transform; the SDK applies them under QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT.
@@ -111,6 +118,11 @@ struct EditorMaterialParams
 
     // Model
     bool exactNormals = false;
+
+    // Model, force_rasterize: the game lets a model or sprite material skip its rasterized
+    // emitter. Those are paths this editor does not upload, and QrGeometryUploadInfo has no such
+    // flag, so the value is carried through the session and reaches nothing.
+    bool forceRasterize = false;
 
     // Luma. defaultEmission is clamped to [0, 1] by the renderer.
     float emissiveFactor = 0.0f;
@@ -234,6 +246,7 @@ private:
         int32_t gloss = -1;
         int32_t normal = -1;
         int32_t emissive = -1;
+        int32_t overlay = -1;
         uint32_t width = 0;
         uint32_t height = 0;
         float bumpScale = 1.0f;

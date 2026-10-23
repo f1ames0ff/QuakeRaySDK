@@ -412,10 +412,11 @@ const EditorMaterialParams &EditorMaterialTable::For(const EditorSurface &surfac
 bool EditorMaterialBakes::Key::operator==(const Key &other) const
 {
     return albedo == other.albedo && gloss == other.gloss && normal == other.normal &&
-           emissive == other.emissive && width == other.width && height == other.height &&
-           bumpScale == other.bumpScale && transparency == other.transparency &&
-           roughness == other.roughness && metallic == other.metallic &&
-           emission == other.emission && lumaBlend == other.lumaBlend &&
+           emissive == other.emissive && overlay == other.overlay && width == other.width &&
+           height == other.height && bumpScale == other.bumpScale &&
+           transparency == other.transparency && roughness == other.roughness &&
+           metallic == other.metallic && emission == other.emission &&
+           lumaBlend == other.lumaBlend &&
            metalnessFromNormalAlpha == other.metalnessFromNormalAlpha &&
            emissiveMask == other.emissiveMask;
 }
@@ -473,10 +474,17 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     const int32_t gloss = resolveTexture(params.glossTexture);
     const int32_t normal = resolveTexture(params.normalTexture);
     const int32_t emissive = resolveTexture(params.emissiveTexture);
+    const int32_t overlay = resolveTexture(params.overlayTexture);
 
     const bool wantsNormal = normal >= 0 && params.bumpScale != 1.0f;
     const bool passesLight = glass && params.transparency != 1.0f;
     const bool blendsEmission = params.lumaBlend >= 0;
+
+    // gl_texmgr.c composites the overlay into the albedo of a surface that is not glass and
+    // hands a glass pane a separate auxiliary image the traced path never reads. A name that
+    // does not resolve is the same as no overlay at all.
+    const SourceImage overlayImage = SourceOf(scene, overlay);
+    const bool paintsOverlay = overlayImage.Valid() && !glass;
 
     // The game gives a named emissive image precedence over the colour blocks, so a material
     // that resolves one is baked from that image and its blocks stay dormant.
@@ -485,7 +493,7 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     // A material with none of these keys keeps the pool material the scene uploaded, which is
     // every surface until someone authors one.
     if (gloss < 0 && !wantsNormal && emissive < 0 && !passesLight && !blendsEmission &&
-        !params.metalnessFromNormalAlpha && !masksEmission)
+        !params.metalnessFromNormalAlpha && !masksEmission && !paintsOverlay)
     {
         return QR_NO_MATERIAL;
     }
@@ -502,6 +510,7 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
         albedoImage = glossImage.Valid() ? glossImage
                       : normalImage.Valid() ? normalImage
                       : emissiveImage.Valid() ? emissiveImage
+                      : overlayImage.Valid() ? overlayImage
                                               : SourceImage{};
     }
 
@@ -510,11 +519,15 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
         return QR_NO_MATERIAL;
     }
 
+    // An overlay that supplied the set's size would only be stamped over itself.
+    const bool compositeOverlay = paintsOverlay && overlayImage.rgba != albedoImage.rgba;
+
     Key key;
     key.albedo = albedo;
     key.gloss = gloss;
     key.normal = normal;
     key.emissive = emissive;
+    key.overlay = compositeOverlay ? overlay : -1;
     key.width = albedoImage.width;
     key.height = albedoImage.height;
     key.bumpScale = params.bumpScale;
@@ -577,6 +590,23 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
             albedoData[offset + 1] = uint8_t(std::min(255.0f, std::max(0.0f, base[1] * baseFactor)));
             albedoData[offset + 2] = uint8_t(std::min(255.0f, std::max(0.0f, base[2] * baseFactor)));
             albedoData[offset + 3] = base[3];
+
+            // The game stamps the overlay on afterwards, weighted by its own alpha and rounded
+            // to nearest: r = (r * (255 - a) + overlay * 255 + 127) / 255.
+            if (compositeOverlay)
+            {
+                const uint8_t *stamp = overlayImage.At(x, y, albedoImage.width, albedoImage.height);
+                const int alpha = stamp[3];
+                const int inverse = 255 - alpha;
+
+                for (int channel = 0; channel < 3; channel++)
+                {
+                    const int value = (int(albedoData[offset + channel]) * inverse +
+                                       int(stamp[channel]) * 255 + 127) /
+                                      255;
+                    albedoData[offset + channel] = uint8_t(std::min(255, value));
+                }
+            }
 
             float roughness = key.roughness;
 
