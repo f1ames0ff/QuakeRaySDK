@@ -70,6 +70,28 @@ converts it to the canonical camera space. Arbitrary rotations and non-uniform
 instance transforms are not part of this contract; the host must bake them
 into its data.
 
+The winding reversal keeps the host's authored winding authoritative: the
+renderer cancels the orientation flip that the composed scene transform
+introduces, so a triangle the host marks as front-facing is front-facing in the
+scene as well. The composed determinant is `det(instance transform)` times the
+frame determinant, so a negative-determinant instance transform is handled the
+same way as a mirrored frame, and the rule applies to indexed and non-indexed
+triangle lists alike. The host therefore still owns its own front faces,
+exactly as its rasterizer sees them. A host that stores a reflected copy of a
+right-handed world — the common case when a game mirrors a level, or when a
+left-handed world is derived from a right-handed one — must reverse that copy's
+triangle order when it creates the copy, because reflecting positions alone
+inverts their orientation. Reflection is not a renderer concern; the renderer
+only cancels the flip its own scene transform performs. `qray_spatial_twin_gpu`
+covers both halves: it renders the same scene through a right-handed Y-up frame
+and through a mirrored frame whose triangle order was reversed at export, and
+requires both images to match.
+
+Because the flip is baked into the uploaded index buffer, `qrUpdateGeometryTransform`
+cannot change it afterwards: it raises `QR_CANT_UPDATE_TRANSFORM` when the new
+transform would flip winding relative to the upload. A host that needs to change
+that sign re-uploads the geometry.
+
 ## Camera and frame data
 
 `QrDrawFrameInfo.view[16]` remains a column-major world-to-view matrix. Camera
@@ -152,6 +174,20 @@ topology and are not changed.
 DTAL group centers, bounds, reaches, radii and areas are converted. DTAL
 member basis vectors and origins are converted; member UVs and probability
 fields are not.
+
+### Light coverage in the GPU twin
+
+`qray_spatial_twin_gpu` renders without a top-level acceleration structure, so
+its path-traced passes are skipped and its reference frame is lit by the
+procedural sky and the directional light alone. Removing the spherical or the
+polygonal light from that frame leaves the image bit-identical, which was
+verified by probing both. Those two types are therefore executed through the
+conversion and upload path — enough to catch a bad transform, a rejected
+payload or a crash — but their shading is not part of the equivalence gate.
+The polygonal light is the one type whose emitted side comes from the vertex
+order, so a mirrored frame reorders it in `SpatialPolygonalLight`. That rule is
+covered only by that single code path; no test asserts it directly, because the
+twin frame cannot make the light visible.
 
 ## Atmosphere, fog and water
 

@@ -645,6 +645,16 @@ GLOBAL_UNIFORM_MEMBERS = [
     (UINT32, 1, "glassBlur",                      1),
     (UINT32, 1, "glassDenoise",                   1),
     (UINT32, 1, "glassParticles",                 1),
+
+    # Scene units per host unit, so shader constants authored per host unit (media fog
+    # density, ray offsets) stay host independent. Kept at the tail, with the padding that
+    # keeps the block a multiple of 16 bytes: inserting it between the existing fields moved
+    # the following float4 constants off their 16-byte boundary, and the compiler then
+    # realigned them, shifting every later member in the shader's view of the block.
+    (FLOAT32, 1, "sceneUnitsPerHostUnit",         1),
+    (UINT32, 1, "__pad7",                         1),
+    (UINT32, 1, "__pad8",                         1),
+    (UINT32, 1, "__pad9",                         1),
 ]
 
 GEOM_INSTANCE_MEMBERS = [

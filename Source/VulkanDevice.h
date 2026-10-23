@@ -243,6 +243,7 @@ private:
     bool                spatialFrameLocked = false;
     bool                smokeWindDirectionSet = false;
     QrFloat3D           smokeWindDirection = { { 0.45f, 0.20f, 0.87f } };
+    std::unordered_map<uint32_t, bool> geometryWindingFlips;
 
     uint32_t            frameId;
 
