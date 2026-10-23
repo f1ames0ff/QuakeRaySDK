@@ -566,9 +566,23 @@ int32_t EditorApp::TextureIndexByName(const std::string &name) const
 // A material's texture_base replaces the image the map put on the surface, so the surface's own
 // material is swapped out before ApplyEditorMaterial sets the rest of the parameters. A name the
 // scene does not carry, or NONE, keeps the map's image: the override only wins where it resolves.
+//
+// The keys the SDK has no upload field for -- the extra images, bump_scale, transparency,
+// luma_blend -- are folded into a packed material set here, and that bake replaces the pool
+// material entirely because the shader reads those channels instead of the scalars.
 QrMaterial EditorApp::SurfaceMaterialWithOverride(const EditorSurface &surface,
-                                                 const EditorMaterialParams &params) const
+                                                 const EditorMaterialParams &params)
 {
+    const auto resolve = [this](const std::string &name) { return TextureIndexByName(name); };
+
+    const QrMaterial baked = m_materialBakes.Get(m_instance, surface.textureName, params, m_scene,
+                                                 m_textureMaterials, resolve);
+
+    if (baked != QR_NO_MATERIAL)
+    {
+        return baked;
+    }
+
     const int32_t index = TextureIndexByName(params.baseTexture);
 
     if (index >= 0 && size_t(index) < m_textureMaterials.size())
@@ -590,6 +604,9 @@ bool EditorApp::CreateTextureMaterials()
     {
         return false;
     }
+
+    // A reload replaces every image the bakes were built from, so none of them can be reused.
+    m_materialBakes.Destroy(m_instance);
 
     m_textureMaterials.assign(m_scene.textures.size(), QR_NO_MATERIAL);
 
@@ -732,6 +749,10 @@ bool EditorApp::UploadStaticGeometry()
         return false;
     }
 
+    // Every pass uploads the geometry the parameters produce now, so a bake the pass does not ask
+    // for again has nothing pointing at it once the new geometry is submitted.
+    m_materialBakes.BeginPass();
+
     uint32_t uploadedSurfaces = 0;
 
     for (size_t surfaceIndex = 0; surfaceIndex < m_scene.surfaces.size(); surfaceIndex++)
@@ -807,6 +828,13 @@ bool EditorApp::UploadStaticGeometry()
                  this);
 
     const QrResult submitResult = qrSubmitStaticGeometries(m_instance);
+
+    if (submitResult == QR_SUCCESS)
+    {
+        m_materialBakes.EndPass(m_instance);
+    }
+
+    PrintMessage(("material bakes: " + std::to_string(m_materialBakes.Count())).c_str(), this);
     PrintMessage(("submit static scene: " + std::string(qrGetResultDescription(submitResult))).c_str(), this);
     return submitResult == QR_SUCCESS;
 }
@@ -1014,6 +1042,7 @@ void EditorApp::Frame()
     draw.pVolumetricParams = &m_frameParams.volume;
     draw.pLevelFogParams = &m_frameParams.fog;
     draw.pReflectRefractParams = &m_frameParams.reflectRefract;
+    draw.pTexturesParams = &m_frameParams.textures;
 
     const QrResult drawResult = qrDrawFrame(m_instance, &draw);
 
@@ -3716,6 +3745,63 @@ void EditorApp::DrawMaterials()
                 material.textureOffsetV = 0.0f;
                 changed = true;
             }
+
+            // The three extra images a packed material set carries. NONE keeps whatever the
+            // source image already puts in that channel.
+            const auto textureCombo = [this, &changed](const char *label, std::string &name) {
+                bool edited = false;
+
+                if (ImGui::BeginCombo(label, name.empty() ? "NONE" : name.c_str()))
+                {
+                    if (ImGui::Selectable("NONE", name.empty()))
+                    {
+                        name.clear();
+                        edited = true;
+                    }
+
+                    for (size_t i = 0; i < m_scene.textures.size(); ++i)
+                    {
+                        const std::string &candidate = m_scene.textures[i].name;
+                        const bool selected = !name.empty() && candidate == name;
+
+                        if (ImGui::Selectable(candidate.c_str(), selected))
+                        {
+                            name = candidate;
+                            edited = true;
+                        }
+
+                        if (selected)
+                        {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+
+                    // A name the scene does not carry still has to stay visible here, otherwise
+                    // opening the material would look like it had cleared what the file holds.
+                    if (!name.empty() && TextureIndexByName(name) < 0)
+                    {
+                        ImGui::Separator();
+                        ImGui::TextDisabled("%s - not in this scene", name.c_str());
+                    }
+
+                    ImGui::EndCombo();
+                }
+
+                LogRect(label);
+                changed |= edited;
+            };
+
+            textureCombo("Gloss##tex", material.glossTexture);
+            textureCombo("Normal##tex", material.normalTexture);
+            textureCombo("Emissive##tex", material.emissiveTexture);
+
+            if (ImGui::Button("Reset extra textures"))
+            {
+                material.glossTexture.clear();
+                material.normalTexture.clear();
+                material.emissiveTexture.clear();
+                changed = true;
+            }
         }
 
         if (ImGui::CollapsingHeader("Surface", ImGuiTreeNodeFlags_DefaultOpen))
@@ -3751,6 +3837,13 @@ void EditorApp::DrawMaterials()
 
             changed |= ImGui::Checkbox("Mirror##surf", &material.mirror);
 
+            // The game also scales the normal map's tilt, and its roughness can come from the
+            // normal map's alpha channel instead of the scalar.
+            changed |= ImGui::SliderFloat("Bump scale##surf", &material.bumpScale, 0.0f, 4.0f, "%.2f");
+            LogRect("material bump scale");
+            changed |= ImGui::Checkbox("Metalness from normal alpha##surf",
+                                       &material.metalnessFromNormalAlpha);
+
             // The game locks the pane's own fields off a material that is not glass, which is
             // also why they only reach the layer colors when material_glass is set.
             const bool glassPane = material.type == EditorMaterialType::Glass;
@@ -3759,6 +3852,9 @@ void EditorApp::DrawMaterials()
             changed |= ImGui::SliderFloat("Glass IOR##surf", &material.glassIor, 0.0f, 5.0f, "%.2f");
             changed |= ImGui::SliderFloat("Glass thickness##surf", &material.glassThickness, 0.0f,
                                           64.0f, "%.1f");
+            changed |= ImGui::SliderFloat("Transparency##surf", &material.transparency, 0.0f, 1.0f,
+                                          "%.3f");
+            LogRect("material transparency");
             changed |= ImGui::ColorEdit3("Glass colour##surf", material.glassColor);
             ImGui::EndDisabled();
         }
@@ -3775,6 +3871,23 @@ void EditorApp::DrawMaterials()
             // The checkbox uploads EMISSION_RAY_ONLY, which the game's is_light key also reaches,
             // so the label and the file key agree on what the flag means.
             changed |= ImGui::Checkbox("Is light##luma", &material.luma);
+
+            // luma_blend picks how the emissive layer is composited: the game stores -1 for "use
+            // the global setting" and 0..5 for a style this material forces.
+            {
+                const char *blendNames[] = { "Cvar", "Off", "Normal", "Screen", "Overlay",
+                                             "Hard light", "Color dodge" };
+                int32_t blend = material.lumaBlend + 1;
+                blend = std::clamp(blend, 0, int32_t(IM_ARRAYSIZE(blendNames)) - 1);
+
+                if (ImGui::Combo("Luma blend##luma", &blend, blendNames, IM_ARRAYSIZE(blendNames)))
+                {
+                    material.lumaBlend = blend - 1;
+                    changed = true;
+                }
+
+                LogRect("material luma blend");
+            }
         }
 
     if (changed)
@@ -5310,6 +5423,8 @@ void EditorApp::Shutdown()
     }
 
     m_textureMaterials.clear();
+
+    m_materialBakes.Destroy(m_instance);
 
     if (m_material != QR_NO_MATERIAL && m_instance != nullptr)
     {

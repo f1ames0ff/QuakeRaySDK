@@ -155,4 +155,25 @@ void BuildEditorFrameParams(const EditorRenderSettings &settings, const float su
     out.reflectRefract.glassShadows = 1;
     out.reflectRefract.glassParticles = 1;
     out.reflectRefract.portalNormalTwirl = 1;
+
+    // The texture block is handed over so a material can author its own emission blend,
+    // and it repeats what the renderer falls back to when the block is absent, except for
+    // the blend mode: the fallback is 0, the game's rt_emis_blend default is 1, and a
+    // material that leaves luma_blend alone has to land on the same composite it does.
+    out.textures = {};
+    out.textures.dynamicSamplerFilter = QR_SAMPLER_FILTER_LINEAR;
+    out.textures.normalMapStrength = 1.0f;
+    out.textures.emissionMapBoost = 100.0f;
+    out.textures.emissionMaxScreenColor = 1.5f;
+    out.textures.emissionSharpMask = 1.0f;
+    out.textures.talSelfLitOffset = 0.0f;
+    out.textures.squareInputRoughness = 1;
+    out.textures.minRoughness = 0.0f;
+    out.textures.emissionBlendMode = 1;
+    out.textures.emissionBlendStrength = 1.0f;
+
+    for (uint32_t i = 0; i < QR_LIGHT_STYLE_COUNT; i++)
+    {
+        out.textures.lightStyleScales[i] = 1.0f;
+    }
 }
