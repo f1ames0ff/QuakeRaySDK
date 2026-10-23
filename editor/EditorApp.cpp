@@ -557,6 +557,9 @@ bool EditorApp::LoadScene()
                   " lights)")
                      .c_str(),
                  this);
+
+    m_materials.Rebuild(m_scene);
+    m_selectedMaterial = m_materials.Empty() ? -1 : 0;
     return true;
 }
 
@@ -568,6 +571,16 @@ bool EditorApp::UploadScene()
     }
 
     if (!CreateTextureMaterials())
+    {
+        return false;
+    }
+
+    return UploadStaticGeometry();
+}
+
+bool EditorApp::UploadStaticGeometry()
+{
+    if (m_instance == nullptr)
     {
         return false;
     }
@@ -595,7 +608,6 @@ bool EditorApp::UploadScene()
         upload.uniqueID = uint32_t(surfaceIndex) + 1;
         upload.flags = QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
         upload.geomType = QR_GEOMETRY_TYPE_STATIC;
-        upload.passThroughType = PassThroughTypeForSurface(surface.kind);
         upload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
         upload.vertexCount = uint32_t(surface.vertices.size());
         upload.pVertices = surface.vertices.data();
@@ -604,9 +616,8 @@ bool EditorApp::UploadScene()
         upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
         upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
         upload.geomMaterial.layerMaterials[0] = SurfaceMaterial(surface);
-        upload.defaultRoughness = 0.7f;
-        upload.defaultMetallicity = 0.0f;
-        upload.defaultEmission = 0.0f;
+        ApplyEditorMaterial(m_materials.For(surface), PassThroughTypeForSurface(surface.kind),
+                            upload);
         upload.transform.matrix[0][0] = 1.0f;
         upload.transform.matrix[1][1] = 1.0f;
         upload.transform.matrix[2][2] = 1.0f;
@@ -638,9 +649,7 @@ bool EditorApp::UploadScene()
         upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
         upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
         upload.geomMaterial.layerMaterials[0] = m_material;
-        upload.defaultRoughness = 0.7f;
-        upload.defaultMetallicity = 0.0f;
-        upload.defaultEmission = 0.0f;
+        ApplyEditorMaterial(EditorMaterialParams{}, QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE, upload);
         upload.transform.matrix[0][0] = 1.0f;
         upload.transform.matrix[1][1] = 1.0f;
         upload.transform.matrix[2][2] = 1.0f;
@@ -757,6 +766,19 @@ void EditorApp::Frame()
     }
 
     m_frameTimeMs = deltaSeconds * 1000.0f;
+
+    // A material edit is applied by re-uploading the static scene, which starts its own
+    // command buffer and waits for the device -- so it has to run before the frame opens.
+    // Waiting for the control to stop being held keeps a slider drag from rebuilding per frame.
+    if (m_materialsChanged && !ImGui::IsAnyItemActive())
+    {
+        m_materialsChanged = false;
+
+        if (UploadStaticGeometry())
+        {
+            PrintMessage("materials applied: static scene re-uploaded", this);
+        }
+    }
 
     RECT client = {};
     GetClientRect(m_window, &client);
@@ -1436,6 +1458,15 @@ void EditorApp::Pick()
         const EditorSurface &picked = m_scene.surfaces[size_t(m_selectedSurface)];
         const size_t base = size_t(m_selectedTriangle) * 3;
 
+        // Picking a face also selects its material, so the Materials tab follows the
+        // surface under the cursor the way the game editor's material mode does.
+        const int32_t pickedMaterial = m_materials.IndexOf(picked.textureName);
+
+        if (pickedMaterial >= 0)
+        {
+            m_selectedMaterial = pickedMaterial;
+        }
+
         m_hasPickPoint = true;
 
         for (int axis = 0; axis < 3; axis++)
@@ -1621,120 +1652,142 @@ void EditorApp::DrawPanel(float deltaSeconds)
     }
 
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(320.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(380.0f, 660.0f), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("QuakeRay Editor", &m_showPanel, ImGuiWindowFlags_AlwaysAutoResize))
+    // Tabs keep every group reachable: the panel is a fixed height now that there are
+    // more sections than fit on a 720p screen at once.
+    if (ImGui::Begin("QuakeRay Editor", &m_showPanel, ImGuiWindowFlags_NoCollapse))
     {
         const float fps = deltaSeconds > 0.0f ? 1.0f / deltaSeconds : 0.0f;
         ImGui::Text("Frame  %.2f ms  (%.0f FPS)", m_frameTimeMs, fps);
         ImGui::Text("Drawable  %ux%u", m_clientWidth, m_clientHeight);
 
-        ImGui::Separator();
-        ImGui::TextUnformatted("Scene");
-        ImGui::Text("Vertices  %zu", m_scene.vertices.size());
-        ImGui::Text("Triangles %zu", m_scene.indices.size() / 3);
-        ImGui::Text("Surfaces  %zu  Textures %zu", m_scene.surfaces.size(),
-                    m_scene.textures.size());
-        ImGui::Text("Lights    %zu", m_scene.lights.size());
-
-        QrClusterLightStats clusterStats = {};
-
-        if (qrGetClusterLightStats(m_instance, &clusterStats) == QR_SUCCESS)
+        if (ImGui::BeginTabBar("EditorTabs"))
         {
-            ImGui::Text("Clusters  %u  sources %u", clusterStats.clusters, clusterStats.sources);
-            ImGui::Text("Grants    %u  entries %u  denied %u", clusterStats.grants,
-                        clusterStats.listEntries, clusterStats.denied);
-        }
-
-        if (m_scene.hasBounds)
-        {
-            ImGui::Text("Bounds    %.1f %.1f %.1f .. %.1f %.1f %.1f",
-                        m_scene.boundsMin[0], m_scene.boundsMin[1], m_scene.boundsMin[2],
-                        m_scene.boundsMax[0], m_scene.boundsMax[1], m_scene.boundsMax[2]);
-        }
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("Camera");
-        ImGui::Text("%.1f  %.1f  %.1f", m_cameraPosition[0], m_cameraPosition[1],
-                    m_cameraPosition[2]);
-        ImGui::Text("yaw %.1f deg  pitch %.1f deg", m_cameraYaw * 57.29577951f,
-                    m_cameraPitch * 57.29577951f);
-        ImGui::SliderFloat("Fly speed", &m_cameraSpeed, 16.0f, 8192.0f, "%.0f u/s");
-
-        if (ImGui::Button("Reset camera"))
-        {
-            ResetCameraToScene();
-        }
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("Selection");
-
-        if (m_selectedSurface >= 0 && m_selectedSurface < int32_t(m_scene.surfaces.size()))
-        {
-            const EditorSurface &surface = m_scene.surfaces[size_t(m_selectedSurface)];
-
-            ImGui::Text("Surface   %d  triangle %d", m_selectedSurface, m_selectedTriangle);
-            ImGui::Text("Texture   %s", surface.textureName.c_str());
-            ImGui::Text("Kind      %s", SurfaceKindName(surface.kind));
-            ImGui::Text("Cluster   %u", m_pickCluster);
-        }
-        else if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
-        {
-            EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
-
-            ImGui::Text("Light     %d  %s", m_selectedLight,
-                        light.className.empty() ? "light" : light.className.c_str());
-            ImGui::Text("Position  %.1f %.1f %.1f", light.position[0], light.position[1],
-                        light.position[2]);
-            ImGui::Text("Radiance  %.0f %.0f %.0f", light.color[0], light.color[1], light.color[2]);
-            ImGui::Text("Cluster   %s (%u)",
-                        light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER ? "none" : "resolved",
-                        light.cluster);
-
-            // Authoring mirrors the map entity keys the game honours: `light` (which becomes
-            // the radiance through kEditorLightIntensityScale) and rt_elight_radius.
-            float intensity = light.intensity;
-
-            if (ImGui::SliderFloat("Light key##light", &intensity, 0.0f, 800.0f, "%.0f"))
+            if (ImGui::BeginTabItem("Scene"))
             {
-                SetEditorLightIntensity(light, intensity);
-                PrintMessage(("light " + std::to_string(m_selectedLight) + ": light key " +
-                              std::to_string(int32_t(intensity)))
-                                 .c_str(),
-                             this);
+                ImGui::Separator();
+                ImGui::TextUnformatted("Scene");
+                ImGui::Text("Vertices  %zu", m_scene.vertices.size());
+                ImGui::Text("Triangles %zu", m_scene.indices.size() / 3);
+                ImGui::Text("Surfaces  %zu  Textures %zu", m_scene.surfaces.size(),
+                            m_scene.textures.size());
+                ImGui::Text("Lights    %zu", m_scene.lights.size());
+
+                QrClusterLightStats clusterStats = {};
+
+                if (qrGetClusterLightStats(m_instance, &clusterStats) == QR_SUCCESS)
+                {
+                    ImGui::Text("Clusters  %u  sources %u", clusterStats.clusters, clusterStats.sources);
+                    ImGui::Text("Grants    %u  entries %u  denied %u", clusterStats.grants,
+                                clusterStats.listEntries, clusterStats.denied);
+                }
+
+                if (m_scene.hasBounds)
+                {
+                    ImGui::Text("Bounds    %.1f %.1f %.1f .. %.1f %.1f %.1f",
+                                m_scene.boundsMin[0], m_scene.boundsMin[1], m_scene.boundsMin[2],
+                                m_scene.boundsMax[0], m_scene.boundsMax[1], m_scene.boundsMax[2]);
+                }
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("Camera");
+                ImGui::Text("%.1f  %.1f  %.1f", m_cameraPosition[0], m_cameraPosition[1],
+                            m_cameraPosition[2]);
+                ImGui::Text("yaw %.1f deg  pitch %.1f deg", m_cameraYaw * 57.29577951f,
+                            m_cameraPitch * 57.29577951f);
+                ImGui::SliderFloat("Fly speed", &m_cameraSpeed, 16.0f, 8192.0f, "%.0f u/s");
+
+                if (ImGui::Button("Reset camera"))
+                {
+                    ResetCameraToScene();
+                }
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("Selection");
+
+                if (m_selectedSurface >= 0 && m_selectedSurface < int32_t(m_scene.surfaces.size()))
+                {
+                    const EditorSurface &surface = m_scene.surfaces[size_t(m_selectedSurface)];
+
+                    ImGui::Text("Surface   %d  triangle %d", m_selectedSurface, m_selectedTriangle);
+                    ImGui::Text("Texture   %s", surface.textureName.c_str());
+                    ImGui::Text("Kind      %s", SurfaceKindName(surface.kind));
+                    ImGui::Text("Cluster   %u", m_pickCluster);
+                }
+                else if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
+                {
+                    EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
+
+                    ImGui::Text("Light     %d  %s", m_selectedLight,
+                                light.className.empty() ? "light" : light.className.c_str());
+                    ImGui::Text("Position  %.1f %.1f %.1f", light.position[0], light.position[1],
+                                light.position[2]);
+                    ImGui::Text("Radiance  %.0f %.0f %.0f", light.color[0], light.color[1], light.color[2]);
+                    ImGui::Text("Cluster   %s (%u)",
+                                light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER ? "none" : "resolved",
+                                light.cluster);
+
+                    // Authoring mirrors the map entity keys the game honours: `light` (which becomes
+                    // the radiance through kEditorLightIntensityScale) and rt_elight_radius.
+                    float intensity = light.intensity;
+
+                    if (ImGui::SliderFloat("Light key##light", &intensity, 0.0f, 800.0f, "%.0f"))
+                    {
+                        SetEditorLightIntensity(light, intensity);
+                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": light key " +
+                                      std::to_string(int32_t(intensity)))
+                                         .c_str(),
+                                     this);
+                    }
+
+                    if (ImGui::SliderFloat("Radius##light", &light.radius, 0.0f, 256.0f, "%.1f units"))
+                    {
+                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": radius " +
+                                      std::to_string(int32_t(light.radius)))
+                                         .c_str(),
+                                     this);
+                    }
+                }
+                else
+                {
+                    ImGui::TextUnformatted("Nothing picked - LMB in the viewport");
+                }
+
+                if (m_hasPickPoint)
+                {
+                    ImGui::Text("At        %.1f %.1f %.1f", m_pickPoint[0], m_pickPoint[1], m_pickPoint[2]);
+                }
+
+                if (ImGui::Button("Clear selection"))
+                {
+                    ClearSelection();
+                }
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("Sun");
+                ImGui::SliderFloat("Intensity", &m_sunIntensity, 0.0f, 64.0f, "%.2f");
+                ImGui::SliderFloat("Azimuth", &m_sunAzimuth, 0.0f, 360.0f, "%.0f deg");
+                ImGui::SliderFloat("Elevation", &m_sunElevation, -89.0f, 89.0f, "%.0f deg");
+                ImGui::SliderFloat("Angular size", &m_sunAngularDiameter, 0.1f, 8.0f, "%.2f deg");
+
+                ImGui::EndTabItem();
             }
 
-            if (ImGui::SliderFloat("Radius##light", &light.radius, 0.0f, 256.0f, "%.1f units"))
+            if (ImGui::BeginTabItem("Render"))
             {
-                PrintMessage(("light " + std::to_string(m_selectedLight) + ": radius " +
-                              std::to_string(int32_t(light.radius)))
-                                 .c_str(),
-                             this);
+                DrawGlobalSettings();
+                ImGui::EndTabItem();
             }
-        }
-        else
-        {
-            ImGui::TextUnformatted("Nothing picked - LMB in the viewport");
-        }
 
-        if (m_hasPickPoint)
-        {
-            ImGui::Text("At        %.1f %.1f %.1f", m_pickPoint[0], m_pickPoint[1], m_pickPoint[2]);
+            if (ImGui::BeginTabItem("Materials"))
+            {
+                DrawMaterials();
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
         }
-
-        if (ImGui::Button("Clear selection"))
-        {
-            ClearSelection();
-        }
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("Sun");
-        ImGui::SliderFloat("Intensity", &m_sunIntensity, 0.0f, 64.0f, "%.2f");
-        ImGui::SliderFloat("Azimuth", &m_sunAzimuth, 0.0f, 360.0f, "%.0f deg");
-        ImGui::SliderFloat("Elevation", &m_sunElevation, -89.0f, 89.0f, "%.0f deg");
-        ImGui::SliderFloat("Angular size", &m_sunAngularDiameter, 0.1f, 8.0f, "%.2f deg");
-
-        DrawGlobalSettings();
 
         ImGui::Separator();
         ImGui::TextUnformatted("RMB drag look  WASD move  Q/E down/up  Shift x4");
@@ -1831,6 +1884,123 @@ void EditorApp::DrawGlobalSettings()
         ImGui::ColorEdit3("Fog colour", settings.fogColor);
         ImGui::SliderFloat("Density", &settings.fogDensity, 0.0f, 1.0f, "%.4f");
         ImGui::SliderFloat("Sky blend", &settings.fogSkyBlend, 0.0f, 1.0f, "%.2f");
+    }
+
+    ImGui::EndChild();
+}
+
+void EditorApp::DrawMaterials()
+{
+    ImGui::Separator();
+    ImGui::TextUnformatted("Materials");
+
+    if (m_materials.Empty())
+    {
+        ImGui::TextUnformatted("No surfaces loaded");
+        return;
+    }
+
+    // One entry per texture name, sorted. The list scrolls on its own so the
+    // parameter sections below stay reachable on a short screen.
+    const float availableListHeight = ImGui::GetIO().DisplaySize.y * 0.22f;
+    const float listHeight = availableListHeight < 160.0f ? availableListHeight : 160.0f;
+
+    if (ImGui::BeginChild("MaterialList", ImVec2(360.0f, listHeight), true))
+    {
+        for (size_t i = 0; i < m_materials.Count(); i++)
+        {
+            const bool selected = int32_t(i) == m_selectedMaterial;
+
+            if (ImGui::Selectable(m_materials.NameAt(i).c_str(), selected))
+            {
+                m_selectedMaterial = int32_t(i);
+            }
+        }
+    }
+
+    ImGui::EndChild();
+
+    if (m_selectedMaterial < 0 || size_t(m_selectedMaterial) >= m_materials.Count())
+    {
+        m_selectedMaterial = -1;
+        return;
+    }
+
+    // The sections scroll on their own so the panel stays inside the viewport on a
+    // short screen, however many parameters a material grows.
+    if (!ImGui::BeginChild("MaterialParams", ImVec2(0.0f, 0.0f)))
+    {
+        ImGui::EndChild();
+        return;
+    }
+
+        EditorMaterialParams &material = m_materials.At(size_t(m_selectedMaterial));
+        bool changed = false;
+
+        if (ImGui::CollapsingHeader("Textures", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            changed |= ImGui::SliderFloat("Scale U##tex", &material.textureScaleU, 0.05f, 16.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Scale V##tex", &material.textureScaleV, 0.05f, 16.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Offset U##tex", &material.textureOffsetU, -8.0f, 8.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Offset V##tex", &material.textureOffsetV, -8.0f, 8.0f, "%.2f");
+
+            if (ImGui::Button("Reset texture transform"))
+            {
+                material.textureScaleU = 1.0f;
+                material.textureScaleV = 1.0f;
+                material.textureOffsetU = 0.0f;
+                material.textureOffsetV = 0.0f;
+                changed = true;
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Surface", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            // roughness_override at 0 means "no override" in the game editor, so the
+            // checkbox owns whether a value is sent at all.
+            bool roughnessOverride = material.roughnessOverride >= 0.0f;
+
+            if (ImGui::Checkbox("Roughness override", &roughnessOverride))
+            {
+                material.roughnessOverride = roughnessOverride ? kEditorDefaultRoughness : -1.0f;
+                changed = true;
+            }
+
+            if (roughnessOverride)
+            {
+                changed |= ImGui::SliderFloat("Roughness##surf", &material.roughnessOverride, 0.0f, 1.0f,
+                                              "%.3f");
+            }
+
+            changed |= ImGui::SliderFloat("Metalness##surf", &material.metalnessFactor, 0.0f, 1.0f,
+                                          "%.3f");
+            changed |= ImGui::SliderFloat("Base factor##surf", &material.baseFactor, 0.0f, 4.0f, "%.2f");
+
+            int32_t type = int32_t(material.type);
+            const char *materialTypes[] = { "None", "Glass", "Water" };
+
+            if (ImGui::Combo("Material##surf", &type, materialTypes, IM_ARRAYSIZE(materialTypes)))
+            {
+                material.type = EditorMaterialType(type);
+                changed = true;
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Model", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            changed |= ImGui::Checkbox("Exact normals##model", &material.exactNormals);
+        }
+
+        if (ImGui::CollapsingHeader("Luma", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            changed |= ImGui::SliderFloat("Emissive factor##luma", &material.emissiveFactor, 0.0f, 1.0f,
+                                          "%.3f");
+            changed |= ImGui::Checkbox("Luma##luma", &material.luma);
+        }
+
+    if (changed)
+    {
+        m_materialsChanged = true;
     }
 
     ImGui::EndChild();

@@ -9,6 +9,7 @@
 #include <qray/qray.h>
 
 #include "Assets.h"
+#include "EditorMaterial.h"
 #include "EditorSettings.h"
 #include "EditorUi.h"
 #include "Scene.h"
@@ -38,6 +39,7 @@ private:
     bool CreateUi();
     bool LoadScene();
     bool UploadScene();
+    bool UploadStaticGeometry();
     bool UploadWorldClusters();
     QrMaterial SurfaceMaterial(const EditorSurface &surface) const;
     static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
@@ -49,6 +51,7 @@ private:
     void UploadClusterLightSources();
     void DrawPanel(float deltaSeconds);
     void DrawGlobalSettings();
+    void DrawMaterials();
 
     // Casts a ray through the cursor the way QRE_DoPick resolves a click against the world:
     // the nearest surface along the ray wins, and a light in front of that surface wins over it.
@@ -102,6 +105,14 @@ private:
     // rebuilt every frame and only live for the duration of the qrDrawFrame call.
     EditorRenderSettings m_settings;
     EditorFrameParams m_frameParams;
+
+    // One material per texture name; edited from the Materials tab and written into every
+    // surface upload that uses it, the way the game's rt_material_t is keyed.
+    EditorMaterialTable m_materials;
+    int32_t m_selectedMaterial = -1;
+    // Set by an edit, cleared once the scene has been re-uploaded with the new values. The
+    // rebuild waits for the pointer to leave the control so a drag does not rebuild per frame.
+    bool m_materialsChanged = false;
 
     float m_frameTimeMs = 0.0f;
     uint32_t m_clientWidth = 0;

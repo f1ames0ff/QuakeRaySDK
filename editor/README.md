@@ -36,6 +36,17 @@ exactly as `Quake/gl_vidsdl.c` does, and `EditorApp::Frame` hands the four
 structs to `qrDrawFrame`, so the panel edits the same fields the game's cvars
 feed.
 
+The panel has three tabs: `Scene` (frame stats, the selection and the light
+authoring above), `Render` (the global settings above) and `Materials`.
+`Materials` lists one material per texture name, the way the game keys
+`rt_material_t`, and selects the material of a picked surface. Its parameter
+block covers what the SDK upload info can express today: the texcoord transform,
+the material type, roughness, metalness, base factor, exact normals, luma and
+emission. The game's remaining parameters have no SDK field yet and are absent
+rather than dead sliders; [`docs/editor-parity.md`](../docs/editor-parity.md)
+lists them. A change is published by re-uploading the static scene once the
+widget is released, so it shows in the next frame.
+
 The target is feature parity with the in-game editor (`qr_editor`); the current
 state and the remaining gap are listed in
 [`docs/editor-parity.md`](../docs/editor-parity.md).
@@ -85,10 +96,12 @@ from a PAK remains an adapter step.
 
 The remaining gap against the in-game editor is tracked in
 [`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
-is the source of truth for what is left. The global settings block is done; the
-next block is the material parameter table, followed by light authoring beyond
-the `light` key and the radius, and the session lifecycle that writes
-`qray.materials.yaml` back.
+is the source of truth for what is left. The global settings block and the
+material parameter table are done as far as the SDK upload info goes; the next
+block is light authoring beyond the `light` key and the radius, then the session
+lifecycle that writes `qray.materials.yaml` back. The material parameters the
+game has and the SDK cannot express yet are listed in that document and need
+new upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
 remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`
