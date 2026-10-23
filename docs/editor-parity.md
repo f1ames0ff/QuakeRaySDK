@@ -46,11 +46,11 @@ no implementation.
 | Map light `light` key authoring | done | `SetEditorLightIntensity` via `kEditorLightIntensityScale` |
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
 | Sun intensity, azimuth, elevation, angular size | done | `UploadSun` → `qrUploadDirectionalLight` |
-| Surface material read-out | done | texture name and pass-through kind |
-| Material parameters (32 of them, per animation frame) | missing | needs a host-side material parameter model; the SDK's `qrCreateMaterial` takes a descriptor, not editable named params |
+| Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
+| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 13 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
 | Texture browser with previews and search | missing | `QR_GUI_TextureBrowser` equivalent |
-| Texture UV scale/offset authoring | missing | `qrUpdateGeometryTexCoords` exists in the SDK |
-| Luma mask authoring and preview | missing | |
+| Texture UV scale/offset authoring | partial | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`); `qrUpdateGeometryTexCoords` is not used because `VertexCollector::UpdateTexCoords` still asserts |
+| Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; there is no mask texture and no preview |
 | Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type; the parameters are not editable |
 | Light colour authoring | missing | `EditorLight::color` is derived from intensity today |
 | Light position and offset authoring | missing | |
@@ -73,25 +73,74 @@ no implementation.
 | Modal dialogs | missing | |
 | Crosshair and hint overlay | partial | the hints are panel text, not an overlay |
 
+## Materials
+
+`EditorMaterialTable` keys one `EditorMaterialParams` by texture name, so two surfaces that share a
+texture share a material, the way the game keys `rt_material_t`. `Rebuild` runs after the scene
+loads; `For(surface)` returns the material of a surface and the defaults for a texture the table
+does not know. A surface pick calls `IndexOf(picked.textureName)` and moves the `Materials` tab to
+that material, so the panel edits what was clicked.
+
+The tab is the third of `Scene`, `Render`, `Materials`. The list of material names scrolls; the
+parameter block below it is a second scrolling child with the `Textures`, `Surface`, `Model` and
+`Luma` headers the game uses.
+
+| Game parameter | Editor field | Reaches the renderer as |
+| --- | --- | --- |
+| `texture_scale_u/v`, `texture_offset_u/v` | `Scale U/V`, `Offset U/V` | layer-0 texcoord transform, with `QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT` asserted only when the transform is not identity |
+| `material` | type combo `none`/`glass`/`water` | `QrGeometryPassThroughType`; `none` keeps the kind the BSP loader derived |
+| `roughness_override` | `Roughness override` | `defaultRoughness`; the checkbox writes `kEditorDefaultRoughness`, clearing it returns the `-1` sentinel |
+| `metalness_factor` | `Metalness` | `defaultMetallicity` |
+| `base_factor` | `Base factor` | `layerColors[0]` as a grey albedo tint |
+| `exact_normals` | `Exact normals` | `QR_GEOMETRY_UPLOAD_EXACT_NORMALS_BIT` |
+| `luma` | `Luma` | `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` |
+| `default_emission` | `Emissive` | `defaultEmission` |
+
+`ApplyEditorMaterial` writes those fields into a `QrGeometryUploadInfo`. They are read at upload
+time, so an edit is published by rebuilding the static scene: `EditorApp::Frame` watches
+`m_materialsChanged`, waits until no widget is active, and calls `UploadStaticGeometry` once per
+change (`materials applied: static scene re-uploaded` in `editor.log`).
+
+Deliberately absent, because the SDK upload info has no field for them and a slider that cannot
+change the picture would be a lie: `bump_scale`, `metalness_from_normal_alpha`, `mirror`,
+`transparency`, `glass_ior`, `glass_thickness`, `glass_color`, `force_rasterize`, the `light_*`
+group and `luma_blend`. The game's emissive range is 0..5; the SDK clamps emission to [0, 1].
+
 ## Order of work
 
-1. **Material parameters.** The largest block and the reason the editor exists. It needs the
-   parameter table (`qre_params`) and the animation-frame model ported next to the editor, then
-   the `Textures`, `Surface`, `Model` and `Light` sections drawn from that table.
-2. **Light authoring.** Colour, offset, spot cone and style first, then the light list, then the
+1. **Light authoring.** Colour, offset, spot cone and style first, then the light list, then the
    custom-light store with add/clone/remove.
-3. **Session lifecycle.** Apply, Cancel, Exit and the `qray.materials.yaml` writer, plus the
+2. **Session lifecycle.** Apply, Cancel, Exit and the `qray.materials.yaml` writer, plus the
    notify toast and the dialogs they need.
-4. **Viewport aids.** Crosshair, hint overlay, gizmo and drag.
+3. **Viewport aids.** Crosshair, hint overlay, gizmo and drag.
 
 Global settings were the one mechanical block, and they are done: `EditorSettings.cpp` owns the
-table and `DrawGlobalSettings` draws it.
+table and `DrawGlobalSettings` draws it. The material parameter table is in place and the SDK
+fields it can express are wired; what is left of it is the list of unsupported parameters above,
+which needs SDK upload fields before it can be authored.
 
 ## Verification
 
 Every row marked done must be exercised by a harness that proves the change reaches the renderer,
 not only the panel. A slider that moves is not evidence: the light authoring path was accepted
 only after a frame diff showed 9105 changed samples against a 57-sample control noise floor.
+
+The material panel was verified the same way, with `PrintWindow` captures of the live editor
+(1280x720 window, viewport sampled on a 3-pixel grid, luminance = mean of R+G+B):
+
+| Check | Measurement |
+| --- | --- |
+| Control noise between two idle frames | 667 changed samples (sum of abs RGB delta above 6) |
+| `Metalness` drag | 137269 changed samples, mean 5.572 -- the field reaches the frame |
+| `Base factor`, material 0.08 -> 3.6 | viewport luminance 222.13 vs 268.935, delta 46.805 on the picked material |
+| Static re-upload after an edit | `editor.log`: `geometry upload: 68 surfaces` / `submit static scene: QR_SUCCESS` / `materials applied: static scene re-uploaded` per change |
+
+An earlier run of the same `Base factor` measurement showed a delta of 0.122, which was read as a
+dead slider. The cause was the selection, not the field: the drag targeted material index 0, whose
+surfaces are not in the camera frustum. Repeating it on the material a viewport pick selected
+produced the 46.805 above. The lesson is part of the harness rule -- a negative result has to name
+the surface it measured.
+
 
 The global settings were accepted the same way. Dragging `Global / Brightness` from 1.00 to the
 slider maximum changed 178615 of 921600 sampled pixels, against 309 for two consecutive frames
