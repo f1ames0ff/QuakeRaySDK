@@ -49,8 +49,8 @@ no implementation.
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
 | Sun intensity, azimuth, elevation, angular size | done | `Sun` group: `Light` (`rt_physical_sun`), `Light strength` (`rt_sky_sun`), `Pitch` / `Yaw` (`rt_sky_sun_pitch` / `rt_sky_sun_yaw`) and `Disc scale` / `Disc colour` / `Disc size`; the direction reaches `QrDrawFrameVolumetricParams::volume.sourceDirection` as the game's `+forward` |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
-| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 13 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
-| Texture browser with previews and search | missing | `QR_GUI_TextureBrowser` equivalent |
+| Material parameters (32 of them, per animation frame) | partial | `EditorMaterial.{h,cpp}`; 14 of the game's parameters, one material per texture name, applied by re-uploading the static scene. Unsupported fields are listed under [Materials](#materials) |
+| Texture browser with previews and search | done | `DrawTextureBrowser`; a grid of the scene's own textures with a name filter, the picked texture outlined in the game's orange, and `Select` / `NONE` writing `texture_base` |
 | Texture UV scale/offset authoring | partial | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`); `qrUpdateGeometryTexCoords` is not used because `VertexCollector::UpdateTexCoords` still asserts |
 | Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; there is no mask texture and no preview |
 | Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type; the parameters are not editable |
@@ -89,6 +89,7 @@ parameter block below it is a second scrolling child with the `Textures`, `Surfa
 
 | Game parameter | Editor field | Reaches the renderer as |
 | --- | --- | --- |
+| `texture_base` | `Browse...` over the texture browser, `NONE` to clear | `geomMaterial.layerMaterials[0]`, but only when the name resolves to a texture the loaded scene carries; an unknown name leaves the material as the BSP loader derived it |
 | `texture_scale_u/v`, `texture_offset_u/v` | `Scale U/V`, `Offset U/V` | layer-0 texcoord transform, with `QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT` asserted only when the transform is not identity |
 | `material` | type combo `none`/`glass`/`water` | `QrGeometryPassThroughType`; `none` keeps the kind the BSP loader derived |
 | `roughness_override` | `Roughness override` | `defaultRoughness`; the checkbox writes `kEditorDefaultRoughness`, clearing it returns the `-1` sentinel |
@@ -107,6 +108,29 @@ Deliberately absent, because the SDK upload info has no field for them and a sli
 change the picture would be a lie: `bump_scale`, `metalness_from_normal_alpha`, `mirror`,
 `transparency`, `glass_ior`, `glass_thickness`, `glass_color`, `force_rasterize`, the `light_*`
 group and `luma_blend`. The game's emissive range is 0..5; the SDK clamps emission to [0, 1].
+
+### Texture browser
+
+`Browse...` in the `Textures` group opens `DrawTextureBrowser`, the `QR_GUI_TextureBrowser`
+equivalent. The grid is the scene's own texture set -- `LoadEditorSceneBsp` already decodes every
+BSP texture into `EditorTexture`, and `CreateTextureMaterials` uploads each as a `QrMaterial`, so a
+tile is an `ImGui::Image` over that handle and needs no new SDK entry point. The tile geometry is
+the game's: 128 px images, a 10 px gap, the name under each one clipped with an ellipsis, and rows
+virtualised so a 1400-texture map draws only what fits.
+
+The filter is a case-insensitive substring over the texture name, which is the same test
+`QRGuiTextHas` performs; the counter reads `N of M textures`. Opening the browser points the
+selection at the material's current `texture_base` when the scene carries it, and at the
+material's own texture name otherwise -- the game's `QrTextureBrowserBaseName` match, minus the
+folder tree, because a standalone editor has no mods to tree.
+
+`Select` writes the picked name and `NONE` clears the field, which is the same thing the game's
+browser returns: the key's default is empty, so `WriteMerged` drops `texture_base` entirely.
+`Escape`, `Cancel` and the close box abandon the pick.
+
+A `texture_base` that names nothing in the scene is kept in the file but not applied, and the panel
+says `not in this scene` beside the row, so a file authored against another map is not silently
+rewritten by opening it here.
 
 ## Session
 
@@ -128,9 +152,9 @@ game's list uses for "the file owns this name".
 | Target file exists | copied to `qray.backup_materials.yaml` first |
 
 The owned keys are the fields the SDK upload info can express and the panel can edit:
-`texture_scale_u/v`, `texture_offset_u/v`, `roughness_override`, `metalness_factor`,
-`base_factor`, `emissive_factor`, `is_light`, `exact_normals`, `material_glass` and
-`material_water`.
+`texture_base`, `texture_scale_u/v`, `texture_offset_u/v`, `roughness_override`,
+`metalness_factor`, `base_factor`, `emissive_factor`, `is_light`, `exact_normals`,
+`material_glass` and `material_water`.
 
 ### Level document
 
@@ -227,8 +251,9 @@ cvar angles, so they round-trip without an angle conversion. `rt_sky_sun_disc`,
 
 Global settings were the one mechanical block, and they are done: `EditorSettings.cpp` owns the
 table and `DrawGlobalSettings` draws it. The material parameter table is in place and the SDK
-fields it can express are wired; what is left of it is the list of unsupported parameters above,
-which needs SDK upload fields before it can be authored.
+fields it can express are wired; the texture browser is done as well, so a material's base texture
+is picked from a grid of previews rather than typed. What is left of the table is the list of
+unsupported parameters above, which needs SDK upload fields before it can be authored.
 
 ## Verification
 
@@ -245,6 +270,9 @@ The material panel was verified the same way, with `PrintWindow` captures of the
 | `Metalness` drag | 137269 changed samples, mean 5.572 -- the field reaches the frame |
 | `Base factor`, material 0.08 -> 3.6 | viewport luminance 222.13 vs 268.935, delta 46.805 on the picked material |
 | Static re-upload after an edit | `editor.log`: `geometry upload: 68 surfaces` / `submit static scene: QR_SUCCESS` / `materials applied: static scene re-uploaded` per change |
+| `texture_base` through the browser | `Browse...` on `*slime0` opened the grid; the filter `wall` narrowed it; `Select` logged `texture browser: texture_base '*slime0' -> uwall1_2`, the row's 23x23 preview drew 23 distinct colours, and the live re-upload changed 18914 viewport pixels (mean 7.6188) |
+| Saved `texture_base` | `qray.materials.yaml` gained `texture_base: uwall1_2` directly under `- name: *slime0`, ahead of every other key |
+| `NONE` | the second save left `- name: *slime0` with no keys, so a cleared value is dropped rather than written empty |
 
 An earlier run of the same `Base factor` measurement showed a delta of 0.122, which was read as a
 dead slider. The cause was the selection, not the field: the drag targeted material index 0, whose

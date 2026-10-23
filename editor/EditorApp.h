@@ -47,6 +47,12 @@ private:
     bool UploadStaticGeometry();
     bool UploadWorldClusters();
     QrMaterial SurfaceMaterial(const EditorSurface &surface) const;
+    // The image a material's texture_base names, or -1 when the value is empty or names a
+    // texture this scene does not carry.
+    int32_t TextureIndexByName(const std::string &name) const;
+    // The surface's own material, replaced by the one texture_base names where it resolves.
+    QrMaterial SurfaceMaterialWithOverride(const EditorSurface &surface,
+                                           const EditorMaterialParams &params) const;
     static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
@@ -62,6 +68,9 @@ private:
     void DrawPanel(float deltaSeconds);
     void DrawGlobalSettings();
     void DrawMaterials();
+    // The game editor's texture browser: the scene's own images as a searchable grid of
+    // previews, opened from the Base row of a material and writing its texture_base.
+    void DrawTextureBrowser();
     // The session of the game editor: what the panel authored since the last Apply, the file it
     // writes and the prompt an exit with unsaved changes opens.
     void LoadMaterialsSession();
@@ -172,6 +181,9 @@ private:
     QrInstance m_instance = nullptr;
     QrMaterial m_material = QR_NO_MATERIAL;
     std::vector<QrMaterial> m_textureMaterials;
+    // Lowercased scene texture name to its index, the lookup a texture_base override and the
+    // browser both need.
+    std::unordered_map<std::string, int32_t> m_textureIndexByName;
     std::vector<uint8_t> m_palette;
     EditorAssetSource m_assets;
     EditorUi m_ui;
@@ -224,6 +236,14 @@ private:
     // surface upload that uses it, the way the game's rt_material_t is keyed.
     EditorMaterialTable m_materials;
     int32_t m_selectedMaterial = -1;
+    // The texture browser: the request the Browse button leaves for the window, which opens on
+    // the next frame. The material is named rather than indexed because the list stays clickable
+    // while the browser is open, so the target is the one the button was pressed on.
+    bool m_textureBrowserRequested = false;
+    bool m_textureBrowserFocus = false;
+    std::string m_textureBrowserMaterial;
+    int32_t m_textureBrowserSelection = -1;
+    char m_textureBrowserSearch[64] = {};
     // Set by an edit, cleared once the scene has been re-uploaded with the new values. The
     // rebuild waits for the pointer to leave the control so a drag does not rebuild per frame.
     bool m_materialsChanged = false;

@@ -15,9 +15,10 @@ namespace {
 // The keys EditorMaterialParams owns. Written in the game writer's own order for the fields the
 // two share, so a block the game wrote and the editor re-writes keeps its shape.
 const char *const kOwnedKeys[] = {
-    "texture_scale_u",  "texture_scale_v", "texture_offset_u", "texture_offset_v",
-    "roughness_override", "metalness_factor", "base_factor",    "emissive_factor",
-    "is_light",         "exact_normals",    "material_glass",   "material_water",
+    "texture_base",      "texture_scale_u",    "texture_scale_v",  "texture_offset_u",
+    "texture_offset_v",  "roughness_override", "metalness_factor", "base_factor",
+    "emissive_factor",   "is_light",           "exact_normals",    "material_glass",
+    "material_water",
 };
 
 // The header of a target that does not exist yet. A file that does exist keeps its own header:
@@ -244,6 +245,21 @@ bool BoolOf(std::string_view value, bool fallback)
     return fallback;
 }
 
+// A text value: the writer spells it bare, but a hand-written file may quote it, and the game's
+// NONE means "keep the map's own image", which is what the empty string stands for here.
+std::string TextOf(std::string_view value)
+{
+    std::string text(value);
+
+    if (text.size() >= 2 && (text.front() == '"' || text.front() == '\'') &&
+        text.back() == text.front())
+    {
+        text = text.substr(1, text.size() - 2);
+    }
+
+    return Lowercase(text) == "none" ? std::string() : text;
+}
+
 // The owned keys of `params`, in canonical order, as `key`/`value` pairs. A key at its file
 // default is left out, which is what keeps a save from growing the file by eleven dead lines.
 std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMaterialParams &params)
@@ -253,6 +269,12 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     auto append = [&values](const char *key, const std::string &value) {
         values.emplace_back(key, value);
     };
+
+    // The game writes the diffuse image first, before the scale and offset pair.
+    if (!params.baseTexture.empty())
+    {
+        append("texture_base", params.baseTexture);
+    }
 
     if (params.textureScaleU != 1.0f)
     {
@@ -1138,7 +1160,11 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
 
         const std::string_view value = ValueOf(line);
 
-        if (key == "texture_scale_u")
+        if (key == "texture_base")
+        {
+            params.baseTexture = TextOf(value);
+        }
+        else if (key == "texture_scale_u")
         {
             params.textureScaleU = FloatOf(value, params.textureScaleU);
         }
