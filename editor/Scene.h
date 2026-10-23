@@ -53,6 +53,16 @@ struct EditorLight
     std::string className;
 };
 
+// Radiance per unit of a map light's `light` key, matching RT_FIXUP_LIGHT_INTENSITY: the game
+// divides by rt_elight_normaliz (100), then multiplies by rt_globallight_mult (10), the
+// Quake-to-meter area fix (1 / 0.025^2 = 1600) and rt_brightness (1.0).
+inline constexpr float kEditorLightIntensityScale =
+    10.0f * (1.0f / (0.025f * 0.025f)) / 100.0f;
+
+// Writes the radiance the uploaded light carries for this `light` key value. Authoring changes
+// light.intensity, so colours must be refreshed through here rather than scaled twice.
+void SetEditorLightIntensity(EditorLight &light, float intensity);
+
 // One node of the BSP tree, holding only what a point-in-leaf walk needs. children >= 0 are
 // node indices, children < 0 are leaves addressed as -(child + 1).
 struct EditorBspNode

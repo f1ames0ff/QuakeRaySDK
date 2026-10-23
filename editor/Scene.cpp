@@ -459,15 +459,11 @@ bool StartsWithLight(const std::string &text)
     return text.size() >= 5 && text.compare(0, 5, "light") == 0;
 }
 
-// Mirrors RT_UploadAllElights + RT_LIGHT_Emit + RT_FIXUP_LIGHT_INTENSITY: the
-// map light's `light` key is divided by rt_elight_normaliz (100), then scaled by
-// rt_globallight_mult (10), the Quake-to-meter area fix (1 / 0.025^2 = 1600)
-// and rt_brightness (1.0). The radius keeps the rt_elight_radius default of one
+// Mirrors RT_UploadAllElights + RT_LIGHT_Emit + RT_FIXUP_LIGHT_INTENSITY through
+// kEditorLightIntensityScale. The radius keeps the rt_elight_radius default of one
 // centimetre, which is 40 scene units at the SDK's 40 units per metre. Map light
 // colours stay at the default light colour, exactly as the game ignores
 // `_color`/`color` keys and the stored has_color flag.
-constexpr float kLightIntensityScale =
-    10.0f * (1.0f / (0.025f * 0.025f)) / 100.0f;
 constexpr float kQuakeUnitsPerMeter = 40.0f;
 constexpr float kDefaultLightIntensity = 200.0f;
 constexpr float kDefaultLightRadiusMeters = 0.01f;
@@ -918,6 +914,16 @@ uint32_t ResolveSurfaceCluster(const EditorScene &scene, const float centroid[3]
 
 }
 
+void SetEditorLightIntensity(EditorLight &light, float intensity)
+{
+    light.intensity = intensity;
+
+    for (int channel = 0; channel < 3; channel++)
+    {
+        light.color[channel] = intensity * kEditorLightIntensityScale;
+    }
+}
+
 bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, EditorScene &scene,
                         std::string &error)
 {
@@ -1074,15 +1080,10 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         light.position[0] = position[0];
         light.position[1] = position[1];
         light.position[2] = position[2];
-        light.intensity = intensity;
         light.radius = kDefaultLightRadiusMeters * kQuakeUnitsPerMeter;
         light.cluster = ResolveLightCluster(scene, light.position);
         light.className = className;
-
-        for (int channel = 0; channel < 3; channel++)
-        {
-            light.color[channel] = intensity * kLightIntensityScale;
-        }
+        SetEditorLightIntensity(light, intensity);
 
         scene.lights.push_back(std::move(light));
     }

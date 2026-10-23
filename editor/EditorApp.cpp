@@ -1665,17 +1665,37 @@ void EditorApp::DrawPanel(float deltaSeconds)
         }
         else if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
         {
-            const EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
+            EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
 
             ImGui::Text("Light     %d  %s", m_selectedLight,
                         light.className.empty() ? "light" : light.className.c_str());
             ImGui::Text("Position  %.1f %.1f %.1f", light.position[0], light.position[1],
                         light.position[2]);
-            ImGui::Text("Color     %.2f %.2f %.2f", light.color[0], light.color[1], light.color[2]);
-            ImGui::Text("Intensity %.1f  radius %.1f", light.intensity, light.radius);
+            ImGui::Text("Radiance  %.0f %.0f %.0f", light.color[0], light.color[1], light.color[2]);
             ImGui::Text("Cluster   %s (%u)",
                         light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER ? "none" : "resolved",
                         light.cluster);
+
+            // Authoring mirrors the map entity keys the game honours: `light` (which becomes
+            // the radiance through kEditorLightIntensityScale) and rt_elight_radius.
+            float intensity = light.intensity;
+
+            if (ImGui::SliderFloat("Light key##light", &intensity, 0.0f, 800.0f, "%.0f"))
+            {
+                SetEditorLightIntensity(light, intensity);
+                PrintMessage(("light " + std::to_string(m_selectedLight) + ": light key " +
+                              std::to_string(int32_t(intensity)))
+                                 .c_str(),
+                             this);
+            }
+
+            if (ImGui::SliderFloat("Radius##light", &light.radius, 0.0f, 256.0f, "%.1f units"))
+            {
+                PrintMessage(("light " + std::to_string(m_selectedLight) + ": radius " +
+                              std::to_string(int32_t(light.radius)))
+                                 .c_str(),
+                             this);
+            }
         }
         else
         {
