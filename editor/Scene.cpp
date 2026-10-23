@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 namespace
 {
@@ -305,6 +306,7 @@ struct BspTexInfo
 {
     float u[4] = {};
     float v[4] = {};
+    int32_t miptex = -1;
     int32_t flags = 0;
 };
 
@@ -329,9 +331,209 @@ float Dot(const float a[3], const float b[4])
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + b[3];
 }
 
+struct MipTexture
+{
+    std::string name;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> indices;
+    std::vector<uint8_t> palette;
+};
+
+std::string Lowercase(std::string text)
+{
+    for (char &character : text)
+    {
+        character = char(std::tolower(static_cast<unsigned char>(character)));
+    }
+
+    return text;
 }
 
-bool LoadEditorSceneBsp(const std::string &path, EditorScene &scene, std::string &error)
+// The miptex name field is fixed at 16 bytes and is not always terminated.
+std::string MipTextureName(const uint8_t *name)
+{
+    char buffer[17] = {};
+    std::memcpy(buffer, name, 16);
+    return Lowercase(std::string(buffer));
+}
+
+// Quake stores its wall textures inside the BSP (lump 2): a miptex directory
+// followed by an embedded 8-bit image with four mip levels and a palette.
+bool DecodeBspTextures(const std::vector<uint8_t> &bytes, const BspLump &lump,
+                       std::vector<MipTexture> &textures)
+{
+    textures.clear();
+
+    if (lump.length < 4)
+    {
+        return true;
+    }
+
+    const int32_t count = ReadLittleEndian<int32_t>(bytes, lump.offset);
+
+    if (count <= 0)
+    {
+        return true;
+    }
+
+    if (size_t(count) > (lump.length - 4) / 4)
+    {
+        return false;
+    }
+
+    textures.resize(size_t(count));
+
+    for (int32_t i = 0; i < count; i++)
+    {
+        const int32_t dataOffset =
+            ReadLittleEndian<int32_t>(bytes, lump.offset + 4 + size_t(i) * 4);
+
+        if (dataOffset < 0 || size_t(dataOffset) + 40 > lump.length)
+        {
+            continue;
+        }
+
+        const size_t base = lump.offset + size_t(dataOffset);
+        MipTexture &texture = textures[size_t(i)];
+        texture.name = MipTextureName(bytes.data() + base);
+        texture.width = ReadLittleEndian<uint32_t>(bytes, base + 16);
+        texture.height = ReadLittleEndian<uint32_t>(bytes, base + 20);
+
+        if (texture.width == 0 || texture.height == 0 || texture.width > 4096 ||
+            texture.height > 4096)
+        {
+            texture.width = 0;
+            texture.height = 0;
+            continue;
+        }
+
+        const size_t pixelCount = size_t(texture.width) * size_t(texture.height);
+        const size_t available = lump.length - size_t(dataOffset) - 40;
+
+        if (pixelCount > available)
+        {
+            texture.width = 0;
+            texture.height = 0;
+            continue;
+        }
+
+        texture.indices.assign(bytes.data() + base + 40,
+                               bytes.data() + base + 40 + pixelCount);
+
+        const size_t paletteOffset = pixelCount / 64 * 85;
+
+        if (paletteOffset + 768 <= available)
+        {
+            texture.palette.assign(bytes.data() + base + 40 + paletteOffset,
+                                   bytes.data() + base + 40 + paletteOffset + 768);
+        }
+    }
+
+    return true;
+}
+
+void ConvertIndexedToRgba(const MipTexture &texture, const uint8_t *palette768,
+                          EditorTexture &out)
+{
+    out.name = texture.name;
+    out.width = texture.width;
+    out.height = texture.height;
+    out.rgba.assign(size_t(texture.width) * size_t(texture.height) * 4, 255);
+
+    const uint8_t *palette = palette768;
+
+    if (palette == nullptr && texture.palette.size() >= 768)
+    {
+        palette = texture.palette.data();
+    }
+
+    for (size_t i = 0; i < texture.indices.size(); i++)
+    {
+        const uint8_t index = texture.indices[i];
+        uint8_t red = index;
+        uint8_t green = index;
+        uint8_t blue = index;
+
+        if (palette != nullptr)
+        {
+            red = palette[size_t(index) * 3 + 0];
+            green = palette[size_t(index) * 3 + 1];
+            blue = palette[size_t(index) * 3 + 2];
+        }
+
+        out.rgba[i * 4 + 0] = red;
+        out.rgba[i * 4 + 1] = green;
+        out.rgba[i * 4 + 2] = blue;
+        out.rgba[i * 4 + 3] = 255;
+    }
+}
+
+// Mirrors the TEX_SPECIAL handling of gl_model.c: the leading character of the
+// texture name decides how the surface is lit and blended.
+EditorSurfaceKind ClassifyTexture(const std::string &name)
+{
+    if (name.empty())
+    {
+        return EditorSurfaceKind::Opaque;
+    }
+
+    if (name[0] == '{')
+    {
+        return EditorSurfaceKind::Fence;
+    }
+
+    if (name[0] == '*')
+    {
+        if (name.find("lava") != std::string::npos)
+        {
+            return EditorSurfaceKind::Lava;
+        }
+
+        if (name.find("slime") != std::string::npos)
+        {
+            return EditorSurfaceKind::Slime;
+        }
+
+        if (name.find("tele") != std::string::npos)
+        {
+            return EditorSurfaceKind::Teleport;
+        }
+
+        return EditorSurfaceKind::Water;
+    }
+
+    if (name.compare(0, 3, "sky") == 0)
+    {
+        return EditorSurfaceKind::Sky;
+    }
+
+    return EditorSurfaceKind::Opaque;
+}
+
+// "+0floor" .. "+9floor" are the frames of one animated surface, so they are
+// grouped under a single texture key.
+std::string AnimationBaseName(const std::string &name)
+{
+    if (name.size() < 2 || name[0] != '+')
+    {
+        return name;
+    }
+
+    const char frame = name[1];
+
+    if (std::isdigit(static_cast<unsigned char>(frame)) || (frame >= 'a' && frame <= 'j'))
+    {
+        return "+" + name.substr(2);
+    }
+
+    return name;
+}
+
+}
+
+bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, EditorScene &scene,
+                        std::string &error)
 {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
 
@@ -493,6 +695,7 @@ bool LoadEditorSceneBsp(const std::string &path, EditorScene &scene, std::string
             texInfos[i].v[axis] = ReadLittleEndian<float>(bytes, offset + 16 + size_t(axis) * 4);
         }
 
+        texInfos[i].miptex = ReadLittleEndian<int32_t>(bytes, offset + 32);
         texInfos[i].flags = ReadLittleEndian<int32_t>(bytes, offset + 36);
     }
 
@@ -517,6 +720,63 @@ bool LoadEditorSceneBsp(const std::string &path, EditorScene &scene, std::string
     {
         surfEdges[i] = ReadLittleEndian<int32_t>(bytes, lumps[13].offset + i * 4);
     }
+
+    std::vector<MipTexture> mipTextures;
+
+    if (!DecodeBspTextures(bytes, lumps[2], mipTextures))
+    {
+        error = "malformed BSP texture lump in " + path;
+        return false;
+    }
+
+    scene.textures.resize(mipTextures.size());
+
+    for (size_t i = 0; i < mipTextures.size(); i++)
+    {
+        if (mipTextures[i].width == 0 || mipTextures[i].height == 0)
+        {
+            continue;
+        }
+
+        ConvertIndexedToRgba(mipTextures[i], palette768, scene.textures[i]);
+    }
+
+    std::vector<EditorSurface> surfaces;
+    std::unordered_map<std::string, size_t> surfaceByTexture;
+
+    auto surfaceForTexture = [&surfaces, &surfaceByTexture](const std::string &textureName,
+                                                            int32_t textureIndex) -> EditorSurface & {
+        const std::string key = AnimationBaseName(textureName);
+        const auto found = surfaceByTexture.find(key);
+
+        if (found != surfaceByTexture.end())
+        {
+            EditorSurface &existing = surfaces[found->second];
+
+            if (textureIndex >= 0 &&
+                std::find(existing.animationFrames.begin(), existing.animationFrames.end(),
+                          textureIndex) == existing.animationFrames.end())
+            {
+                existing.animationFrames.push_back(textureIndex);
+            }
+
+            return existing;
+        }
+
+        EditorSurface surface;
+        surface.textureName = key;
+        surface.texture = textureIndex;
+        surface.kind = ClassifyTexture(key);
+
+        if (textureIndex >= 0)
+        {
+            surface.animationFrames.push_back(textureIndex);
+        }
+
+        surfaceByTexture.emplace(key, surfaces.size());
+        surfaces.push_back(std::move(surface));
+        return surfaces.back();
+    };
 
     for (size_t faceIndex = 0; faceIndex < faceCount; faceIndex++)
     {
@@ -617,6 +877,25 @@ bool LoadEditorSceneBsp(const std::string &path, EditorScene &scene, std::string
             faceNormal[2] /= normalLength;
         }
 
+        int32_t textureIndex = -1;
+        std::string textureName = "notex";
+
+        if (texInfo != nullptr && texInfo->miptex >= 0 &&
+            size_t(texInfo->miptex) < scene.textures.size() &&
+            scene.textures[size_t(texInfo->miptex)].width > 0)
+        {
+            textureIndex = texInfo->miptex;
+            textureName = scene.textures[size_t(textureIndex)].name;
+        }
+        else if (texInfo != nullptr && texInfo->miptex >= 0 &&
+                 size_t(texInfo->miptex) < mipTextures.size() &&
+                 !mipTextures[size_t(texInfo->miptex)].name.empty())
+        {
+            textureName = mipTextures[size_t(texInfo->miptex)].name;
+        }
+
+        EditorSurface &surface = surfaceForTexture(textureName, textureIndex);
+
         for (size_t corner = 1; corner + 1 < polygon.size() / 3; corner++)
         {
             const size_t sourceCorners[3] = { 0, corner, corner + 1 };
@@ -639,23 +918,39 @@ bool LoadEditorSceneBsp(const std::string &path, EditorScene &scene, std::string
                 }
 
                 vertex.packedColor = 0xFFFFFFFFu;
-                scene.indices.push_back(uint32_t(scene.vertices.size()));
-                scene.vertices.push_back(vertex);
+                surface.indices.push_back(uint32_t(surface.vertices.size()));
+                surface.vertices.push_back(vertex);
             }
         }
     }
 
-    if (scene.vertices.empty() || scene.indices.empty())
+    if (surfaces.empty())
     {
         error = "no triangles in " + path;
         return false;
     }
 
+    for (const EditorSurface &surface : surfaces)
+    {
+        const uint32_t offset = uint32_t(scene.vertices.size());
+
+        scene.vertices.insert(scene.vertices.end(), surface.vertices.begin(),
+                              surface.vertices.end());
+
+        for (uint32_t index : surface.indices)
+        {
+            scene.indices.push_back(offset + index);
+        }
+    }
+
+    scene.surfaces = std::move(surfaces);
+
     UpdateSceneBounds(scene);
     return true;
 }
 
-bool LoadEditorScene(const std::string &path, EditorScene &scene, std::string &error)
+bool LoadEditorScene(const std::string &path, const uint8_t *palette768, EditorScene &scene,
+                     std::string &error)
 {
     std::string extension;
     const size_t dot = path.find_last_of('.');
@@ -673,7 +968,7 @@ bool LoadEditorScene(const std::string &path, EditorScene &scene, std::string &e
 
     if (extension == ".bsp")
     {
-        return LoadEditorSceneBsp(path, scene, error);
+        return LoadEditorSceneBsp(path, palette768, scene, error);
     }
 
     return LoadEditorSceneObj(path, scene, error);
