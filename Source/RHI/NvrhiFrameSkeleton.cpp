@@ -44,6 +44,7 @@
 
 #include <fstream>
 #include <algorithm>
+#include <cstring>
 
 #include "../Const.h"
 #include "../Framebuffers.h"
@@ -299,6 +300,216 @@ void NvrhiFrameSkeleton::RequestScreenshot(const std::string &path)
     if (!path.empty())
     {
         screenshotPath = path;
+    }
+}
+
+static bool IsReadbackSourceFormat(nvrhi::Format format)
+{
+    return format == nvrhi::Format::BGRA8_UNORM ||
+           format == nvrhi::Format::RGBA8_UNORM ||
+           format == nvrhi::Format::SBGRA8_UNORM ||
+           format == nvrhi::Format::SRGBA8_UNORM;
+}
+
+static bool IsReadbackFormatSupported(QrFrameReadbackFormat format)
+{
+    return format == QR_FRAME_READBACK_FORMAT_RGBA8_UNORM ||
+           format == QR_FRAME_READBACK_FORMAT_BGRA8_UNORM;
+}
+
+QrResult NvrhiFrameSkeleton::GetFrameReadbackRequirements(QrFrameReadbackFormat format,
+                                                           QrBool32 includeUi, uint32_t &width,
+                                                           uint32_t &height, uint32_t &rowPitch,
+                                                           uint64_t &bufferSize) const
+{
+    if (!IsReadbackFormatSupported(format) || includeUi == QR_FALSE)
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    if (swapchainTextures.empty())
+    {
+        return QR_FRAME_NOT_READY;
+    }
+
+    const nvrhi::TextureDesc &desc = swapchainTextures.front()->getDesc();
+
+    if (desc.width == 0 || desc.height == 0 || !IsReadbackSourceFormat(desc.format))
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    width = desc.width;
+    height = desc.height;
+    rowPitch = width * 4u;
+    bufferSize = uint64_t(rowPitch) * height;
+    return QR_SUCCESS;
+}
+
+QrResult NvrhiFrameSkeleton::RequestFrameReadback(uint32_t frameIndex,
+                                                   const QrFrameReadbackInfo &info,
+                                                   uint64_t &requestId)
+{
+    if (frameIndex >= readbackSlots.size() || info.pDst == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    if (info.frameId != QR_FRAME_ID_LATEST || info.includeUi != QR_TRUE ||
+        !IsReadbackFormatSupported(info.format))
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    ReadbackSlot &slot = readbackSlots[frameIndex];
+
+    if (slot.queued || slot.pending)
+    {
+        return QR_READBACK_BUSY;
+    }
+
+    if (swapchainTextures.empty())
+    {
+        return QR_FRAME_NOT_READY;
+    }
+
+    const nvrhi::TextureDesc &desc = swapchainTextures.front()->getDesc();
+
+    if (desc.width == 0 || desc.height == 0 || info.width != desc.width || info.height != desc.height)
+    {
+        return QR_FRAME_NOT_READY;
+    }
+
+    if (!IsReadbackSourceFormat(desc.format))
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    const uint64_t requiredRowPitch = uint64_t(desc.width) * 4u;
+    const uint64_t requiredSize = requiredRowPitch * desc.height;
+
+    if (info.rowPitch < requiredRowPitch || info.bufferSize < requiredSize)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    slot.info = info;
+    slot.sourceFormat = desc.format;
+    slot.requestId = nextReadbackRequestId++;
+    slot.ready = false;
+    slot.failed = false;
+    slot.queued = true;
+    requestId = slot.requestId;
+    return QR_SUCCESS;
+}
+
+QrResult NvrhiFrameSkeleton::GetFrameReadbackStatus(uint64_t requestId, QrBool32 &done) const
+{
+    done = QR_FALSE;
+
+    if (requestId == 0)
+    {
+        return QR_READBACK_INVALID;
+    }
+
+    for (const ReadbackSlot &slot : readbackSlots)
+    {
+        if (slot.requestId != requestId)
+        {
+            continue;
+        }
+
+        if (slot.failed)
+        {
+            return QR_READBACK_FAILED;
+        }
+
+        done = slot.ready ? QR_TRUE : QR_FALSE;
+        return QR_SUCCESS;
+    }
+
+    return QR_READBACK_INVALID;
+}
+
+void NvrhiFrameSkeleton::CompleteFrameReadback(uint32_t frameIndex)
+{
+    ReadbackSlot &slot = readbackSlots[frameIndex];
+
+    if (!slot.pending)
+    {
+        return;
+    }
+
+    slot.pending = false;
+
+    if (slot.staging == nullptr || slot.info.pDst == nullptr)
+    {
+        slot.failed = true;
+        return;
+    }
+
+    size_t sourceRowPitch = 0;
+    void *data = device->mapStagingTexture(slot.staging, nvrhi::TextureSlice(),
+                                           nvrhi::CpuAccessMode::Read, &sourceRowPitch);
+
+    if (data == nullptr)
+    {
+        slot.failed = true;
+        return;
+    }
+
+    const nvrhi::TextureDesc &desc = slot.staging->getDesc();
+    const bool sourceBgra = desc.format == nvrhi::Format::BGRA8_UNORM ||
+                            desc.format == nvrhi::Format::SBGRA8_UNORM;
+    const bool targetBgra = slot.info.format == QR_FRAME_READBACK_FORMAT_BGRA8_UNORM;
+
+    if (sourceRowPitch < size_t(desc.width) * 4u ||
+        slot.info.bufferSize < uint64_t(slot.info.rowPitch) * desc.height)
+    {
+        device->unmapStagingTexture(slot.staging);
+        slot.failed = true;
+        return;
+    }
+
+    for (uint32_t y = 0; y < desc.height; y++)
+    {
+        const uint8_t *src = static_cast<const uint8_t *>(data) + size_t(y) * sourceRowPitch;
+        uint8_t *dst = static_cast<uint8_t *>(slot.info.pDst) + size_t(y) * slot.info.rowPitch;
+
+        if (sourceBgra == targetBgra)
+        {
+            memcpy(dst, src, size_t(desc.width) * 4u);
+            continue;
+        }
+
+        for (uint32_t x = 0; x < desc.width; x++)
+        {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+            src += 4;
+            dst += 4;
+        }
+    }
+
+    device->unmapStagingTexture(slot.staging);
+    slot.ready = true;
+}
+
+void NvrhiFrameSkeleton::DestroyFrameReadback()
+{
+    for (ReadbackSlot &slot : readbackSlots)
+    {
+        if (slot.queued || slot.pending || slot.ready)
+        {
+            slot.failed = true;
+        }
+
+        slot.queued = false;
+        slot.pending = false;
+        slot.ready = false;
+        slot.staging = nullptr;
     }
 }
 
@@ -652,6 +863,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     cpuProfiler = sky.cpuProfiler;
     const bool resetHistory = previousFrameUiOnly && !sky.renderUiOnly;
     frameContext->BeginSlot(frameIndex, cpuProfiler);
+    CompleteFrameReadback(frameIndex);
 
     nvrhi::ICommandList *commandList = frameContext->GetCommandList(frameIndex);
     assert(commandList != nullptr);
@@ -1822,6 +2034,38 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         args.vertexCount = 3;
         commandList->draw(args);
 
+        ReadbackSlot &readback = readbackSlots[frameIndex];
+
+        if (readback.queued)
+        {
+            const nvrhi::TextureDesc &backBufferDesc = backBuffer->getDesc();
+
+            if (readback.staging == nullptr ||
+                readback.staging->getDesc().width != backBufferDesc.width ||
+                readback.staging->getDesc().height != backBufferDesc.height ||
+                readback.staging->getDesc().format != backBufferDesc.format)
+            {
+                nvrhi::TextureDesc stagingDesc = backBufferDesc;
+                stagingDesc.debugName = "Frame readback staging";
+                stagingDesc.isRenderTarget = false;
+                stagingDesc.isUAV = false;
+                readback.staging = device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
+            }
+
+            if (readback.staging != nullptr)
+            {
+                commandList->copyTexture(readback.staging, nvrhi::TextureSlice(),
+                                         backBuffer, nvrhi::TextureSlice());
+                readback.pending = true;
+            }
+            else
+            {
+                readback.failed = true;
+            }
+
+            readback.queued = false;
+        }
+
         if (!screenshotPath.empty())
         {
             const nvrhi::TextureDesc &backBufferDesc = backBuffer->getDesc();
@@ -2402,6 +2646,8 @@ bool NvrhiFrameSkeleton::CreateSwapchainResources(const Swapchain *pSwapchain)
 
 void NvrhiFrameSkeleton::DestroySwapchainResources()
 {
+    DestroyFrameReadback();
+
     // The sky pass wraps the engine's ALBEDO images and keeps one wrapped target per frame slot.
     // Dropping them here is what lets the engine destroy and re-create its framebuffers: the
     // re-create path of the swapchain waits for the device before it notifies

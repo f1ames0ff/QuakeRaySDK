@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <string>
@@ -465,6 +466,13 @@ public:
 
     void RequestScreenshot(const std::string &path);
 
+    QrResult GetFrameReadbackRequirements(QrFrameReadbackFormat format, QrBool32 includeUi,
+                                          uint32_t &width, uint32_t &height, uint32_t &rowPitch,
+                                          uint64_t &bufferSize) const;
+    QrResult RequestFrameReadback(uint32_t frameIndex, const QrFrameReadbackInfo &info,
+                                  uint64_t &requestId);
+    QrResult GetFrameReadbackStatus(uint64_t requestId, QrBool32 &done) const;
+
     // The GPU timings of the most recent frame the timer queries produced. 'pPassMs' receives
     // QR_GPU_PASS_COUNT entries in the order of qrGetGpuPassName. Returns false until the first
     // frame's timestamps could be read back (and forever when the timer queries are unavailable).
@@ -513,6 +521,8 @@ private:
     bool CreatePipeline(nvrhi::Format colorFormat);
     bool CreateSwapchainResources(const Swapchain *pSwapchain);
     void DestroySwapchainResources();
+    void CompleteFrameReadback(uint32_t frameIndex);
+    void DestroyFrameReadback();
 
     nvrhi::vulkan::IDevice *device;
     PrintFunction print;
@@ -520,6 +530,21 @@ private:
     std::string screenshotPath;
     nvrhi::StagingTextureHandle screenshotStaging;
     bool screenshotPending = false;
+
+    struct ReadbackSlot
+    {
+        nvrhi::StagingTextureHandle staging;
+        QrFrameReadbackInfo        info = {};
+        nvrhi::Format              sourceFormat = nvrhi::Format::UNKNOWN;
+        uint64_t                   requestId = 0;
+        bool                       queued = false;
+        bool                       pending = false;
+        bool                       ready = false;
+        bool                       failed = false;
+    };
+
+    std::array<ReadbackSlot, MAX_FRAMES_IN_FLIGHT> readbackSlots = {};
+    uint64_t nextReadbackRequestId = 1;
 
     nvrhi::ShaderHandle vertexShader;
     nvrhi::ShaderHandle pixelShader;
