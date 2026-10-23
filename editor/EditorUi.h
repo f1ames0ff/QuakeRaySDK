@@ -27,6 +27,9 @@ public:
     bool WantsMouse() const;
     bool WantsKeyboard() const;
 
+    float MouseX() const { return m_mouseX; }
+    float MouseY() const { return m_mouseY; }
+
     void SetCursorVisible(bool visible);
     float DisplayScale() const { return m_scale; }
 

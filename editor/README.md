@@ -11,9 +11,18 @@ directional light and renders the scene through the SDK. The default asset is
 `assets/editor_scene.obj`.
 
 For a BSP29 map, the loader reads the world geometry, computes per-face UVs from
-the BSP texinfo data and starts the camera at `info_player_start`. Texture
-loading, entity presentation and editor-side material authoring are not part of
-this stage; the viewport uses a checker material so geometry and UVs are visible.
+the BSP texinfo data, decodes the miptex entries of the texture lump into RGBA
+materials and starts the camera at `info_player_start`. Every surface is
+uploaded with the world cluster its BSP leaf resolves to, and the map light
+entities are resolved to their clusters and pushed through
+`qrUploadClusterLightSources`, so the cluster light path the game uses is the
+path the editor previews.
+
+Clicking in the viewport picks geometry or a light. A surface pick reports the
+selected triangle, its texture, its kind and its cluster; a light pick reports
+the light entity. The selection is outlined in the viewport and shown in the
+panel. Picking walks the uploaded surfaces rather than the BSP, which is enough
+for one pick per click.
 
 ## Build
 
@@ -54,11 +63,11 @@ options remain available for a different deployment layout:
 ```
 
 The BSP loader currently accepts Quake BSP29 files directly. Extracting a map
-from a PAK and texture loading are the next adapter steps.
+from a PAK remains an adapter step.
 
 ## Next work
 
-The editor core, selection, material/light authoring, PAK handling, Quake
-texture loading and sidecar persistence remain. The long-term spatial contract
-still needs an explicit world-units and up-axis decision; the current loader
-uses Quake units and Z-up.
+Material and light authoring panels, PAK handling, wal textures from the game
+archive and sidecar persistence remain. The current loader uses Quake units and
+Z-up; `QrSpatialConvention` already accepts that as a host convention, but the
+editor does not yet author in a different one.

@@ -31,6 +31,90 @@ uint64_t LightUniqueID(size_t index)
     return kFirstLightUniqueID + uint64_t(index);
 }
 
+// A light is picked when the ray passes this close to its origin, the way QRE_LightUnderCrosshair
+// accepts a light the crosshair is near rather than exactly on.
+constexpr float kLightPickRadiusUnits = 24.0f;
+
+// The vertical field of view the frame is drawn with. Picking and the selection overlay invert it,
+// so they must not carry their own copy.
+constexpr float kEditorFovYRadians = 1.0471975512f;
+
+// Moller-Trumbore, without backface culling: a BSP face is picked from either side.
+bool RayTriangle(const float origin[3], const float direction[3], const float a[3], const float b[3],
+                 const float c[3], float &outDistance)
+{
+    const float edge1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const float edge2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+
+    const float pvec[3] = {
+        direction[1] * edge2[2] - direction[2] * edge2[1],
+        direction[2] * edge2[0] - direction[0] * edge2[2],
+        direction[0] * edge2[1] - direction[1] * edge2[0],
+    };
+
+    const float determinant = edge1[0] * pvec[0] + edge1[1] * pvec[1] + edge1[2] * pvec[2];
+
+    if (std::fabs(determinant) < 1e-9f)
+    {
+        return false;
+    }
+
+    const float inverse = 1.0f / determinant;
+    const float tvec[3] = { origin[0] - a[0], origin[1] - a[1], origin[2] - a[2] };
+
+    const float u = (tvec[0] * pvec[0] + tvec[1] * pvec[1] + tvec[2] * pvec[2]) * inverse;
+
+    if (u < 0.0f || u > 1.0f)
+    {
+        return false;
+    }
+
+    const float qvec[3] = {
+        tvec[1] * edge1[2] - tvec[2] * edge1[1],
+        tvec[2] * edge1[0] - tvec[0] * edge1[2],
+        tvec[0] * edge1[1] - tvec[1] * edge1[0],
+    };
+
+    const float v = (direction[0] * qvec[0] + direction[1] * qvec[1] + direction[2] * qvec[2]) * inverse;
+
+    if (v < 0.0f || u + v > 1.0f)
+    {
+        return false;
+    }
+
+    const float distance = (edge2[0] * qvec[0] + edge2[1] * qvec[1] + edge2[2] * qvec[2]) * inverse;
+
+    if (distance <= 0.0f)
+    {
+        return false;
+    }
+
+    outDistance = distance;
+    return true;
+}
+
+const char *SurfaceKindName(EditorSurfaceKind kind)
+{
+    switch (kind)
+    {
+    case EditorSurfaceKind::Fence:
+        return "fence";
+    case EditorSurfaceKind::Water:
+        return "water";
+    case EditorSurfaceKind::Slime:
+        return "slime";
+    case EditorSurfaceKind::Lava:
+        return "lava";
+    case EditorSurfaceKind::Teleport:
+        return "teleport";
+    case EditorSurfaceKind::Sky:
+        return "sky";
+    default:
+        return "opaque";
+    }
+}
+
+
 struct FileBlob
 {
     std::vector<uint8_t> bytes;
@@ -698,6 +782,7 @@ void EditorApp::Frame()
 
     m_ui.BeginFrame(deltaSeconds, m_clientWidth, m_clientHeight);
     DrawPanel(deltaSeconds);
+    DrawSelectionOverlay();
     UpdateCamera(deltaSeconds);
     m_ui.EndFrame(m_instance, m_clientWidth, m_clientHeight);
 
@@ -730,7 +815,7 @@ void EditorApp::Frame()
     QrDrawFrameInfo draw = {};
     LookAt(eye, target, up, draw.view);
     draw.worldUpVector = { 0.0f, 0.0f, 1.0f };
-    draw.fovYRadians = 1.0471975512f;
+    draw.fovYRadians = kEditorFovYRadians;
     draw.cameraNear = std::max(0.1f, sceneExtent * 0.0005f);
     draw.cameraFar = std::max(1000.0f, sceneExtent * 8.0f);
     draw.rayLength = draw.cameraFar;
@@ -809,6 +894,16 @@ LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lPara
         {
             m_lastMouse.x = x;
             m_lastMouse.y = y;
+        }
+
+        break;
+    }
+
+    case WM_LBUTTONDOWN:
+    {
+        if (!m_ui.WantsMouse())
+        {
+            Pick();
         }
 
         break;
@@ -1113,6 +1208,396 @@ void EditorApp::UploadClusterLightSources()
     }
 }
 
+void EditorApp::ViewBasis(float side[3], float up[3], float forward[3]) const
+{
+    // The same basis LookAt builds the view matrix from, so a ray cast here and a vertex
+    // projected with the same basis agree with what the frame draws.
+    const float cosPitch = std::cos(m_cameraPitch);
+
+    forward[0] = cosPitch * std::cos(m_cameraYaw);
+    forward[1] = cosPitch * std::sin(m_cameraYaw);
+    forward[2] = std::sin(m_cameraPitch);
+
+    const float worldUp[3] = { 0.0f, 0.0f, 1.0f };
+
+    side[0] = forward[1] * worldUp[2] - forward[2] * worldUp[1];
+    side[1] = forward[2] * worldUp[0] - forward[0] * worldUp[2];
+    side[2] = forward[0] * worldUp[1] - forward[1] * worldUp[0];
+
+    const float sideLength = std::sqrt(side[0] * side[0] + side[1] * side[1] + side[2] * side[2]);
+
+    if (sideLength > 1e-6f)
+    {
+        side[0] /= sideLength;
+        side[1] /= sideLength;
+        side[2] /= sideLength;
+    }
+    else
+    {
+        side[0] = 1.0f;
+        side[1] = 0.0f;
+        side[2] = 0.0f;
+    }
+
+    up[0] = side[1] * forward[2] - side[2] * forward[1];
+    up[1] = side[2] * forward[0] - side[0] * forward[2];
+    up[2] = side[0] * forward[1] - side[1] * forward[0];
+}
+
+int32_t EditorApp::PickSurface(const float origin[3], const float direction[3], int32_t &outTriangle,
+                               float &outDistance) const
+{
+    // Every triangle of the scene is tested rather than walking the BSP: a click happens once
+    // per input event, and the surfaces already carry their own index lists.
+    int32_t bestSurface = -1;
+    int32_t bestTriangle = -1;
+    float bestDistance = 0.0f;
+
+    for (size_t s = 0; s < m_scene.surfaces.size(); s++)
+    {
+        const EditorSurface &surface = m_scene.surfaces[s];
+
+        for (size_t i = 0; i + 2 < surface.indices.size(); i += 3)
+        {
+            const uint32_t ia = surface.indices[i + 0];
+            const uint32_t ib = surface.indices[i + 1];
+            const uint32_t ic = surface.indices[i + 2];
+
+            if (ia >= surface.vertices.size() || ib >= surface.vertices.size() ||
+                ic >= surface.vertices.size())
+            {
+                continue;
+            }
+
+            float distance = 0.0f;
+
+            if (!RayTriangle(origin, direction, surface.vertices[ia].position,
+                             surface.vertices[ib].position, surface.vertices[ic].position, distance))
+            {
+                continue;
+            }
+
+            if (bestSurface < 0 || distance < bestDistance)
+            {
+                bestSurface = int32_t(s);
+                bestTriangle = int32_t(i / 3);
+                bestDistance = distance;
+            }
+        }
+    }
+
+    outTriangle = bestTriangle;
+    outDistance = bestDistance;
+    return bestSurface;
+}
+
+int32_t EditorApp::PickLight(const float origin[3], const float direction[3], float &outDistance) const
+{
+    // QRE_LightUnderCrosshair accepts the light nearest the crosshair ray rather than one exactly
+    // under it, because a light is drawn as a small gizmo, not as a surface.
+    int32_t bestLight = -1;
+    float bestDistance = 0.0f;
+
+    for (size_t index = 0; index < m_scene.lights.size(); index++)
+    {
+        const EditorLight &light = m_scene.lights[index];
+        const float toLight[3] = {
+            light.position[0] - origin[0],
+            light.position[1] - origin[1],
+            light.position[2] - origin[2],
+        };
+
+        const float along = toLight[0] * direction[0] + toLight[1] * direction[1] +
+                            toLight[2] * direction[2];
+
+        if (along <= 0.0f)
+        {
+            continue;
+        }
+
+        const float perpendicular[3] = {
+            toLight[0] - direction[0] * along,
+            toLight[1] - direction[1] * along,
+            toLight[2] - direction[2] * along,
+        };
+
+        const float distanceSquared = perpendicular[0] * perpendicular[0] +
+                                      perpendicular[1] * perpendicular[1] +
+                                      perpendicular[2] * perpendicular[2];
+
+        if (distanceSquared > kLightPickRadiusUnits * kLightPickRadiusUnits)
+        {
+            continue;
+        }
+
+        if (bestLight < 0 || along < bestDistance)
+        {
+            bestLight = int32_t(index);
+            bestDistance = along;
+        }
+    }
+
+    outDistance = bestDistance;
+    return bestLight;
+}
+
+void EditorApp::ClearSelection()
+{
+    m_selectedSurface = -1;
+    m_selectedTriangle = -1;
+    m_selectedLight = -1;
+    m_hasPickPoint = false;
+    m_pickCluster = 0;
+}
+
+void EditorApp::Pick()
+{
+    if (m_scene.surfaces.empty() && m_scene.lights.empty())
+    {
+        return;
+    }
+
+    float side[3] = {};
+    float up[3] = {};
+    float forward[3] = {};
+    ViewBasis(side, up, forward);
+
+    // A click while the mouse is captured comes from the crosshair, so it uses the centre of the
+    // viewport; otherwise it comes from the cursor.
+    float cursorX = float(m_clientWidth) * 0.5f;
+    float cursorY = float(m_clientHeight) * 0.5f;
+
+    if (!m_looking)
+    {
+        cursorX = m_ui.MouseX();
+        cursorY = m_ui.MouseY();
+    }
+
+    if (m_clientWidth == 0 || m_clientHeight == 0)
+    {
+        return;
+    }
+
+    const float aspect = float(m_clientWidth) / float(m_clientHeight);
+    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
+    const float ndcX = (cursorX / float(m_clientWidth)) * 2.0f - 1.0f;
+    const float ndcY = 1.0f - (cursorY / float(m_clientHeight)) * 2.0f;
+
+    float direction[3] = {
+        forward[0] + side[0] * (ndcX * tanHalfFov * aspect) + up[0] * (ndcY * tanHalfFov),
+        forward[1] + side[1] * (ndcX * tanHalfFov * aspect) + up[1] * (ndcY * tanHalfFov),
+        forward[2] + side[2] * (ndcX * tanHalfFov * aspect) + up[2] * (ndcY * tanHalfFov),
+    };
+
+    const float directionLength = std::sqrt(direction[0] * direction[0] +
+                                            direction[1] * direction[1] +
+                                            direction[2] * direction[2]);
+
+    if (directionLength <= 1e-6f)
+    {
+        return;
+    }
+
+    direction[0] /= directionLength;
+    direction[1] /= directionLength;
+    direction[2] /= directionLength;
+
+    int32_t triangle = -1;
+    float surfaceDistance = 0.0f;
+    const int32_t surface = PickSurface(m_cameraPosition, direction, triangle, surfaceDistance);
+    float lightDistance = 0.0f;
+    const int32_t light = PickLight(m_cameraPosition, direction, lightDistance);
+
+    // A light in front of the surface hides it, exactly like a gizmo drawn over the wall behind.
+    const bool lightWins = light >= 0 && (surface < 0 || lightDistance < surfaceDistance);
+
+    m_selectedLight = lightWins ? light : -1;
+    m_selectedSurface = (!lightWins && surface >= 0) ? surface : -1;
+    m_selectedTriangle = (!lightWins && surface >= 0) ? triangle : -1;
+    m_pickCluster = 0;
+
+    if (m_selectedSurface >= 0)
+    {
+        const EditorSurface &picked = m_scene.surfaces[size_t(m_selectedSurface)];
+        const size_t base = size_t(m_selectedTriangle) * 3;
+
+        m_hasPickPoint = true;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            m_pickPoint[axis] = 0.0f;
+        }
+
+        for (size_t corner = 0; corner < 3 && base + corner < picked.indices.size(); corner++)
+        {
+            const QrVertex &vertex = picked.vertices[picked.indices[base + corner]];
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                m_pickPoint[axis] += vertex.position[axis] / 3.0f;
+            }
+
+            m_pickCluster = vertex.cluster;
+        }
+    }
+    else if (m_selectedLight >= 0)
+    {
+        const EditorLight &picked = m_scene.lights[size_t(m_selectedLight)];
+
+        m_hasPickPoint = true;
+        m_pickCluster = picked.cluster;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            m_pickPoint[axis] = picked.position[axis];
+        }
+    }
+    else
+    {
+        m_hasPickPoint = false;
+    }
+
+    if (m_selectedSurface < 0 && m_selectedLight < 0)
+    {
+        ClearSelection();
+        PrintMessage("pick: nothing under the cursor", this);
+        return;
+    }
+
+    if (m_selectedLight >= 0)
+    {
+        PrintMessage(("pick: light " + std::to_string(m_selectedLight)).c_str(), this);
+    }
+    else
+    {
+        const EditorSurface &picked = m_scene.surfaces[size_t(m_selectedSurface)];
+
+        PrintMessage(("pick: surface " + std::to_string(m_selectedSurface) + " triangle " +
+                      std::to_string(m_selectedTriangle) + " texture " + picked.textureName +
+                      " cluster " + std::to_string(m_pickCluster))
+                         .c_str(),
+                     this);
+    }
+}
+
+void EditorApp::DrawSelectionOverlay()
+{
+    if (!m_hasPickPoint || m_clientWidth == 0 || m_clientHeight == 0)
+    {
+        return;
+    }
+
+    ImDrawList *drawList = ImGui::GetBackgroundDrawList();
+
+    if (drawList == nullptr)
+    {
+        return;
+    }
+
+    float side[3] = {};
+    float up[3] = {};
+    float forward[3] = {};
+    ViewBasis(side, up, forward);
+
+    const float aspect = float(m_clientWidth) / float(m_clientHeight);
+    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
+
+    // Projects a world point the same way ViewBasis casts a ray, so the outline lands on the
+    // geometry the click resolved. Returns false when the point is behind the camera.
+    const auto project = [&](const float point[3], float &outX, float &outY) -> bool {
+        const float relative[3] = {
+            point[0] - m_cameraPosition[0],
+            point[1] - m_cameraPosition[1],
+            point[2] - m_cameraPosition[2],
+        };
+
+        const float depth = relative[0] * forward[0] + relative[1] * forward[1] +
+                            relative[2] * forward[2];
+
+        if (depth <= 1e-3f)
+        {
+            return false;
+        }
+
+        const float horizontal = relative[0] * side[0] + relative[1] * side[1] +
+                                 relative[2] * side[2];
+        const float vertical = relative[0] * up[0] + relative[1] * up[1] + relative[2] * up[2];
+
+        const float ndcX = horizontal / (depth * tanHalfFov * aspect);
+        const float ndcY = vertical / (depth * tanHalfFov);
+
+        outX = (ndcX * 0.5f + 0.5f) * float(m_clientWidth);
+        outY = (1.0f - (ndcY * 0.5f + 0.5f)) * float(m_clientHeight);
+        return true;
+    };
+
+    const ImU32 accent = IM_COL32(255, 170, 40, 255);
+    const ImU32 marker = IM_COL32(90, 200, 255, 255);
+
+    if (m_selectedSurface >= 0 && m_selectedSurface < int32_t(m_scene.surfaces.size()))
+    {
+        const EditorSurface &surface = m_scene.surfaces[size_t(m_selectedSurface)];
+        const size_t base = size_t(m_selectedTriangle) * 3;
+
+        if (base + 2 < surface.indices.size())
+        {
+            float screenX[3] = {};
+            float screenY[3] = {};
+            bool visible = true;
+
+            for (size_t corner = 0; corner < 3; corner++)
+            {
+                const uint32_t index = surface.indices[base + corner];
+
+                if (index >= surface.vertices.size() ||
+                    !project(surface.vertices[index].position, screenX[corner], screenY[corner]))
+                {
+                    visible = false;
+                    break;
+                }
+            }
+
+            if (visible)
+            {
+                for (int corner = 0; corner < 3; corner++)
+                {
+                    const int next = (corner + 1) % 3;
+
+                    drawList->AddLine(ImVec2(screenX[corner], screenY[corner]),
+                                      ImVec2(screenX[next], screenY[next]), accent, 2.0f);
+                }
+            }
+        }
+    }
+
+    if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
+    {
+        // A three-axis cross at the light's origin stands in for the gizmo the game editor draws
+        // with its own overlay path, which the SDK does not expose.
+        const EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
+        const float extent = 12.0f;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            float from[3] = { light.position[0], light.position[1], light.position[2] };
+            float to[3] = { light.position[0], light.position[1], light.position[2] };
+
+            from[axis] -= extent;
+            to[axis] += extent;
+
+            float fromX = 0.0f;
+            float fromY = 0.0f;
+            float toX = 0.0f;
+            float toY = 0.0f;
+
+            if (project(from, fromX, fromY) && project(to, toX, toY))
+            {
+                drawList->AddLine(ImVec2(fromX, fromY), ImVec2(toX, toY), marker, 2.0f);
+            }
+        }
+    }
+}
+
 void EditorApp::DrawPanel(float deltaSeconds)
 {
     if (!m_showPanel)
@@ -1164,6 +1649,47 @@ void EditorApp::DrawPanel(float deltaSeconds)
         if (ImGui::Button("Reset camera"))
         {
             ResetCameraToScene();
+        }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Selection");
+
+        if (m_selectedSurface >= 0 && m_selectedSurface < int32_t(m_scene.surfaces.size()))
+        {
+            const EditorSurface &surface = m_scene.surfaces[size_t(m_selectedSurface)];
+
+            ImGui::Text("Surface   %d  triangle %d", m_selectedSurface, m_selectedTriangle);
+            ImGui::Text("Texture   %s", surface.textureName.c_str());
+            ImGui::Text("Kind      %s", SurfaceKindName(surface.kind));
+            ImGui::Text("Cluster   %u", m_pickCluster);
+        }
+        else if (m_selectedLight >= 0 && m_selectedLight < int32_t(m_scene.lights.size()))
+        {
+            const EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
+
+            ImGui::Text("Light     %d  %s", m_selectedLight,
+                        light.className.empty() ? "light" : light.className.c_str());
+            ImGui::Text("Position  %.1f %.1f %.1f", light.position[0], light.position[1],
+                        light.position[2]);
+            ImGui::Text("Color     %.2f %.2f %.2f", light.color[0], light.color[1], light.color[2]);
+            ImGui::Text("Intensity %.1f  radius %.1f", light.intensity, light.radius);
+            ImGui::Text("Cluster   %s (%u)",
+                        light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER ? "none" : "resolved",
+                        light.cluster);
+        }
+        else
+        {
+            ImGui::TextUnformatted("Nothing picked - LMB in the viewport");
+        }
+
+        if (m_hasPickPoint)
+        {
+            ImGui::Text("At        %.1f %.1f %.1f", m_pickPoint[0], m_pickPoint[1], m_pickPoint[2]);
+        }
+
+        if (ImGui::Button("Clear selection"))
+        {
+            ClearSelection();
         }
 
         ImGui::Separator();
