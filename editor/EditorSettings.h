@@ -62,8 +62,10 @@ struct EditorRenderSettings
     int32_t tonemapType = 1;
 
     // Level fog: a density of 0 draws none, which is what a map without a `fog`
-    // key gets.
-    float fogColor[3] = { 0.0f, 0.0f, 0.0f };
+    // key gets. The colour starts white because that is the engine's own default
+    // for a level whose file carries no `color:` key, so the preview of such a
+    // level is the fog the game shows rather than a black one.
+    float fogColor[3] = { 1.0f, 1.0f, 1.0f };
     float fogDensity = 0.0f;
     float fogSkyBlend = 0.0f;
 };

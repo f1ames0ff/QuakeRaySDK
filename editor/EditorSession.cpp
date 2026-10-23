@@ -1,5 +1,6 @@
 #include "EditorSession.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -350,6 +351,439 @@ std::vector<TextLine> SplitLines(const std::string &text)
     return lines;
 }
 
+// `rrggbb`, the only form RT_CustomColorFromString reads back.
+std::string FormatColor(const float color[3])
+{
+    char buffer[16];
+    int channels[3];
+
+    for (int i = 0; i < 3; i++)
+    {
+        const float clamped = std::min(1.0f, std::max(0.0f, color[i]));
+        channels[i] = int(clamped * 255.0f + 0.5f) & 0xff;
+    }
+
+    std::snprintf(buffer, sizeof(buffer), "%02x%02x%02x", channels[0], channels[1], channels[2]);
+    return buffer;
+}
+
+void ParseColor(std::string_view value, float color[3])
+{
+    size_t start = 0;
+
+    while (start < value.size() && (value[start] == ' ' || value[start] == '#' || value[start] == '\t'))
+    {
+        start++;
+    }
+
+    const std::string text(value.substr(start));
+
+    unsigned int red = 0;
+    unsigned int green = 0;
+    unsigned int blue = 0;
+
+    // The game's own reader accepts six hex digits and nothing else, so a malformed value leaves
+    // the colour alone rather than turning into black.
+    if (text.size() != 6 || std::sscanf(text.c_str(), "%2x%2x%2x", &red, &green, &blue) != 3)
+    {
+        return;
+    }
+
+    color[0] = float(red) / 255.0f;
+    color[1] = float(green) / 255.0f;
+    color[2] = float(blue) / 255.0f;
+}
+
+std::string FormatVector(const float value[3])
+{
+    return FormatFloat(value[0]) + " " + FormatFloat(value[1]) + " " + FormatFloat(value[2]);
+}
+
+void ParseVector(std::string_view value, float out[3])
+{
+    const std::string text(value);
+
+    std::sscanf(text.c_str(), "%f %f %f", &out[0], &out[1], &out[2]);
+}
+
+std::string FormatBool(bool value)
+{
+    return value ? "true" : "false";
+}
+
+// `maps/start.bsp` and `start` both name the level `start`, as RT_CustomLights_LevelKey decides.
+std::string LevelKeyOf(const std::string &scenePath)
+{
+    size_t base = 0;
+
+    for (size_t i = 0; i < scenePath.size(); i++)
+    {
+        if (scenePath[i] == '/' || scenePath[i] == '\\')
+        {
+            base = i + 1;
+        }
+    }
+
+    std::string key = scenePath.substr(base);
+    const size_t dot = key.find_last_of('.');
+
+    if (dot != std::string::npos)
+    {
+        key.erase(dot);
+    }
+
+    return Lowercase(key);
+}
+
+// The keys an entry of the level's `lights:` list owns; `offset:` and any key the game reads but
+// the editor does not model are left in the file.
+bool IsLightKey(std::string_view key)
+{
+    static const char *const keys[] = { "origin",  "radius",     "intensity",   "color",
+                                        "spot",    "dir",        "angle_inner", "angle_outer",
+                                        "style" };
+
+    for (const char *owned : keys)
+    {
+        if (key == owned)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// The key of a list item line, `- key: value` giving `key`, and empty for anything else.
+std::string_view ItemKeyOf(std::string_view line)
+{
+    const size_t start = LeadingWhitespace(line);
+
+    if (start >= line.size() || line[start] != '-')
+    {
+        return {};
+    }
+
+    return KeyOf(line.substr(start + 1));
+}
+
+// The `- origin:` head of a light entry, and the origin it carries.
+bool LightOriginOf(std::string_view line, float origin[3])
+{
+    if (ItemKeyOf(line) != "origin")
+    {
+        return false;
+    }
+
+    ParseVector(ValueOf(line), origin);
+    return true;
+}
+
+// The index RT_CustomStyleFromString resolves a `style:` value to: a name, or a bare number
+// clamped into the table.
+int32_t StyleFromValue(std::string_view value)
+{
+    const std::string text = Lowercase(value);
+
+    for (int32_t i = 0; i < kEditorStyleCount; i++)
+    {
+        if (Lowercase(kEditorStyleNames[i]) == text)
+        {
+            return i;
+        }
+    }
+
+    const int32_t number = std::atoi(std::string(value).c_str());
+    return number < 0 ? 0 : (number >= kEditorStyleCount ? kEditorStyleCount - 1 : number);
+}
+
+std::string TrimmedLine(std::string_view line)
+{
+    size_t end = line.size();
+
+    while (end > 0 && (line[end - 1] == '\r' || line[end - 1] == '\n'))
+    {
+        end--;
+    }
+
+    return std::string(line.substr(0, end));
+}
+
+// One `key:` block of a level section: `fog:`, `lights:`, or the game's own `sky:`.
+struct SubBlock
+{
+    std::string key;
+    size_t head = 0;
+    size_t first = 0;
+    size_t last = 0;
+};
+
+// One `- origin:` entry of a `lights:` block, carrying the keys the editor does not model so a
+// rewrite keeps them where they were.
+struct LightEntryBlock
+{
+    EditorLevelLight light;
+    std::vector<std::string> extra;
+    size_t first = 0;
+    size_t last = 0;
+};
+
+// One past the last line of the section whose head is `head`.
+size_t SectionEnd(const std::vector<TextLine> &lines, const std::string &text, size_t head)
+{
+    size_t end = head + 1;
+
+    while (end < lines.size() && IsBodyLine(lines[end].View(text)))
+    {
+        end++;
+    }
+
+    return end;
+}
+
+// A section's children sit at its shallowest key, two spaces in every file the game writes; taking
+// the minimum keeps a hand-written section readable rather than assuming the depth.
+size_t SectionChildIndent(const std::vector<TextLine> &lines, const std::string &text, size_t first,
+                          size_t last)
+{
+    size_t indent = 0;
+
+    for (size_t i = first; i < last; i++)
+    {
+        const std::string_view line = lines[i].View(text);
+
+        if (KeyOf(line).empty())
+        {
+            continue;
+        }
+
+        const size_t current = LeadingWhitespace(line);
+
+        if (indent == 0 || current < indent)
+        {
+            indent = current;
+        }
+    }
+
+    return indent == 0 ? 2 : indent;
+}
+
+std::vector<SubBlock> SectionBlocks(const std::vector<TextLine> &lines, const std::string &text,
+                                    size_t first, size_t last)
+{
+    const size_t indent = SectionChildIndent(lines, text, first, last);
+    std::vector<SubBlock> blocks;
+    size_t i = first;
+
+    while (i < last)
+    {
+        const std::string_view line = lines[i].View(text);
+        const std::string key = Lowercase(KeyOf(line));
+
+        if (key.empty() || LeadingWhitespace(line) != indent)
+        {
+            i++;
+            continue;
+        }
+
+        SubBlock block;
+        block.key = key;
+        block.head = i;
+        block.first = i + 1;
+
+        size_t end = block.first;
+
+        while (end < last)
+        {
+            const std::string_view body = lines[end].View(text);
+
+            if (!IsBodyLine(body))
+            {
+                break;
+            }
+
+            if (LeadingWhitespace(body) <= indent && !KeyOf(body).empty())
+            {
+                break;
+            }
+
+            end++;
+        }
+
+        block.last = end;
+        blocks.push_back(block);
+        i = end;
+    }
+
+    return blocks;
+}
+
+std::vector<LightEntryBlock> ParseLightEntries(const std::vector<TextLine> &lines,
+                                               const std::string &text, const SubBlock &block)
+{
+    std::vector<LightEntryBlock> entries;
+    size_t i = block.first;
+
+    while (i < block.last)
+    {
+        float origin[3] = {};
+
+        if (!LightOriginOf(lines[i].View(text), origin))
+        {
+            i++;
+            continue;
+        }
+
+        LightEntryBlock entry;
+        entry.first = i;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            entry.light.origin[axis] = origin[axis];
+        }
+
+        const size_t indent = LeadingWhitespace(lines[i].View(text));
+        i++;
+
+        while (i < block.last)
+        {
+            const std::string_view line = lines[i].View(text);
+
+            if (!IsBodyLine(line) || LeadingWhitespace(line) <= indent)
+            {
+                break;
+            }
+
+            const std::string key = Lowercase(KeyOf(line));
+            const std::string_view value = ValueOf(line);
+            EditorLevelLight &light = entry.light;
+
+            if (key == "origin")
+            {
+                ParseVector(value, light.origin);
+            }
+            else if (key == "radius")
+            {
+                light.radius = FloatOf(value, light.radius);
+            }
+            else if (key == "intensity")
+            {
+                light.intensity = FloatOf(value, light.intensity);
+            }
+            else if (key == "color")
+            {
+                ParseColor(value, light.color);
+            }
+            else if (key == "spot")
+            {
+                light.spot = BoolOf(value, light.spot);
+            }
+            else if (key == "dir")
+            {
+                ParseVector(value, light.direction);
+            }
+            else if (key == "angle_inner")
+            {
+                light.angleInner = FloatOf(value, light.angleInner);
+            }
+            else if (key == "angle_outer")
+            {
+                light.angleOuter = FloatOf(value, light.angleOuter);
+            }
+            else if (key == "style")
+            {
+                light.style = StyleFromValue(value);
+            }
+            else
+            {
+                entry.extra.push_back(TrimmedLine(line));
+            }
+
+            i++;
+        }
+
+        entry.last = i;
+        entries.push_back(entry);
+    }
+
+    return entries;
+}
+
+void ParseFogFields(const std::vector<TextLine> &lines, const std::string &text,
+                    const SubBlock &block, EditorLevelFog &fog, bool &hasEnabled)
+{
+    for (size_t i = block.first; i < block.last; i++)
+    {
+        const std::string_view line = lines[i].View(text);
+        const std::string key = Lowercase(KeyOf(line));
+        const std::string_view value = ValueOf(line);
+
+        if (key == "color")
+        {
+            ParseColor(value, fog.color);
+        }
+        else if (key == "density")
+        {
+            fog.density = std::max(0.0f, FloatOf(value, fog.density));
+        }
+        else if (key == "enabled")
+        {
+            fog.enabled = BoolOf(value, fog.enabled);
+            hasEnabled = true;
+        }
+    }
+}
+
+std::string RenderFogBlock(const EditorLevelFog &fog, size_t childIndent)
+{
+    const std::string field(childIndent + 2, ' ');
+    std::string text(childIndent, ' ');
+
+    text += "fog:\n";
+    text += field + "color: " + FormatColor(fog.color) + "\n";
+    text += field + "density: " + FormatFloat(fog.density) + "\n";
+    text += field + "enabled: " + FormatBool(fog.enabled) + "\n";
+    return text;
+}
+
+// The entry as RT_CustomLights_WriteEntry lays it out. `extra` carries the keys the editor cannot
+// express, which is how an entry's `offset:` survives a session.
+std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<std::string> &extra,
+                             size_t childIndent)
+{
+    const std::string head(childIndent + 2, ' ');
+    const std::string field(childIndent + 4, ' ');
+    std::string text;
+
+    text += head + "- origin: " + FormatVector(light.origin) + "\n";
+
+    for (const std::string &line : extra)
+    {
+        text += line + "\n";
+    }
+
+    text += field + "radius: " + FormatFloat(light.radius) + "\n";
+    text += field + "intensity: " + FormatFloat(light.intensity) + "\n";
+    text += field + "color: " + FormatColor(light.color) + "\n";
+
+    if (light.spot)
+    {
+        text += field + "spot: true\n";
+        text += field + "dir: " + FormatVector(light.direction) + "\n";
+        text += field + "angle_inner: " + FormatFloat(light.angleInner) + "\n";
+        text += field + "angle_outer: " + FormatFloat(light.angleOuter) + "\n";
+    }
+
+    if (light.style > 0)
+    {
+        const int32_t style =
+            light.style < kEditorStyleCount ? light.style : kEditorStyleCount - 1;
+        text += field + "style: " + std::string(kEditorStyleNames[style]) + "\n";
+    }
+
+    return text;
+}
+
 bool ReadFileText(const std::string &path, std::string &text)
 {
     FILE *file = nullptr;
@@ -374,9 +808,11 @@ bool ReadFileText(const std::string &path, std::string &text)
 } // namespace
 
 EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
+                                           const std::string &lightsOverride,
                                            const std::string &scenePath)
 {
     EditorSessionPaths paths;
+    const std::string sceneDirectory = EditorDirectoryOf(scenePath);
 
     if (!materialsOverride.empty())
     {
@@ -384,13 +820,29 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
     }
     else
     {
-        const std::string directory = EditorDirectoryOf(scenePath);
-        paths.materials = directory.empty() ? "qray.materials.yaml" : directory + "\\qray.materials.yaml";
+        paths.materials = sceneDirectory.empty() ? "qray.materials.yaml"
+                                                 : sceneDirectory + "\\qray.materials.yaml";
     }
 
-    const std::string directory = EditorDirectoryOf(paths.materials);
-    paths.materialsBackup = (directory.empty() ? std::string(".") : directory) +
+    if (!lightsOverride.empty())
+    {
+        paths.lights = lightsOverride;
+    }
+    else
+    {
+        paths.lights = sceneDirectory.empty() ? "qray.lights.yaml"
+                                              : sceneDirectory + "\\qray.lights.yaml";
+    }
+
+    const std::string materialsDirectory = EditorDirectoryOf(paths.materials);
+    paths.materialsBackup = (materialsDirectory.empty() ? std::string(".") : materialsDirectory) +
                             "\\qray.backup_materials.yaml";
+
+    const std::string lightsDirectory = EditorDirectoryOf(paths.lights);
+    paths.lightsBackup = (lightsDirectory.empty() ? std::string(".") : lightsDirectory) +
+                         "\\qray.backup_lights.yaml";
+
+    paths.level = LevelKeyOf(scenePath);
     return paths;
 }
 
@@ -696,6 +1148,255 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
         {
             merged += std::string(4, ' ') + key + ": " + value + "\n";
         }
+    }
+
+    return merged;
+}
+
+const char *const kEditorStyleNames[kEditorStyleCount] = {
+    "steady",        "flicker",      "slow strong pulse", "candle",       "fast strobe",
+    "gentle pulse",  "flicker B",    "candle B",          "candle C",     "slow strobe",
+    "fluorescent",   "slow pulse",
+};
+
+std::string RenderEditorLevelSection(const std::string &level, const EditorLevelFog &fog,
+                                     const std::vector<EditorLevelLight> &lights)
+{
+    std::string text = level + ":\n";
+
+    text += RenderFogBlock(fog, 2);
+
+    if (!lights.empty())
+    {
+        text += "  lights:\n";
+
+        for (const EditorLevelLight &light : lights)
+        {
+            text += RenderLightEntry(light, {}, 2);
+        }
+    }
+
+    return text;
+}
+
+bool EditorLevelDocument::Load(const std::string &path, std::string &error)
+{
+    m_text.clear();
+    m_exists = ReadFileText(path, m_text);
+    error.clear();
+
+    // The merge appends whole lines, so a file whose last line has no newline would swallow the
+    // first line of a section appended after it.
+    if (!m_text.empty() && m_text.back() != '\n')
+    {
+        m_text += '\n';
+    }
+
+    return true;
+}
+
+EditorLevelDocument::ReadResult EditorLevelDocument::ReadLevel(const std::string &level) const
+{
+    const std::vector<TextLine> lines = SplitLines(m_text);
+    const std::string key = Lowercase(level);
+    ReadResult result;
+
+    for (size_t head = 0; head < lines.size(); head++)
+    {
+        const std::string_view line = lines[head].View(m_text);
+
+        if (LeadingWhitespace(line) != 0 || Lowercase(KeyOf(line)) != key)
+        {
+            continue;
+        }
+
+        result.present = true;
+        const size_t end = SectionEnd(lines, m_text, head);
+        bool hasEnabled = false;
+
+        for (const SubBlock &block : SectionBlocks(lines, m_text, head + 1, end))
+        {
+            if (block.key == "fog")
+            {
+                result.hasFog = true;
+                ParseFogFields(lines, m_text, block, result.fog, hasEnabled);
+            }
+            else if (block.key == "lights")
+            {
+                result.hasLights = true;
+
+                for (const LightEntryBlock &entry : ParseLightEntries(lines, m_text, block))
+                {
+                    result.lights.push_back(entry.light);
+                }
+            }
+        }
+
+        // A section written before the editor had an `enabled:` key still shows its fog, so the
+        // density is what decides; the game's own reader treats the key as optional the same way.
+        if (result.hasFog && !hasEnabled)
+        {
+            result.fog.enabled = result.fog.density > 0.0f;
+        }
+
+        return result;
+    }
+
+    return result;
+}
+
+std::string EditorLevelDocument::WriteMerged(const std::string &level, const EditorLevelFog &fog,
+                                             const std::vector<EditorLevelLight> &lights) const
+{
+    const std::vector<TextLine> lines = SplitLines(m_text);
+    const std::string key = Lowercase(level);
+    std::string merged;
+    bool found = false;
+
+    for (size_t head = 0; head < lines.size();)
+    {
+        const std::string_view line = lines[head].View(m_text);
+
+        if (LeadingWhitespace(line) != 0 || Lowercase(KeyOf(line)) != key)
+        {
+            merged += line;
+            head++;
+            continue;
+        }
+
+        found = true;
+        merged += line;
+        const size_t bodyStart = merged.size();
+
+        const size_t end = SectionEnd(lines, m_text, head);
+        const size_t childIndent = SectionChildIndent(lines, m_text, head + 1, end);
+        const std::vector<SubBlock> blocks = SectionBlocks(lines, m_text, head + 1, end);
+        const SubBlock *oldLights = nullptr;
+        bool fogWritten = false;
+        bool lightsWritten = false;
+        size_t cursor = head + 1;
+
+        for (const SubBlock &block : blocks)
+        {
+            if (block.key == "lights")
+            {
+                oldLights = &block;
+            }
+        }
+
+        std::vector<LightEntryBlock> oldEntries;
+
+        if (oldLights != nullptr)
+        {
+            oldEntries = ParseLightEntries(lines, m_text, *oldLights);
+        }
+
+        while (cursor < end)
+        {
+            const SubBlock *block = nullptr;
+
+            for (const SubBlock &candidate : blocks)
+            {
+                if (candidate.head == cursor)
+                {
+                    block = &candidate;
+                    break;
+                }
+            }
+
+            if (block == nullptr)
+            {
+                merged += lines[cursor].View(m_text);
+                cursor++;
+                continue;
+            }
+
+            if (block->key == "fog")
+            {
+                merged += RenderFogBlock(fog, childIndent);
+                fogWritten = true;
+            }
+            else if (block->key == "lights")
+            {
+                // The game writes no `lights:` block for a level without custom lights, and
+                // neither does the editor: an empty list removes the block it owned.
+                if (!lights.empty())
+                {
+                    merged += std::string(childIndent, ' ') + "lights:\n";
+
+                    std::vector<bool> used(oldEntries.size(), false);
+
+                    for (const EditorLevelLight &light : lights)
+                    {
+                        std::vector<std::string> extra;
+
+                        for (size_t e = 0; e < oldEntries.size(); e++)
+                        {
+                            const EditorLevelLight &old = oldEntries[e].light;
+
+                            if (used[e] || old.origin[0] != light.origin[0] ||
+                                old.origin[1] != light.origin[1] ||
+                                old.origin[2] != light.origin[2])
+                            {
+                                continue;
+                            }
+
+                            used[e] = true;
+                            extra = oldEntries[e].extra;
+                            break;
+                        }
+
+                        merged += RenderLightEntry(light, extra, childIndent);
+                    }
+
+                    lightsWritten = true;
+                }
+            }
+            else
+            {
+                for (size_t i = block->head; i < block->last; i++)
+                {
+                    merged += lines[i].View(m_text);
+                }
+            }
+
+            cursor = block->last;
+        }
+
+        if (!fogWritten)
+        {
+            // A section the game wrote always carries its fog, so a missing block means a
+            // hand-written one: put the fog first, where the game's writer keeps it.
+            const std::string block = RenderFogBlock(fog, childIndent);
+            merged.insert(bodyStart, block);
+        }
+
+        if (!lightsWritten && !lights.empty())
+        {
+            merged += std::string(childIndent, ' ') + "lights:\n";
+
+            for (const EditorLevelLight &light : lights)
+            {
+                merged += RenderLightEntry(light, {}, childIndent);
+            }
+        }
+
+        head = end;
+    }
+
+    if (!found)
+    {
+        if (!merged.empty() && merged.back() != '\n')
+        {
+            merged += '\n';
+        }
+
+        if (!merged.empty())
+        {
+            merged += '\n';
+        }
+
+        merged += RenderEditorLevelSection(level, fog, lights);
     }
 
     return merged;

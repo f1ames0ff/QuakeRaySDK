@@ -61,6 +61,16 @@ private:
     // The session of the game editor: what the panel authored since the last Apply, the file it
     // writes and the prompt an exit with unsaved changes opens.
     void LoadMaterialsSession();
+    // The level scope of the session: the `fog:` and `lights:` blocks of one level in
+    // qray.lights.yaml, read into the fog settings and the custom lights, and written back only
+    // for the blocks the live state no longer matches.
+    void LoadLightsSession();
+    EditorLevelFog LevelFog() const;
+    EditorLevelLight LevelLight(const EditorLight &light) const;
+    std::vector<EditorLevelLight> LevelLights() const;
+    // Renders the section the live state stands for, which is both what a save writes and how an
+    // edit is noticed: a frame whose section differs from the loaded one is unsaved level work.
+    std::string LevelFingerprint() const;
     void TouchMaterial(const std::string &name);
     bool ApplySession();
     void DiscardSession();
@@ -193,10 +203,19 @@ private:
 
     // The session. --materials names the target, or the scene's own folder is used; the target is
     // qray.materials.yaml and its previous generation is qray.backup_materials.yaml, the two names
-    // the game editor saves under.
+    // the game editor saves under. --lights names qray.lights.yaml the same way, whose level
+    // section is qray.backup_lights.yaml's previous generation.
     std::string m_materialsOverride;
+    std::string m_lightsOverride;
     EditorSessionPaths m_sessionPaths;
     EditorMaterialsDocument m_materialsDocument;
+    EditorLevelDocument m_levelDocument;
+    // The level section as the file holds it after the last read or save. A frame whose live fog
+    // and custom lights render a different section has unsaved level work.
+    std::string m_levelFingerprint;
+    // Latched by the first frame that renders a different section, so the comparison runs until
+    // the level is edited and not once per frame after that.
+    bool m_levelTouched = false;
     // The materials the panel authored since the last Apply, which are the blocks a save
     // rewrites. Everything else in the file is left exactly as it was.
     std::vector<std::string> m_touchedMaterials;

@@ -68,7 +68,7 @@ no implementation.
 | God rays authoring | done | `God rays` group, gated on the procedural sky like the game |
 | Tonemap authoring | done | `Tonemap` group including the LPM percentiles the game hard-codes |
 | Volumetric fog authoring | done | `Volumetric fog` group; the scattering source follows the authored sun |
-| Level/global scope switch | missing | the session writes the material scope only; the level scope the game adds as `fog:` and `qray_lights:` is not authored yet |
+| Level/global scope switch | partial | the level scope is authored (`fog:` and `lights:` in `qray.lights.yaml`, see [Level document](#level-document)); the switch in the game's Global tab selects the scope of the sky, sun and cloud settings, and those are not written yet |
 | Apply / Cancel / Exit with a dirty prompt | done | `DrawSessionBar`, `ApplySession`, `DiscardSession`, `RequestExit` and `DrawSessionPrompt`. `WM_CLOSE` goes through the same prompt; `Yes` saves and exits, `No` exits without writing, `Escape` or the close box dismisses the prompt and keeps the session |
 | Save back to `qray.materials.yaml` | done | `EditorMaterialsDocument::WriteMerged` in `EditorSession.cpp`; `--materials <file>` picks the target, and the previous generation is copied to `qray.backup_materials.yaml` before a write |
 | Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded` and `nothing to save`, held six seconds and faded over the last one |
@@ -132,19 +132,49 @@ The owned keys are the fields the SDK upload info can express and the panel can 
 `base_factor`, `emissive_factor`, `is_light`, `exact_normals`, `material_glass` and
 `material_water`.
 
-`Apply` writes, reloads the document and reports through the toast; `Cancel` re-reads the file and
-re-uploads the static scene, so a discarded edit leaves the viewport matching the file; `Exit`
-closes without a prompt when the session is clean, and otherwise opens `DrawSessionPrompt`, whose
-`Yes` saves first and `No` exits without writing. `Escape` and the close box dismiss the prompt.
+### Level document
+
+`--lights <file>` names the level document; without it the editor targets `qray.lights.yaml`
+next to the scene, which is the file the game loads from `<gamedir>`. The file is a root mapping
+keyed by level name (`e1m1`) and the editor owns two blocks inside the level's own section:
+
+| Block | Keys | Scale |
+| --- | --- | --- |
+| `fog:` | `color:` as `rrggbb`, `density:`, `enabled:` | `density` is the authored value; the frame divides it by 64 |
+| `lights:` | `- origin:` x y z, `radius:`, `intensity:`, `color:`, `spot:`, `dir:`, `angle_inner:`, `angle_outer:`, `style:` | `origin` in scene units (40 per metre), `radius` in metres, `intensity` in file units of 100 editor points |
+
+The scales are the game's own: `origin` is a scene-space position, `radius` defaults to
+`RT_CUSTOM_RADIUS_DEFAULT` metres, and a custom light's `intensity` reaches
+`RT_FIXUP_LIGHT_INTENSITY` without the `/ rt_elight_normaliz` a map light takes, so one file unit
+is 100 editor points. A new light's 2.0 units and 0.4 metres therefore round-trip through the
+panel unchanged, and the fog colour starts white because that is what the engine shows for a
+level whose section carries no `color:` key.
+
+The level merge follows the material rules, with the level's own section as the unit of the
+write: every block it carries that the editor does not own (`sky:`, comments, a block a hand edit
+added) is copied verbatim at the indent it had, the other levels' sections are not touched, and a
+section the file does not have yet is appended. A level with no custom light left keeps its
+`fog:` block and loses `lights:`, which is how the game reads "no custom lights here"; the editor
+reads it the same way, where a missing `lights:` block leaves the panel's own lights alone and
+only an existing block replaces them.
+
+`Apply` writes both documents, reloads them and reports through the toast. The first Apply also
+creates a target that does not exist yet, even when only the level was edited, because the game's
+apply writes the whole merged session and a scripted run expects the file it named to appear.
+`Cancel` re-reads the files and re-uploads the static scene, so a discarded edit leaves the
+viewport matching them; `Exit` closes without a prompt when the session is clean, and otherwise
+opens `DrawSessionPrompt`, whose `Yes` saves first and `No` exits without writing. `Escape` and the
+close box dismiss the prompt.
 
 ## Order of work
 
 1. **Light authoring.** Colour, offset, the spot cone, the light style, the light list and the
    custom-light store with add/duplicate/clone/remove are done, as are both drags and the axis
    gizmo.
-2. **Session lifecycle.** Done. Apply, Cancel, Exit and the `qray.materials.yaml` writer, plus the
-   notify toast and the save prompt. What remains of the write path is the level scope above the
-   material scope (`fog:` and `qray_lights:`).
+2. **Session lifecycle.** Done. Apply, Cancel, Exit and both writers -- `qray.materials.yaml` and
+   the level scope (`fog:` / `lights:`) -- plus the notify toast and the save prompt. What remains
+   of the write path is the sky block and the scope switch that decides whether it belongs to the
+   level or to the global settings.
 3. **Viewport aids.** The gizmo and the marker drag are done; the crosshair and the hint overlay
    are still panel text.
 
@@ -229,3 +259,31 @@ process exited with the file untouched, `Yes` logged `session: saved <path>` bef
 the file carried the edit. The prompt is a fixed 440x148 window for the reason the panel layout
 logs exist: an `AlwaysAutoResize` prompt moved under the cursor between the capture and the click,
 which made a scripted click miss a button that had rendered in that spot a frame earlier.
+
+The level writer was accepted on a scratch document the same way. `Add light` on the Entities tab
+logged `session: level e1m1 touched`, and the Apply that followed wrote
+
+```text
+e1m1:
+  fog:
+    color: ffffff
+    density: 0
+    enabled: false
+  lights:
+    - origin: 480 -256 110
+      radius: 0.4
+      intensity: 2
+      color: ffffff
+```
+
+together with a header-only `qray_materials.yaml`, so the file a run names exists after the first
+save even when the level was the only edit. A second Apply left the document byte-identical,
+because the fingerprint is re-rendered from the state rather than read from the dirty latch.
+
+The reader was then given a section the editor does not own: `sky: e1m1_sky` inside `e1m1`, an
+`ff8000` fog with `density: 0.5` and `enabled: true`, and a second level `e1m2`. A fresh launch
+logged `read, 1 lights for e1m1`, one more `Add light` plus `Apply` rewrote the fog with the values
+that were read rather than with the defaults, kept `sky:` and the whole `e1m2:` section verbatim
+and wrote `qray.backup_lights.yaml` as the previous generation. Removing the last light and
+applying again dropped the `lights:` block and left `fog:`, `sky:` and `e1m2:` in place, which is
+the empty-store shape the game reads back as "no custom lights on this level".
