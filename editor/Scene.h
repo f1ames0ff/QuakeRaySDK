@@ -27,6 +27,18 @@ struct EditorTexture
     std::vector<uint8_t> rgba;
 };
 
+// One BSP polygon of a surface, kept because a textured area light is built from a face's own
+// corners: the vertex list above is a triangle fan that no longer says where one polygon ends and
+// the next begins, and a light fitted over a fan that spans two faces would stand for a shape the
+// level does not have.
+struct EditorSurfaceFace
+{
+    float normal[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
+    std::vector<QrFloat3D> positions;
+    std::vector<QrFloat2D> texCoords;
+};
+
 // One texture's worth of faces: the editor uploads each group as its own
 // geometry with that texture's material, the way r_world.c uploads one surface
 // per material at a time.
@@ -38,6 +50,8 @@ struct EditorSurface
     EditorSurfaceKind kind = EditorSurfaceKind::Opaque;
     std::vector<QrVertex> vertices;
     std::vector<uint32_t> indices;
+    // The polygons the vertices above fan out of, in the order Scene.cpp met them.
+    std::vector<EditorSurfaceFace> faces;
 };
 
 struct EditorLight
@@ -128,6 +142,21 @@ struct EditorScene
     std::vector<EditorLight> lights;
     std::vector<EditorBspNode> nodes;
     EditorWorldClusters worldClusters;
+    // The skyflatcolor of gl_sky.c: the average of the sky texture's opaque front-layer
+    // pixels, over 255. It is the ambient the game gives the volumetric fog, and it is not
+    // rt_sky_color: a level whose sky is painted blue still has a warm-grey flat colour
+    // because that is the picture, not the tint. False when the level carries no sky.
+    float skyFlatColor[3] = {};
+    bool hasSkyFlatColor = false;
+    // The classic scrolling sky, split the way Sky_LoadTexture splits it: the right half of
+    // every row is the opaque layer and the left half the alpha mask, whose zero index is the
+    // transparent key. Both layers are half the sky texture's width, and the last sky texture
+    // in the level owns them, as in the game.
+    std::vector<uint8_t> skySolidRgba;
+    std::vector<uint8_t> skyAlphaRgba;
+    uint32_t skyLayerWidth = 0;
+    uint32_t skyLayerHeight = 0;
+    bool hasScrollingSky = false;
     float boundsMin[3] = {};
     float boundsMax[3] = {};
     float cameraPosition[3] = {};

@@ -16,6 +16,25 @@
 #include "EditorUi.h"
 #include "Scene.h"
 
+// One textured area light the level's own light materials cast. The game rebuilds its list every
+// frame (RT_CollectWorldEmissiveLights) and uploads it through the same per-frame light registry,
+// so the editor keeps the upload info it derived once from the geometry and re-uploads it each
+// frame -- the identity and the fitted geometry of a light do not change with time, its colour is
+// refreshed from the material the same way RT_UploadAllWorldModelLights refreshes an animated
+// surface's.
+struct EditorEmissiveLight
+{
+    QrTexturedAreaLightUploadInfo info = {};
+    // The surface the light stands for, so a material edit can refresh its colour without
+    // re-deriving the geometry.
+    size_t surfaceIndex = 0;
+    // RT_RegisterWorldModelLight's cluster power: area * meanEmiss * luminance(color).
+    float power = 0.0f;
+    float center[3] = { 0.0f, 0.0f, 0.0f };
+    // The cluster the surface resolved into, which is what an area light is registered against.
+    uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
+};
+
 class EditorApp
 {
 public:
@@ -60,6 +79,14 @@ private:
     void UploadSun();
     void SunDirection(float direction[3]) const;
     void UploadLights();
+    // Builds one textured area light per polygon of every surface whose material casts light.
+    // Called from the static geometry pass, which is where the material bakes a light reads its
+    // mask from are alive.
+    void BuildEmissiveLights();
+    // Re-uploads that list, which the per-frame light registry asks for: LightManager forgets
+    // every registered source at the start of a frame, exactly as RT_UploadAllWorldModelLights
+    // uploads the game's own area lights anew each frame.
+    void UploadEmissiveLights();
     // Uploads one light under the ID the light lists know it by: a spot when its cone is on,
     // a sphere otherwise, which is the branch RT_LIGHT_Emit takes.
     void UploadLight(const EditorLight &light, uint64_t uniqueID, QrResult &lastResult);
@@ -79,6 +106,10 @@ private:
     // qray.lights.yaml, read into the sky controls, the fog settings and the custom lights, and
     // written back only for the blocks the live state no longer matches.
     void LoadLightsSession();
+    // The global set the panel starts from: the `name "value"` lines of the game's config.cfg,
+    // which is where the cvars the Global tab drives are archived. Reads the file once, before
+    // the first level scope, because after that the panel's own values are the live state.
+    void LoadGameConfigGlobals();
     EditorLevelFog LevelFog() const;
     // The `sky:` block the live state stands for: the level's own overrides while the panel edits
     // the level scope, and no block at all in the global scope, which is how
@@ -121,6 +152,9 @@ private:
     // the nearest surface along the ray wins, and a light in front of that surface wins over it.
     void Pick();
     void ViewBasis(float side[3], float up[3], float forward[3]) const;
+    // The vertical field of view the frame is drawn with, so the picking and the overlay
+    // invert exactly the projection the renderer used instead of a constant of their own.
+    float FovYRadians() const;
     int32_t PickSurface(const float origin[3], const float direction[3], int32_t &outTriangle,
                         float &outDistance) const;
     int32_t PickLight(const float origin[3], const float direction[3], float &outDistance,
@@ -248,6 +282,9 @@ private:
     EditorLevelSky m_skyGlobals;
     EditorLevelSky m_skyLevel;
     bool m_skyGlobal = true;
+    // The game config has already been read, so a scene reload keeps whatever the panel holds
+    // instead of re-asserting the file over edits made since.
+    bool m_gameConfigApplied = false;
 
     // The text the panel's own values render to, taken when the session last matched the file. A
     // key whose text still matches it was not edited and writes back the file's own spelling.
@@ -332,6 +369,11 @@ private:
     // and a map light cannot be removed from the scene by an editor action.
     std::vector<EditorLight> m_customLights;
     int32_t m_selectedCustomLight = -1;
+    // Surface lights, rebuilt with the geometry: a textured area light stands for one emissive
+    // face of the level, so it is not something the editor owns or edits the way a custom light
+    // is. Rebuilt rather than patched because the material bake decides whether a surface is a
+    // light at all.
+    std::vector<EditorEmissiveLight> m_emissiveLights;
     float m_pickPoint[3] = {};
     bool m_hasPickPoint = false;
     uint32_t m_pickCluster = 0;

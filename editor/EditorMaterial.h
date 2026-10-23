@@ -124,8 +124,9 @@ struct EditorMaterialParams
     // flag, so the value is carried through the session and reaches nothing.
     bool forceRasterize = false;
 
-    // Luma. defaultEmission is clamped to [0, 1] by the renderer.
-    float emissiveFactor = 0.0f;
+    // Luma. defaultEmission is clamped to [0, 1] by the renderer. The game's material default is
+    // 1 (rt_material.c's rt_mat_reset), which is what a light material's colour is scaled by.
+    float emissiveFactor = 1.0f;
     bool luma = false;
 
     // Luma, luma_blend: -1 follows the global rt_emis_blend the way the game's cvar value does,
@@ -210,6 +211,19 @@ private:
     EditorMaterialParams m_defaults;
 };
 
+// What the emission channel of a bake says about the light its surface casts. gl_texmgr.c
+// derives the same three things while it synthesizes the packed set: rtemissivecolor, the
+// albedo weighted sum of the mask normalised by mean_base, and rtemissivemean, the
+// brightness clamped mean a masked light carries as its meanEmiss. A material with no mask has
+// no record at all, which is the game's QR_NO_MATERIAL light: uniform over its whole polygon.
+struct EditorMaterialEmission
+{
+    bool valid = false;
+    float color[3] = { 1.0f, 1.0f, 1.0f };
+    float mean = 0.0f;
+    float meanBase = 0.0f;
+};
+
 // Bakes the material parameters whose only consumer is a packed material texture. The SDK takes
 // one albedo, one normal and one roughness-metallic-emission image, so a material that names a
 // gloss, normal or emissive image, pushes its bumps, passes light through a pane or picks an
@@ -239,6 +253,11 @@ public:
                    const EditorScene &scene, const std::vector<QrMaterial> &pool,
                    const std::function<int32_t(const std::string &)> &resolveTexture);
 
+    // The emission the bake behind this handle carries, or an invalid record when the handle is
+    // no bake of this pass. A textured area light reads the mask off the material it is handed,
+    // so a surface that casts light takes its colour and its mean from the same bake.
+    EditorMaterialEmission EmissionOf(QrMaterial material) const;
+
 private:
     struct Key
     {
@@ -266,6 +285,7 @@ private:
     {
         Key key;
         QrMaterial material = QR_NO_MATERIAL;
+        EditorMaterialEmission emission;
         bool used = false;
     };
 

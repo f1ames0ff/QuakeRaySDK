@@ -44,6 +44,21 @@ exactly as `Quake/gl_vidsdl.c` does, and `EditorApp::Frame` hands the four
 structs to `qrDrawFrame`, so the panel edits the same fields the game's cvars
 feed.
 
+## Units
+
+The editor is a host, so it states what it hands the SDK in meters: the scene is
+authored, picked and saved in Quake units (40 per meter, `kEditorUnitsPerMeter`
+in `Scene.h`), and `EditorSpatial.{h,cpp}` converts at the one boundary every
+value crosses - vertex positions, cluster bounds, light positions and radii,
+area-light corners and areas, and the whole frame block down to fog density,
+water transmittance, cloud height and near-DOF focus distance. Each conversion
+is the one `Quake/qr_spatial_adapter.cpp` applies to the same field, so a level
+lit here is lit the way the game lights it. Nothing else in the editor divides
+a length by `kEditorUnitsPerMeter` on its way to the renderer. A setting the
+panel authors in meters is stated in units by its builder first - the same
+`METRIC_TO_QUAKEUNIT` the game wraps its metric cvars in - so the boundary
+stays the only place the two spaces meet.
+
 The panel has four tabs: `Scene` (frame stats, the selection and the light
 authoring above), `Entities` (the map and custom light lists), `Render` (the
 global settings above) and `Materials`. The
@@ -244,6 +259,8 @@ field for - `texture_overlay`, `force_rasterize`, the `luma:` colour blocks and
 the `light_*` emitter group - which need new upload fields first.
 
 PAK handling, wal textures from the game archive and sidecar persistence also
-remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`
-already accepts that as a host convention, but the editor does not yet author in
-a different one.
+remain. The current loader uses Quake units and Z-up. API 1.06 accepts the
+Z-up orientation, but every spatial input reaches the SDK in meters, so the
+editor converts at one boundary: `EditorSpatial.{h,cpp}` is the editor's own
+counterpart of `Quake/qr_spatial_adapter.cpp`, and no other file divides a
+length by `kEditorUnitsPerMeter` on its way to the renderer.

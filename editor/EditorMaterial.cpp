@@ -312,7 +312,10 @@ void ApplyEditorMaterial(const EditorMaterialParams &material,
 
     upload.defaultRoughness = mirror ? 0.0f : roughness;
     upload.defaultMetallicity = material.metalnessFactor;
-    upload.defaultEmission = material.emissiveFactor;
+    // The game uploads no scalar emission for any geometry kind (r_world.c, r_alias.c and
+    // r_sprite.c all pass 0): a surface's glow is the emission channel of its packed set, so the
+    // scalar path is only the fallback for geometry that has no set at all.
+    upload.defaultEmission = 0.0f;
 
     const float base = material.baseFactor;
     upload.layerColors[0] = { base, base, base, 1.0f };
@@ -566,6 +569,15 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     const uint8_t blendCode = params.lumaBlend < 0 ? 0 : uint8_t(params.lumaBlend + 1);
     const bool metalFromNormalAlpha = params.metalnessFromNormalAlpha && normalImage.Valid();
 
+    // The emission the mask carries, summed the way gl_texmgr.c sums it: the albedo weighted
+    // colour is what a masked light's own colour is when the material names no light_color, and
+    // the two means are its meanEmiss and the base the colour is normalised by.
+    double emissR = 0.0;
+    double emissG = 0.0;
+    double emissB = 0.0;
+    double emissMean = 0.0;
+    double emissMeanBase = 0.0;
+
     // The blocks select out of the albedo, so their masks are the size of the baked set.
     std::vector<float> colorEmission;
     std::vector<uint8_t> colorBlend;
@@ -645,10 +657,16 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
                 emission = colorEmission[pixel];
                 pixelBlend = colorBlend[pixel];
             }
-            else
+
+            if (emission > 0.0f)
             {
-                emission = key.emission;
+                emissR += albedoData[offset + 0] * emission;
+                emissG += albedoData[offset + 1] * emission;
+                emissB += albedoData[offset + 2] * emission;
             }
+
+            emissMean += std::min(1.0f, emission);
+            emissMeanBase += emission;
 
             rmeData[offset + 0] = uint8_t(std::min(255.0f, std::max(0.0f, roughness * 255.0f)));
             rmeData[offset + 1] = uint8_t(std::min(255.0f, std::max(0.0f, metallic * 255.0f)));
@@ -694,6 +712,38 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
         return QR_NO_MATERIAL;
     }
 
-    m_entries.push_back(Entry{ key, material, true });
+    EditorMaterialEmission emissionInfo;
+    emissionInfo.valid = emissiveImage.Valid() || !colorEmission.empty();
+    emissionInfo.mean = float(emissMean / double(pixels));
+    emissionInfo.meanBase = float(emissMeanBase / double(pixels));
+
+    // A mask that emits nowhere keeps the white colour: dividing by its own zero mean would
+    // otherwise turn a light the material still declares into one with no colour at all.
+    if (emissionInfo.meanBase > 1e-6f)
+    {
+        const double scale = 1.0 / (double(pixels) * 255.0 * double(emissionInfo.meanBase));
+
+        emissionInfo.color[0] = float(emissR * scale);
+        emissionInfo.color[1] = float(emissG * scale);
+        emissionInfo.color[2] = float(emissB * scale);
+    }
+
+    m_entries.push_back(Entry{ key, material, emissionInfo, true });
     return material;
+}
+
+EditorMaterialEmission EditorMaterialBakes::EmissionOf(QrMaterial material) const
+{
+    if (material != QR_NO_MATERIAL)
+    {
+        for (const Entry &entry : m_entries)
+        {
+            if (entry.material == material)
+            {
+                return entry.emission;
+            }
+        }
+    }
+
+    return EditorMaterialEmission{};
 }

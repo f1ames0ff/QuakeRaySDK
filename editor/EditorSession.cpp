@@ -41,6 +41,96 @@ std::string Lowercase(std::string_view text)
     return lowered;
 }
 
+// The name a world material carries in the game's file: the miptex the BSP stores is keyed with
+// the `textures/` prefix there, so a scene name is written in that form and read in either, which
+// is also what lets a file an older editor wrote keep resolving.
+std::string CanonicalMaterialName(const std::string &name)
+{
+    static const std::string_view prefix = "textures/";
+
+    if (Lowercase(name).compare(0, prefix.size(), prefix) == 0)
+    {
+        return name;
+    }
+
+    return std::string(prefix) + name;
+}
+
+// A frame of an animated texture: Quake's `+0tex` .. `+9tex` and the `+atex` .. `+jtex` the
+// engines that ran out of digits wrote.
+bool IsFrameDigit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'j');
+}
+
+// The key a material is written under: the game's per-miptex form, so an animated family with no
+// entry yet is created as the frame the game reads its light from rather than as a name no lookup
+// can reach.
+std::string MaterialKeyName(const std::string &name)
+{
+    if (name.size() >= 2 && name[0] == '+' && !IsFrameDigit(name[1]))
+    {
+        return CanonicalMaterialName("+0" + name.substr(1));
+    }
+
+    return CanonicalMaterialName(name);
+}
+
+// The names one scene material can have in the file. A scene keys an animated surface by its
+// family -- `+planet`, because the editor keeps one row per animated texture rather than one per
+// frame -- while the game keys its materials per miptex, so `+0planet`, `+1planet` and so on, and
+// either form may or may not carry the textures/ prefix. The family resolves through the frame
+// the game's RT_CanonicalLightTex picks: the first one.
+size_t MaterialNameCandidates(const std::string &name, std::string *out, size_t maxOut)
+{
+    size_t count = 0;
+
+    auto add = [&](const std::string &value) {
+        const std::string lowered = Lowercase(value);
+
+        for (size_t i = 0; i < count; i++)
+        {
+            if (out[i] == lowered)
+            {
+                return;
+            }
+        }
+
+        if (count < maxOut)
+        {
+            out[count++] = lowered;
+        }
+    };
+
+    add(MaterialKeyName(name));
+    add(CanonicalMaterialName(name));
+    add(name);
+
+    if (name.size() >= 2 && name[0] == '+' && !IsFrameDigit(name[1]))
+    {
+        add("+0" + name.substr(1));
+    }
+
+    return count;
+}
+
+// foundLower is a name as the file spells it, already lowercased.
+bool MaterialNameMatches(const std::string &entryName, const std::string &foundLower)
+{
+    std::string candidates[4];
+    const size_t count = MaterialNameCandidates(entryName, candidates, 4);
+
+    for (size_t i = 0; i < count; i++)
+    {
+        if (candidates[i] == foundLower)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool IsSpace(char c)
 {
     return c == ' ' || c == '\t';
@@ -343,14 +433,14 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("texture_emissive", params.emissiveTexture);
     }
 
-    if (!params.glossTexture.empty())
-    {
-        append("texture_gloss", params.glossTexture);
-    }
-
     if (!params.overlayTexture.empty())
     {
         append("texture_overlay", params.overlayTexture);
+    }
+
+    if (!params.glossTexture.empty())
+    {
+        append("texture_gloss", params.glossTexture);
     }
 
     if (params.textureScaleU != 1.0f)
@@ -393,7 +483,8 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("metalness_from_normal_alpha", "true");
     }
 
-    if (params.emissiveFactor != 0.0f)
+    // rt_material.c's default is 1, so only a value that differs from it has to be written.
+    if (params.emissiveFactor != 1.0f)
     {
         append("emissive_factor", FormatFloat(params.emissiveFactor));
     }
@@ -1531,14 +1622,13 @@ bool EditorMaterialsDocument::Load(const std::string &path, std::string &error)
 
 size_t EditorMaterialsDocument::FindEntry(const std::string &name) const
 {
-    const std::string wanted = Lowercase(name);
     const std::vector<TextLine> lines = SplitLines(m_text);
 
     for (size_t i = 0; i < lines.size(); i++)
     {
         std::string found;
 
-        if (NameOf(lines[i].View(m_text), found) && found == wanted)
+        if (NameOf(lines[i].View(m_text), found) && MaterialNameMatches(name, found))
         {
             return i;
         }
@@ -1779,13 +1869,6 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
         merged += "qray_materials:\n";
     }
 
-    std::vector<std::string> wanted(entries.size());
-
-    for (size_t i = 0; i < entries.size(); i++)
-    {
-        wanted[i] = Lowercase(entries[i].name);
-    }
-
     const std::vector<TextLine> lines = SplitLines(m_text);
 
     for (size_t i = 0; i < lines.size(); i++)
@@ -1796,9 +1879,12 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
 
         if (NameOf(line, found))
         {
-            for (size_t e = 0; e < wanted.size(); e++)
+            for (size_t e = 0; e < entries.size(); e++)
             {
-                if (wanted[e] == found && !written[e])
+                // The same resolution a read uses, so an entry the file already carries under the
+                // game's key form is updated in place rather than appended a second time under
+                // the scene's bare miptex name.
+                if (!written[e] && MaterialNameMatches(entries[e].name, found))
                 {
                     entry = e;
                     break;
@@ -1931,7 +2017,7 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
             merged += '\n';
         }
 
-        merged += "  - name: " + entries[e].name + "\n";
+        merged += "  - name: " + MaterialKeyName(entries[e].name) + "\n";
 
         for (const auto &[key, value] : OwnedValues(entries[e].params))
         {

@@ -1,12 +1,16 @@
 #include "EditorApp.h"
 
+#include "EditorSpatial.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <windowsx.h>
@@ -128,8 +132,8 @@ float DistanceToSegment(float px, float py, float x0, float y0, float x1, float 
 }
 
 // The vertical field of view the frame is drawn with. Picking and the selection overlay invert it,
-// so they must not carry their own copy.
-constexpr float kEditorFovYRadians = 1.0471975512f;
+// so they must not carry their own copy -- EditorApp::FovYRadians is the only source, and it
+// ports the game's fov/fov_adapt conversion rather than naming a lens of its own.
 
 // Moller-Trumbore, without backface culling: a BSP face is picked from either side.
 bool RayTriangle(const float origin[3], const float direction[3], const float a[3], const float b[3],
@@ -662,16 +666,42 @@ bool EditorApp::LoadScene()
     m_lightStatsLogged = false;
 
     const std::string sceneDirectory = EditorDirectoryOf(m_scenePath);
-    const std::string base = sceneDirectory.empty() ? std::string(".") : sceneDirectory;
+    std::string base = sceneDirectory.empty() ? std::string(".") : sceneDirectory;
 
-    const std::string candidates[] = {
-        base,
-        base + "\\id1",
-        base + "\\..",
-        base + "\\..\\id1",
-        base + "\\..\\..",
-        base + "\\..\\..\\id1",
-    };
+    // A relative --scene would otherwise be walked up by spelling rather than by filesystem: the
+    // path `scenes` has no separator to strip, so the search would stop one level in and never
+    // reach the game directory the data actually lives under.
+    {
+        std::error_code error;
+        const std::filesystem::path absolute = std::filesystem::absolute(base, error);
+
+        if (!error)
+        {
+            base = absolute.lexically_normal().string();
+        }
+    }
+
+    // A standalone build sits several levels below the game directory, and a level usually
+    // sits in a data folder beside it, so neither `--gamedir` nor one fixed layout can be
+    // assumed: walk up from the scene and try each level's own directory and its `id1`.
+    std::vector<std::string> candidates;
+    std::string directory = base;
+
+    for (int level = 0; level < 6; level++)
+    {
+        candidates.push_back(directory);
+        candidates.push_back(directory + "\\id1");
+        candidates.push_back(directory + "\\Debug\\id1");
+
+        const size_t slash = directory.find_last_of("\\/");
+
+        if (slash == std::string::npos)
+        {
+            break;
+        }
+
+        directory = slash == 0 ? directory.substr(0, 1) : directory.substr(0, slash);
+    }
 
     if (!m_gamePath.empty())
     {
@@ -715,6 +745,9 @@ bool EditorApp::LoadScene()
     m_materials.Rebuild(m_scene);
     m_selectedMaterial = m_materials.Empty() ? -1 : 0;
     LoadMaterialsSession();
+    // The global set comes first so the level scope is read against the values the game would
+    // have rather than against the panel's own defaults.
+    LoadGameConfigGlobals();
     LoadLightsSession();
     return true;
 }
@@ -755,6 +788,10 @@ bool EditorApp::UploadStaticGeometry()
 
     uint32_t uploadedSurfaces = 0;
 
+    // The scene stays in Quake units -- the panel, the picking and the session file all read them
+    // -- so the meters the renderer is handed are a converted copy of each upload's vertices.
+    std::vector<QrVertex> meterVertices;
+
     for (size_t surfaceIndex = 0; surfaceIndex < m_scene.surfaces.size(); surfaceIndex++)
     {
         const EditorSurface &surface = m_scene.surfaces[surfaceIndex];
@@ -768,7 +805,13 @@ bool EditorApp::UploadStaticGeometry()
         upload.uniqueID = uint32_t(surfaceIndex) + 1;
         upload.flags = QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
         upload.geomType = QR_GEOMETRY_TYPE_STATIC;
-        upload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
+        // A sky surface is not a wall: the game uploads the brushes whose faces carry a sky texture
+        // in the SKY lane (r_brush.c), and the renderer answers a ray that reaches one with sky
+        // radiance. Left as world geometry the brush is shaded like any other wall, which paints
+        // the sky opening as a lit slab instead of a sky.
+        const bool isSkySurface = surface.kind == EditorSurfaceKind::Sky;
+        upload.visibilityType =
+            isSkySurface ? QR_GEOMETRY_VISIBILITY_TYPE_SKY : QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
         upload.vertexCount = uint32_t(surface.vertices.size());
         upload.pVertices = surface.vertices.data();
         upload.indexCount = uint32_t(surface.indices.size());
@@ -782,6 +825,8 @@ bool EditorApp::UploadStaticGeometry()
         upload.transform.matrix[0][0] = 1.0f;
         upload.transform.matrix[1][1] = 1.0f;
         upload.transform.matrix[2][2] = 1.0f;
+
+        EditorMetersGeometry(upload, meterVertices);
 
         const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
 
@@ -815,6 +860,8 @@ bool EditorApp::UploadStaticGeometry()
         upload.transform.matrix[1][1] = 1.0f;
         upload.transform.matrix[2][2] = 1.0f;
 
+        EditorMetersGeometry(upload, meterVertices);
+
         const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
 
         if (uploadResult != QR_SUCCESS)
@@ -826,6 +873,10 @@ bool EditorApp::UploadStaticGeometry()
 
     PrintMessage(("geometry upload: " + std::to_string(uploadedSurfaces) + " surfaces").c_str(),
                  this);
+
+    // Inside the pass, where the bakes the surfaces are drawn with are alive: a light reads the
+    // mask off the material of the very surface it stands for.
+    BuildEmissiveLights();
 
     const QrResult submitResult = qrSubmitStaticGeometries(m_instance);
 
@@ -860,6 +911,10 @@ bool EditorApp::UploadWorldClusters()
     // PVS the renderer treats every cluster as visible from every other one, which is what a
     // map without compiled vis needs. The cluster table alone is what the light lists read.
     upload.clusterGeneration = ++m_clusterGeneration;
+
+    std::vector<QrFloat3D> meterMins;
+    std::vector<QrFloat3D> meterMaxs;
+    EditorMetersWorldLights(upload, meterMins, meterMaxs);
 
     const QrResult result = qrUploadWorldLights(m_instance, &upload);
 
@@ -972,6 +1027,7 @@ void EditorApp::Frame()
 
     UploadSun();
     UploadLights();
+    UploadEmissiveLights();
     UploadClusterLightSources();
 
     m_ui.BeginFrame(deltaSeconds, m_clientWidth, m_clientHeight);
@@ -1019,7 +1075,7 @@ void EditorApp::Frame()
     QrDrawFrameInfo draw = {};
     LookAt(eye, target, up, draw.view);
     draw.worldUpVector = { 0.0f, 0.0f, 1.0f };
-    draw.fovYRadians = kEditorFovYRadians;
+    draw.fovYRadians = FovYRadians();
     draw.cameraNear = std::max(0.1f, sceneExtent * 0.0005f);
     draw.cameraFar = std::max(1000.0f, sceneExtent * 8.0f);
     draw.rayLength = draw.cameraFar;
@@ -1037,15 +1093,47 @@ void EditorApp::Frame()
     SunDirection(toSun);
 
     BuildEditorFrameParams(m_settings, toSun, m_sun.enabled ? m_sun.radiance : 0.0f, eye,
+                           m_scene.hasSkyFlatColor ? m_scene.skyFlatColor : nullptr,
                            m_frameParams);
+
+    // The render size the game derives in ResolutionToQray: rt_renderscale is a custom size and
+    // the SDK's blit is the upscale, because the editor asks for no device-level upscaler. The
+    // pixelized size stays null, as it does on the game's own path.
+    if (m_clientWidth > 0 && m_clientHeight > 0)
+    {
+        const float scale = std::clamp(m_settings.renderScale / 100.0f, 0.2f, 1.0f);
+
+        m_frameParams.resolution.upscaleTechnique = QR_RENDER_UPSCALE_TECHNIQUE_LINEAR;
+        m_frameParams.resolution.sharpenTechnique = QR_RENDER_SHARPEN_TECHNIQUE_NONE;
+        m_frameParams.resolution.resolutionMode = QR_RENDER_RESOLUTION_MODE_CUSTOM;
+        m_frameParams.resolution.customRenderSize.width = uint32_t(float(m_clientWidth) * scale);
+        m_frameParams.resolution.customRenderSize.height = uint32_t(float(m_clientHeight) * scale);
+        m_frameParams.resolution.pPixelizedRenderSize = nullptr;
+    }
+
     draw.pSkyParams = &m_frameParams.sky;
     draw.pTonemappingParams = &m_frameParams.tonemap;
     draw.pVolumetricParams = &m_frameParams.volume;
     draw.pLevelFogParams = &m_frameParams.fog;
     draw.pReflectRefractParams = &m_frameParams.reflectRefract;
     draw.pTexturesParams = &m_frameParams.textures;
+    draw.pBloomParams = &m_frameParams.bloom;
+    // Left null, the renderer substitutes its own estimator -- one-unit gradient cells where
+    // the game asks for two metres, and its own sensitivity gradients -- so the preview would
+    // be shaded by a different integrator than the game that opens the same level.
+    draw.pIlluminationParams = &m_frameParams.illumination;
+    draw.forceAntiFirefly = m_frameParams.antifirefly;
+    draw.pRenderResolutionParams = &m_frameParams.resolution;
+    // Re-established here rather than left to the builder: every pointer has to name this frame's
+    // own block, which the builder cannot promise of a record it only fills.
+    m_frameParams.postEffects.pBloom = &m_frameParams.bloomEffect;
+    m_frameParams.postEffects.pVignette = &m_frameParams.vignette;
+    m_frameParams.postEffects.pFilmGrain = &m_frameParams.filmGrain;
+    m_frameParams.postEffects.pSharpen = &m_frameParams.sharpen;
+    m_frameParams.postEffects.pCRT = &m_frameParams.crt;
+    draw.postEffectParams = m_frameParams.postEffects;
 
-    const QrResult drawResult = qrDrawFrame(m_instance, &draw);
+    const QrResult drawResult = EditorDrawFrame(m_instance, &draw);
 
     if (drawResult != QR_SUCCESS)
     {
@@ -1372,7 +1460,12 @@ void EditorApp::UploadSun()
 
     QrDirectionalLightUploadInfo sun = {};
     sun.uniqueID = 2;
-    sun.color = { m_sun.radiance, m_sun.radiance, m_sun.radiance };
+    // RT_UploadSunLight colours the light with RT_GetSunColor -- rt_sky_sun_color -- before it
+    // scales it by rt_sky_sun, so the disc the sky paints and the light that shades the level
+    // are one sun. A neutral light here floods a level whose sun is authored red, which is what
+    // rt_sky_sun_color "18 5 9" is.
+    sun.color = { m_sun.radiance * m_settings.sunColor[0], m_sun.radiance * m_settings.sunColor[1],
+                  m_sun.radiance * m_settings.sunColor[2] };
     sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
     sun.angularDiameterDegrees = m_sun.angularDiameter;
 
@@ -1409,6 +1502,8 @@ void EditorApp::UploadLight(const EditorLight &light, uint64_t uniqueID, QrResul
         info.angleInner = light.angleInner * 0.01745329252f;
         info.angleOuter = light.angleOuter * 0.01745329252f;
 
+        EditorMetersSpotLight(info);
+
         lastResult = qrUploadSpotLight(m_instance, &info);
     }
     else
@@ -1421,6 +1516,8 @@ void EditorApp::UploadLight(const EditorLight &light, uint64_t uniqueID, QrResul
         info.position = { light.position[0], light.position[1], light.position[2] };
         info.radius = light.radius;
 
+        EditorMetersSphericalLight(info);
+
         lastResult = qrUploadSphericalLight(m_instance, &info);
     }
 }
@@ -1429,7 +1526,13 @@ void EditorApp::UploadLights()
 {
     QrResult lastResult = QR_SUCCESS;
 
-    for (size_t index = 0; index < m_scene.lights.size(); index++)
+    // RT_UploadAllElights returns at once for rt_truelight > 0: the map's light entities are not
+    // light sources of a frame lit from the emissive materials of its surfaces. Uploading them
+    // here anyway lights the level the game draws from the sun alone, which is how the viewport
+    // ends up flat and grey instead of the warm dark the same level has in the game.
+    const bool uploadMapLights = m_settings.truelight <= 0.0f;
+
+    for (size_t index = 0; uploadMapLights && index < m_scene.lights.size(); index++)
     {
         UploadLight(m_scene.lights[index], LightUniqueID(index), lastResult);
 
@@ -1491,7 +1594,9 @@ void EditorApp::LogLightCluster(const EditorLight &light, uint64_t uniqueID, con
 
 void EditorApp::UploadClusterLightSources()
 {
-    const size_t lightCount = m_scene.lights.size() + m_customLights.size();
+    const bool uploadMapLights = m_settings.truelight <= 0.0f;
+    const size_t mapLightCount = uploadMapLights ? m_scene.lights.size() : 0;
+    const size_t lightCount = mapLightCount + m_customLights.size() + m_emissiveLights.size();
 
     if (m_scene.worldClusters.numLeafs == 0 || lightCount == 0)
     {
@@ -1516,7 +1621,7 @@ void EditorApp::UploadClusterLightSources()
         index++;
     };
 
-    for (size_t mapIndex = 0; mapIndex < m_scene.lights.size(); mapIndex++)
+    for (size_t mapIndex = 0; mapIndex < mapLightCount; mapIndex++)
     {
         appendSource(m_scene.lights[mapIndex], LightUniqueID(mapIndex));
     }
@@ -1526,10 +1631,38 @@ void EditorApp::UploadClusterLightSources()
         appendSource(m_customLights[customIndex], CustomLightUniqueID(customIndex));
     }
 
+    // A surface light stands off its own surface rather than on it, so the cluster its origin
+    // falls in is the one in front of the geometry: RT_RegisterWorldModelLight puts the origin
+    // two units along the normal and clusters it there. It is registered with its own power,
+    // which is what ranks it against the level's other lights in a cluster list.
+    for (size_t emissiveIndex = 0; emissiveIndex < m_emissiveLights.size(); emissiveIndex++)
+    {
+        const EditorEmissiveLight &light = m_emissiveLights[emissiveIndex];
+        const float normal[3] = { light.info.normal.data[0], light.info.normal.data[1],
+                                  light.info.normal.data[2] };
+
+        sources[index].uniqueID = light.info.uniqueID;
+        sources[index].origin = { light.center[0] + 2.0f * normal[0],
+                                  light.center[1] + 2.0f * normal[1],
+                                  light.center[2] + 2.0f * normal[2] };
+        sources[index].cluster = light.cluster;
+        sources[index].reach = kLightReachUnits;
+        sources[index].radius = 0.0f;
+        sources[index].clusterCount = 0;
+        sources[index].pClusters = nullptr;
+        sources[index].power = light.power;
+        index++;
+    }
+
     QrClusterLightSourcesUploadInfo info = {};
     info.numLights = uint32_t(sources.size());
     info.pLights = sources.data();
-    info.topUpReach = kLightTopUpReachUnits;
+    info.topUpReach = EditorMetersLength(kLightTopUpReachUnits);
+
+    for (QrClusterLightSource &source : sources)
+    {
+        EditorMetersClusterLightSource(source);
+    }
     info.allowIncremental = 1;
     info.allowOverflow = 1;
     info.validate = 0;
@@ -1545,6 +1678,513 @@ void EditorApp::UploadClusterLightSources()
             logged = true;
             PrintMessage(("cluster light sources: " + std::string(qrGetResultDescription(result)))
                              .c_str(),
+                         this);
+        }
+    }
+}
+
+namespace
+{
+
+// The unique ID range of the textured area lights a level's own materials cast. The game numbers
+// one per (entity, model, surface, piece) through RT_GetBrushSurfUniqueId; the editor's world is a
+// single model, so an index into its own list says the same thing, and the range sits above the
+// map and custom light ranges so no light of either kind can be mistaken for an area light.
+constexpr uint64_t kFirstEmissiveLightUniqueID = kFirstCustomLightUniqueID + 0x10000;
+
+// RT_EMIS_INTENSITY_TO_RAW(rt_emis_light_intensity) times RT_FIXUP_LIGHT_INTENSITY, the two
+// calls RT_ScaleEmissiveLightColor makes: the game scales an emissive surface light's colour by
+// rt_emis_light_intensity * 0.01 times rt_globallight_mult (10), the Quake-to-metre area fix
+// (1 / 0.025^2 = 1600) and rt_brightness. The two constants are the ones kEditorSkySunRadiance
+// folds in as well, so a surface light and the sun of the same level are stated in the same units.
+constexpr float kEditorEmissionLightScale = 10.0f * 1600.0f * 0.01f;
+
+void CrossProduct(const float a[3], const float b[3], float out[3])
+{
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+float DotProduct(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+float VectorLength(const float v[3])
+{
+    return std::sqrt(DotProduct(v, v));
+}
+
+bool NormalizeVector(float v[3])
+{
+    const float length = VectorLength(v);
+
+    if (!(length > 1e-9f))
+    {
+        return false;
+    }
+
+    v[0] /= length;
+    v[1] /= length;
+    v[2] /= length;
+    return true;
+}
+
+// The area of one convex polygon and its area weighted centre, summed over the same fan of
+// triangles r_world.c walks while it collects a face's corners.
+void MeasureFace(const std::vector<QrFloat3D> &corners, float &area, float center[3])
+{
+    area = 0.0f;
+    center[0] = 0.0f;
+    center[1] = 0.0f;
+    center[2] = 0.0f;
+
+    for (size_t corner = 2; corner < corners.size(); corner++)
+    {
+        float a[3];
+        float b[3];
+        float cross[3];
+
+        // The first corner is the fan's hub, so each triangle is (0, n-1, n).
+        for (int axis = 0; axis < 3; axis++)
+        {
+            a[axis] = corners[corner - 1].data[axis] - corners[0].data[axis];
+            b[axis] = corners[corner].data[axis] - corners[0].data[axis];
+        }
+
+        CrossProduct(a, b, cross);
+
+        const float triangleArea = 0.5f * VectorLength(cross);
+
+        if (!(triangleArea > 0.0f))
+        {
+            continue;
+        }
+
+        area += triangleArea;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            center[axis] += triangleArea * (corners[0].data[axis] + corners[corner - 1].data[axis] +
+                                            corners[corner].data[axis]) /
+                            3.0f;
+        }
+    }
+
+    if (area > 0.0f)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            center[axis] /= area;
+        }
+    }
+}
+
+// The affine map from a face's uv to its position that r_world.c fits with a least-squares solve:
+// position = A * u + B * v + C. False when the corners do not pin one down, which is a face whose
+// uv collapses -- a texture projected edge on -- and one no light can follow.
+bool FitFaceUvToPosition(const std::vector<QrFloat3D> &corners,
+                         const std::vector<QrFloat2D> &texCoords, float A[3], float B[3],
+                         float C[3])
+{
+    const size_t count = std::min(corners.size(), texCoords.size());
+
+    if (count < 3)
+    {
+        return false;
+    }
+
+    double ss = 0.0;
+    double st = 0.0;
+    double tt = 0.0;
+    double ssum = 0.0;
+    double tsum = 0.0;
+    double sx[3] = {};
+    double tx[3] = {};
+    double psum[3] = {};
+
+    for (size_t i = 0; i < count; i++)
+    {
+        const double u = texCoords[i].data[0];
+        const double v = texCoords[i].data[1];
+
+        ss += u * u;
+        st += u * v;
+        tt += v * v;
+        ssum += u;
+        tsum += v;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            const double p = corners[i].data[axis];
+
+            sx[axis] += u * p;
+            tx[axis] += v * p;
+            psum[axis] += p;
+        }
+    }
+
+    double m[3][3] = {
+        { ss, st, ssum },
+        { st, tt, tsum },
+        { ssum, tsum, double(count) },
+    };
+    double rhs[3][3] = {
+        { sx[0], sx[1], sx[2] },
+        { tx[0], tx[1], tx[2] },
+        { psum[0], psum[1], psum[2] },
+    };
+
+    for (int col = 0; col < 3; col++)
+    {
+        int pivot = col;
+
+        for (int row = col + 1; row < 3; row++)
+        {
+            if (std::fabs(m[row][col]) > std::fabs(m[pivot][col]))
+            {
+                pivot = row;
+            }
+        }
+
+        if (std::fabs(m[pivot][col]) < 1e-9)
+        {
+            return false;
+        }
+
+        if (pivot != col)
+        {
+            for (int k = 0; k < 3; k++)
+            {
+                std::swap(m[col][k], m[pivot][k]);
+                std::swap(rhs[col][k], rhs[pivot][k]);
+            }
+        }
+
+        const double inverse = 1.0 / m[col][col];
+
+        for (int k = 0; k < 3; k++)
+        {
+            m[col][k] *= inverse;
+            rhs[col][k] *= inverse;
+        }
+
+        for (int row = 0; row < 3; row++)
+        {
+            if (row == col)
+            {
+                continue;
+            }
+
+            const double factor = m[row][col];
+
+            if (std::fabs(factor) < 1e-10)
+            {
+                continue;
+            }
+
+            for (int k = 0; k < 3; k++)
+            {
+                m[row][k] -= factor * m[col][k];
+                rhs[row][k] -= factor * rhs[col][k];
+            }
+        }
+    }
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        A[axis] = float(rhs[0][axis]);
+        B[axis] = float(rhs[1][axis]);
+        C[axis] = float(rhs[2][axis]);
+    }
+
+    return true;
+}
+
+// TexMgr_EmissiveCone: the cone a light material's light is held to, in radians. A material with
+// no focus and no projector lights its whole hemisphere, which the SDK states as two zero angles.
+void EmissiveCone(float focusDegrees, float softDegrees, bool projector, float &angleInner,
+                  float &angleOuter)
+{
+    angleInner = 0.0f;
+    angleOuter = 0.0f;
+
+    float outerDegrees = focusDegrees;
+
+    if (!(outerDegrees > 0.0f) || outerDegrees > 90.0f)
+    {
+        if (!projector)
+        {
+            return;
+        }
+
+        outerDegrees = 45.0f;
+    }
+
+    if (softDegrees < 0.0f)
+    {
+        softDegrees = projector ? 45.0f : outerDegrees * 0.1f;
+    }
+
+    if (softDegrees < 0.05f)
+    {
+        softDegrees = 0.05f;
+    }
+
+    if (softDegrees > outerDegrees)
+    {
+        softDegrees = outerDegrees;
+    }
+
+    angleOuter = outerDegrees * 0.01745329252f;
+    angleInner = (outerDegrees - softDegrees) * 0.01745329252f;
+}
+
+} // namespace
+
+void EditorApp::BuildEmissiveLights()
+{
+    m_emissiveLights.clear();
+
+    // The same gate RT_EmissiveLightParamsForTex puts on a texture: the material has to call
+    // itself a light and its gain has to be on. The legacy path lights the level from its light
+    // entities and no surface of it is a light source, which is what truelight 0 means here too.
+    if (m_settings.truelight <= 0.0f)
+    {
+        return;
+    }
+
+    const float intensityScale =
+        kEditorEmissionLightScale * m_settings.emissionLightIntensity * m_settings.brightness;
+
+    uint32_t fittedCount = 0;
+
+    for (size_t surfaceIndex = 0; surfaceIndex < m_scene.surfaces.size(); surfaceIndex++)
+    {
+        const EditorSurface &surface = m_scene.surfaces[surfaceIndex];
+
+        if (surface.faces.empty())
+        {
+            continue;
+        }
+
+        const EditorMaterialParams &params = m_materials.For(surface);
+
+        if (!params.luma || params.lightBrightness <= 0.0f)
+        {
+            continue;
+        }
+
+        // The bake the surface itself is drawn with, so a light reads the mask the shader of that
+        // very surface reads.
+        const QrMaterial material = SurfaceMaterialWithOverride(surface, params);
+        const EditorMaterialEmission emission = m_materialBakes.EmissionOf(material);
+
+        // RT_EmissiveLightParamsForTex refuses a texture that carries neither a light color nor
+        // any emission at all (mean_base <= 0): a surface that only calls itself a light casts
+        // nothing. is_light alone is not enough, which is why 34 of e1m1's 123 light materials
+        // are not light sources.
+        if (!params.hasLightColor && !(emission.meanBase > 0.0f))
+        {
+            continue;
+        }
+
+        // Whether a mask is there is a question about the material, not about how bright it is: a
+        // mask that is black everywhere is still a mask, and the light it builds emits nothing
+        // instead of glowing evenly over the whole polygon.
+        const bool masked = emission.valid;
+
+        float color[3] = { 1.0f, 1.0f, 1.0f };
+
+        if (params.hasLightColor)
+        {
+            // light_color is the light's own colour: the mask only says where it glows.
+            color[0] = params.lightColor[0];
+            color[1] = params.lightColor[1];
+            color[2] = params.lightColor[2];
+        }
+        else
+        {
+            // rtemissivecolor / mean_base is the colour of the mask with its brightness divided
+            // out.
+            color[0] = emission.color[0];
+            color[1] = emission.color[1];
+            color[2] = emission.color[2];
+        }
+
+        // A masked light hands its material to the shader, which reads the mask where it sampled
+        // the polygon and takes its radiance from that instead of the mean, so meanEmiss only
+        // describes how much emission the surface has. A texture with no mask is uniform over its
+        // whole polygon, where the mean is the answer and the light carries 1.0.
+        const float meanEmiss = masked ? emission.mean : 1.0f;
+        const QrMaterial lightMaterial = masked ? material : QR_NO_MATERIAL;
+
+        // The gain is the material's own brightness, applied the way gl_texmgr.c applies it to
+        // rtemissivecolor: before the intensity the frame scales every light by.
+        const float gain = params.lightBrightness * intensityScale;
+
+        float angleInner = 0.0f;
+        float angleOuter = 0.0f;
+        EmissiveCone(params.lightFocus, params.lightFocusSoft, params.lightProjector, angleInner,
+                     angleOuter);
+
+        for (const EditorSurfaceFace &face : surface.faces)
+        {
+            if (face.positions.size() < 3)
+            {
+                continue;
+            }
+
+            float area = 0.0f;
+            float center[3] = { 0.0f, 0.0f, 0.0f };
+            MeasureFace(face.positions, area, center);
+
+            if (!(area > 0.0f))
+            {
+                continue;
+            }
+
+            EditorEmissiveLight light;
+            light.surfaceIndex = surfaceIndex;
+            light.cluster = face.cluster;
+            light.center[0] = center[0];
+            light.center[1] = center[1];
+            light.center[2] = center[2];
+
+            QrTexturedAreaLightUploadInfo &info = light.info;
+            info.uniqueID = kFirstEmissiveLightUniqueID + m_emissiveLights.size();
+            info.color = { color[0] * gain, color[1] * gain, color[2] * gain };
+            info.normal = { face.normal[0], face.normal[1], face.normal[2] };
+            info.area = area;
+            info.meanEmiss = meanEmiss;
+            info.material = lightMaterial;
+            info.angleInner = angleInner;
+            info.angleOuter = angleOuter;
+            info.projector = params.lightProjector ? 1.0f : 0.0f;
+            info.isStatic = 1;
+
+            float fitA[3] = { 0.0f, 0.0f, 0.0f };
+            float fitB[3] = { 0.0f, 0.0f, 0.0f };
+            float fitC[3] = { 0.0f, 0.0f, 0.0f };
+            const bool fitted =
+                FitFaceUvToPosition(face.positions, face.texCoords, fitA, fitB, fitC) &&
+                face.positions.size() <= MAX_TEXTURED_AREA_LIGHT_VERTS;
+
+            if (fitted)
+            {
+                info.numVerts = int(face.positions.size());
+                info.A = { fitA[0], fitA[1], fitA[2] };
+                info.B = { fitB[0], fitB[1], fitB[2] };
+                info.C = { fitC[0], fitC[1], fitC[2] };
+
+                for (int corner = 0; corner < info.numVerts; corner++)
+                {
+                    info.uvVerts[corner] = face.texCoords[size_t(corner)];
+                }
+
+                fittedCount++;
+            }
+            else
+            {
+                // A face no single polygon holds -- more corners than a light carries, or a uv
+                // that collapses -- gets the square RT_AddEmissiveLight falls back to: a shape of
+                // the face's own area, kept in the plane of the face, which preserves the light's
+                // energy. Reading the mask through it would sample points the surface does not
+                // cover, so it carries the mean emission instead, and that is also what the game
+                // hands the square.
+                info.material = QR_NO_MATERIAL;
+                info.numVerts = 4;
+
+                float axis[3] = { 0.0f, 0.0f, 1.0f };
+
+                if (std::fabs(info.normal.data[2]) > 0.9f)
+                {
+                    axis[0] = 1.0f;
+                    axis[1] = 0.0f;
+                    axis[2] = 0.0f;
+                }
+
+                float u[3];
+                CrossProduct(axis, info.normal.data, u);
+
+                if (!NormalizeVector(u))
+                {
+                    // A normal parallel to both axes cannot happen for a real face, and a light
+                    // whose basis is not orthonormal would be a light of no size.
+                    continue;
+                }
+
+                float v[3];
+                CrossProduct(info.normal.data, u, v);
+
+                const float side = std::sqrt(area);
+                float corner[3];
+
+                for (int k = 0; k < 3; k++)
+                {
+                    info.A.data[k] = u[k] * side;
+                    info.B.data[k] = v[k] * side;
+                    corner[k] = center[k] - 0.5f * side * u[k] - 0.5f * side * v[k];
+                }
+
+                info.C = { corner[0], corner[1], corner[2] };
+                info.uvVerts[0] = { 0.0f, 0.0f };
+                info.uvVerts[1] = { 1.0f, 0.0f };
+                info.uvVerts[2] = { 1.0f, 1.0f };
+                info.uvVerts[3] = { 0.0f, 1.0f };
+            }
+
+            // fit says whether A, B, C describe the uv the light carries, which is true of the
+            // square as well: it has a uv of its own.
+            info.fit = 1;
+
+            // RT_RegisterWorldModelLight's power: the area, how much of it emits, and how bright
+            // that emission is. It is what the cluster lists rank the light by.
+            light.power = area * meanEmiss *
+                          (0.2125f * info.color.data[0] + 0.7154f * info.color.data[1] +
+                           0.0721f * info.color.data[2]);
+
+            m_emissiveLights.push_back(light);
+        }
+    }
+
+    PrintMessage(("area lights: " + std::to_string(m_emissiveLights.size()) + " from " +
+                  std::to_string(m_scene.surfaces.size()) + " surfaces, " +
+                  std::to_string(fittedCount) + " fitted and " +
+                  std::to_string(m_emissiveLights.size() - fittedCount) + " squared")
+                     .c_str(),
+                 this);
+}
+
+void EditorApp::UploadEmissiveLights()
+{
+    if (m_emissiveLights.empty() || m_instance == nullptr)
+    {
+        return;
+    }
+
+    std::vector<QrTexturedAreaLightUploadInfo> infos(m_emissiveLights.size());
+
+    for (size_t index = 0; index < m_emissiveLights.size(); index++)
+    {
+        infos[index] = m_emissiveLights[index].info;
+        EditorMetersAreaLight(infos[index]);
+    }
+
+    // One batch, the way RT_UploadAllWorldModelLights adds a model's whole list at once: the
+    // registry is rebuilt per frame, so the list has to go in every frame.
+    const QrResult result =
+        qrUploadTexturedAreaLights(m_instance, infos.data(), uint32_t(infos.size()));
+
+    if (result != QR_SUCCESS)
+    {
+        static bool logged = false;
+
+        if (!logged)
+        {
+            logged = true;
+            PrintMessage(("area lights: " + std::string(qrGetResultDescription(result))).c_str(),
                          this);
         }
     }
@@ -1584,6 +2224,11 @@ void EditorApp::ViewBasis(float side[3], float up[3], float forward[3]) const
     up[0] = side[1] * forward[2] - side[2] * forward[1];
     up[1] = side[2] * forward[0] - side[0] * forward[2];
     up[2] = side[0] * forward[1] - side[1] * forward[0];
+}
+
+float EditorApp::FovYRadians() const
+{
+    return EditorFovYRadians(m_settings, float(m_clientWidth), float(m_clientHeight));
 }
 
 int32_t EditorApp::PickSurface(const float origin[3], const float direction[3], int32_t &outTriangle,
@@ -2335,7 +2980,7 @@ bool EditorApp::ProjectPoint(const float point[3], float &outX, float &outY) con
     ViewBasis(side, up, forward);
 
     const float aspect = float(m_clientWidth) / float(m_clientHeight);
-    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
+    const float tanHalfFov = std::tan(0.5f * FovYRadians());
     const float relative[3] = {
         point[0] - m_cameraPosition[0],
         point[1] - m_cameraPosition[1],
@@ -2578,7 +3223,7 @@ bool EditorApp::CursorDirection(float outDirection[3]) const
     }
 
     const float aspect = float(m_clientWidth) / float(m_clientHeight);
-    const float tanHalfFov = std::tan(0.5f * kEditorFovYRadians);
+    const float tanHalfFov = std::tan(0.5f * FovYRadians());
     const float ndcX = (cursorX / float(m_clientWidth)) * 2.0f - 1.0f;
     const float ndcY = 1.0f - (cursorY / float(m_clientHeight)) * 2.0f;
 
@@ -4803,6 +5448,305 @@ void ApplySkyScope(const EditorLevelSky &sky, bool onlySet, EditorRenderSettings
     }
 }
 
+// One `name "value"` line of the game's config.cfg, which archives every cvar the Global tab
+// drives. The sky block owns its 25 keys and the rest are plain globals, so a name either lands
+// in the block's reader or in one of the fields beside it. Returns whether the line was one the
+// panel represents, which is what tells a caller the file was understood rather than skipped.
+bool ApplyGlobalText(const std::string &name, const std::string &text, EditorRenderSettings &settings,
+                     EditorSunState &sun)
+{
+    if (EditorSkyKeyIndex(name) >= 0)
+    {
+        ApplySkyText(name, text, settings, sun);
+        return true;
+    }
+
+    float value = 0.0f;
+
+    if (name == "rt_water_color" || name == "rt_water_acidcolor")
+    {
+        float color[3] = { 0.0f, 0.0f, 0.0f };
+
+        if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
+        {
+            return true;
+        }
+
+        // The cvars are bytes and the frame block takes 0..1, unlike the sky colours whose
+        // block already states the renderer's own range.
+        float *target = name == "rt_water_color" ? settings.waterColor : settings.acidColor;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            target[axis] = std::clamp(color[axis] * (1.0f / 255.0f), 0.0f, 1.0f);
+        }
+
+        return true;
+    }
+
+    if (std::sscanf(text.c_str(), "%f", &value) != 1)
+    {
+        return false;
+    }
+
+    const int32_t integer = int32_t(value);
+
+    if (name == "rt_truelight")
+    {
+        settings.truelight = value;
+    }
+    else if (name == "rt_level_lights")
+    {
+        settings.levelLights = value != 0.0f;
+    }
+    else if (name == "rt_model_lights")
+    {
+        settings.modelLights = value != 0.0f;
+    }
+    else if (name == "rt_brightness")
+    {
+        settings.brightness = value;
+    }
+    else if (name == "rt_sky_sun_disc")
+    {
+        settings.sunDiscScale = value;
+    }
+    else if (name == "rt_tonemap")
+    {
+        settings.tonemapType = std::clamp(integer, 0, 4);
+    }
+    else if (name == "rt_tonemap_white")
+    {
+        settings.tonemapWhite = value;
+    }
+    else if (name == "rt_tonemap_chroma")
+    {
+        settings.tonemapChroma = value;
+    }
+    else if (name == "rt_tonemap_desat")
+    {
+        settings.tonemapDesat = value;
+    }
+    else if (name == "rt_tonemap_max_log")
+    {
+        settings.tonemapMaxLog = value;
+    }
+    else if (name == "rt_tonemap_min_log")
+    {
+        settings.tonemapMinLog = value;
+    }
+    else if (name == "rt_volume_type")
+    {
+        settings.volumeType = std::clamp(integer, 0, 2);
+    }
+    else if (name == "rt_volume_scatter")
+    {
+        settings.volumeScatter = value;
+    }
+    else if (name == "rt_volume_ambient")
+    {
+        settings.volumeAmbient = value;
+    }
+    else if (name == "rt_volume_far")
+    {
+        settings.volumeFar = value;
+    }
+    else if (name == "rt_volume_lintensity")
+    {
+        settings.volumeLightIntensity = value;
+    }
+    else if (name == "rt_volume_lassymetry")
+    {
+        settings.volumeAsymmetry = value;
+    }
+    else if (name == "rt_normalmap_stren")
+    {
+        settings.normalMapStrength = value;
+    }
+    else if (name == "rt_emis_mapboost")
+    {
+        settings.emissionMapBoost = value;
+    }
+    else if (name == "rt_emis_light_intensity")
+    {
+        settings.emissionLightIntensity = value;
+    }
+    else if (name == "rt_emis_maxscrcolor")
+    {
+        settings.emissionMaxScreenColor = value;
+    }
+    else if (name == "rt_emis_sharpmask")
+    {
+        settings.emissionSharpMask = value;
+    }
+    else if (name == "rt_tal_selflit")
+    {
+        settings.talSelfLitOffset = value;
+    }
+    else if (name == "rt_roughmin")
+    {
+        settings.minRoughness = value;
+    }
+    else if (name == "rt_denoiser")
+    {
+        settings.denoiser = value;
+    }
+    else if (name == "rt_restir")
+    {
+        settings.restir = value;
+    }
+    else if (name == "rt_restir_candidates")
+    {
+        settings.restirCandidates = value;
+    }
+    else if (name == "rt_gi_level")
+    {
+        settings.giLevel = value;
+    }
+    else if (name == "rt_nee_samples")
+    {
+        settings.neeSamples = value;
+    }
+    else if (name == "rt_sensit_dir")
+    {
+        settings.sensitivityDirect = value;
+    }
+    else if (name == "rt_sensit_indir")
+    {
+        settings.sensitivityIndirect = value;
+    }
+    else if (name == "rt_sensit_spec")
+    {
+        settings.sensitivitySpecular = value;
+    }
+    else if (name == "rt_sky_sun_bounce_range")
+    {
+        settings.sunBounceRange = value;
+    }
+    else if (name == "rt_sky_sun_bounce_scale")
+    {
+        settings.sunBounceScale = value;
+    }
+    else if (name == "rt_no_textures")
+    {
+        settings.noTextures = value;
+    }
+    else if (name == "rt_antifirefly")
+    {
+        settings.antifirefly = value;
+    }
+    else if (name == "rt_q2_depthgrad")
+    {
+        settings.q2DepthGrad = int32_t(value);
+    }
+    else if (name == "rt_q2_lightstats")
+    {
+        settings.q2LightStats = int32_t(value);
+    }
+    else if (name == "rt_reflrefr_earlyout")
+    {
+        settings.reflRefrEarlyOut = value > 0.0f;
+    }
+    else if (name == "rt_renderscale")
+    {
+        settings.renderScale = value;
+    }
+    else if (name == "rt_bloom_emis_mult")
+    {
+        settings.bloomEmissionMultiplier = value;
+    }
+    else if (name == "rt_bloom_intensity")
+    {
+        settings.bloomIntensity = value;
+    }
+    else if (name == "rt_bloom_threshold")
+    {
+        settings.bloomThreshold = value;
+    }
+    else if (name == "rt_bloom_knee")
+    {
+        settings.bloomKnee = value;
+    }
+    else if (name == "rt_bloom_scatter")
+    {
+        settings.bloomScatter = value;
+    }
+    else if (name == "rt_bloom_radius")
+    {
+        settings.bloomRadius = value;
+    }
+    else if (name == "rt_bloom_quality")
+    {
+        settings.bloomQuality = int32_t(value);
+    }
+    else if (name == "rt_vignette")
+    {
+        settings.vignetteIntensity = value;
+    }
+    else if (name == "rt_vignette_start")
+    {
+        settings.vignetteStart = value;
+    }
+    else if (name == "rt_vignette_end")
+    {
+        settings.vignetteEnd = value;
+    }
+    else if (name == "rt_vignette_roundness")
+    {
+        settings.vignetteRoundness = value;
+    }
+    else if (name == "rt_filmgrain")
+    {
+        settings.filmGrainIntensity = value;
+    }
+    else if (name == "rt_filmgrain_size")
+    {
+        settings.filmGrainSize = value;
+    }
+    else if (name == "rt_sharpen_strength")
+    {
+        settings.sharpenStrength = value;
+    }
+    else if (name == "rt_local_exposure")
+    {
+        settings.localExposure = value;
+    }
+    else if (name == "rt_ef_crt")
+    {
+        settings.crtEnabled = value != 0.0f;
+    }
+    else if (name == "fov")
+    {
+        settings.fovDegrees = value;
+    }
+    else if (name == "fov_adapt")
+    {
+        settings.fovAdapt = value != 0.0f;
+    }
+    else if (name == "rt_water_speed")
+    {
+        settings.waterSpeed = value;
+    }
+    else if (name == "rt_water_normstren")
+    {
+        settings.waterNormalStrength = value;
+    }
+    else if (name == "rt_water_normsharp")
+    {
+        settings.waterNormalSharpness = value;
+    }
+    else if (name == "rt_water_scale")
+    {
+        settings.waterScale = value;
+    }
+    else
+    {
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 EditorLevelFog EditorApp::LevelFog() const
@@ -4955,8 +5899,9 @@ void EditorApp::LoadLightsSession()
     }
 
     // The values a level key is dropped against are the game's config, which the light editor
-    // reads as its global set. A standalone editor has no config, so the panel's own defaults are
-    // that baseline, and they have to exist before the first level key is compared with them.
+    // reads as its global set. The config is read by LoadGameConfigGlobals before the first level
+    // section, so the panel's state already is that global set; a run that found no config falls
+    // back to the defaults the panel holds, which are the engine's own cvar values.
     if (m_skyGlobals.Empty())
     {
         m_skyGlobals = RenderedSky(m_settings, m_sun);
@@ -5018,6 +5963,94 @@ void EditorApp::LoadLightsSession()
                                 m_sessionPaths.level + ", sky scope " +
                                 (m_skyGlobal ? "global" : "level");
     PrintMessage(message.c_str(), this);
+}
+
+void EditorApp::LoadGameConfigGlobals()
+{
+    if (m_gameConfigApplied)
+    {
+        return;
+    }
+
+    std::vector<uint8_t> file;
+
+    if (!m_assets.ReadFile("config.cfg", file))
+    {
+        PrintMessage("config: no config.cfg found, the panel starts from the engine's own cvar "
+                     "values rather than from the game's global set",
+                     this);
+        return;
+    }
+
+    m_gameConfigApplied = true;
+
+    const std::string text(file.begin(), file.end());
+    std::string name;
+    std::string value;
+    int applied = 0;
+
+    size_t offset = 0;
+
+    while (offset < text.size())
+    {
+        size_t end = text.find('\n', offset);
+
+        if (end == std::string::npos)
+        {
+            end = text.size();
+        }
+
+        const std::string line = text.substr(offset, end - offset);
+        offset = end + 1;
+
+        // A cvar is archived as `name "value"`; comment lines, blank lines and the `bind`/`alias`
+        // commands the engine also writes carry no value the panel represents.
+        const size_t open = line.find('"');
+
+        if (open == std::string::npos || open == 0)
+        {
+            continue;
+        }
+
+        const size_t close = line.find('"', open + 1);
+
+        if (close == std::string::npos)
+        {
+            continue;
+        }
+
+        name = line.substr(0, open);
+        value = line.substr(open + 1, close - open - 1);
+
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t' || name.back() == '\r'))
+        {
+            name.pop_back();
+        }
+
+        if (name.empty() || name[0] == '/' || name[0] == '#')
+        {
+            continue;
+        }
+
+        if (ApplyGlobalText(name, value, m_settings, m_sun))
+        {
+            applied++;
+        }
+    }
+
+    char message[128];
+    std::snprintf(message, sizeof(message), "config: %d global values applied", applied);
+    PrintMessage(message, this);
+
+    // The lighting model decides whether a light entity is a light source at all, so say which one
+    // the file asked for: a viewport that ignores it looks lit when the game's frame is not.
+    if (m_settings.truelight > 0.0f)
+    {
+        std::snprintf(message, sizeof(message),
+                      "lights: materials lighting (rt_truelight %.1f), %d map lights not uploaded",
+                      double(m_settings.truelight), int(m_scene.lights.size()));
+        PrintMessage(message, this);
+    }
 }
 
 void EditorApp::AdoptSkyScope(const EditorLevelDocument::ReadResult &read)

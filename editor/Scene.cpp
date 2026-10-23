@@ -610,6 +610,138 @@ void ConvertIndexedToRgba(const MipTexture &texture, const uint8_t *palette768,
     }
 }
 
+// Mirrors Sky_LoadTexture's skyflatcolor: a sky texture is a masked overlay whose front
+// layer is the left half of every row, a zero index there is the transparent pixel, and
+// the flat colour is the average of the opaque pixels over 255. The game derives the
+// volumetric fog's ambient from this rather than from rt_sky_color, so a level whose sky
+// is painted blue still gets the sky's own average -- warm grey for a Quake sky.
+bool ComputeSkyFlatColor(const MipTexture &texture, const uint8_t *palette768, float color[3])
+{
+    const uint32_t halfWidth = texture.width / 2;
+
+    if (halfWidth == 0 || texture.height == 0 || texture.indices.empty())
+    {
+        return false;
+    }
+
+    const uint8_t *palette = palette768;
+
+    if (palette == nullptr && texture.palette.size() >= 768)
+    {
+        palette = texture.palette.data();
+    }
+
+    if (palette == nullptr)
+    {
+        return false;
+    }
+
+    uint64_t red = 0;
+    uint64_t green = 0;
+    uint64_t blue = 0;
+    uint64_t count = 0;
+
+    for (uint32_t y = 0; y < texture.height; y++)
+    {
+        const uint8_t *row = texture.indices.data() + size_t(y) * texture.width;
+
+        for (uint32_t x = 0; x < halfWidth; x++)
+        {
+            const uint8_t index = row[x];
+
+            if (index == 0)
+            {
+                continue;
+            }
+
+            red += palette[size_t(index) * 3 + 0];
+            green += palette[size_t(index) * 3 + 1];
+            blue += palette[size_t(index) * 3 + 2];
+            count++;
+        }
+    }
+
+    if (count == 0)
+    {
+        return false;
+    }
+
+    const double scale = 1.0 / (double(count) * 255.0);
+    color[0] = float(double(red) * scale);
+    color[1] = float(double(green) * scale);
+    color[2] = float(double(blue) * scale);
+    return true;
+}
+
+// The two layers of the classic scrolling sky, exactly as Sky_LoadTexture builds them: the
+// back layer is the right half of every row and is opaque, the front layer is the left half
+// and a zero index there is the transparent palette entry 255, which is carried here as
+// alpha 0. The renderer samples both through the dome of Sky_DrawFace, so they keep the
+// sky texture's own width/2 by height layout.
+void BuildScrollingSkyLayers(const MipTexture &texture, const uint8_t *palette768,
+                             EditorScene &scene)
+{
+    const uint32_t halfWidth = texture.width / 2;
+
+    if (halfWidth == 0 || texture.height == 0 || texture.indices.empty() ||
+        size_t(halfWidth) * size_t(texture.height) > texture.indices.size())
+    {
+        return;
+    }
+
+    const uint8_t *palette = palette768;
+
+    if (palette == nullptr && texture.palette.size() >= 768)
+    {
+        palette = texture.palette.data();
+    }
+
+    if (palette == nullptr)
+    {
+        return;
+    }
+
+    const size_t pixels = size_t(halfWidth) * size_t(texture.height);
+
+    scene.skySolidRgba.assign(pixels * 4, 255);
+    scene.skyAlphaRgba.assign(pixels * 4, 0);
+    scene.skyLayerWidth = halfWidth;
+    scene.skyLayerHeight = texture.height;
+    scene.hasScrollingSky = true;
+
+    for (uint32_t y = 0; y < texture.height; y++)
+    {
+        const uint8_t *row = texture.indices.data() + size_t(y) * texture.width;
+
+        for (uint32_t x = 0; x < halfWidth; x++)
+        {
+            const size_t out = (size_t(y) * halfWidth + size_t(x)) * 4;
+            const uint8_t back = row[halfWidth + x];
+            const uint8_t front = row[x];
+
+            scene.skySolidRgba[out + 0] = palette[size_t(back) * 3 + 0];
+            scene.skySolidRgba[out + 1] = palette[size_t(back) * 3 + 1];
+            scene.skySolidRgba[out + 2] = palette[size_t(back) * 3 + 2];
+            scene.skySolidRgba[out + 3] = 255;
+
+            if (front == 0)
+            {
+                scene.skyAlphaRgba[out + 0] = 0;
+                scene.skyAlphaRgba[out + 1] = 0;
+                scene.skyAlphaRgba[out + 2] = 0;
+                scene.skyAlphaRgba[out + 3] = 0;
+            }
+            else
+            {
+                scene.skyAlphaRgba[out + 0] = palette[size_t(front) * 3 + 0];
+                scene.skyAlphaRgba[out + 1] = palette[size_t(front) * 3 + 1];
+                scene.skyAlphaRgba[out + 2] = palette[size_t(front) * 3 + 2];
+                scene.skyAlphaRgba[out + 3] = 255;
+            }
+        }
+    }
+}
+
 // Mirrors the TEX_SPECIAL handling of gl_model.c: the leading character of the
 // texture name decides how the surface is lit and blended.
 EditorSurfaceKind ClassifyTexture(const std::string &name)
@@ -1180,6 +1312,15 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         return false;
     }
 
+    scene.hasSkyFlatColor = false;
+    scene.skyFlatColor[0] = 0.0f;
+    scene.skyFlatColor[1] = 0.0f;
+    scene.skyFlatColor[2] = 0.0f;
+    scene.hasScrollingSky = false;
+    scene.skyLayerWidth = 0;
+    scene.skyLayerHeight = 0;
+    scene.skySolidRgba.clear();
+    scene.skyAlphaRgba.clear();
     scene.textures.resize(mipTextures.size());
 
     for (size_t i = 0; i < mipTextures.size(); i++)
@@ -1190,6 +1331,18 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         }
 
         ConvertIndexedToRgba(mipTextures[i], palette768, scene.textures[i]);
+
+        // gl_model.c sends every texture whose name starts with "sky" through
+        // Sky_LoadTexture, and the last one it sees owns skyflatcolor.
+        if (mipTextures[i].name.rfind("sky", 0) == 0)
+        {
+            if (ComputeSkyFlatColor(mipTextures[i], palette768, scene.skyFlatColor))
+            {
+                scene.hasSkyFlatColor = true;
+            }
+
+            BuildScrollingSkyLayers(mipTextures[i], palette768, scene);
+        }
     }
 
     std::vector<EditorSurface> surfaces;
@@ -1365,6 +1518,31 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         }
 
         const uint32_t surfaceCluster = ResolveSurfaceCluster(scene, centroid, faceNormal);
+
+        // The face is kept whole, before the fan below turns it into triangles, because the area
+        // light a light material casts is fitted over the corners of one polygon.
+        EditorSurfaceFace lightFace;
+        lightFace.normal[0] = faceNormal[0];
+        lightFace.normal[1] = faceNormal[1];
+        lightFace.normal[2] = faceNormal[2];
+        lightFace.cluster = surfaceCluster;
+
+        for (size_t corner = 0; corner + 2 < polygon.size(); corner += 3)
+        {
+            QrFloat3D position = { polygon[corner + 0], polygon[corner + 1], polygon[corner + 2] };
+            QrFloat2D texCoord = { 0.0f, 0.0f };
+
+            if (texInfo != nullptr)
+            {
+                texCoord.data[0] = Dot(&polygon[corner], texInfo->u) / 32.0f;
+                texCoord.data[1] = Dot(&polygon[corner], texInfo->v) / 32.0f;
+            }
+
+            lightFace.positions.push_back(position);
+            lightFace.texCoords.push_back(texCoord);
+        }
+
+        surface.faces.push_back(std::move(lightFace));
 
         for (size_t corner = 1; corner + 1 < polygon.size() / 3; corner++)
         {

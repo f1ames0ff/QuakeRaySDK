@@ -41,6 +41,7 @@ no implementation.
 
 | Feature | State | Notes |
 | --- | --- | --- |
+| Metric boundary | done | The editor is a host, so `EditorSpatial.{h,cpp}` is the one place its Quake units become the meters API 1.06 takes: `EditorMetersGeometry`, `EditorMetersWorldLights`, `EditorMetersSphericalLight`/`EditorMetersSpotLight`, `EditorMetersClusterLightSource`, `EditorMetersAreaLight` and `EditorDrawFrame`. Every conversion is the one `Quake/qr_spatial_adapter.cpp` applies to the same field, so a level lit here is lit the way the game lights it |
 | Load a BSP map with per-surface textures | done | `LoadEditorSceneBsp` |
 | Free-fly camera and fly speed | done | `UpdateCamera` |
 | Pick a surface under the cursor | done | `PickSurface` |
