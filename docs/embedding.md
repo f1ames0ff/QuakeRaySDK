@@ -6,6 +6,9 @@ Z-up or Y-up frame, but it must convert all spatial values to meters before
 calling the SDK. The renderer maps meter inputs into its private scene frame as
 described in [spatial-contract.md](spatial-contract.md).
 
+For the complete function-group catalogue and ownership rules, see
+[api.md](api.md). This page is the step-by-step first integration.
+
 ## 1. Build and link
 
 The SDK is a static library on Windows. The host provides NVRHI and Vulkan:
