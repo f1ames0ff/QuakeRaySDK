@@ -15,6 +15,22 @@
 namespace
 {
 
+// RT_LIGHT_Emit numbers map lights from UINT16_MAX upwards and keeps the editor's world
+// geometry IDs (1..N) out of the way.
+constexpr uint64_t kFirstLightUniqueID = uint64_t(UINT16_MAX);
+
+// Every light the editor loads is a light of the map itself, which the game registers through
+// RT_ClusterLightReachStatic(): rt_light_reach_static (25 m at QUAKEUNIT_IN_METERS 0.025, i.e.
+// 1000 units) rather than the rt_light_reach_dynamic 10 m a moving light is held to. The top-up
+// pass is handed the same number, so the reach survives its clamp unchanged.
+constexpr float kLightReachUnits = 1000.0f;
+constexpr float kLightTopUpReachUnits = 1000.0f;
+
+uint64_t LightUniqueID(size_t index)
+{
+    return kFirstLightUniqueID + uint64_t(index);
+}
+
 struct FileBlob
 {
     std::vector<uint8_t> bytes;
@@ -404,6 +420,9 @@ bool EditorApp::CreateTextureMaterials()
 
 bool EditorApp::LoadScene()
 {
+    m_framesSinceSceneLoad = 0;
+    m_lightStatsLogged = false;
+
     const std::string sceneDirectory = EditorDirectoryOf(m_scenePath);
     const std::string base = sceneDirectory.empty() ? std::string(".") : sceneDirectory;
 
@@ -450,7 +469,10 @@ bool EditorApp::LoadScene()
         return false;
     }
 
-    PrintMessage(("scene loaded: " + m_scenePath).c_str(), this);
+    PrintMessage(("scene loaded: " + m_scenePath + " (" + std::to_string(m_scene.lights.size()) +
+                  " lights)")
+                     .c_str(),
+                 this);
     return true;
 }
 
@@ -556,6 +578,84 @@ bool EditorApp::UploadScene()
     return submitResult == QR_SUCCESS;
 }
 
+bool EditorApp::UploadWorldClusters()
+{
+    const EditorWorldClusters &clusters = m_scene.worldClusters;
+
+    if (clusters.numLeafs == 0 || clusters.mins.empty())
+    {
+        // An OBJ scene has no leaf table: the renderer stays without world clusters and the
+        // map lights are lit as plain spherical lights.
+        return true;
+    }
+
+    QrWorldLightsUploadInfo upload = {};
+    upload.flags = 0;
+    upload.numClusters = uint32_t(clusters.mins.size());
+    upload.pClusterMins = clusters.mins.data();
+    upload.pClusterMaxs = clusters.maxs.data();
+    upload.pClusterFlags = clusters.flags.data();
+    // No world light faces and no PVS rows: the editor uploads its own geometry, and without a
+    // PVS the renderer treats every cluster as visible from every other one, which is what a
+    // map without compiled vis needs. The cluster table alone is what the light lists read.
+    upload.clusterGeneration = ++m_clusterGeneration;
+
+    const QrResult result = qrUploadWorldLights(m_instance, &upload);
+
+    if (result != QR_SUCCESS)
+    {
+        PrintMessage(("world clusters: " + std::string(qrGetResultDescription(result))).c_str(),
+                     this);
+        return false;
+    }
+
+    size_t resolved = 0;
+
+    for (const EditorLight &light : m_scene.lights)
+    {
+        if (light.cluster != QR_CLUSTER_LIGHT_NO_CLUSTER)
+        {
+            resolved++;
+        }
+    }
+
+    PrintMessage(("world clusters: " + std::to_string(upload.numClusters) +
+                  " clusters, lights resolved " + std::to_string(resolved) + "/" +
+                  std::to_string(m_scene.lights.size()))
+                     .c_str(),
+                 this);
+
+    size_t unclustered = 0;
+    size_t distinct = 0;
+    uint32_t highest = 0;
+    std::vector<uint8_t> seen(upload.numClusters, 0);
+
+    for (const QrVertex &vertex : m_scene.vertices)
+    {
+        if (vertex.cluster == 0)
+        {
+            unclustered++;
+            continue;
+        }
+
+        if (vertex.cluster < upload.numClusters && seen[vertex.cluster] == 0)
+        {
+            seen[vertex.cluster] = 1;
+            distinct++;
+        }
+
+        highest = std::max(highest, vertex.cluster);
+    }
+
+    PrintMessage(("surface clusters: " + std::to_string(m_scene.vertices.size() - unclustered) +
+                  "/" + std::to_string(m_scene.vertices.size()) + " vertices clustered, " +
+                  std::to_string(distinct) + " distinct, max " + std::to_string(highest))
+                     .c_str(),
+                 this);
+
+    return true;
+}
+
 void EditorApp::Frame()
 {
     if (m_instance == nullptr)
@@ -593,6 +693,8 @@ void EditorApp::Frame()
     }
 
     UploadSun();
+    UploadLights();
+    UploadClusterLightSources();
 
     m_ui.BeginFrame(deltaSeconds, m_clientWidth, m_clientHeight);
     DrawPanel(deltaSeconds);
@@ -650,6 +752,26 @@ void EditorApp::Frame()
         {
             loggedDrawFailure = true;
             PrintMessage(("draw: " + std::string(qrGetResultDescription(drawResult))).c_str(), this);
+        }
+    }
+
+    if (!m_lightStatsLogged && ++m_framesSinceSceneLoad == 120)
+    {
+        m_lightStatsLogged = true;
+
+        QrClusterLightStats clusterStats = {};
+
+        if (qrGetClusterLightStats(m_instance, &clusterStats) == QR_SUCCESS)
+        {
+            char message[320];
+            std::snprintf(message, sizeof(message),
+                          "cluster lights: %u sources, %u grants, %u entries, %u denied, "
+                          "%u clusters, %u full, %u tail, %u tailDropped, %u candidates max",
+                          clusterStats.sources, clusterStats.grants, clusterStats.listEntries,
+                          clusterStats.denied, clusterStats.clusters, clusterStats.fullClusters,
+                          clusterStats.tailEntries, clusterStats.tailCandidatesDropped,
+                          clusterStats.candidateMax);
+            PrintMessage(message, this);
         }
     }
 }
@@ -905,6 +1027,92 @@ void EditorApp::UploadSun()
     }
 }
 
+void EditorApp::UploadLights()
+{
+    QrResult lastResult = QR_SUCCESS;
+
+    for (size_t index = 0; index < m_scene.lights.size(); index++)
+    {
+        const EditorLight &light = m_scene.lights[index];
+
+        QrSphericalLightUploadInfo info = {};
+        // RT_UploadAllElights numbers map lights from UINT16_MAX upwards and
+        // keeps the editor's world geometry IDs (1..N) out of the way.
+        info.uniqueID = LightUniqueID(index);
+        info.color = { light.color[0], light.color[1], light.color[2] };
+        info.position = { light.position[0], light.position[1], light.position[2] };
+        info.radius = light.radius;
+
+        lastResult = qrUploadSphericalLight(m_instance, &info);
+
+        if (lastResult != QR_SUCCESS)
+        {
+            break;
+        }
+    }
+
+    if (lastResult != QR_SUCCESS)
+    {
+        static bool logged = false;
+
+        if (!logged)
+        {
+            logged = true;
+            PrintMessage(("lights: " + std::string(qrGetResultDescription(lastResult))).c_str(),
+                         this);
+        }
+    }
+}
+
+void EditorApp::UploadClusterLightSources()
+{
+    if (m_scene.worldClusters.numLeafs == 0 || m_scene.lights.empty())
+    {
+        return;
+    }
+
+    std::vector<QrClusterLightSource> sources(m_scene.lights.size());
+
+    for (size_t index = 0; index < m_scene.lights.size(); index++)
+    {
+        const EditorLight &light = m_scene.lights[index];
+
+        sources[index].uniqueID = LightUniqueID(index);
+        sources[index].origin = { light.position[0], light.position[1], light.position[2] };
+        sources[index].cluster = light.cluster;
+        // RT_LIGHT_Emit registers a map light with the static reach and no cluster list: the
+        // top-up pass is what hands it the clusters around its own leaf.
+        sources[index].reach = kLightReachUnits;
+        sources[index].radius = 0.0f;
+        sources[index].clusterCount = 0;
+        sources[index].pClusters = nullptr;
+        sources[index].power = 0.0f;
+    }
+
+    QrClusterLightSourcesUploadInfo info = {};
+    info.numLights = uint32_t(sources.size());
+    info.pLights = sources.data();
+    info.topUpReach = kLightTopUpReachUnits;
+    info.allowIncremental = 1;
+    info.allowOverflow = 1;
+    info.validate = 0;
+
+    const QrResult result = qrUploadClusterLightSources(m_instance, &info);
+
+    if (result != QR_SUCCESS)
+    {
+        static bool logged = false;
+
+        if (!logged)
+        {
+            logged = true;
+            PrintMessage(("cluster light sources: " + std::string(qrGetResultDescription(result)))
+                             .c_str(),
+                         this);
+        }
+    }
+}
+
 void EditorApp::DrawPanel(float deltaSeconds)
 {
     if (!m_showPanel)
@@ -927,6 +1135,16 @@ void EditorApp::DrawPanel(float deltaSeconds)
         ImGui::Text("Triangles %zu", m_scene.indices.size() / 3);
         ImGui::Text("Surfaces  %zu  Textures %zu", m_scene.surfaces.size(),
                     m_scene.textures.size());
+        ImGui::Text("Lights    %zu", m_scene.lights.size());
+
+        QrClusterLightStats clusterStats = {};
+
+        if (qrGetClusterLightStats(m_instance, &clusterStats) == QR_SUCCESS)
+        {
+            ImGui::Text("Clusters  %u  sources %u", clusterStats.clusters, clusterStats.sources);
+            ImGui::Text("Grants    %u  entries %u  denied %u", clusterStats.grants,
+                        clusterStats.listEntries, clusterStats.denied);
+        }
 
         if (m_scene.hasBounds)
         {
@@ -1020,6 +1238,11 @@ int EditorApp::Run(int showCommand)
     }
 
     if (!UploadScene())
+    {
+        return 1;
+    }
+
+    if (!UploadWorldClusters())
     {
         return 1;
     }

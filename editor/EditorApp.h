@@ -37,11 +37,14 @@ private:
     bool CreateUi();
     bool LoadScene();
     bool UploadScene();
+    bool UploadWorldClusters();
     QrMaterial SurfaceMaterial(const EditorSurface &surface) const;
     static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
     void UploadSun();
+    void UploadLights();
+    void UploadClusterLightSources();
     void DrawPanel(float deltaSeconds);
     void Frame();
     void Shutdown();
@@ -84,4 +87,9 @@ private:
     float m_frameTimeMs = 0.0f;
     uint32_t m_clientWidth = 0;
     uint32_t m_clientHeight = 0;
+    uint32_t m_framesSinceSceneLoad = 0;
+    bool m_lightStatsLogged = false;
+    // Bumped every time a new world cluster table reaches the renderer, so it can tell a new
+    // map apart from a re-upload of the same one.
+    uint32_t m_clusterGeneration = 0;
 };

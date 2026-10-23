@@ -295,6 +295,7 @@ struct BspLump
 struct BspPlane
 {
     float normal[3] = {};
+    float distance = 0.0f;
 };
 
 struct BspEdge
@@ -325,6 +326,151 @@ bool LumpFits(const BspLump &lump, size_t fileSize, size_t elementSize)
            lump.length <= fileSize - lump.offset &&
            (elementSize == 0 || lump.length % elementSize == 0);
 }
+
+// One `{ "key" "value" ... }` block of the BSP entity lump (lump 0).
+struct BspEntity
+{
+    std::vector<std::pair<std::string, std::string>> fields;
+
+    const std::string &Value(const char *key) const
+    {
+        static const std::string empty;
+
+        for (const auto &field : fields)
+        {
+            if (field.first == key)
+            {
+                return field.second;
+            }
+        }
+
+        return empty;
+    }
+};
+
+bool ParseBspEntities(const std::vector<uint8_t> &bytes, const BspLump &lump,
+                      std::vector<BspEntity> &entities)
+{
+    if (!LumpFits(lump, bytes.size(), 0))
+    {
+        return false;
+    }
+
+    const char *cursor = reinterpret_cast<const char *>(bytes.data() + lump.offset);
+    const char *end = cursor + lump.length;
+
+    const auto skipSpace = [&cursor, end]() {
+        while (cursor < end)
+        {
+            const unsigned char character = static_cast<unsigned char>(*cursor);
+
+            if (std::isspace(character) || character == 0)
+            {
+                cursor++;
+                continue;
+            }
+
+            break;
+        }
+    };
+
+    const auto readToken = [&cursor, end](std::string &token) {
+        if (cursor >= end || *cursor != '"')
+        {
+            return false;
+        }
+
+        cursor++;
+        token.clear();
+
+        while (cursor < end && *cursor != '"')
+        {
+            token.push_back(*cursor++);
+        }
+
+        if (cursor >= end)
+        {
+            return false;
+        }
+
+        cursor++;
+        return true;
+    };
+
+    while (true)
+    {
+        skipSpace();
+
+        if (cursor >= end)
+        {
+            break;
+        }
+
+        if (*cursor != '{')
+        {
+            cursor++;
+            continue;
+        }
+
+        cursor++;
+        BspEntity entity;
+
+        while (true)
+        {
+            skipSpace();
+
+            if (cursor >= end)
+            {
+                return false;
+            }
+
+            if (*cursor == '}')
+            {
+                cursor++;
+                break;
+            }
+
+            std::string key;
+            std::string value;
+
+            if (!readToken(key))
+            {
+                return false;
+            }
+
+            skipSpace();
+
+            if (!readToken(value))
+            {
+                return false;
+            }
+
+            entity.fields.emplace_back(std::move(key), std::move(value));
+        }
+
+        entities.push_back(std::move(entity));
+    }
+
+    return true;
+}
+
+bool StartsWithLight(const std::string &text)
+{
+    return text.size() >= 5 && text.compare(0, 5, "light") == 0;
+}
+
+// Mirrors RT_UploadAllElights + RT_LIGHT_Emit + RT_FIXUP_LIGHT_INTENSITY: the
+// map light's `light` key is divided by rt_elight_normaliz (100), then scaled by
+// rt_globallight_mult (10), the Quake-to-meter area fix (1 / 0.025^2 = 1600)
+// and rt_brightness (1.0). The radius keeps the rt_elight_radius default of one
+// centimetre, which is 40 scene units at the SDK's 40 units per metre. Map light
+// colours stay at the default light colour, exactly as the game ignores
+// `_color`/`color` keys and the stored has_color flag.
+constexpr float kLightIntensityScale =
+    10.0f * (1.0f / (0.025f * 0.025f)) / 100.0f;
+constexpr float kQuakeUnitsPerMeter = 40.0f;
+constexpr float kDefaultLightIntensity = 200.0f;
+constexpr float kDefaultLightRadiusMeters = 0.01f;
 
 float Dot(const float a[3], const float b[4])
 {
@@ -530,6 +676,246 @@ std::string AnimationBaseName(const std::string &name)
     return name;
 }
 
+// Quake's leaf contents values, as stored in the BSP leaf lump.
+constexpr int32_t kBspContentsSolid = -2;
+constexpr int32_t kBspContentsWater = -3;
+constexpr int32_t kBspContentsSlime = -4;
+constexpr int32_t kBspContentsLava = -5;
+
+// The distances RT_ResolveLightLeaf probes outward when a light sits in the solid leaf.
+constexpr float kLightProbeDistances[3] = { 2.0f, 8.0f, 24.0f };
+
+bool IsLiquidContents(int32_t contents)
+{
+    return contents == kBspContentsWater || contents == kBspContentsSlime ||
+           contents == kBspContentsLava;
+}
+
+// Reads the BSP tree and builds the identity world cluster table (r_world.c
+// RT_BuildWorldClustersIdentity): cluster i is leaf i, cluster 0 is the solid
+// leaf and cluster numLeafs is the solid edge cluster.
+bool ParseBspTree(const std::vector<uint8_t> &bytes, const BspLump &nodeLump,
+                  const BspLump &leafLump, const std::vector<BspPlane> &planes,
+                  EditorScene &scene, std::string &error)
+{
+    const size_t nodeCount = nodeLump.length / 24;
+    const size_t leafCount = leafLump.length / 28;
+
+    if (leafCount == 0)
+    {
+        error = "BSP has no leafs";
+        return false;
+    }
+
+    scene.nodes.resize(nodeCount);
+
+    for (size_t i = 0; i < nodeCount; i++)
+    {
+        const size_t offset = nodeLump.offset + i * 24;
+        const int32_t planeIndex = ReadLittleEndian<int32_t>(bytes, offset);
+
+        if (planeIndex < 0 || size_t(planeIndex) >= planes.size())
+        {
+            error = "BSP node references an invalid plane";
+            return false;
+        }
+
+        EditorBspNode &node = scene.nodes[i];
+        node.normal[0] = planes[size_t(planeIndex)].normal[0];
+        node.normal[1] = planes[size_t(planeIndex)].normal[1];
+        node.normal[2] = planes[size_t(planeIndex)].normal[2];
+        node.distance = planes[size_t(planeIndex)].distance;
+        node.children[0] = ReadLittleEndian<int16_t>(bytes, offset + 4);
+        node.children[1] = ReadLittleEndian<int16_t>(bytes, offset + 6);
+
+        for (int child = 0; child < 2; child++)
+        {
+            if (node.children[child] >= 0)
+            {
+                if (size_t(node.children[child]) >= nodeCount)
+                {
+                    error = "BSP node child is out of range";
+                    return false;
+                }
+            }
+            else if (size_t(-int64_t(node.children[child]) - 1) >= leafCount)
+            {
+                error = "BSP node leaf is out of range";
+                return false;
+            }
+        }
+    }
+
+    EditorWorldClusters &clusters = scene.worldClusters;
+    clusters.numLeafs = uint32_t(leafCount);
+    clusters.mins.resize(leafCount + 1);
+    clusters.maxs.resize(leafCount + 1);
+    clusters.flags.assign(leafCount + 1, 0);
+    clusters.contents.assign(leafCount + 1, kBspContentsSolid);
+
+    QrFloat3D boundsMin = { { 0.0f, 0.0f, 0.0f } };
+    QrFloat3D boundsMax = { { 0.0f, 0.0f, 0.0f } };
+    bool haveBounds = false;
+
+    for (size_t i = 1; i < leafCount; i++)
+    {
+        const size_t offset = leafLump.offset + i * 28;
+        const int32_t contents = ReadLittleEndian<int32_t>(bytes, offset);
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            clusters.mins[i].data[axis] =
+                float(ReadLittleEndian<int16_t>(bytes, offset + 8 + size_t(axis) * 2));
+            clusters.maxs[i].data[axis] =
+                float(ReadLittleEndian<int16_t>(bytes, offset + 14 + size_t(axis) * 2));
+
+            if (!haveBounds)
+            {
+                boundsMin.data[axis] = clusters.mins[i].data[axis];
+                boundsMax.data[axis] = clusters.maxs[i].data[axis];
+            }
+            else
+            {
+                boundsMin.data[axis] = std::min(boundsMin.data[axis], clusters.mins[i].data[axis]);
+                boundsMax.data[axis] = std::max(boundsMax.data[axis], clusters.maxs[i].data[axis]);
+            }
+        }
+
+        haveBounds = true;
+        clusters.contents[i] = contents;
+        clusters.flags[i] = uint8_t((contents == kBspContentsSolid ? QR_WORLD_CLUSTER_SOLID_BIT : 0) |
+                                    (IsLiquidContents(contents) ? QR_WORLD_CLUSTER_LIQUID_BIT : 0));
+    }
+
+    // Cluster 0 is the hole: the whole map, solid, and the answer for any leaf the tree cannot
+    // reach. The edge cluster is the same. Neither one is a light's home.
+    for (uint32_t cluster : { uint32_t(0), uint32_t(leafCount) })
+    {
+        clusters.mins[cluster] = boundsMin;
+        clusters.maxs[cluster] = boundsMax;
+        clusters.flags[cluster] = QR_WORLD_CLUSTER_SOLID_BIT;
+    }
+
+    return true;
+}
+
+// Mod_PointInLeaf: walk from the tree's first node until a leaf.
+int32_t LeafAtPoint(const EditorScene &scene, const float point[3])
+{
+    if (scene.nodes.empty())
+    {
+        return -1;
+    }
+
+    int32_t nodeIndex = 0;
+
+    for (size_t step = 0; step <= scene.nodes.size(); step++)
+    {
+        if (nodeIndex < 0 || size_t(nodeIndex) >= scene.nodes.size())
+        {
+            return -1;
+        }
+
+        const EditorBspNode &node = scene.nodes[size_t(nodeIndex)];
+        const float distance = point[0] * node.normal[0] + point[1] * node.normal[1] +
+                               point[2] * node.normal[2] - node.distance;
+        const int32_t child = distance > 0.0f ? node.children[0] : node.children[1];
+
+        if (child >= 0)
+        {
+            nodeIndex = child;
+            continue;
+        }
+
+        const int32_t leaf = -(child + 1);
+        return uint32_t(leaf) < scene.worldClusters.numLeafs ? leaf : -1;
+    }
+
+    return -1;
+}
+
+// RT_ResolveLightLeaf: the light's own leaf, and when that one is solid or the solid leaf a
+// probe outward at 2, 8 and 24 units, because a light modelled inside a wall still has to
+// reach the room it lights.
+uint32_t ResolveLightCluster(const EditorScene &scene, const float origin[3])
+{
+    const EditorWorldClusters &clusters = scene.worldClusters;
+
+    if (scene.nodes.empty() || clusters.numLeafs == 0)
+    {
+        return QR_CLUSTER_LIGHT_NO_CLUSTER;
+    }
+
+    auto usableLeaf = [&clusters](int32_t leaf) {
+        return leaf > 0 && uint32_t(leaf) < clusters.numLeafs &&
+               clusters.contents[size_t(leaf)] != kBspContentsSolid;
+    };
+
+    if (usableLeaf(LeafAtPoint(scene, origin)))
+    {
+        return uint32_t(LeafAtPoint(scene, origin));
+    }
+
+    static const float probeDirections[6][3] = {
+        { 1.0f, 0.0f, 0.0f },  { -1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f },
+        { 0.0f, -1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f },  { 0.0f, 0.0f, -1.0f },
+    };
+
+    for (float probeDistance : kLightProbeDistances)
+    {
+        for (const auto &direction : probeDirections)
+        {
+            const float probe[3] = {
+                origin[0] + probeDistance * direction[0],
+                origin[1] + probeDistance * direction[1],
+                origin[2] + probeDistance * direction[2],
+            };
+            const int32_t leaf = LeafAtPoint(scene, probe);
+
+            if (usableLeaf(leaf))
+            {
+                return uint32_t(leaf);
+            }
+        }
+    }
+
+    return QR_CLUSTER_LIGHT_NO_CLUSTER;
+}
+
+// RT_SurfaceCentroidLeaf: a surface belongs to the leaf just outside its own face, probed at
+// 0.01 and then 1 unit along the normal for the faces whose centroid lands in the wall. The
+// renderer indexes the light lists with the cluster of a shading point, so every vertex of the
+// surface carries it. A face that finds no open leaf falls back to cluster 0, the hole the
+// tables keep for solid geometry.
+uint32_t ResolveSurfaceCluster(const EditorScene &scene, const float centroid[3],
+                               const float normal[3])
+{
+    if (scene.nodes.empty() || scene.worldClusters.numLeafs == 0)
+    {
+        return 0;
+    }
+
+    static const float kProbeOffsets[2] = { 0.01f, 1.0f };
+
+    for (float offset : kProbeOffsets)
+    {
+        const float point[3] = {
+            centroid[0] + offset * normal[0],
+            centroid[1] + offset * normal[1],
+            centroid[2] + offset * normal[2],
+        };
+        const int32_t leaf = LeafAtPoint(scene, point);
+
+        if (leaf > 0 && uint32_t(leaf) < scene.worldClusters.numLeafs &&
+            scene.worldClusters.contents[size_t(leaf)] != kBspContentsSolid)
+        {
+            return uint32_t(leaf);
+        }
+    }
+
+    return 0;
+}
+
 }
 
 bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, EditorScene &scene,
@@ -586,8 +972,10 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
 
     if (!LumpFits(lumps[1], bytes.size(), 20) ||
         !LumpFits(lumps[3], bytes.size(), 12) ||
+        !LumpFits(lumps[5], bytes.size(), 24) ||
         !LumpFits(lumps[6], bytes.size(), 40) ||
         !LumpFits(lumps[7], bytes.size(), 20) ||
+        !LumpFits(lumps[10], bytes.size(), 28) ||
         !LumpFits(lumps[12], bytes.size(), 4) ||
         !LumpFits(lumps[13], bytes.size(), 4))
     {
@@ -595,75 +983,117 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         return false;
     }
 
-    if (lumps[0].length > 0)
+    std::vector<BspEntity> entities;
+
+    if (!ParseBspEntities(bytes, lumps[0], entities))
     {
-        const std::string entities(
-            reinterpret_cast<const char *>(bytes.data() + lumps[0].offset),
-            lumps[0].length);
-        const size_t spawn = entities.find("\"classname\" \"info_player_start\"");
+        error = "malformed BSP entity lump in " + path;
+        return false;
+    }
 
-        if (spawn != std::string::npos)
+    const size_t planeCount = lumps[1].length / 20;
+    std::vector<BspPlane> planes(planeCount);
+
+    for (size_t i = 0; i < planeCount; i++)
+    {
+        const size_t offset = lumps[1].offset + i * 20;
+        planes[i].normal[0] = ReadLittleEndian<float>(bytes, offset);
+        planes[i].normal[1] = ReadLittleEndian<float>(bytes, offset + 4);
+        planes[i].normal[2] = ReadLittleEndian<float>(bytes, offset + 8);
+        planes[i].distance = ReadLittleEndian<float>(bytes, offset + 12);
+    }
+
+    std::string treeError;
+
+    if (!ParseBspTree(bytes, lumps[5], lumps[10], planes, scene, treeError))
+    {
+        error = treeError + " in " + path;
+        return false;
+    }
+
+    const BspEntity *spawn = nullptr;
+
+    for (const char *spawnClass : { "info_player_start", "info_player_deathmatch",
+                                    "info_player_coop" })
+    {
+        for (const BspEntity &entity : entities)
         {
-            const size_t blockStart = entities.rfind('{', spawn);
-            const size_t blockEnd = entities.find('}', spawn);
-
-            if (blockStart != std::string::npos && blockEnd != std::string::npos)
+            if (entity.Value("classname") == spawnClass)
             {
-                const std::string block = entities.substr(blockStart, blockEnd - blockStart);
-
-                auto readValue = [&block](const char *key) {
-                    const std::string quotedKey = "\"" + std::string(key) + "\"";
-                    const size_t keyPosition = block.find(quotedKey);
-
-                    if (keyPosition == std::string::npos)
-                    {
-                        return std::string();
-                    }
-
-                    const size_t valueStart = block.find('"', keyPosition + quotedKey.size());
-
-                    if (valueStart == std::string::npos)
-                    {
-                        return std::string();
-                    }
-
-                    const size_t valueEnd = block.find('"', valueStart + 1);
-
-                    if (valueEnd == std::string::npos)
-                    {
-                        return std::string();
-                    }
-
-                    return block.substr(valueStart + 1, valueEnd - valueStart - 1);
-                };
-
-                const std::string origin = readValue("origin");
-                const std::string angle = readValue("angle");
-                float x = 0.0f;
-                float y = 0.0f;
-                float z = 0.0f;
-
-                if (std::sscanf(origin.c_str(), "%f %f %f", &x, &y, &z) == 3)
-                {
-                    scene.cameraPosition[0] = x;
-                    scene.cameraPosition[1] = y;
-                    scene.cameraPosition[2] = z + 22.0f;
-                    scene.cameraYawDegrees = float(std::atof(angle.c_str()));
-                    scene.hasCamera = true;
-                }
+                spawn = &entity;
+                break;
             }
+        }
+
+        if (spawn)
+        {
+            break;
         }
     }
 
+    if (spawn)
+    {
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+
+        if (std::sscanf(spawn->Value("origin").c_str(), "%f %f %f", &x, &y, &z) == 3)
+        {
+            scene.cameraPosition[0] = x;
+            scene.cameraPosition[1] = y;
+            // The Quake player's eye sits 22 units above the entity origin.
+            scene.cameraPosition[2] = z + 22.0f;
+            scene.cameraYawDegrees = float(std::atof(spawn->Value("angle").c_str()));
+            scene.hasCamera = true;
+        }
+    }
+
+    for (const BspEntity &entity : entities)
+    {
+        const std::string &className = entity.Value("classname");
+
+        if (!StartsWithLight(className))
+        {
+            continue;
+        }
+
+        float position[3] = {};
+
+        if (std::sscanf(entity.Value("origin").c_str(), "%f %f %f", &position[0],
+                        &position[1], &position[2]) != 3)
+        {
+            continue;
+        }
+
+        const std::string &intensityText = entity.Value("light");
+        float intensity = intensityText.empty()
+                              ? kDefaultLightIntensity
+                              : float(std::atof(intensityText.c_str()));
+
+        EditorLight light;
+        light.position[0] = position[0];
+        light.position[1] = position[1];
+        light.position[2] = position[2];
+        light.intensity = intensity;
+        light.radius = kDefaultLightRadiusMeters * kQuakeUnitsPerMeter;
+        light.cluster = ResolveLightCluster(scene, light.position);
+        light.className = className;
+
+        for (int channel = 0; channel < 3; channel++)
+        {
+            light.color[channel] = intensity * kLightIntensityScale;
+        }
+
+        scene.lights.push_back(std::move(light));
+    }
+
     const size_t vertexCount = lumps[3].length / 12;
-    const size_t planeCount = lumps[1].length / 20;
     const size_t texInfoCount = lumps[6].length / 40;
     const size_t faceCount = lumps[7].length / 20;
     const size_t edgeCount = lumps[12].length / 4;
     const size_t surfEdgeCount = lumps[13].length / 4;
 
     std::vector<float> vertices(vertexCount * 3);
-    std::vector<BspPlane> planes(planeCount);
     std::vector<BspTexInfo> texInfos(texInfoCount);
     std::vector<BspFace> faces(faceCount);
     std::vector<BspEdge> edges(edgeCount);
@@ -675,14 +1105,6 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         vertices[i * 3 + 0] = ReadLittleEndian<float>(bytes, offset);
         vertices[i * 3 + 1] = ReadLittleEndian<float>(bytes, offset + 4);
         vertices[i * 3 + 2] = ReadLittleEndian<float>(bytes, offset + 8);
-    }
-
-    for (size_t i = 0; i < planeCount; i++)
-    {
-        const size_t offset = lumps[1].offset + i * 20;
-        planes[i].normal[0] = ReadLittleEndian<float>(bytes, offset);
-        planes[i].normal[1] = ReadLittleEndian<float>(bytes, offset + 4);
-        planes[i].normal[2] = ReadLittleEndian<float>(bytes, offset + 8);
     }
 
     for (size_t i = 0; i < texInfoCount; i++)
@@ -896,6 +1318,25 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
 
         EditorSurface &surface = surfaceForTexture(textureName, textureIndex);
 
+        float centroid[3] = { 0.0f, 0.0f, 0.0f };
+
+        for (size_t corner = 0; corner + 2 < polygon.size(); corner += 3)
+        {
+            centroid[0] += polygon[corner + 0];
+            centroid[1] += polygon[corner + 1];
+            centroid[2] += polygon[corner + 2];
+        }
+
+        if (polygon.size() >= 3)
+        {
+            const float corners = float(polygon.size() / 3);
+            centroid[0] /= corners;
+            centroid[1] /= corners;
+            centroid[2] /= corners;
+        }
+
+        const uint32_t surfaceCluster = ResolveSurfaceCluster(scene, centroid, faceNormal);
+
         for (size_t corner = 1; corner + 1 < polygon.size() / 3; corner++)
         {
             const size_t sourceCorners[3] = { 0, corner, corner + 1 };
@@ -918,6 +1359,7 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
                 }
 
                 vertex.packedColor = 0xFFFFFFFFu;
+                vertex.cluster = surfaceCluster;
                 surface.indices.push_back(uint32_t(surface.vertices.size()));
                 surface.vertices.push_back(vertex);
             }
