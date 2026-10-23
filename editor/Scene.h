@@ -53,6 +53,13 @@ struct EditorLight
     // Quake entity light: the leaf at its origin, or the first non-solid leaf a short probe
     // outward finds. QR_CLUSTER_LIGHT_NO_CLUSTER when the map has no leaf table.
     uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
+    // A spot light is a spherical one plus a cone: the game's `spot` key with a direction and
+    // the `angle_inner` / `angle_outer` half-angles, both in degrees and clamped to [0, 90]
+    // with the inner one never wider than the outer.
+    bool spot = false;
+    float direction[3] = { 0.0f, 0.0f, 1.0f };
+    float angleInner = 0.0f;
+    float angleOuter = 30.0f;
     std::string className;
 };
 
@@ -69,6 +76,10 @@ void SetEditorLightIntensity(EditorLight &light, float intensity);
 // Writes the hue multiplier and refreshes the radiance, so a colour edit does not have to know
 // the intensity scale.
 void SetEditorLightTint(EditorLight &light, const float tint[3]);
+
+// Clamps the authored cone to the range RT_ClampLightCone accepts: half-angles in [0, 90]
+// degrees with the inner one never wider than the outer.
+void ClampEditorLightCone(EditorLight &light);
 
 // One node of the BSP tree, holding only what a point-in-leaf walk needs. children >= 0 are
 // node indices, children < 0 are leaves addressed as -(child + 1).

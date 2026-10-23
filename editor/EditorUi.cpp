@@ -103,6 +103,9 @@ bool EditorUi::Initialize(HWND window, QrInstance instance, const std::string &f
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    // Dragging on empty panel space must not move the window: the outline button in a light
+    // field is easy to miss, and a stray drag used to slide the whole panel off screen.
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
 
     ApplyEditorStyle();
 

@@ -1166,16 +1166,37 @@ void EditorApp::UploadLights()
     for (size_t index = 0; index < m_scene.lights.size(); index++)
     {
         const EditorLight &light = m_scene.lights[index];
+        // RT_LIGHT_Emit uploads a spot light when the entry's cone is on and its axis is not
+        // zero, and a spherical one otherwise.
+        const bool isSpot = light.spot && (light.direction[0] * light.direction[0] +
+                                           light.direction[1] * light.direction[1] +
+                                           light.direction[2] * light.direction[2]) > 0.0f;
 
-        QrSphericalLightUploadInfo info = {};
-        // RT_UploadAllElights numbers map lights from UINT16_MAX upwards and
-        // keeps the editor's world geometry IDs (1..N) out of the way.
-        info.uniqueID = LightUniqueID(index);
-        info.color = { light.color[0], light.color[1], light.color[2] };
-        info.position = { light.position[0], light.position[1], light.position[2] };
-        info.radius = light.radius;
+        if (isSpot)
+        {
+            QrSpotLightUploadInfo info = {};
+            info.uniqueID = LightUniqueID(index);
+            info.color = { light.color[0], light.color[1], light.color[2] };
+            info.position = { light.position[0], light.position[1], light.position[2] };
+            info.direction = { light.direction[0], light.direction[1], light.direction[2] };
+            info.radius = light.radius;
+            info.angleInner = light.angleInner * 0.01745329252f;
+            info.angleOuter = light.angleOuter * 0.01745329252f;
 
-        lastResult = qrUploadSphericalLight(m_instance, &info);
+            lastResult = qrUploadSpotLight(m_instance, &info);
+        }
+        else
+        {
+            QrSphericalLightUploadInfo info = {};
+            // RT_UploadAllElights numbers map lights from UINT16_MAX upwards and
+            // keeps the editor's world geometry IDs (1..N) out of the way.
+            info.uniqueID = LightUniqueID(index);
+            info.color = { light.color[0], light.color[1], light.color[2] };
+            info.position = { light.position[0], light.position[1], light.position[2] };
+            info.radius = light.radius;
+
+            lastResult = qrUploadSphericalLight(m_instance, &info);
+        }
 
         if (lastResult != QR_SUCCESS)
         {
@@ -1194,6 +1215,45 @@ void EditorApp::UploadLights()
                          this);
         }
     }
+}
+
+void EditorApp::LogLightCluster(int32_t index)
+{
+    if (index < 0 || size_t(index) >= m_scene.lights.size())
+    {
+        return;
+    }
+
+    const EditorLight &light = m_scene.lights[size_t(index)];
+    uint64_t uids[128] = {};
+    uint32_t count = 0;
+
+    if (qrGetClusterLightList(m_instance, light.cluster, uids, 128, &count) != QR_SUCCESS)
+    {
+        PrintMessage(("light " + std::to_string(index) + ": cluster " +
+                      std::to_string(light.cluster) + " unreadable")
+                         .c_str(),
+                     this);
+        return;
+    }
+
+    // A light its own cluster does not list cannot be shaded there, whatever it was authored to:
+    // this is what says so, instead of a dark viewport that looks like a bad radiance value.
+    const uint64_t uid = LightUniqueID(size_t(index));
+    bool listed = false;
+
+    for (uint32_t slot = 0; slot < count; slot++)
+    {
+        listed = listed || uids[slot] == uid;
+    }
+
+    PrintMessage(("light " + std::to_string(index) + ": cluster " +
+                  std::to_string(light.cluster) + " lists " + std::to_string(count) +
+                  (listed ? " with it" : " without it") + ", radiance " +
+                  std::to_string(light.color[0]) + " " + std::to_string(light.color[1]) + " " +
+                  std::to_string(light.color[2]) + ", radius " + std::to_string(light.radius))
+                     .c_str(),
+                 this);
 }
 
 void EditorApp::UploadClusterLightSources()
@@ -1736,9 +1796,29 @@ void EditorApp::DrawPanel(float deltaSeconds)
 
                     // Authoring mirrors the map entity keys the game honours: `light` (which becomes
                     // the radiance through kEditorLightIntensityScale) and rt_elight_radius.
-                    float intensity = light.intensity;
+                    //
+                    // Every widget's item rect is collected here so a scripted session can click a
+                    // field without reading pixels; see `panel rect` below.
+                    std::string rects;
 
-                    if (ImGui::SliderFloat("Light key##light", &intensity, 0.0f, 800.0f, "%.0f"))
+                    auto appendRect = [&rects](const char *name) {
+                        const ImVec2 min = ImGui::GetItemRectMin();
+                        const ImVec2 max = ImGui::GetItemRectMax();
+
+                        rects += " ";
+                        rects += name;
+                        rects += " " + std::to_string(int32_t(min.x)) + "," + std::to_string(int32_t(min.y)) +
+                                 " " + std::to_string(int32_t(max.x)) + "," +
+                                 std::to_string(int32_t(max.y));
+                    };
+
+                    float intensity = light.intensity;
+                    bool intensityDrawn = ImGui::SliderFloat("Light key##light", &intensity, 0.0f, 800.0f,
+                                                             "%.0f");
+
+                    appendRect("lightkey");
+
+                    if (intensityDrawn)
                     {
                         SetEditorLightIntensity(light, intensity);
                         PrintMessage(("light " + std::to_string(m_selectedLight) + ": light key " +
@@ -1747,7 +1827,12 @@ void EditorApp::DrawPanel(float deltaSeconds)
                                      this);
                     }
 
-                    if (ImGui::SliderFloat("Radius##light", &light.radius, 0.0f, 256.0f, "%.1f units"))
+                    const bool radiusDrawn = ImGui::SliderFloat("Radius##light", &light.radius, 0.0f, 256.0f,
+                                                                "%.1f units");
+
+                    appendRect("radius");
+
+                    if (radiusDrawn)
                     {
                         PrintMessage(("light " + std::to_string(m_selectedLight) + ": radius " +
                                       std::to_string(int32_t(light.radius)))
@@ -1756,8 +1841,8 @@ void EditorApp::DrawPanel(float deltaSeconds)
                     }
 
                     const bool colourDrawn = ImGui::ColorEdit3("Colour##light", light.tint);
-                    const ImVec2 colourMin = ImGui::GetItemRectMin();
-                    const ImVec2 colourMax = ImGui::GetItemRectMax();
+
+                    appendRect("colour");
 
                     if (colourDrawn)
                     {
@@ -1769,8 +1854,13 @@ void EditorApp::DrawPanel(float deltaSeconds)
                                      this);
                     }
 
-                    if (ImGui::DragFloat3("Position##light", light.position, 1.0f, -16384.0f, 16384.0f,
-                                          "%.1f units"))
+                    const bool positionDrawn =
+                        ImGui::DragFloat3("Position##light", light.position, 1.0f, -16384.0f, 16384.0f,
+                                          "%.1f units");
+
+                    appendRect("position");
+
+                    if (positionDrawn)
                     {
                         light.cluster = ResolveEditorLightCluster(m_scene, light.position);
                         PrintMessage(("light " + std::to_string(m_selectedLight) + ": position " +
@@ -1782,24 +1872,143 @@ void EditorApp::DrawPanel(float deltaSeconds)
                                      this);
                     }
 
-                    {
-                        const float scroll = ImGui::GetScrollY();
+                    // Aim and drop: the light lands just off the picked face on the camera side,
+                    // so it sits in the room instead of inside the wall.
+                    ImGui::BeginDisabled(!m_hasPickPoint);
 
-                        if (m_loggedLightRect != m_selectedLight || m_loggedPanelScroll != scroll)
+                    if (ImGui::Button("Place at pick##light") && m_hasPickPoint)
+                    {
+                        float ray[3] = { m_pickPoint[0] - m_cameraPosition[0],
+                                         m_pickPoint[1] - m_cameraPosition[1],
+                                         m_pickPoint[2] - m_cameraPosition[2] };
+                        const float rayLength =
+                            std::sqrt(ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2]);
+
+                        if (rayLength > 1e-4f)
                         {
-                            m_loggedLightRect = m_selectedLight;
-                            m_loggedPanelScroll = scroll;
-                            const ImVec2 positionMin = ImGui::GetItemRectMin();
-                            const ImVec2 positionMax = ImGui::GetItemRectMax();
-                            PrintMessage(("panel rect: colour " + std::to_string(int32_t(colourMin.x)) + "," +
-                                          std::to_string(int32_t(colourMin.y)) + " " +
-                                          std::to_string(int32_t(colourMax.x)) + "," +
-                                          std::to_string(int32_t(colourMax.y)) + " position " +
-                                          std::to_string(int32_t(positionMin.x)) + "," +
-                                          std::to_string(int32_t(positionMin.y)) + " " +
-                                          std::to_string(int32_t(positionMax.x)) + "," +
-                                          std::to_string(int32_t(positionMax.y)) + " scroll " +
-                                          std::to_string(int32_t(scroll)))
+                            // Stand off the surface along the pick ray so the light does not sit
+                            // inside the face it lights, but by the same short step whatever its
+                            // radius: a radius-sized step walks a large light out of the map,
+                            // where it resolves to no cluster and shades nothing at all.
+                            constexpr float kPlaceOffsetUnits = 8.0f;
+
+                            // The cone is aimed down the pick ray, at what was picked: a spot
+                            // that faced the camera would light the space behind it and leave
+                            // the surface the author clicked on dark.
+                            for (int axis = 0; axis < 3; axis++)
+                            {
+                                ray[axis] /= rayLength;
+                                light.position[axis] = m_pickPoint[axis] - ray[axis] * kPlaceOffsetUnits;
+                                light.direction[axis] = ray[axis];
+                            }
+
+                            light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+
+                            // A light that fell outside every leaf still belongs to what was
+                            // picked: the surface's own cluster is where its list has to be.
+                            if (light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER)
+                            {
+                                light.cluster = m_pickCluster;
+                            }
+
+                            PrintMessage(("light " + std::to_string(m_selectedLight) + ": placed at " +
+                                          std::to_string(int32_t(light.position[0])) + " " +
+                                          std::to_string(int32_t(light.position[1])) + " " +
+                                          std::to_string(int32_t(light.position[2])) + " cluster " +
+                                          std::to_string(light.cluster))
+                                             .c_str(),
+                                         this);
+                            LogLightCluster(m_selectedLight);
+                        }
+                    }
+
+                    ImGui::EndDisabled();
+                    appendRect("place");
+
+                    // The `spot` key and its cone, uploaded through qrUploadSpotLight so the
+                    // light stops being a point source.
+                    const bool spotDrawn = ImGui::Checkbox("Spot##light", &light.spot);
+
+                    appendRect("spot");
+
+                    if (spotDrawn)
+                    {
+                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": spot " +
+                                      (light.spot ? "on" : "off"))
+                                         .c_str(),
+                                     this);
+                        LogLightCluster(m_selectedLight);
+                    }
+
+                    if (light.spot)
+                    {
+                        // Three separate fields so each axis can be pointed at on its own - a
+                        // DragFloat3 packs them into one item rect and hides the axis under the
+                        // pointer, which makes both authoring and scripted checks guesswork.
+                        ImGui::TextUnformatted("Spot dir");
+
+                        const float fieldWidth =
+                            (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) /
+                            3.0f;
+
+                        bool directionDrawn = false;
+
+                        for (int axis = 0; axis < 3; axis++)
+                        {
+                            const char *ids[3] = {"##dirx", "##diry", "##dirz"};
+
+                            if (axis > 0)
+                            {
+                                ImGui::SameLine();
+                            }
+
+                            ImGui::SetNextItemWidth(fieldWidth);
+                            directionDrawn |=
+                                ImGui::DragFloat(ids[axis], &light.direction[axis], 0.05f, -1.0f, 1.0f,
+                                                 "%.2f");
+                            appendRect(axis == 0 ? "dirx" : (axis == 1 ? "diry" : "dirz"));
+                        }
+
+                        if (directionDrawn)
+                        {
+                            PrintMessage(("light " + std::to_string(m_selectedLight) + ": direction " +
+                                          std::to_string(light.direction[0]) + " " +
+                                          std::to_string(light.direction[1]) + " " +
+                                          std::to_string(light.direction[2]))
+                                             .c_str(),
+                                         this);
+                        }
+
+                        bool coneDrawn = ImGui::SliderFloat("Inner deg##light", &light.angleInner, 0.0f,
+                                                            90.0f, "%.1f deg");
+
+                        appendRect("inner");
+
+                        coneDrawn |= ImGui::SliderFloat("Outer deg##light", &light.angleOuter, 0.0f, 90.0f,
+                                                        "%.1f deg");
+
+                        appendRect("outer");
+
+                        if (coneDrawn)
+                        {
+                            ClampEditorLightCone(light);
+                            PrintMessage(("light " + std::to_string(m_selectedLight) + ": cone " +
+                                          std::to_string(int32_t(light.angleInner)) + ".." +
+                                          std::to_string(int32_t(light.angleOuter)) + " deg")
+                                             .c_str(),
+                                         this);
+                        }
+                    }
+
+                    {
+                        const uint64_t layout = std::hash<std::string>{}(rects);
+                        const uint64_t key = layout | 1u;
+
+                        if (m_loggedLightLayout != key)
+                        {
+                            m_loggedLightLayout = key;
+                            PrintMessage(("panel rect:" + rects + " scroll " +
+                                          std::to_string(int32_t(ImGui::GetScrollY())))
                                              .c_str(),
                                          this);
                         }

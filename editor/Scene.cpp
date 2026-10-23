@@ -934,6 +934,12 @@ void SetEditorLightTint(EditorLight &light, const float tint[3])
     SetEditorLightIntensity(light, light.intensity);
 }
 
+void ClampEditorLightCone(EditorLight &light)
+{
+    light.angleOuter = std::min(90.0f, std::max(0.0f, light.angleOuter));
+    light.angleInner = std::min(light.angleOuter, std::max(0.0f, light.angleInner));
+}
+
 uint32_t ResolveEditorLightCluster(const EditorScene &scene, const float origin[3])
 {
     return ResolveLightCluster(scene, origin);
