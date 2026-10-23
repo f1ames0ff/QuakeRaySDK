@@ -10,6 +10,8 @@ namespace qray
 namespace
 {
 
+constexpr float kInternalSceneUnitsPerMeter = 40.0f;
+
 int AxisIndex(QrAxis axis)
 {
     return int(axis) % 3;
@@ -51,10 +53,10 @@ SpatialFrame::SpatialFrame()
           { 0.0f, 1.0f, 0.0f },
           { 0.0f, 0.0f, 1.0f },
       }
-    , scale(1.0f)
-    , invScale(1.0f)
+    , scale(kInternalSceneUnitsPerMeter)
+    , invScale(1.0f / kInternalSceneUnitsPerMeter)
     , frameDeterminant(1.0f)
-    , identity(true)
+    , identity(false)
     , mirrored(false)
 {
 }
@@ -64,8 +66,11 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
     if (convention.size != sizeof(QrSpatialConvention) ||
         convention.version != QR_SPATIAL_CONVENTION_VERSION ||
         convention.hostIsRightHanded > QR_TRUE ||
-        !std::isfinite(convention.unitsPerMeter) ||
-        convention.unitsPerMeter <= 0.0f)
+        convention.reserved0 != 0 ||
+        convention.reserved[0] != 0 ||
+        convention.reserved[1] != 0 ||
+        convention.reserved[2] != 0 ||
+        convention.reserved[3] != 0)
     {
         return false;
     }
@@ -111,13 +116,7 @@ bool SpatialFrame::Configure(const QrSpatialConvention &convention)
         return false;
     }
 
-    const float candidateScale = QR_SCENE_UNITS_PER_METER / convention.unitsPerMeter;
-
-    if (!std::isfinite(candidateScale) || candidateScale <= 0.0f)
-    {
-        return false;
-    }
-
+    const float candidateScale = kInternalSceneUnitsPerMeter;
     const float candidateInvScale = 1.0f / candidateScale;
 
     if (!std::isfinite(candidateInvScale))
@@ -188,7 +187,7 @@ float SpatialFrame::Area(float value) const
 
 float SpatialFrame::Transmittance(float value) const
 {
-    return std::pow(std::max(value, 0.000001f), invScale);
+    return std::max(std::pow(std::max(value, 0.0f), invScale), 0.000001f);
 }
 
 QrTransform SpatialFrame::Transform(const QrTransform &value) const
@@ -204,6 +203,19 @@ QrTransform SpatialFrame::Transform(const QrTransform &value) const
                          hostToScene[row][1] * value.matrix[1][column] +
                          hostToScene[row][2] * value.matrix[2][column]);
         }
+    }
+
+    return result;
+}
+
+QrGeometryUploadInfo SpatialFrame::Geometry(const QrGeometryUploadInfo &value) const
+{
+    QrGeometryUploadInfo result = value;
+    result.transform = Transform(value.transform);
+
+    if (value.passThroughType == QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT)
+    {
+        result.layerColors[2].data[1] = Length(value.layerColors[2].data[1]);
     }
 
     return result;

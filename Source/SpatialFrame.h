@@ -24,6 +24,7 @@ public:
     float Transmittance(float value) const;
 
     QrTransform Transform(const QrTransform &value) const;
+    QrGeometryUploadInfo Geometry(const QrGeometryUploadInfo &value) const;
     QrMatrix3D CubemapRotation(const QrMatrix3D &value) const;
 
     // A negative determinant in the composed scene transform reverses the

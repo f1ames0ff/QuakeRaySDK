@@ -6,7 +6,7 @@
 
 int main()
 {
-    if (std::strcmp(QR_API_VERSION, "1.05.0000") != 0)
+    if (std::strcmp(QR_API_VERSION, "1.06.0000") != 0)
     {
         std::fprintf(stderr, "unexpected QR_API_VERSION: %s\n", QR_API_VERSION);
         return 1;

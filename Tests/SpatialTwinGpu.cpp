@@ -176,7 +176,7 @@ void TransformDirection(const float matrix[16], const float direction[3], float 
     }
 }
 
-void MakeYUpFrame(float scale, float frame[16], float inverse[16])
+void MakeYUpFrame(float frame[16], float inverse[16])
 {
     const float rotation[3][3] = {
         { 1.0f, 0.0f, 0.0f },
@@ -191,8 +191,8 @@ void MakeYUpFrame(float scale, float frame[16], float inverse[16])
     {
         for (int column = 0; column < 3; column++)
         {
-            frame[column * 4 + row] = scale * rotation[row][column];
-            inverse[column * 4 + row] = rotation[column][row] / scale;
+            frame[column * 4 + row] = rotation[row][column];
+            inverse[column * 4 + row] = rotation[column][row];
         }
     }
 
@@ -200,23 +200,23 @@ void MakeYUpFrame(float scale, float frame[16], float inverse[16])
     inverse[15] = 1.0f;
 }
 
-void MakeMirrorXFrame(float scale, float inverse[16])
+void MakeMirrorXFrame(float inverse[16])
 {
     std::memset(inverse, 0, 16 * sizeof(float));
 
-    inverse[0] = -1.0f / scale;
-    inverse[5] = 1.0f / scale;
-    inverse[10] = 1.0f / scale;
+    inverse[0] = -1.0f;
+    inverse[5] = 1.0f;
+    inverse[10] = 1.0f;
     inverse[15] = 1.0f;
 }
 
-void MakeMirrorXForwardFrame(float scale, float frame[16])
+void MakeMirrorXForwardFrame(float frame[16])
 {
     std::memset(frame, 0, 16 * sizeof(float));
 
-    frame[0] = -scale;
-    frame[5] = scale;
-    frame[10] = scale;
+    frame[0] = -1.0f;
+    frame[5] = 1.0f;
+    frame[10] = 1.0f;
     frame[15] = 1.0f;
 }
 
@@ -259,12 +259,8 @@ void MakeArbitraryCanonicalTransform(QrTransform &transform)
 }
 
 
-// The host hands the renderer host world vertices plus a host matrix. The renderer
-// traces with (scale * axis) * M_host, where axis is the host->scene linear part, and
-// the already converted vertices come from (axis^T / scale) * v_canonical. For the
-// canonical placement to survive that chain,
-//     M_host = axis^T * M_canonical * axis,   t_host = axis^T * t_canonical / scale.
-void MakeHostTransform(const float hostToSceneFrame[16], float hostScale, const QrTransform &canonical,
+// Meter-valued inputs differ between these hosts only by their signed axis mapping.
+void MakeHostTransform(const float hostToSceneFrame[16], const QrTransform &canonical,
                        QrTransform &host)
 {
     float axis[3][3] = {};
@@ -273,7 +269,7 @@ void MakeHostTransform(const float hostToSceneFrame[16], float hostScale, const 
     {
         for (int column = 0; column < 3; column++)
         {
-            axis[row][column] = hostToSceneFrame[column * 4 + row] / hostScale;
+            axis[row][column] = hostToSceneFrame[column * 4 + row];
         }
     }
 
@@ -307,7 +303,7 @@ void MakeHostTransform(const float hostToSceneFrame[16], float hostScale, const 
             sum += axis[inner][row] * canonical.matrix[inner][3];
         }
 
-        host.matrix[row][3] = sum / hostScale;
+        host.matrix[row][3] = sum;
     }
 }
 
@@ -1196,23 +1192,16 @@ int main(int argc, char **argv)
     const float canonicalAcidColor[3] = { 0.81f, 0.98f, 0.77f };
     const float canonicalAcidDensity = 0.6f;
 
-    // Everything the reflect/refract and sky paths take is host-space. A host
-    // declares the same artistic values in its own units, so the twin has to
-    // derive them per convention exactly like a real host would.
-    auto makeSceneOptions = [&](const float hostFrame[16], float hostScale,
-                                const QrTransform &canonicalTransform) {
+    // Spatial values are meters for every host; these variants differ only in
+    // axis convention and handedness.
+    auto makeSceneOptions = [&](const float hostFrame[16], const QrTransform &canonicalTransform) {
         SceneOptions options = {};
-        MakeHostTransform(hostFrame, hostScale, canonicalTransform, options.transform);
+        MakeHostTransform(hostFrame, canonicalTransform, options.transform);
         options.water = true;
         options.acid = true;
         options.ui = true;
-        // Both are lengths in host units: the renderer multiplies them by the
-        // frame scale, so the host must not pre-divide them.
         options.waterWaveSpeed = canonicalWaterWaveSpeed;
         options.waterTextureAreaScale = canonicalWaterTextureAreaScale;
-        // Colours are transmittance per host unit, so the host declares the same
-        // artistic value it would use in its own units; the renderer raises them
-        // to the scene unit through SpatialFrame::Transmittance.
         options.waterColor = { { canonicalWaterColor[0], canonicalWaterColor[1],
                                  canonicalWaterColor[2] } };
         options.acidColor = { { canonicalAcidColor[0], canonicalAcidColor[1],
@@ -1221,12 +1210,12 @@ int main(int argc, char **argv)
         return options;
     };
 
-    auto makeSkyOptions = [](bool clouds, float hostScale) {
+    auto makeSkyOptions = [](bool clouds) {
         SkyOptions sky = {};
         sky.procedural = true;
         sky.clouds = clouds;
-        sky.cloudHeight = 400.0f / hostScale;
-        sky.cloudThickness = 120.0f / hostScale;
+        sky.cloudHeight = 10.0f;
+        sky.cloudThickness = 3.0f;
         return sky;
     };
 
@@ -1237,9 +1226,8 @@ int main(int argc, char **argv)
     const float canonicalPointPosition[3] = { 0.0f, -2.0f, 4.0f };
     const float canonicalPointNormal[3] = { 0.0f, 0.0f, 1.0f };
     const float canonicalPointRadius = 2.0f;
-    // Relative power: the renderer multiplies spherical/spot/polygonal light
-    // color by the frame scale squared, so a host with its own units declares
-    // the same scene power by dividing by that factor.
+    // Relative power is identical for meter-valued hosts; the SDK applies its
+    // fixed meter-to-scene scale.
     const float canonicalPointColor[3] = { 20.0f, 12.0f, 8.0f };
     const float canonicalFogDensity = 0.01f;
     const float canonicalClusterMin[3] = { -10.0f, -10.0f, -10.0f };
@@ -1255,20 +1243,18 @@ int main(int argc, char **argv)
     QrSpatialConvention identity = {
         sizeof(QrSpatialConvention), QR_SPATIAL_CONVENTION_VERSION,
         QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z,
-        QR_TRUE, QR_SCENE_UNITS_PER_METER, {},
+        QR_TRUE, 0, {},
     };
 
     QrSpatialConvention yUp = {
         sizeof(QrSpatialConvention), QR_SPATIAL_CONVENTION_VERSION,
         QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Z, QR_AXIS_POSITIVE_Y,
-        QR_TRUE, 1.0f, {},
+        QR_TRUE, 0, {},
     };
 
-    const float scale = QR_SCENE_UNITS_PER_METER;
-    const float inverseArea = 1.0f / (scale * scale);
     float frame[16] = {};
     float inverseFrame[16] = {};
-    MakeYUpFrame(scale, frame, inverseFrame);
+    MakeYUpFrame(frame, inverseFrame);
 
     SceneVertices yUpVertices = {};
     MakeSceneVertices(inverseFrame, yUpVertices);
@@ -1293,13 +1279,13 @@ int main(int argc, char **argv)
     TransformPoint(inverseFrame, canonicalPointPosition, yUpPointPosition);
     TransformDirection(inverseFrame, canonicalPointNormal, yUpPointNormal);
     Normalize(yUpPointNormal);
-    const float yUpPointRadius = canonicalPointRadius / scale;
+    const float yUpPointRadius = canonicalPointRadius;
     const float yUpPointColor[3] = {
-        canonicalPointColor[0] * inverseArea,
-        canonicalPointColor[1] * inverseArea,
-        canonicalPointColor[2] * inverseArea,
+        canonicalPointColor[0],
+        canonicalPointColor[1],
+        canonicalPointColor[2],
     };
-    const float yUpFogDensity = canonicalFogDensity * scale;
+    const float yUpFogDensity = canonicalFogDensity;
     float yUpClusterMin[3] = {};
     float yUpClusterMax[3] = {};
     TransformPoint(inverseFrame, canonicalClusterMin, yUpClusterMin);
@@ -1313,17 +1299,17 @@ int main(int argc, char **argv)
     TransformDirection(inverseFrame, canonicalParticleUp, yUpParticleUp);
     Normalize(yUpParticleRight);
     Normalize(yUpParticleUp);
-    const float yUpParticleSize = canonicalParticleSize / scale;
+    const float yUpParticleSize = canonicalParticleSize;
 
     QrSpatialConvention mirror = identity;
     mirror.sceneXAxis = QR_AXIS_NEGATIVE_X;
     mirror.hostIsRightHanded = QR_FALSE;
 
     float mirrorInverse[16] = {};
-    MakeMirrorXFrame(scale, mirrorInverse);
+    MakeMirrorXFrame(mirrorInverse);
 
     float mirrorFrame[16] = {};
-    MakeMirrorXForwardFrame(scale, mirrorFrame);
+    MakeMirrorXForwardFrame(mirrorFrame);
 
     SceneVertices mirrorVertices = {};
     MakeSceneVertices(mirrorInverse, mirrorVertices);
@@ -1367,13 +1353,13 @@ int main(int argc, char **argv)
     TransformDirection(mirrorInverse, canonicalPointNormal, mirrorPointNormal);
     Normalize(mirrorPointNormal);
 
-    const float mirrorPointRadius = canonicalPointRadius / scale;
+    const float mirrorPointRadius = canonicalPointRadius;
     const float mirrorPointColor[3] = {
-        canonicalPointColor[0] * inverseArea,
-        canonicalPointColor[1] * inverseArea,
-        canonicalPointColor[2] * inverseArea,
+        canonicalPointColor[0],
+        canonicalPointColor[1],
+        canonicalPointColor[2],
     };
-    const float mirrorFogDensity = canonicalFogDensity * scale;
+    const float mirrorFogDensity = canonicalFogDensity;
     float mirrorClusterMin[3] = {};
     float mirrorClusterMax[3] = {};
     TransformPoint(mirrorInverse, canonicalClusterMin, mirrorClusterMin);
@@ -1387,15 +1373,15 @@ int main(int argc, char **argv)
     TransformDirection(mirrorInverse, canonicalParticleUp, mirrorParticleUp);
     Normalize(mirrorParticleRight);
     Normalize(mirrorParticleUp);
-    const float mirrorParticleSize = canonicalParticleSize / scale;
+    const float mirrorParticleSize = canonicalParticleSize;
 
-    SceneOptions identityOptions = makeSceneOptions(identityFrame, 1.0f, canonicalGeometryTransform);
-    SceneOptions yUpOptions = makeSceneOptions(frame, scale, canonicalGeometryTransform);
-    SceneOptions mirrorOptions = makeSceneOptions(mirrorFrame, scale, canonicalGeometryTransform);
+    SceneOptions identityOptions = makeSceneOptions(identityFrame, canonicalGeometryTransform);
+    SceneOptions yUpOptions = makeSceneOptions(frame, canonicalGeometryTransform);
+    SceneOptions mirrorOptions = makeSceneOptions(mirrorFrame, canonicalGeometryTransform);
 
-    SkyOptions identitySky = makeSkyOptions(true, 1.0f);
-    SkyOptions yUpSky = makeSkyOptions(true, scale);
-    SkyOptions mirrorSky = makeSkyOptions(true, scale);
+    SkyOptions identitySky = makeSkyOptions(true);
+    SkyOptions yUpSky = makeSkyOptions(true);
+    SkyOptions mirrorSky = makeSkyOptions(true);
 
     auto runIdentity = [&](const SceneOptions &options, const SkyOptions &sky, RenderResult &result) {
         return RunPass(window, shaderFolder, blueNoisePath, identity, identityVertices, indices, options,
@@ -1418,7 +1404,7 @@ int main(int argc, char **argv)
 
     auto runYUp = [&](const SceneOptions &options, const SkyOptions &sky, RenderResult &result) {
         return RunPass(window, shaderFolder, blueNoisePath, yUp, yUpVertices, indices, options, sky,
-                       yUpView, yUpEye, yUpUp, 0.1f / scale, 100.0f / scale, 100.0f / scale,
+                       yUpView, yUpEye, yUpUp, 0.1f, 100.0f, 100.0f,
                        yUpFogDensity, yUpSun, yUpPointPosition, yUpPointNormal, yUpPointRadius,
                        yUpPointColor, yUpClusterMin, yUpClusterMax, yUpParticlePosition,
                        yUpParticleSize, yUpParticleRight, yUpParticleUp, result);
@@ -1426,8 +1412,8 @@ int main(int argc, char **argv)
 
     auto runMirror = [&](const SceneOptions &options, const SkyOptions &sky, RenderResult &result) {
         return RunPass(window, shaderFolder, blueNoisePath, mirror, mirrorVertices, mirrorIndices, options,
-                       sky, mirrorView, mirrorEye, mirrorUp, 0.1f / scale, 100.0f / scale,
-                       100.0f / scale, mirrorFogDensity, mirrorSun, mirrorPointPosition,
+                       sky, mirrorView, mirrorEye, mirrorUp, 0.1f, 100.0f,
+                       100.0f, mirrorFogDensity, mirrorSun, mirrorPointPosition,
                        mirrorPointNormal, mirrorPointRadius, mirrorPointColor, mirrorClusterMin,
                        mirrorClusterMax, mirrorParticlePosition, mirrorParticleSize, mirrorParticleRight,
                        mirrorParticleUp, result);
@@ -1465,7 +1451,7 @@ int main(int argc, char **argv)
     emptyScene.particles = false;
 
 
-    const SkyOptions noClouds = makeSkyOptions(false, 1.0f);
+    const SkyOptions noClouds = makeSkyOptions(false);
 
     RenderResult noWaterResult;
     RenderResult noAcidResult;

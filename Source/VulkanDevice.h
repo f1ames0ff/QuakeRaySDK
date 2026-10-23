@@ -237,7 +237,7 @@ private:
         QR_AXIS_POSITIVE_Y,
         QR_AXIS_POSITIVE_Z,
         QR_TRUE,
-        QR_SCENE_UNITS_PER_METER,
+        0,
         {},
     };
     bool                spatialFrameLocked = false;

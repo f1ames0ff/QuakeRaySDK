@@ -12,11 +12,11 @@ a geometry-only OBJ/BSP29 scene path for editor development.
 
 ## Package contents
 
-- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.05.0000`.
+- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.06.0000`.
 - `Source/` — renderer, RHI passes, lighting, shaders, and the FidelityFX API.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `Tests/` — engine-free GPU and policy tests.
-- `docs/spatial-contract.md` — host units, orientation, and conversion contract.
+- `docs/spatial-contract.md` — meter-valued inputs, orientation, and conversion contract.
 - `docs/embedding.md` — host integration guide.
 
 ## Requirements
@@ -81,16 +81,18 @@ FidelityFX provider, and exposes `qray::renderer`.
 
 ## Spatial contract
 
-The renderer normalizes host scene data into a right-handed, `+Z`-up internal
-space with 40 scene units per meter. The host declares its axes, handedness and
-`unitsPerMeter` once after instance creation with
-`qrSetSpatialConvention`; the default is the existing identity Quake
-convention. Right-handed and left-handed signed axis permutations are
-supported. `qrSetSmokeWindDirection` supplies the smoke wind in host scene
-space, and a cluster upload that omits both PVS tables is treated as
-all-visible. The world-depth target is `R32_SFLOAT`; `rayLength` is accepted up
-to the SDK safety ceiling instead of the former 250 m clamp. The full
-field-by-field conversion rules and the second-host checklist are in
+The renderer normalizes meter-valued host data into a right-handed, `+Z`-up
+internal space with 40 scene units per meter. The host declares only its axes
+and handedness with `qrSetSpatialConvention`; all reserved fields must be
+zero, and there is no configurable unit scale. Omitting the call selects
+identity axes and still requires meter-valued inputs. Right-handed and
+left-handed signed axis permutations are supported. QuakeRay's host adapter
+converts native Quake units to meters before spatial SDK calls;
+`SWAPCHAIN` uploads remain pixel-based. `qrSetSmokeWindDirection` supplies
+smoke wind in host scene space, and a cluster upload that omits both PVS tables
+is treated as all-visible. The world-depth target is `R32_SFLOAT`;
+`rayLength` is bounded by the 10,000,000 internal-scene-unit safety ceiling.
+The full field-by-field conversion rules and the second-host checklist are in
 [docs/spatial-contract.md](docs/spatial-contract.md).
 
 ## Frame readback
@@ -123,9 +125,9 @@ structures; a host supplies scene uploads through the `Qr*` contract in
 `qray.h`. Embedded/device-sharing integration and non-Windows targets are not
 part of the current package.
 
-`rayLength` is host-controlled up to the 10,000,000-scene-unit safety ceiling;
-the shader sky sentinel follows `2 * rayLength`, and the world-depth target is
-`R32_SFLOAT`. Right-handed and left-handed signed axis permutations with
+`rayLength` is expressed in meters up to 250,000 m (the 10,000,000 internal
+scene-unit safety ceiling); the shader sky sentinel follows `2 * rayLength`,
+and the world-depth target is `R32_SFLOAT`. Right-handed and left-handed signed axis permutations with
 uniform scale are supported. Arbitrary world rotations and non-uniform
 instance scale remain host-side conversion; the spatial contract is in
 [docs/spatial-contract.md](docs/spatial-contract.md).
