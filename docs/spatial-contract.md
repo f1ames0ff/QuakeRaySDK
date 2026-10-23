@@ -66,26 +66,33 @@ its native coordinates; the renderer mirrors the frame into the canonical
 right-handed scene and reverses triangle winding for indexed geometry, polygon
 lights and world-light faces. The host must supply the view matrix in the same
 handedness as its world (its native world-to-view matrix); the renderer
-converts it to the canonical camera space. Arbitrary rotations and non-uniform
-instance transforms are not part of this contract; the host must bake them
-into its data.
+converts it to the canonical camera space.
+
+Only the convention itself is restricted to an axis permutation: the world's
+own axes have to be a signed permutation of the scene axes, so a world whose
+"up" is an arbitrary rotated vector cannot be expressed and has to be rotated
+into one before it is handed over. Instance transforms are not restricted.
+`SpatialFrame::Transform` evaluates the linear map `scale * hostToScene * M`,
+which is exact for any `M`, so arbitrary instance rotations and non-uniform
+instance scales are converted without loss and the host does not have to bake
+them. Likewise `ReversesWinding` compares `det(M3x3)` against the frame
+determinant, so an instance whose own determinant is negative — mirrored
+geometry, or a non-uniform scale with an odd number of negative factors — is
+handled by the same rule regardless of how the frame is oriented. What the
+host does own is the orientation of its authored data: reflecting positions
+without reversing the triangle order changes what the triangles face, and the
+renderer does not undo that, it only cancels the flip of its own scene
+transform.
 
 The winding reversal keeps the host's authored winding authoritative: the
 renderer cancels the orientation flip that the composed scene transform
 introduces, so a triangle the host marks as front-facing is front-facing in the
-scene as well. The composed determinant is `det(instance transform)` times the
-frame determinant, so a negative-determinant instance transform is handled the
-same way as a mirrored frame, and the rule applies to indexed and non-indexed
-triangle lists alike. The host therefore still owns its own front faces,
-exactly as its rasterizer sees them. A host that stores a reflected copy of a
-right-handed world — the common case when a game mirrors a level, or when a
-left-handed world is derived from a right-handed one — must reverse that copy's
-triangle order when it creates the copy, because reflecting positions alone
-inverts their orientation. Reflection is not a renderer concern; the renderer
-only cancels the flip its own scene transform performs. `qray_spatial_twin_gpu`
-covers both halves: it renders the same scene through a right-handed Y-up frame
-and through a mirrored frame whose triangle order was reversed at export, and
-requires both images to match.
+scene as well, and the rule applies to indexed and non-indexed triangle lists
+alike. The host therefore still owns its own front faces, exactly as its
+rasterizer sees them, including the reflected-copy case described above.
+`qray_spatial_twin_gpu` covers both halves: it renders the same scene through a
+right-handed Y-up frame and through a mirrored frame whose triangle order was
+reversed at export, and requires both images to match.
 
 Because the flip is baked into the uploaded index buffer, `qrUpdateGeometryTransform`
 cannot change it afterwards: it raises `QR_CANT_UPDATE_TRANSFORM` when the new
