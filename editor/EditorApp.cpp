@@ -827,6 +827,17 @@ void EditorApp::Frame()
     draw.renderUiOnly = 0;
     draw.enableCpuProfiling = 0;
 
+    // The sun the viewport shows is the sun the sky and the shafts use, so the
+    // disc, the scattering direction and the directional light cannot disagree.
+    float toSun[3];
+    SunDirection(toSun);
+
+    BuildEditorFrameParams(m_settings, toSun, m_sunIntensity, eye, m_frameParams);
+    draw.pSkyParams = &m_frameParams.sky;
+    draw.pTonemappingParams = &m_frameParams.tonemap;
+    draw.pVolumetricParams = &m_frameParams.volume;
+    draw.pLevelFogParams = &m_frameParams.fog;
+
     const QrResult drawResult = qrDrawFrame(m_instance, &draw);
 
     if (drawResult != QR_SUCCESS)
@@ -1090,17 +1101,21 @@ void EditorApp::UpdateCamera(float deltaSeconds)
     }
 }
 
-void EditorApp::UploadSun()
+void EditorApp::SunDirection(float direction[3]) const
 {
     const float elevation = m_sunElevation * 0.01745329252f;
     const float azimuth = m_sunAzimuth * 0.01745329252f;
     const float cosElevation = std::cos(elevation);
 
-    const float toSun[3] = {
-        cosElevation * std::cos(azimuth),
-        cosElevation * std::sin(azimuth),
-        std::sin(elevation),
-    };
+    direction[0] = cosElevation * std::cos(azimuth);
+    direction[1] = cosElevation * std::sin(azimuth);
+    direction[2] = std::sin(elevation);
+}
+
+void EditorApp::UploadSun()
+{
+    float toSun[3];
+    SunDirection(toSun);
 
     QrDirectionalLightUploadInfo sun = {};
     sun.uniqueID = 2;
@@ -1719,12 +1734,106 @@ void EditorApp::DrawPanel(float deltaSeconds)
         ImGui::SliderFloat("Elevation", &m_sunElevation, -89.0f, 89.0f, "%.0f deg");
         ImGui::SliderFloat("Angular size", &m_sunAngularDiameter, 0.1f, 8.0f, "%.2f deg");
 
+        DrawGlobalSettings();
+
         ImGui::Separator();
         ImGui::TextUnformatted("RMB drag look  WASD move  Q/E down/up  Shift x4");
         ImGui::TextUnformatted("F1 panel  Ctrl+O reset camera");
     }
 
     ImGui::End();
+}
+
+void EditorApp::DrawGlobalSettings()
+{
+    EditorRenderSettings &settings = m_settings;
+
+    ImGui::Separator();
+
+    // Every group is open by default and the whole block scrolls, so the panel
+    // stays inside the viewport however many settings the game editor grows.
+    const float available = ImGui::GetIO().DisplaySize.y * 0.45f;
+    const float scrollHeight = available < 520.0f ? available : 520.0f;
+
+    if (!ImGui::BeginChild("GlobalScroll", ImVec2(360.0f, scrollHeight)))
+    {
+        ImGui::EndChild();
+        return;
+    }
+
+    const ImGuiTreeNodeFlags openGroup = ImGuiTreeNodeFlags_DefaultOpen;
+
+    if (ImGui::CollapsingHeader("Global", openGroup))
+    {
+        ImGui::SliderFloat("Brightness", &settings.brightness, 0.0f, 3.0f, "%.2f");
+
+        const char *skyTypes[] = { "Colour", "Cubemap", "Rasterized", "Procedural" };
+        ImGui::Combo("Sky type", &settings.skyType, skyTypes, IM_ARRAYSIZE(skyTypes));
+
+        ImGui::SliderFloat("Sky scale", &settings.skyScale, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderFloat("Sky brightness", &settings.skyBrightness, 0.0f, 10.0f, "%.2f");
+        ImGui::ColorEdit3("Sky colour", settings.skyColor);
+        ImGui::SliderFloat("Sky light mult", &settings.skyLightMultiplier, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderInt("Sky ambient lod", &settings.skyAmbientLod, 0, 10);
+        ImGui::Checkbox("Sky nee", &settings.skyNee);
+    }
+
+    if (ImGui::CollapsingHeader("Clouds", openGroup))
+    {
+        ImGui::Checkbox("Clouds##enabled", &settings.clouds);
+        ImGui::ColorEdit3("Cloud colour", settings.cloudsColor);
+        ImGui::SliderFloat("Cloud alpha", &settings.cloudsAlpha, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Coverage", &settings.cloudsCoverage, 0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat("Density", &settings.cloudsDensity, 0.0f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Speed", &settings.cloudsSpeed, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderInt("Quality", &settings.cloudsQuality, 0, QR_SKY_CLOUDS_MAX_QUALITY);
+        ImGui::SliderFloat("Height", &settings.cloudsHeight, 1.0f, 300000.0f, "%.0f units");
+        ImGui::SliderFloat("Thickness", &settings.cloudsThickness, 1.0f, 300000.0f, "%.0f units");
+    }
+
+    if (ImGui::CollapsingHeader("Sun disc", openGroup))
+    {
+        ImGui::SliderFloat("Disc scale", &settings.sunDiscScale, 0.0f, 20.0f, "%.2f");
+        ImGui::ColorEdit3("Disc colour", settings.sunColor);
+        ImGui::SliderFloat("Disc size", &settings.sunDiscSize, 0.0f, 10.0f, "%.2f");
+    }
+
+    if (ImGui::CollapsingHeader("God rays", openGroup))
+    {
+        ImGui::Checkbox("God rays##enabled", &settings.godRays);
+        ImGui::SliderFloat("Shaft strength", &settings.godRaysIntensity, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderInt("Shaft quality", &settings.godRaysQuality, 0, 3);
+    }
+
+    if (ImGui::CollapsingHeader("Volumetric fog", openGroup))
+    {
+        const char *volumeTypes[] = { "Off", "Depth based", "Full" };
+        ImGui::Combo("Volume type", &settings.volumeType, volumeTypes, IM_ARRAYSIZE(volumeTypes));
+        ImGui::SliderFloat("Scattering", &settings.volumeScatter, 0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat("Ambient", &settings.volumeAmbient, 0.0f, 8.0f, "%.2f");
+        ImGui::SliderFloat("Far", &settings.volumeFar, 0.0f, 4000.0f, "%.0f units");
+        ImGui::SliderFloat("Light intensity", &settings.volumeLightIntensity, 0.0f, 1000.0f, "%.0f");
+        ImGui::SliderFloat("Asymmetry", &settings.volumeAsymmetry, -0.99f, 0.99f, "%.2f");
+    }
+
+    if (ImGui::CollapsingHeader("Tonemap", openGroup))
+    {
+        ImGui::SliderFloat("White point", &settings.tonemapWhite, 1.0f, 40.0f, "%.2f");
+        ImGui::SliderFloat("Chroma", &settings.tonemapChroma, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Desaturation", &settings.tonemapDesat, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Max log", &settings.tonemapMaxLog, -4.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Min log", &settings.tonemapMinLog, -12.0f, 0.0f, "%.2f");
+        ImGui::SliderInt("Tonemap type", &settings.tonemapType, 0, 4);
+    }
+
+    if (ImGui::CollapsingHeader("Level fog", openGroup))
+    {
+        ImGui::ColorEdit3("Fog colour", settings.fogColor);
+        ImGui::SliderFloat("Density", &settings.fogDensity, 0.0f, 1.0f, "%.4f");
+        ImGui::SliderFloat("Sky blend", &settings.fogSkyBlend, 0.0f, 1.0f, "%.2f");
+    }
+
+    ImGui::EndChild();
 }
 
 int EditorApp::Run(int showCommand)

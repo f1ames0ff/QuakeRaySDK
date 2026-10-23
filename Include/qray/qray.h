@@ -1215,6 +1215,8 @@ typedef struct QrDrawFrameSkyParams
 
     float       skyColorMultiplier;
 
+    // Carries the opacity the clouds are composited with when skyType is
+    // QR_SKY_TYPE_PROCEDURAL; the procedural sky has no tint strength to put here.
     float       skyColorSaturation;
     float       skyAmbientLod;
     float       skyLightMultiplier;
@@ -1224,6 +1226,22 @@ typedef struct QrDrawFrameSkyParams
 
     QrCubemap   skyCubemap;
 
+    // The rotation applied to skyCubemap for QR_SKY_TYPE_CUBEMAP.
+    //
+    // For QR_SKY_TYPE_PROCEDURAL this matrix is not a rotation: it is the cloud
+    // block, six floats starting at matrix[0][0], in this order:
+    //
+    //     [0][0..2]  cloud colour, linear RGB
+    //     [1][0]     coverage, 0..1
+    //     [1][1]     density
+    //     [1][2]     wind speed
+    //     [2][0]     1 when the cloud layer is drawn, 0 when it is not
+    //     [2][1]     layer base height, scene units
+    //     [2][2]     layer thickness, scene units
+    //
+    // The packing keeps the struct layout stable; a host that fills this field
+    // for a procedural sky must fill the whole block, because an unset coverage
+    // or density draws nothing at all.
     QrMatrix3D  skyCubemapRotationTransform;
 
     QrBool32    godRaysEnabled;

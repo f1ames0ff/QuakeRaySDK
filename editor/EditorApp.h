@@ -9,6 +9,7 @@
 #include <qray/qray.h>
 
 #include "Assets.h"
+#include "EditorSettings.h"
 #include "EditorUi.h"
 #include "Scene.h"
 
@@ -43,9 +44,11 @@ private:
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
     void UploadSun();
+    void SunDirection(float direction[3]) const;
     void UploadLights();
     void UploadClusterLightSources();
     void DrawPanel(float deltaSeconds);
+    void DrawGlobalSettings();
 
     // Casts a ray through the cursor the way QRE_DoPick resolves a click against the world:
     // the nearest surface along the ray wins, and a light in front of that surface wins over it.
@@ -94,6 +97,11 @@ private:
     float m_sunAzimuth = 32.0f;
     float m_sunElevation = 45.0f;
     float m_sunAngularDiameter = 0.5f;
+
+    // The Global tab of the game editor. The frame params derived from it are
+    // rebuilt every frame and only live for the duration of the qrDrawFrame call.
+    EditorRenderSettings m_settings;
+    EditorFrameParams m_frameParams;
 
     float m_frameTimeMs = 0.0f;
     uint32_t m_clientWidth = 0;
