@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -46,6 +47,14 @@ struct CaseResult
 {
     std::string name;
     double milliseconds;
+    double normalized;
+};
+
+struct BaselineEntry
+{
+    bool hasNormalized = false;
+    double normalized = 0.0;
+    double absolute = 0.0;
 };
 
 const PerfCase kCases[] =
@@ -56,7 +65,34 @@ const PerfCase kCases[] =
     { "huge",   1048576, 65536, 256 },
 };
 
-constexpr int kWarmupHugePasses = 8;
+// Measured in the same round-robin series as the cases and used only as a
+// divisor: a clock or power state change moves the reference and the cases
+// alike, so their ratio stays comparable across machines while the absolute
+// milliseconds do not. It runs long enough to be dominated by the same shader
+// work as the cases rather than by the dispatch overhead a short probe measures.
+const PerfCase kReferenceCase = { "reference", 262144, 4096, 256 };
+
+constexpr int kCaseCount = int(sizeof(kCases) / sizeof(kCases[0]));
+
+// This class of GPU switches between clock/power states several times per
+// second, and a case timed on its own lands in whichever state happens to be
+// active - a 2x spread that no divisor taken minutes earlier can cancel. The
+// cases and the reference therefore run round-robin inside one series, so every
+// sample draws from the same distribution of states and the lowest round of a
+// case comes from the same state as the lowest reference round.
+constexpr int kTimedRounds = 8;
+
+// The first series only settles the pipeline and the caches; the rounds of the
+// following ones are what the gate reads. A round is cheap enough that several
+// series cost a fraction of the warmup while giving the minimum - the estimate
+// contention and clock transitions can only inflate - many more chances to be
+// sampled in the fastest state the hardware actually reaches.
+constexpr int kSeriesCount = 3;
+static_assert(kSeriesCount > 1, "one series is discarded as a warmup");
+
+// Warmup is time based rather than a pass count: it has to hold the GPU in its
+// sustained state long enough for the driver to stop ramping clocks.
+constexpr double kWarmupSeconds = 0.25;
 
 qray::ShLightEncoded MakeLight()
 {
@@ -87,7 +123,33 @@ qray::ShLightEncoded MakeLight()
     return light;
 }
 
-double RunCase(VulkanTestContext &gpu, nvrhi::IShader *shader, const PerfCase &perfCase, float &checksum)
+struct CaseRunner
+{
+    void Prepare(VulkanTestContext &gpu, nvrhi::IShader *shader, const PerfCase &perfCase);
+    double Dispatch();
+    float ReadChecksum();
+
+private:
+    nvrhi::IDevice *m_device = nullptr;
+    nvrhi::ComputeState m_state;
+    nvrhi::BindingLayoutHandle m_uniformLayout;
+    nvrhi::BindingLayoutHandle m_lightLayout;
+    nvrhi::BindingLayoutHandle m_probeLayout;
+    nvrhi::BindingSetHandle m_uniformSet;
+    nvrhi::BindingSetHandle m_lightSet;
+    nvrhi::BindingSetHandle m_probeSet;
+    nvrhi::ComputePipelineHandle m_pipeline;
+    nvrhi::BufferHandle m_uniformBuffer;
+    nvrhi::BufferHandle m_paramsBuffer;
+    nvrhi::BufferHandle m_lightsBuffer;
+    nvrhi::BufferHandle m_outputBuffer;
+    nvrhi::BufferHandle m_readbackBuffer;
+    std::vector<nvrhi::BufferHandle> m_lightDummies;
+    nvrhi::BufferHandle m_lightStatsDummy;
+    uint32_t m_groups = 0;
+};
+
+void CaseRunner::Prepare(VulkanTestContext &gpu, nvrhi::IShader *shader, const PerfCase &perfCase)
 {
     nvrhi::IDevice *device = gpu.context.GetDevice();
 
@@ -219,6 +281,26 @@ double RunCase(VulkanTestContext &gpu, nvrhi::IShader *shader, const PerfCase &p
     state.bindings.push_back(lightSet.Get());
     state.bindings.push_back(probeSet.Get());
 
+    // ComputeState stores raw pointers, so the pipeline, its layouts and the
+    // binding sets - and through them the buffers - have to outlive Prepare and
+    // are owned here instead of by its locals.
+    m_device = device;
+    m_state = state;
+    m_uniformLayout = uniformLayout;
+    m_lightLayout = lightLayout;
+    m_probeLayout = probeLayout;
+    m_uniformSet = uniformSet;
+    m_lightSet = lightSet;
+    m_probeSet = probeSet;
+    m_pipeline = pipeline;
+    m_uniformBuffer = uniformBuffer;
+    m_paramsBuffer = paramsBuffer;
+    m_lightsBuffer = lightsBuffer;
+    m_outputBuffer = outputBuffer;
+    m_readbackBuffer = readbackBuffer;
+    m_lightDummies = lightDummies;
+    m_lightStatsDummy = lightStatsDummy;
+
     {
         auto setup = device->createCommandList();
         setup->open();
@@ -230,56 +312,69 @@ double RunCase(VulkanTestContext &gpu, nvrhi::IShader *shader, const PerfCase &p
         device->waitForIdle();
     }
 
-    const uint32_t groups = (perfCase.threads + 63) / 64;
-    std::vector<double> timings;
+    m_groups = (perfCase.threads + 63) / 64;
+}
 
-    for (int iteration = 0; iteration < 4; iteration++)
-    {
-        auto timer = device->createTimerQuery();
-        auto cmd = device->createCommandList();
-        cmd->open();
-        cmd->setComputeState(state);
-        cmd->beginTimerQuery(timer);
-        cmd->dispatch(groups, 1, 1);
-        cmd->endTimerQuery(timer);
-        cmd->copyBuffer(readbackBuffer, 0, outputBuffer, 0, sizeof(float));
-        cmd->close();
-        device->executeCommandList(cmd);
-        device->waitForIdle();
+double CaseRunner::Dispatch()
+{
+    auto timer = m_device->createTimerQuery();
+    auto cmd = m_device->createCommandList();
+    cmd->open();
+    cmd->setComputeState(m_state);
+    cmd->beginTimerQuery(timer);
+    cmd->dispatch(m_groups, 1, 1);
+    cmd->endTimerQuery(timer);
+    cmd->copyBuffer(m_readbackBuffer, 0, m_outputBuffer, 0, sizeof(float));
+    cmd->close();
+    m_device->executeCommandList(cmd);
+    m_device->waitForIdle();
 
-        if (iteration > 0)
-        {
-            timings.push_back(device->getTimerQueryTime(timer) * 1000.0);
-        }
-    }
+    return m_device->getTimerQueryTime(timer) * 1000.0;
+}
 
-    std::sort(timings.begin(), timings.end());
-
-    const void *data = device->mapBuffer(readbackBuffer, nvrhi::CpuAccessMode::Read);
+float CaseRunner::ReadChecksum()
+{
+    float checksum = 0.0f;
+    const void *data = m_device->mapBuffer(m_readbackBuffer, nvrhi::CpuAccessMode::Read);
     Require(data != nullptr, "map perf readback");
     std::memcpy(&checksum, data, sizeof(float));
-    device->unmapBuffer(readbackBuffer);
+    m_device->unmapBuffer(m_readbackBuffer);
+    return checksum;
+}
 
-    return timings[timings.size() / 2];
+// Runs the case for at least the requested time and returns its checksum, so the
+// dispatches that only warm up the pipeline are still verified end to end.
+float WarmUp(VulkanTestContext &gpu, nvrhi::IShader *shader, const PerfCase &perfCase, double seconds)
+{
+    CaseRunner runner;
+    runner.Prepare(gpu, shader, perfCase);
+
+    const auto start = std::chrono::steady_clock::now();
+    do
+    {
+        runner.Dispatch();
+    } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
+
+    return runner.ReadChecksum();
 }
 
 void WriteBaseline(const std::filesystem::path &path, const std::vector<CaseResult> &results)
 {
     std::ofstream file(path);
     Require(file.is_open(), "open baseline for writing: " + path.string());
-    file << "# dtal perf baseline: case milliseconds\n";
+    file << "# dtal perf baseline: case ratio to the in-run reference and absolute milliseconds\n";
     for (const CaseResult &result : results)
     {
-        file << result.name << ' ' << result.milliseconds << '\n';
+        file << result.name << ' ' << result.normalized << ' ' << result.milliseconds << '\n';
     }
 }
 
-std::map<std::string, double> ReadBaseline(const std::filesystem::path &path)
+std::map<std::string, BaselineEntry> ReadBaseline(const std::filesystem::path &path)
 {
     std::ifstream file(path);
     Require(file.is_open(), "open baseline for reading: " + path.string());
 
-    std::map<std::string, double> baseline;
+    std::map<std::string, BaselineEntry> baseline;
     std::string line;
 
     while (std::getline(file, line))
@@ -291,12 +386,30 @@ std::map<std::string, double> ReadBaseline(const std::filesystem::path &path)
 
         std::istringstream stream(line);
         std::string name;
-        double milliseconds = 0.0;
+        double first = 0.0;
+        double second = 0.0;
 
-        if (stream >> name >> milliseconds)
+        if (!(stream >> name >> first))
         {
-            baseline[name] = milliseconds;
+            continue;
         }
+
+        BaselineEntry entry;
+
+        if (stream >> second)
+        {
+            entry.hasNormalized = true;
+            entry.normalized = first;
+            entry.absolute = second;
+        }
+        else
+        {
+            // Two columns are the earlier absolute-only format; it still gates,
+            // but on the machine state it was captured in.
+            entry.absolute = first;
+        }
+
+        baseline[name] = entry;
     }
 
     return baseline;
@@ -311,7 +424,7 @@ int main(int argc, char **argv)
         std::string shaderPath = argc > 1 ? argv[1] : "DtalPerf.comp.spv";
         std::filesystem::path baselinePath = argc > 2 ? argv[2] : "DtalPerf.baseline.txt";
         bool update = false;
-        double tolerance = 0.2;
+        double tolerance = 0.15;
 
         for (int i = 1; i < argc; i++)
         {
@@ -331,30 +444,62 @@ int main(int argc, char **argv)
         auto shader = qray::rhi::loadShader(device, shaderPath, nvrhi::ShaderType::Compute, "Dtal perf probe");
         Require(shader != nullptr, "load " + shaderPath);
 
+        for (const PerfCase &perfCase : kCases)
+        {
+            Require(std::isfinite(WarmUp(gpu, shader, perfCase, kWarmupSeconds)), "non-finite warmup checksum");
+        }
+        Require(std::isfinite(WarmUp(gpu, shader, kReferenceCase, kWarmupSeconds)), "non-finite reference warmup checksum");
+
+        CaseRunner runners[kCaseCount];
+        for (int caseIndex = 0; caseIndex < kCaseCount; caseIndex++)
+        {
+            runners[caseIndex].Prepare(gpu, shader, kCases[caseIndex]);
+        }
+
+        CaseRunner referenceRunner;
+        referenceRunner.Prepare(gpu, shader, kReferenceCase);
+
+        std::vector<double> caseTimings[kCaseCount];
+        std::vector<double> referenceTimings;
+
+        for (int series = 0; series < kSeriesCount; series++)
+        {
+            for (int round = 0; round < kTimedRounds; round++)
+            {
+                for (int caseIndex = 0; caseIndex < kCaseCount; caseIndex++)
+                {
+                    const double milliseconds = runners[caseIndex].Dispatch();
+                    if (series > 0)
+                    {
+                        caseTimings[caseIndex].push_back(milliseconds);
+                    }
+                }
+
+                const double referenceMilliseconds = referenceRunner.Dispatch();
+                if (series > 0)
+                {
+                    referenceTimings.push_back(referenceMilliseconds);
+                }
+            }
+        }
+
+        const double reference = *std::min_element(referenceTimings.begin(), referenceTimings.end());
+        Require(reference > 0.0, "non-positive reference timing");
+
         std::vector<CaseResult> results;
-
-        for (int warmup = 0; warmup < kWarmupHugePasses; warmup++)
+        for (int caseIndex = 0; caseIndex < kCaseCount; caseIndex++)
         {
-            float warmupChecksum = 0.0f;
-            RunCase(gpu, shader, kCases[3], warmupChecksum);
-        }
+            const PerfCase &perfCase = kCases[caseIndex];
+            const double milliseconds = *std::min_element(caseTimings[caseIndex].begin(), caseTimings[caseIndex].end());
+            Require(std::isfinite(runners[caseIndex].ReadChecksum()), "non-finite perf checksum");
 
-        for (const PerfCase &perfCase : kCases)
-        {
-            float warmupChecksum = 0.0f;
-            RunCase(gpu, shader, perfCase, warmupChecksum);
-        }
-
-        for (const PerfCase &perfCase : kCases)
-        {
-            float checksum = 0.0f;
-            const double milliseconds = RunCase(gpu, shader, perfCase, checksum);
-            Require(std::isfinite(checksum), "non-finite perf checksum");
-            std::cout << "dtal " << perfCase.name << ": " << milliseconds << " ms ("
-                      << perfCase.threads << " threads, " << perfCase.lights << " lights, "
-                      << perfCase.samplesPerThread << " samples/thread, "
-                      << double(perfCase.threads) * perfCase.samplesPerThread / 1e6 << "M samples)\n";
-            results.push_back({ perfCase.name, milliseconds });
+            const double normalized = milliseconds / reference;
+            std::cout << "dtal " << perfCase.name << ": " << milliseconds << " ms, " << normalized
+                      << " normalized (reference " << reference << " ms; " << perfCase.threads
+                      << " threads, " << perfCase.lights << " lights, " << perfCase.samplesPerThread
+                      << " samples/thread, " << double(perfCase.threads) * perfCase.samplesPerThread / 1e6
+                      << "M samples)\n";
+            results.push_back({ perfCase.name, milliseconds, normalized });
         }
 
         Require(gpu.errors == 0, "Vulkan/NVRHI validation errors=" + std::to_string(gpu.errors.load()));
@@ -367,7 +512,7 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        const std::map<std::string, double> baseline = ReadBaseline(baselinePath);
+        const std::map<std::string, BaselineEntry> baseline = ReadBaseline(baselinePath);
         bool failed = false;
 
         for (const CaseResult &result : results)
@@ -380,11 +525,15 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            const double ratio = result.milliseconds / it->second;
+            const double measured = it->second.hasNormalized ? result.normalized : result.milliseconds;
+            const double expected = it->second.hasNormalized ? it->second.normalized : it->second.absolute;
+            const double ratio = measured / expected;
             const bool regression = ratio > 1.0 + tolerance;
-            std::cout << "dtal " << result.name << ": " << result.milliseconds << " ms vs baseline "
-                      << it->second << " ms (" << (ratio * 100.0 - 100.0) << "%)"
-                      << (regression ? " REGRESSION" : "") << '\n';
+            std::cout << "dtal " << result.name << ": " << result.milliseconds << " ms, "
+                      << result.normalized << " normalized vs baseline " << expected
+                      << (it->second.hasNormalized ? " normalized" : " ms (legacy absolute baseline)")
+                      << " (" << (ratio * 100.0 - 100.0) << "%)" << (regression ? " REGRESSION" : "")
+                      << '\n';
 
             if (regression)
             {
