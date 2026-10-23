@@ -46,6 +46,17 @@ private:
     void UploadLights();
     void UploadClusterLightSources();
     void DrawPanel(float deltaSeconds);
+
+    // Casts a ray through the cursor the way QRE_DoPick resolves a click against the world:
+    // the nearest surface along the ray wins, and a light in front of that surface wins over it.
+    void Pick();
+    void ViewBasis(float side[3], float up[3], float forward[3]) const;
+    int32_t PickSurface(const float origin[3], const float direction[3], int32_t &outTriangle,
+                        float &outDistance) const;
+    int32_t PickLight(const float origin[3], const float direction[3], float &outDistance) const;
+    void DrawSelectionOverlay();
+    void ClearSelection();
+
     void Frame();
     void Shutdown();
 
@@ -92,4 +103,13 @@ private:
     // Bumped every time a new world cluster table reaches the renderer, so it can tell a new
     // map apart from a re-upload of the same one.
     uint32_t m_clusterGeneration = 0;
+
+    // Selection state, mirroring the game editor's surface and light picks. m_selectedTriangle
+    // is an index into the selected surface's own index list, not into the scene's.
+    int32_t m_selectedSurface = -1;
+    int32_t m_selectedTriangle = -1;
+    int32_t m_selectedLight = -1;
+    float m_pickPoint[3] = {};
+    bool m_hasPickPoint = false;
+    uint32_t m_pickCluster = 0;
 };
