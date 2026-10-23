@@ -24,9 +24,11 @@ the light entity. The selection is outlined in the viewport and shown in the
 panel. Picking walks the uploaded surfaces rather than the BSP, which is enough
 for one pick per click.
 
-A picked light is authored from the panel with the two map entity keys the game
-honours: `light`, which becomes the radiance through the same scale the game
-applies, and `rt_elight_radius`. Both values reach the renderer through the
+A picked light is authored from the panel with the four fields the map entity
+keys the game honours map to: `Light key` (`light`, which becomes the radiance
+through the same scale the game applies), `Radius` (`rt_elight_radius`),
+`Colour` (a per-light tint on that radiance) and `Position` (which re-resolves
+the cluster the light contributes to). All four reach the renderer through the
 per-frame upload, so a change shows in the next frame.
 
 Global render settings are authored from the scrolling block below the sun:
@@ -37,7 +39,12 @@ structs to `qrDrawFrame`, so the panel edits the same fields the game's cvars
 feed.
 
 The panel has three tabs: `Scene` (frame stats, the selection and the light
-authoring above), `Render` (the global settings above) and `Materials`.
+authoring above), `Render` (the global settings above) and `Materials`. The
+`Scene` body scrolls, because the selection and sun blocks are taller than a
+720p window once the panel is fixed at 660 px; the key hints stay pinned below
+the scroll area. The light fields log their screen rectangle to `editor.log`
+whenever the selection or the scroll offset changes, so a scripted session can
+find them without reading pixels.
 `Materials` lists one material per texture name, the way the game keys
 `rt_material_t`, and selects the material of a picked surface. Its parameter
 block covers what the SDK upload info can express today: the texcoord transform,
@@ -96,9 +103,10 @@ from a PAK remains an adapter step.
 
 The remaining gap against the in-game editor is tracked in
 [`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
-is the source of truth for what is left. The global settings block and the
-material parameter table are done as far as the SDK upload info goes; the next
-block is light authoring beyond the `light` key and the radius, then the session
+is the source of truth for what is left. The global settings block, the
+material parameter table and light colour/position authoring are done as far as
+the SDK upload info goes; the next block is the rest of light authoring (spot
+cone, style, the entity list, the custom-light store), then the session
 lifecycle that writes `qray.materials.yaml` back. The material parameters the
 game has and the SDK cannot express yet are listed in that document and need
 new upload fields first.

@@ -1666,6 +1666,12 @@ void EditorApp::DrawPanel(float deltaSeconds)
         {
             if (ImGui::BeginTabItem("Scene"))
             {
+                // The selection, light and sun blocks are taller than a 720p window once the
+                // panel is fixed at 660, so the tab scrolls and the key hints stay visible.
+                const float footerHeight =
+                    ImGui::GetTextLineHeightWithSpacing() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
+                ImGui::BeginChild("SceneParams", ImVec2(0.0f, -footerHeight), false);
+
                 ImGui::Separator();
                 ImGui::TextUnformatted("Scene");
                 ImGui::Text("Vertices  %zu", m_scene.vertices.size());
@@ -1748,6 +1754,56 @@ void EditorApp::DrawPanel(float deltaSeconds)
                                          .c_str(),
                                      this);
                     }
+
+                    const bool colourDrawn = ImGui::ColorEdit3("Colour##light", light.tint);
+                    const ImVec2 colourMin = ImGui::GetItemRectMin();
+                    const ImVec2 colourMax = ImGui::GetItemRectMax();
+
+                    if (colourDrawn)
+                    {
+                        SetEditorLightTint(light, light.tint);
+                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": colour " +
+                                      std::to_string(light.tint[0]) + " " + std::to_string(light.tint[1]) +
+                                      " " + std::to_string(light.tint[2]))
+                                         .c_str(),
+                                     this);
+                    }
+
+                    if (ImGui::DragFloat3("Position##light", light.position, 1.0f, -16384.0f, 16384.0f,
+                                          "%.1f units"))
+                    {
+                        light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+                        PrintMessage(("light " + std::to_string(m_selectedLight) + ": position " +
+                                      std::to_string(int32_t(light.position[0])) + " " +
+                                      std::to_string(int32_t(light.position[1])) + " " +
+                                      std::to_string(int32_t(light.position[2])) + " cluster " +
+                                      std::to_string(light.cluster))
+                                         .c_str(),
+                                     this);
+                    }
+
+                    {
+                        const float scroll = ImGui::GetScrollY();
+
+                        if (m_loggedLightRect != m_selectedLight || m_loggedPanelScroll != scroll)
+                        {
+                            m_loggedLightRect = m_selectedLight;
+                            m_loggedPanelScroll = scroll;
+                            const ImVec2 positionMin = ImGui::GetItemRectMin();
+                            const ImVec2 positionMax = ImGui::GetItemRectMax();
+                            PrintMessage(("panel rect: colour " + std::to_string(int32_t(colourMin.x)) + "," +
+                                          std::to_string(int32_t(colourMin.y)) + " " +
+                                          std::to_string(int32_t(colourMax.x)) + "," +
+                                          std::to_string(int32_t(colourMax.y)) + " position " +
+                                          std::to_string(int32_t(positionMin.x)) + "," +
+                                          std::to_string(int32_t(positionMin.y)) + " " +
+                                          std::to_string(int32_t(positionMax.x)) + "," +
+                                          std::to_string(int32_t(positionMax.y)) + " scroll " +
+                                          std::to_string(int32_t(scroll)))
+                                             .c_str(),
+                                         this);
+                        }
+                    }
                 }
                 else
                 {
@@ -1771,6 +1827,7 @@ void EditorApp::DrawPanel(float deltaSeconds)
                 ImGui::SliderFloat("Elevation", &m_sunElevation, -89.0f, 89.0f, "%.0f deg");
                 ImGui::SliderFloat("Angular size", &m_sunAngularDiameter, 0.1f, 8.0f, "%.2f deg");
 
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
 

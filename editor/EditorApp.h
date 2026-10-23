@@ -131,4 +131,9 @@ private:
     float m_pickPoint[3] = {};
     bool m_hasPickPoint = false;
     uint32_t m_pickCluster = 0;
+
+    // Last selection and scroll offset the light fields logged their rectangle for, so the log
+    // carries one line per layout change instead of one per frame.
+    int32_t m_loggedLightRect = -1;
+    float m_loggedPanelScroll = -1.0f;
 };

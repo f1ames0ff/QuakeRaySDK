@@ -43,6 +43,9 @@ struct EditorSurface
 struct EditorLight
 {
     float position[3] = {};
+    // The hue an author edits. `color` is the radiance the upload carries, so it stays
+    // intensity * kEditorLightIntensityScale * tint and moving the `light` key keeps the hue.
+    float tint[3] = { 1.0f, 1.0f, 1.0f };
     float color[3] = { 1.0f, 1.0f, 1.0f };
     float intensity = 300.0f;
     float radius = 0.0f;
@@ -62,6 +65,10 @@ inline constexpr float kEditorLightIntensityScale =
 // Writes the radiance the uploaded light carries for this `light` key value. Authoring changes
 // light.intensity, so colours must be refreshed through here rather than scaled twice.
 void SetEditorLightIntensity(EditorLight &light, float intensity);
+
+// Writes the hue multiplier and refreshes the radiance, so a colour edit does not have to know
+// the intensity scale.
+void SetEditorLightTint(EditorLight &light, const float tint[3]);
 
 // One node of the BSP tree, holding only what a point-in-leaf walk needs. children >= 0 are
 // node indices, children < 0 are leaves addressed as -(child + 1).
@@ -108,3 +115,7 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
                         std::string &error);
 bool LoadEditorScene(const std::string &path, const uint8_t *palette768, EditorScene &scene,
                      std::string &error);
+
+// Re-resolves the cluster a light stands in, the way the loader does when it reads the map, so
+// moving a light in the panel keeps its world cluster light list correct.
+uint32_t ResolveEditorLightCluster(const EditorScene &scene, const float origin[3]);
