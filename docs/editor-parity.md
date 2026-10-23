@@ -26,10 +26,11 @@ back to `qray.materials.yaml`. Its surface is:
 `EditorApp::DrawPanel` draws one window with these rows: frame/stat readout, scene counts,
 cluster-light stats, bounds, camera readout and fly speed, `Reset camera`, and a selection block
 that is either a surface (index, triangle, texture name, kind, cluster) or a light (position,
-radiance, cluster, `Light key`, `Radius`), then `At`, `Clear selection`, a `Sun` block
-(intensity, azimuth, elevation, angular size), the scrolling global-settings block
+radiance, cluster, `Light key`, `Radius`, `Colour`, `Position`), then `At`, `Clear selection`, a
+`Sun` block (intensity, azimuth, elevation, angular size), the scrolling global-settings block
 (`Global`, `Clouds`, `Sun disc`, `God rays`, `Volumetric fog`, `Tonemap`, `Level fog`) and the
-key hints.
+key hints. The `Scene` tab body itself scrolls: the light and sun blocks are taller than a 720p
+window once the panel is fixed at 660 px, and the key hints stay pinned below the scroll area.
 
 ## Gap matrix
 
@@ -52,8 +53,8 @@ no implementation.
 | Texture UV scale/offset authoring | partial | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`); `qrUpdateGeometryTexCoords` is not used because `VertexCollector::UpdateTexCoords` still asserts |
 | Luma mask authoring and preview | partial | `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; there is no mask texture and no preview |
 | Glass and water pass-through parameters | partial | `PassThroughTypeForSurface` picks the type; the parameters are not editable |
-| Light colour authoring | missing | `EditorLight::color` is derived from intensity today |
-| Light position and offset authoring | missing | |
+| Light colour authoring | done | `Colour` (`ColorEdit3`) writes `EditorLight::tint`; `SetEditorLightTint` rebuilds radiance as `intensity * kEditorLightIntensityScale * tint` |
+| Light position and offset authoring | done | `Position` (`DragFloat3`) moves the light and re-resolves its cluster through `ResolveEditorLightCluster` |
 | Light spot direction and inner/outer angles | missing | `qrUploadSpotLight` exists in the SDK; the editor never calls it |
 | Light style authoring | missing | |
 | Light list for the Entity tab | missing | needs a list widget and the light table the game builds |
@@ -108,8 +109,8 @@ group and `luma_blend`. The game's emissive range is 0..5; the SDK clamps emissi
 
 ## Order of work
 
-1. **Light authoring.** Colour, offset, spot cone and style first, then the light list, then the
-   custom-light store with add/clone/remove.
+1. **Light authoring.** Colour and offset are done; what remains is the spot cone, the light
+   style, then the light list, then the custom-light store with add/clone/remove.
 2. **Session lifecycle.** Apply, Cancel, Exit and the `qray.materials.yaml` writer, plus the
    notify toast and the dialogs they need.
 3. **Viewport aids.** Crosshair, hint overlay, gizmo and drag.
@@ -145,3 +146,20 @@ the surface it measured.
 The global settings were accepted the same way. Dragging `Global / Brightness` from 1.00 to the
 slider maximum changed 178615 of 921600 sampled pixels, against 309 for two consecutive frames
 taken without touching the panel.
+
+Light authoring was verified on light 8 of `scenes/e1m1.bsp` (picked in the viewport, selection
+overlay and `editor.log` both named light 8), with the viewport region (x >= 400) compared
+separately from the panel so that the panel text and swatch cannot fake a hit:
+
+| Check | Measurement |
+| --- | --- |
+| Control noise, two idle frames | 461 changed samples of 921600 (mean 0.1424) |
+| `Position` drag, +10 units on the second component | 529101 of 580800 viewport samples changed, mean 42.4271 |
+| `Position` drag log | `light 8: position 480 -220 168 cluster 1133` -- the entry carries the re-resolved cluster |
+| `Colour` edit to magenta | 561695 of 580800 viewport samples changed, mean 84.1652 |
+| `Colour` edit log | `light 8: colour 1.000000 0.000000 1.000000` |
+
+The light block sits below the panel fold on a 720p window, so the `Scene` tab scrolls; the light
+fields emit `panel rect: …` into `editor.log` whenever the selection or the scroll offset changes,
+which is how a scripted session finds them without reading pixels. A `DragFloat3` over the panel
+is enough to move a light, and `Ctrl+Click` on a colour channel accepts a typed value.

@@ -920,8 +920,23 @@ void SetEditorLightIntensity(EditorLight &light, float intensity)
 
     for (int channel = 0; channel < 3; channel++)
     {
-        light.color[channel] = intensity * kEditorLightIntensityScale;
+        light.color[channel] = intensity * kEditorLightIntensityScale * light.tint[channel];
     }
+}
+
+void SetEditorLightTint(EditorLight &light, const float tint[3])
+{
+    for (int channel = 0; channel < 3; channel++)
+    {
+        light.tint[channel] = tint[channel];
+    }
+
+    SetEditorLightIntensity(light, light.intensity);
+}
+
+uint32_t ResolveEditorLightCluster(const EditorScene &scene, const float origin[3])
+{
+    return ResolveLightCluster(scene, origin);
 }
 
 bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, EditorScene &scene,
