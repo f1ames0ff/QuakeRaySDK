@@ -3890,6 +3890,250 @@ void EditorApp::DrawMaterials()
             }
         }
 
+        if (ImGui::CollapsingHeader("Luma blocks", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            // The material-level fallbacks: a block that omits a key inherits these, and a block
+            // the author appends starts from them.
+            changed |= ImGui::SliderFloat("Luma threshold##lumadef", &material.lumaThreshold, 0.0f, 1.0f,
+                                          "%.3f");
+            LogRect("material luma threshold");
+            changed |= ImGui::SliderFloat("Luma feather##lumadef", &material.lumaFeather, 0.0f, 16.0f,
+                                          "%.1f");
+            LogRect("material luma feather");
+
+            int32_t removeIndex = -1;
+
+            // The image a block is authored against: the material's base texture, or - when the file
+            // leaves base as NONE - the texture the row itself overrides, which is what the map
+            // shows there and therefore what the author is matching.
+            int32_t lumaTexture = TextureIndexByName(material.baseTexture);
+
+            if (lumaTexture < 0)
+            {
+                lumaTexture = TextureIndexByName(m_materials.NameAt(size_t(m_selectedMaterial)));
+            }
+
+            const bool lumaTextureResolved = lumaTexture >= 0 &&
+                                             size_t(lumaTexture) < m_textureMaterials.size() &&
+                                             size_t(lumaTexture) < m_scene.textures.size() &&
+                                             m_textureMaterials[size_t(lumaTexture)] != QR_NO_MATERIAL;
+
+            for (size_t blockIndex = 0; blockIndex < material.emissiveBlocks.size(); ++blockIndex)
+            {
+                EditorEmissiveBlock &block = material.emissiveBlocks[blockIndex];
+                const bool polygon = !block.polyUv.empty();
+                char label[64];
+
+                if (polygon)
+                {
+                    std::snprintf(label, sizeof(label), "Mask  %d points",
+                                  int(block.polyUv.size() / 2));
+                }
+                else
+                {
+                    std::snprintf(label, sizeof(label), "Colour  %02X%02X%02X",
+                                  int(block.color[0] * 255.0f + 0.5f),
+                                  int(block.color[1] * 255.0f + 0.5f),
+                                  int(block.color[2] * 255.0f + 0.5f));
+                }
+
+                ImGui::PushID(int(blockIndex));
+
+                if (ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    if (polygon)
+                    {
+                        // The block selects by uv, so the mask is painted over the image the
+                        // surface shows, with the game's own polygon handles.
+                        if (lumaTextureResolved)
+                        {
+                            const EditorTexture &texture = m_scene.textures[size_t(lumaTexture)];
+
+                            // RT_MAT_EMIS_POLY_MAX: the game reads no more points than this.
+                            changed |= EditorPolygonEdit(
+                                "##lumamask", uint64_t(m_textureMaterials[size_t(lumaTexture)]),
+                                texture.width, texture.height, block.polyUv, 16);
+                        }
+                        else
+                        {
+                            ImGui::TextDisabled("The material has no image to paint a mask on.");
+                        }
+
+                        LogRect("material luma mask");
+
+                        ImGui::TextDisabled(
+                            "Drag a point, a side or the outline. Ctrl+click adds a point, "
+                            "right-click removes one, Ctrl+wheel zooms.");
+
+                        if (ImGui::Button("Reset mask"))
+                        {
+                            block.polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
+                            changed = true;
+                        }
+
+                        ImGui::SameLine();
+                    }
+                    else
+                    {
+                        changed |= ImGui::ColorEdit3("Luma colour##lumacol", block.color);
+
+                        // The game's eyedropper: the block shows the image it matches and a click
+                        // takes that pixel, which is how a colour is found without guessing.
+                        if (lumaTextureResolved)
+                        {
+                            const EditorTexture &texture = m_scene.textures[size_t(lumaTexture)];
+                            float u = 0.0f;
+                            float v = 0.0f;
+
+                            if (EditorImagePick(
+                                    "##lumapick",
+                                    uint64_t(m_textureMaterials[size_t(lumaTexture)]), texture.width,
+                                    texture.height, u, v))
+                            {
+                                const size_t pixels =
+                                    size_t(texture.width) * size_t(texture.height) * 4;
+
+                                if (texture.rgba.size() >= pixels)
+                                {
+                                    const int32_t px = std::clamp(
+                                        int32_t(u * float(texture.width)), 0,
+                                        int32_t(texture.width) - 1);
+                                    const int32_t py = std::clamp(
+                                        int32_t(v * float(texture.height)), 0,
+                                        int32_t(texture.height) - 1);
+                                    const uint8_t *pixel =
+                                        texture.rgba.data() +
+                                        (size_t(py) * size_t(texture.width) + size_t(px)) * 4;
+
+                                    block.color[0] = float(pixel[0]) / 255.0f;
+                                    block.color[1] = float(pixel[1]) / 255.0f;
+                                    block.color[2] = float(pixel[2]) / 255.0f;
+                                    changed = true;
+                                }
+                            }
+
+                            LogRect("material luma pick");
+                            ImGui::TextDisabled("Click a colour in the image to take it.");
+                        }
+
+                        changed |= ImGui::SliderFloat("Luma threshold##lumablk", &block.threshold,
+                                                      0.0f, 1.0f, "%.3f");
+                    }
+
+                    {
+                        int32_t feather = int32_t(block.feather + 0.5f);
+
+                        if (ImGui::SliderInt("Luma feather##lumablk", &feather, 0, 16, "%d"))
+                        {
+                            // The game rounds the stored value, so the slider owns an integer.
+                            block.feather = float(feather);
+                            changed = true;
+                        }
+                    }
+
+                    changed |= ImGui::SliderFloat("Emissive factor##lumablk", &block.factor, 0.0f, 5.0f,
+                                                  "%.3f");
+
+                    {
+                        const char *blendNames[] = { "Cvar", "Off", "Normal", "Screen", "Overlay",
+                                                     "Hard light", "Color dodge" };
+                        int32_t blend = block.blend + 1;
+                        blend = std::clamp(blend, 0, int32_t(IM_ARRAYSIZE(blendNames)) - 1);
+
+                        if (ImGui::Combo("Luma blend##lumablk", &blend, blendNames,
+                                         IM_ARRAYSIZE(blendNames)))
+                        {
+                            block.blend = blend - 1;
+                            changed = true;
+                        }
+                    }
+
+                    {
+                        // The game keeps one block clipboard; pasting only into a block of the
+                        // same kind, since a polygon cannot become a colour.
+                        const bool canPaste = m_lumaClipboardValid &&
+                                              m_lumaClipboard.polyUv.empty() == block.polyUv.empty();
+
+                        if (ImGui::Button("Copy##lumablk"))
+                        {
+                            m_lumaClipboard = block;
+                            m_lumaClipboardValid = true;
+                        }
+
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled(!canPaste);
+
+                        if (ImGui::Button("Paste##lumablk"))
+                        {
+                            block = m_lumaClipboard;
+                            changed = true;
+                        }
+
+                        ImGui::EndDisabled();
+                        ImGui::SameLine();
+                    }
+
+                    if (ImGui::Button("Remove block"))
+                    {
+                        removeIndex = int32_t(blockIndex);
+                    }
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::PopID();
+            }
+
+            if (removeIndex >= 0)
+            {
+                material.emissiveBlocks.erase(material.emissiveBlocks.begin() + removeIndex);
+
+                changed = true;
+            }
+
+            const bool canAdd = material.emissiveBlocks.size() < kEditorEmissiveBlockMax;
+
+            ImGui::BeginDisabled(!canAdd);
+
+            const auto appendBlock = [&material, &changed](bool polygon) {
+                EditorEmissiveBlock block;
+                block.threshold = material.lumaThreshold > 0.0f ? material.lumaThreshold : 0.02f;
+                block.feather = material.lumaFeather;
+                block.factor = material.emissiveFactor;
+                block.blend = material.lumaBlend;
+
+                if (polygon)
+                {
+                    block.polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
+                }
+
+                material.emissiveBlocks.push_back(block);
+                changed = true;
+            };
+
+            if (ImGui::Button("Add colour block"))
+            {
+                appendBlock(false);
+            }
+
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !canAdd)
+            {
+                ImGui::SetTooltip("Ten blocks is the most the game reads");
+            }
+
+            LogRect("material luma add colour");
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("Add mask block"))
+            {
+                appendBlock(true);
+            }
+
+            LogRect("material luma add mask");
+            ImGui::EndDisabled();
+        }
+
     if (changed)
     {
         m_materialsChanged = true;

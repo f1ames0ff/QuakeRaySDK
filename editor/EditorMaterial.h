@@ -21,6 +21,33 @@ enum class EditorMaterialType
     Water,
 };
 
+// One colour-emissive block, the game's rt_emissive_t: a colour and the tone controls that work
+// for it alone. A block whose own keys are absent inherits the material-level ones, so what the
+// editor holds is always resolved.
+struct EditorEmissiveBlock
+{
+    float color[3] = { 1.0f, 1.0f, 1.0f };
+
+    // How far a pixel's colour may differ and still glow, and the pixels of edge softening
+    // applied to the mask afterwards, 0 leaving it hard.
+    float threshold = 0.02f;
+    float feather = 0.0f;
+
+    // Scales this block's emission. The game multiplies the mask by it and by nothing else.
+    float factor = 1.0f;
+
+    // How the glow is composited: -1 follows the material's, 0..5 pin a mode.
+    int32_t blend = -1;
+
+    // Non-empty selects by uv instead of by colour -- pairs of u,v, at least three of them.
+    // The colour and threshold are then unused, which is what the game's polygon form does.
+    std::vector<float> polyUv;
+};
+
+// RT_MAT_MAX_EMISSIVE_COLORS: the game's loader stops reading blocks past this, so the editor
+// stops adding them here rather than write entries the game would drop.
+inline constexpr size_t kEditorEmissiveBlockMax = 10;
+
 // The subset of the game's rt_material_t the editor expresses. The keys whose only consumer is
 // a packed material texture -- the extra images, bump_scale, transparency, luma_blend -- are
 // baked into the albedo / normal / roughness-metallic-emission set by EditorMaterialBakes, the
@@ -93,6 +120,17 @@ struct EditorMaterialParams
     // packed roughness-metallic-emission texture, so it only reaches the shader once a material
     // texture exists -- which any emission above zero already needs.
     int32_t lumaBlend = -1;
+
+    // Luma, the game's color_emissive blocks: an atlas with several differently coloured glow
+    // regions, each with its own tone controls. A block builds its own mask out of the albedo
+    // and the bake composites them by nearest colour, exactly as gl_texmgr.c does. A material
+    // that names an emissive image gets that image instead, which is the game's own precedence.
+    std::vector<EditorEmissiveBlock> emissiveBlocks;
+
+    // Luma, luma_threshold / luma_feather: the material-level fallbacks a block inherits when its
+    // entry omits them, and the values a block the editor appends starts from.
+    float lumaThreshold = 0.02f;
+    float lumaFeather = 0.0f;
 };
 
 // The roughness the editor has always used for BSP surfaces, kept as the value a
@@ -183,6 +221,9 @@ private:
         float emission = 0.0f;
         int32_t lumaBlend = -1;
         bool metalnessFromNormalAlpha = false;
+        // The colour blocks, serialized: two materials that differ in any block's colour,
+        // threshold, feather, factor, blend or polygon are different bakes.
+        std::string emissiveMask;
         bool operator==(const Key &other) const;
     };
 

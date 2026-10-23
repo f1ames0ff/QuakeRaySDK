@@ -150,6 +150,11 @@ private:
     void UpdateLightGrab();
     void FinishLightGrab(bool kept);
 
+    // One luma block copied from the panel, the way the game keeps a block clipboard; valid only
+    // while the flag is set, because a default block is a legitimate clipboard entry.
+    EditorEmissiveBlock m_lumaClipboard;
+    bool m_lumaClipboardValid = false;
+
     // The light the panel edits: the map light or the custom one, whichever was picked last.
     // Null when the selection is a surface or nothing at all.
     EditorLight *SelectedLight();
