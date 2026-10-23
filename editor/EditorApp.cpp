@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+#include <windowsx.h>
+
+#include <imgui.h>
+
 namespace
 {
 
@@ -186,6 +190,11 @@ void EditorApp::CloseFile(void *fileHandle, void *)
 LRESULT CALLBACK EditorApp::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     EditorApp *app = reinterpret_cast<EditorApp *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    if (app != nullptr && message != WM_CLOSE && message != WM_DESTROY && message != WM_PAINT)
+    {
+        app->HandleWindowMessage(message, wParam, lParam);
+    }
 
     switch (message)
     {
@@ -376,15 +385,6 @@ bool EditorApp::UploadScene()
         return false;
     }
 
-    QrDirectionalLightUploadInfo sun = {};
-    sun.uniqueID = 2;
-    sun.color = { 8.0f, 8.0f, 8.0f };
-    sun.direction = { 0.3f, 0.5f, -0.8f };
-    sun.angularDiameterDegrees = 0.5f;
-
-    const QrResult lightResult = qrUploadDirectionalLight(m_instance, &sun);
-    PrintMessage(("sun upload: " + std::string(qrGetResultDescription(lightResult))).c_str(), this);
-
     const QrResult submitResult = qrSubmitStaticGeometries(m_instance);
     PrintMessage(("submit static scene: " + std::string(qrGetResultDescription(submitResult))).c_str(), this);
     return submitResult == QR_SUCCESS;
@@ -396,6 +396,22 @@ void EditorApp::Frame()
     {
         return;
     }
+
+    const auto now = std::chrono::steady_clock::now();
+    float deltaSeconds = std::chrono::duration<float>(now - m_lastFrameTime).count();
+    m_lastFrameTime = now;
+
+    if (!(deltaSeconds > 0.0f) || deltaSeconds > 0.25f)
+    {
+        deltaSeconds = 1.0f / 60.0f;
+    }
+
+    m_frameTimeMs = deltaSeconds * 1000.0f;
+
+    RECT client = {};
+    GetClientRect(m_window, &client);
+    m_clientWidth = uint32_t(std::max<LONG>(0, client.right - client.left));
+    m_clientHeight = uint32_t(std::max<LONG>(0, client.bottom - client.top));
 
     QrStartFrameInfo startInfo = {
         .presentMode = QR_PRESENT_MODE_VSYNC,
@@ -410,44 +426,36 @@ void EditorApp::Frame()
         return;
     }
 
-    float eye[3] = { 4.0f, -6.0f, 3.0f };
-    float target[3] = { 0.0f, 0.0f, 1.0f };
+    UploadSun();
+
+    m_ui.BeginFrame(deltaSeconds, m_clientWidth, m_clientHeight);
+    DrawPanel(deltaSeconds);
+    UpdateCamera(deltaSeconds);
+    m_ui.EndFrame(m_instance, m_clientWidth, m_clientHeight);
+
+    const float cosPitch = std::cos(m_cameraPitch);
+    const float eye[3] = { m_cameraPosition[0], m_cameraPosition[1], m_cameraPosition[2] };
+    const float forward[3] = {
+        cosPitch * std::cos(m_cameraYaw),
+        cosPitch * std::sin(m_cameraYaw),
+        std::sin(m_cameraPitch),
+    };
+
+    float target[3] = {
+        eye[0] + forward[0],
+        eye[1] + forward[1],
+        eye[2] + forward[2],
+    };
+
     const float up[3] = { 0.0f, 0.0f, 1.0f };
     float sceneExtent = 10.0f;
 
     if (m_scene.hasBounds)
     {
-        float center[3] = {};
-
         for (int axis = 0; axis < 3; axis++)
         {
-            center[axis] = (m_scene.boundsMin[axis] + m_scene.boundsMax[axis]) * 0.5f;
             sceneExtent = std::max(sceneExtent,
                                    m_scene.boundsMax[axis] - m_scene.boundsMin[axis]);
-        }
-
-        if (m_scene.hasCamera)
-        {
-            for (int axis = 0; axis < 3; axis++)
-            {
-                eye[axis] = m_scene.cameraPosition[axis];
-            }
-
-            const float yaw = m_scene.cameraYawDegrees * 0.01745329252f;
-            target[0] = eye[0] + std::cos(yaw) * 512.0f;
-            target[1] = eye[1] + std::sin(yaw) * 512.0f;
-            target[2] = eye[2];
-        }
-        else
-        {
-            eye[0] = center[0] + sceneExtent * 0.8f;
-            eye[1] = center[1] - sceneExtent * 1.0f;
-            eye[2] = center[2] + sceneExtent * 0.6f;
-
-            for (int axis = 0; axis < 3; axis++)
-            {
-                target[axis] = center[axis];
-            }
         }
     }
 
@@ -478,6 +486,313 @@ void EditorApp::Frame()
             PrintMessage(("draw: " + std::string(qrGetResultDescription(drawResult))).c_str(), this);
         }
     }
+}
+
+LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
+{
+    m_ui.HandleMessage(message, wParam, lParam);
+
+    switch (message)
+    {
+    case WM_MOUSEMOVE:
+    {
+        const LONG x = GET_X_LPARAM(lParam);
+        const LONG y = GET_Y_LPARAM(lParam);
+
+        if (m_looking)
+        {
+            const float dx = float(x - m_lastMouse.x);
+            const float dy = float(y - m_lastMouse.y);
+
+            m_cameraYaw -= dx * m_cameraSensitivity;
+            m_cameraPitch = std::clamp(m_cameraPitch - dy * m_cameraSensitivity, -1.55f, 1.55f);
+
+            RECT client = {};
+            GetClientRect(m_window, &client);
+
+            POINT center = { (client.right - client.left) / 2, (client.bottom - client.top) / 2 };
+            ClientToScreen(m_window, &center);
+            SetCursorPos(center.x, center.y);
+
+            m_lastMouse.x = (client.right - client.left) / 2;
+            m_lastMouse.y = (client.bottom - client.top) / 2;
+        }
+        else
+        {
+            m_lastMouse.x = x;
+            m_lastMouse.y = y;
+        }
+
+        break;
+    }
+
+    case WM_RBUTTONDOWN:
+    {
+        if (!m_ui.WantsMouse())
+        {
+            m_looking = true;
+            m_ui.SetCursorVisible(false);
+
+            RECT client = {};
+            GetClientRect(m_window, &client);
+            POINT center = { (client.right - client.left) / 2, (client.bottom - client.top) / 2 };
+            ClientToScreen(m_window, &center);
+            SetCursorPos(center.x, center.y);
+            ScreenToClient(m_window, &center);
+            m_lastMouse = center;
+        }
+
+        break;
+    }
+
+    case WM_RBUTTONUP:
+        m_looking = false;
+        m_ui.SetCursorVisible(true);
+        break;
+
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        if (wParam < 256)
+        {
+            m_keys[wParam] = true;
+        }
+
+        if (wParam == VK_F1)
+        {
+            m_showPanel = !m_showPanel;
+        }
+        else if (wParam == 'O' && (m_keys[VK_CONTROL] || (GetKeyState(VK_CONTROL) & 0x8000) != 0))
+        {
+            ResetCameraToScene();
+        }
+        break;
+
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if (wParam < 256)
+        {
+            m_keys[wParam] = false;
+        }
+        break;
+
+    case WM_KILLFOCUS:
+        for (bool &pressed : m_keys)
+        {
+            pressed = false;
+        }
+
+        m_looking = false;
+        m_ui.SetCursorVisible(true);
+        break;
+
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+bool EditorApp::CreateUi()
+{
+    std::string error;
+
+    m_fontPath = "fonts/Roboto-Regular.ttf";
+
+    if (!m_ui.Initialize(m_window, m_instance, m_fontPath, error))
+    {
+        PrintMessage(("ui: " + error).c_str(), this);
+        return false;
+    }
+
+    PrintMessage("ui ready", this);
+    return true;
+}
+
+void EditorApp::ResetCameraToScene()
+{
+    if (m_scene.hasCamera)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            m_cameraPosition[axis] = m_scene.cameraPosition[axis];
+        }
+
+        m_cameraYaw = m_scene.cameraYawDegrees * 0.01745329252f;
+        m_cameraPitch = 0.0f;
+        return;
+    }
+
+    float center[3] = { 0.0f, 0.0f, 0.0f };
+    float extent = 10.0f;
+
+    if (m_scene.hasBounds)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            center[axis] = (m_scene.boundsMin[axis] + m_scene.boundsMax[axis]) * 0.5f;
+            extent = std::max(extent, m_scene.boundsMax[axis] - m_scene.boundsMin[axis]);
+        }
+    }
+
+    m_cameraPosition[0] = center[0] + extent * 0.8f;
+    m_cameraPosition[1] = center[1] - extent * 1.0f;
+    m_cameraPosition[2] = center[2] + extent * 0.6f;
+
+    const float dx = center[0] - m_cameraPosition[0];
+    const float dy = center[1] - m_cameraPosition[1];
+    const float dz = center[2] - m_cameraPosition[2];
+
+    m_cameraYaw = std::atan2(dy, dx);
+    m_cameraPitch = std::atan2(dz, std::sqrt(dx * dx + dy * dy));
+    m_cameraSpeed = std::max(64.0f, extent * 0.5f);
+}
+
+void EditorApp::UpdateCamera(float deltaSeconds)
+{
+    if (m_ui.WantsKeyboard())
+    {
+        return;
+    }
+
+    const float cosPitch = std::cos(m_cameraPitch);
+
+    const float forward[3] = {
+        cosPitch * std::cos(m_cameraYaw),
+        cosPitch * std::sin(m_cameraYaw),
+        std::sin(m_cameraPitch),
+    };
+
+    const float right[3] = {
+        std::sin(m_cameraYaw),
+        -std::cos(m_cameraYaw),
+        0.0f,
+    };
+
+    float speed = m_cameraSpeed * deltaSeconds;
+
+    if (m_keys[VK_SHIFT])
+    {
+        speed *= 4.0f;
+    }
+
+    float movement[3] = { 0.0f, 0.0f, 0.0f };
+
+    const auto addAxis = [&](int key, const float *axis, float scale) {
+        if (key < 256 && m_keys[key])
+        {
+            movement[0] += axis[0] * scale;
+            movement[1] += axis[1] * scale;
+            movement[2] += axis[2] * scale;
+        }
+    };
+
+    addAxis('W', forward, speed);
+    addAxis('S', forward, -speed);
+    addAxis('D', right, speed);
+    addAxis('A', right, -speed);
+
+    if (m_keys['E'] || m_keys[VK_SPACE])
+    {
+        movement[2] += speed;
+    }
+
+    if (m_keys['Q'] || m_keys[VK_CONTROL])
+    {
+        movement[2] -= speed;
+    }
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        m_cameraPosition[axis] += movement[axis];
+    }
+}
+
+void EditorApp::UploadSun()
+{
+    const float elevation = m_sunElevation * 0.01745329252f;
+    const float azimuth = m_sunAzimuth * 0.01745329252f;
+    const float cosElevation = std::cos(elevation);
+
+    const float toSun[3] = {
+        cosElevation * std::cos(azimuth),
+        cosElevation * std::sin(azimuth),
+        std::sin(elevation),
+    };
+
+    QrDirectionalLightUploadInfo sun = {};
+    sun.uniqueID = 2;
+    sun.color = { m_sunIntensity, m_sunIntensity, m_sunIntensity };
+    sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
+    sun.angularDiameterDegrees = m_sunAngularDiameter;
+
+    const QrResult result = qrUploadDirectionalLight(m_instance, &sun);
+
+    if (result != QR_SUCCESS)
+    {
+        static bool logged = false;
+
+        if (!logged)
+        {
+            logged = true;
+            PrintMessage(("sun: " + std::string(qrGetResultDescription(result))).c_str(), this);
+        }
+    }
+}
+
+void EditorApp::DrawPanel(float deltaSeconds)
+{
+    if (!m_showPanel)
+    {
+        return;
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320.0f, 0.0f), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("QuakeRay Editor", &m_showPanel, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        const float fps = deltaSeconds > 0.0f ? 1.0f / deltaSeconds : 0.0f;
+        ImGui::Text("Frame  %.2f ms  (%.0f FPS)", m_frameTimeMs, fps);
+        ImGui::Text("Drawable  %ux%u", m_clientWidth, m_clientHeight);
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Scene");
+        ImGui::Text("Vertices  %zu", m_scene.vertices.size());
+        ImGui::Text("Triangles %zu", m_scene.indices.size() / 3);
+
+        if (m_scene.hasBounds)
+        {
+            ImGui::Text("Bounds    %.1f %.1f %.1f .. %.1f %.1f %.1f",
+                        m_scene.boundsMin[0], m_scene.boundsMin[1], m_scene.boundsMin[2],
+                        m_scene.boundsMax[0], m_scene.boundsMax[1], m_scene.boundsMax[2]);
+        }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Camera");
+        ImGui::Text("%.1f  %.1f  %.1f", m_cameraPosition[0], m_cameraPosition[1],
+                    m_cameraPosition[2]);
+        ImGui::Text("yaw %.1f deg  pitch %.1f deg", m_cameraYaw * 57.29577951f,
+                    m_cameraPitch * 57.29577951f);
+        ImGui::SliderFloat("Fly speed", &m_cameraSpeed, 16.0f, 8192.0f, "%.0f u/s");
+
+        if (ImGui::Button("Reset camera"))
+        {
+            ResetCameraToScene();
+        }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Sun");
+        ImGui::SliderFloat("Intensity", &m_sunIntensity, 0.0f, 64.0f, "%.2f");
+        ImGui::SliderFloat("Azimuth", &m_sunAzimuth, 0.0f, 360.0f, "%.0f deg");
+        ImGui::SliderFloat("Elevation", &m_sunElevation, -89.0f, 89.0f, "%.0f deg");
+        ImGui::SliderFloat("Angular size", &m_sunAngularDiameter, 0.1f, 8.0f, "%.2f deg");
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("RMB drag look  WASD move  Q/E down/up  Shift x4");
+        ImGui::TextUnformatted("F1 panel  Ctrl+O reset camera");
+    }
+
+    ImGui::End();
 }
 
 int EditorApp::Run(int showCommand)
@@ -537,6 +852,11 @@ int EditorApp::Run(int showCommand)
         return 1;
     }
 
+    ResetCameraToScene();
+    CreateUi();
+
+    m_lastFrameTime = std::chrono::steady_clock::now();
+
     MSG message = {};
 
     while (m_running)
@@ -573,6 +893,14 @@ int EditorApp::Run(int showCommand)
 
 void EditorApp::Shutdown()
 {
+    m_ui.Shutdown();
+
+    if (m_material != QR_NO_MATERIAL && m_instance != nullptr)
+    {
+        qrDestroyMaterial(m_instance, m_material);
+        m_material = QR_NO_MATERIAL;
+    }
+
     if (m_instance != nullptr)
     {
         qrDestroyInstance(m_instance);
