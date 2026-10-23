@@ -32,7 +32,19 @@
     #define QRCONV
 #endif
 
-#define QR_API_VERSION "1.04.0000"
+#define QR_API_VERSION "1.06.0000"
+
+#define QR_SPATIAL_CONVENTION_VERSION 2
+
+typedef enum QrAxis
+{
+    QR_AXIS_POSITIVE_X = 0,
+    QR_AXIS_POSITIVE_Y = 1,
+    QR_AXIS_POSITIVE_Z = 2,
+    QR_AXIS_NEGATIVE_X = 3,
+    QR_AXIS_NEGATIVE_Y = 4,
+    QR_AXIS_NEGATIVE_Z = 5,
+} QrAxis;
 
 #ifdef QR_USE_SURFACE_WIN32
     #include <windows.h>
@@ -55,6 +67,23 @@ QR_DEFINE_NON_DISPATCHABLE_HANDLE(QrInstance)
 typedef uint32_t QrMaterial;
 typedef uint32_t QrCubemap;
 typedef uint32_t QrFlags;
+
+/* Spatial values use meters, square meters and inverse meters. The host converts
+   its native units before calling the SDK; this convention describes axes only. */
+typedef struct QrSpatialConvention
+{
+    uint32_t    size;
+    uint32_t    version;
+
+    QrAxis      sceneXAxis;
+    QrAxis      sceneYAxis;
+    QrAxis      sceneZAxis;
+
+    QrBool32    hostIsRightHanded;
+    uint32_t    reserved0;
+
+    uint32_t    reserved[4];
+} QrSpatialConvention;
 
 #define QR_NULL_HANDLE      0
 #define QR_NO_MATERIAL      0
@@ -187,6 +216,16 @@ QRAPI QrResult QRCONV qrCreateInstance(
 QRAPI QrResult QRCONV qrDestroyInstance(
     QrInstance                          qrInstance);
 
+QRAPI QrResult QRCONV qrSetSpatialConvention(
+    QrInstance                          qrInstance,
+    const QrSpatialConvention           *pConvention);
+
+/* pConvention->size and pConvention->version must be initialized by the caller;
+   the function treats them as an in/out ABI header. */
+QRAPI QrResult QRCONV qrGetSpatialConvention(
+    QrInstance                          qrInstance,
+    QrSpatialConvention                 *pConvention);
+
 typedef struct QrLayeredMaterial
 {
     QrMaterial  layerMaterials[3];
@@ -232,11 +271,15 @@ typedef enum QrGeometryMaterialBlendType
 
 typedef struct QrTransform
 {
+    /* Row-major 3x4 affine transform: dimensionless linear part, meter translation. */
     float       matrix[3][4];
 } QrTransform;
 
 typedef struct QrMatrix3D
 {
+    /* Row-major 3x3. A cubemap rotation maps host-world directions to cubemap
+       lookup directions: the renderer composes it as R_host * H^T, where H maps
+       host-world directions into the canonical scene frame. */
     float       matrix[3][3];
 } QrMatrix3D;
 
@@ -255,10 +298,18 @@ typedef struct QrFloat4D
     float       data[4];
 } QrFloat4D;
 
+QRAPI QrResult QRCONV qrSetSmokeWindDirection(
+    QrInstance                          qrInstance,
+    const QrFloat3D                     *pDirection);
+
+QRAPI QrResult QRCONV qrGetSmokeWindDirection(
+    QrInstance                          qrInstance,
+    QrFloat3D                           *pDirection);
+
 typedef struct QrVertex
 {
-    float       position[3];        uint32_t _padding0;
-    float       normal[3];          uint32_t _padding1;
+    float       position[3];        uint32_t _padding0; /* local-space meters */
+    float       normal[3];          uint32_t _padding1; /* dimensionless direction */
     float       texCoord[2];
     float       texCoordLayer1[2];
     float       texCoordLayer2[2];
@@ -321,6 +372,9 @@ typedef struct QrGeometryUploadInfo
     QrFloat4D                       layerColors[3];
     QrGeometryMaterialBlendType     layerBlendingTypes[3];
 
+    /* Glass reflect/refract uses layerColors[2].data[1] as the pane thickness
+       in meters. The slot is unused for other pass-through types. */
+
     float                           texCoordScale[2];
     float                           texCoordOffset[2];
 
@@ -345,6 +399,8 @@ typedef struct QrUpdateTexCoordsInfo
     uint32_t        vertexOffset;
     uint32_t        vertexCount;
 
+    // One UV pair per vertex, tightly packed, laid out the way QrVertex holds it. A null entry
+    // leaves that layer's texcoords alone.
     const void      *pTexCoordLayerData[3];
 } QrUpdateTexCoordsInfo;
 
@@ -471,6 +527,8 @@ typedef enum QrRasterizedGeometryStateFlagBits
     QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE       = 2,
     QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST         = 4,
     QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE        = 8,
+    /* Consecutive vertex/index pairs form line segments; triangle winding
+       reversal does not apply to this topology. */
     QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST    = 16,
     QR_RASTERIZED_GEOMETRY_STATE_SMOKE              = 32,
     QR_RASTERIZED_GEOMETRY_STATE_PARTICLE           = 64,
@@ -504,6 +562,8 @@ typedef struct QrRasterizedGeometryUploadInfo
     QrBlendFactor                           blendFuncSrc;
     QrBlendFactor                           blendFuncDst;
 
+    /* Smoke only: xyz are spatial noise frequencies in inverse meters and w is
+       the wind/advection rate in meters per second. */
     QrFloat4D                               smokeNoise;
     QrFloat4D                               smokeLook;
 
@@ -1171,6 +1231,8 @@ typedef struct QrDrawFrameSkyParams
 
     float       skyColorMultiplier;
 
+    // Carries the opacity the clouds are composited with when skyType is
+    // QR_SKY_TYPE_PROCEDURAL; the procedural sky has no tint strength to put here.
     float       skyColorSaturation;
     float       skyAmbientLod;
     float       skyLightMultiplier;
@@ -1180,6 +1242,22 @@ typedef struct QrDrawFrameSkyParams
 
     QrCubemap   skyCubemap;
 
+    // The rotation applied to skyCubemap for QR_SKY_TYPE_CUBEMAP.
+    //
+    // For QR_SKY_TYPE_PROCEDURAL this matrix is not a rotation: it is the cloud
+    // block, six floats starting at matrix[0][0], in this order:
+    //
+    //     [0][0..2]  cloud colour, linear RGB
+    //     [1][0]     coverage, 0..1
+    //     [1][1]     density
+    //     [1][2]     wind speed
+    //     [2][0]     1 when the cloud layer is drawn, 0 when it is not
+    //     [2][1]     layer base height, meters
+    //     [2][2]     layer thickness, meters
+    //
+    // The packing keeps the struct layout stable; a host that fills this field
+    // for a procedural sky must fill the whole block, because an unset coverage
+    // or density draws nothing at all.
     QrMatrix3D  skyCubemapRotationTransform;
 
     QrBool32    godRaysEnabled;
@@ -1192,6 +1270,8 @@ typedef struct QrDrawFrameSkyParams
 
     uint32_t    skyCloudsQuality;
     uint32_t    godRaysQuality;
+
+    /* Multiplier for the baseline 0.025-radian sun-disc angular radius. */
     float       sunDiscSize;
 } QrDrawFrameSkyParams;
 
@@ -1297,10 +1377,10 @@ typedef struct QrDrawFrameVolumetricParams
 
     QrBool32    useSimpleDepthBased;
 
-    float       volumetricFar;
+    float       volumetricFar; /* meters */
     QrFloat3D   ambientColor;
 
-    float       scaterring;
+    float       scaterring; /* inverse meters */
 
     QrFloat3D   sourceColor;
     QrFloat3D   sourceDirection;
@@ -1312,7 +1392,7 @@ typedef struct QrDrawFrameLevelFogParams
 {
     QrFloat3D   color;
 
-    float       density;
+    float       density; /* inverse meters */
 
     float       skyBlend;
 } QrDrawFrameLevelFogParams;
@@ -1321,12 +1401,13 @@ typedef struct QrDrawFrameLevelFogParams
 
 typedef struct QrFogVolume
 {
+    /* World-space coordinates in meters. */
     QrFloat3D   pointA;
     QrFloat3D   pointB;
 
     QrFloat3D   color;
 
-    float       halfExtinctionDistance;
+    float       halfExtinctionDistance; /* meters */
 
     uint32_t    softface;
 } QrFogVolume;
@@ -1419,8 +1500,8 @@ typedef struct QrPostEffectsBloomParams
 typedef struct QrPostEffectsNearDofParams
 {
     float       strength;
-    float       focusDistance;
-    float       maxRadius;
+    float       focusDistance; /* meters */
+    float       maxRadius;      /* screen-space pixels */
 } QrPostEffectsNearDofParams;
 
 typedef struct QrPostEffectsSharpenParams
@@ -1492,19 +1573,19 @@ typedef struct QrDrawFrameReflectRefractParams
 
     float       indexOfRefractionWater;
     QrBool32    forceNoWaterRefraction;
-    float       waterWaveSpeed;
+    float       waterWaveSpeed; /* meters per second */
     float       waterWaveNormalStrength;
 
     float       turbWarpStrength;
 
-    QrFloat3D   waterColor;
+    QrFloat3D   waterColor; /* transmittance over one meter */
 
-    QrFloat3D   acidColor;
+    QrFloat3D   acidColor; /* transmittance over one meter */
     float       acidDensity;
 
     float       waterWaveTextureDerivativesMultiplier;
 
-    float       waterTextureAreaScale;
+    float       waterTextureAreaScale; /* meters */
 
     QrBool32    disableBackfaceReflectionsForNoMediaChange;
 
@@ -1563,16 +1644,16 @@ typedef QrFlags QrDrawFrameRayCullFlags;
 
 typedef struct QrDrawFrameInfo
 {
-    float                   view[16];
+    float                   view[16]; /* column-major world-to-view; translation in meters */
 
     QrFloat3D               worldUpVector;
 
     float                   fovYRadians;
 
-    float                   cameraNear;
-    float                   cameraFar;
+    float                   cameraNear; /* meters */
+    float                   cameraFar; /* meters */
 
-    float                   rayLength;
+    float                   rayLength; /* meters */
 
     QrDrawFrameRayCullFlags rayCullMaskWorld;
 

@@ -106,8 +106,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float sunLight = params.sunDirection.w;
 
     CloudLayer layer;
-    layer.altitude  = max(params.cloudLayer.x, 1.0);
-    layer.thickness = max(params.cloudLayer.y, 1.0);
+    layer.altitude  = max(params.cloudLayer.x, 0.025);
+    layer.thickness = max(params.cloudLayer.y, 0.025);
     layer.coverage  = clamp(params.cloudParams.x, 0.0, 0.99);
     layer.density   = max(params.cloudParams.y, 0.0);
     layer.detail    = clamp(params.cloudMarch.z, 0.0, 0.9);

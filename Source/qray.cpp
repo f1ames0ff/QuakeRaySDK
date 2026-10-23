@@ -156,6 +156,44 @@ static auto Call(QrInstance qrInstance, Func f, Args&&... args)
     return ReturnType{};
 }
 
+template<typename Func, typename... Args>
+static QrResult CallAlways(QrInstance qrInstance, Func f, Args&&... args)
+{
+    try
+    {
+        VulkanDevice &dev = GetDevice(qrInstance);
+
+        G_EntryPointCalls.fetch_add(1, std::memory_order_relaxed);
+        (dev.*f)(std::forward<Args>(args)...);
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
+    return QR_SUCCESS;
+}
+
+QrResult qrSetSpatialConvention(QrInstance qrInstance, const QrSpatialConvention *pConvention)
+{
+    return CallAlways(qrInstance, &VulkanDevice::SetSpatialConvention, pConvention);
+}
+
+QrResult qrGetSpatialConvention(QrInstance qrInstance, QrSpatialConvention *pConvention)
+{
+    return CallAlways(qrInstance, &VulkanDevice::GetSpatialConvention, pConvention);
+}
+
+QrResult qrSetSmokeWindDirection(QrInstance qrInstance, const QrFloat3D *pDirection)
+{
+    return CallAlways(qrInstance, &VulkanDevice::SetSmokeWindDirection, pDirection);
+}
+
+QrResult qrGetSmokeWindDirection(QrInstance qrInstance, QrFloat3D *pDirection)
+{
+    return CallAlways(qrInstance, &VulkanDevice::GetSmokeWindDirection, pDirection);
+}
+
 QrResult qrUploadGeometry(QrInstance qrInstance, const QrGeometryUploadInfo *pUploadInfo)
 {
     return Call(qrInstance, &VulkanDevice::UploadGeometry, pUploadInfo );

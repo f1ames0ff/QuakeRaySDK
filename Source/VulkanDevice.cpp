@@ -34,6 +34,218 @@
 
 using namespace qray;
 
+namespace
+{
+
+QrFloat3D SpatialPoint(const SpatialFrame &frame, const QrFloat3D &value)
+{
+    return frame.IsIdentity() ? value : frame.Point(value);
+}
+
+QrFloat3D SpatialDirection(const SpatialFrame &frame, const QrFloat3D &value)
+{
+    return frame.IsIdentity() ? value : frame.Direction(value);
+}
+
+QrTransform SpatialTransform(const SpatialFrame &frame, const QrTransform &value)
+{
+    return frame.IsIdentity() ? value : frame.Transform(value);
+}
+
+QrDirectionalLightUploadInfo SpatialDirectionalLight(const SpatialFrame &frame, const QrDirectionalLightUploadInfo &source)
+{
+    QrDirectionalLightUploadInfo result = source;
+    result.direction = SpatialDirection(frame, source.direction);
+    return result;
+}
+
+QrSphericalLightUploadInfo SpatialSphericalLight(const SpatialFrame &frame, const QrSphericalLightUploadInfo &source)
+{
+    QrSphericalLightUploadInfo result = source;
+    const float powerScale = frame.Scale() * frame.Scale();
+    result.position = SpatialPoint(frame, source.position);
+    result.normal = SpatialDirection(frame, source.normal);
+    result.radius = frame.Length(source.radius);
+    result.color.data[0] *= powerScale;
+    result.color.data[1] *= powerScale;
+    result.color.data[2] *= powerScale;
+    return result;
+}
+
+QrSpotLightUploadInfo SpatialSpotLight(const SpatialFrame &frame, const QrSpotLightUploadInfo &source)
+{
+    QrSpotLightUploadInfo result = source;
+    const float powerScale = frame.Scale() * frame.Scale();
+    result.position = SpatialPoint(frame, source.position);
+    result.direction = SpatialDirection(frame, source.direction);
+    result.radius = frame.Length(source.radius);
+    result.color.data[0] *= powerScale;
+    result.color.data[1] *= powerScale;
+    result.color.data[2] *= powerScale;
+    return result;
+}
+
+QrPolygonalLightUploadInfo SpatialPolygonalLight(const SpatialFrame &frame, const QrPolygonalLightUploadInfo &source)
+{
+    QrPolygonalLightUploadInfo result = source;
+    const float powerScale = frame.Scale() * frame.Scale();
+
+    for (int i = 0; i < 3; i++)
+    {
+        result.positions[i] = SpatialPoint(frame, source.positions[i]);
+    }
+
+    if (frame.IsMirrored())
+    {
+        // A polygonal light has no normal field: LightManager derives one from the
+        // vertex order, so a mirrored frame has to restore the host's authored side
+        // by putting that order back.
+        std::swap(result.positions[1], result.positions[2]);
+    }
+
+    result.color.data[0] *= powerScale;
+    result.color.data[1] *= powerScale;
+    result.color.data[2] *= powerScale;
+    return result;
+}
+
+QrTexturedAreaLightUploadInfo SpatialTexturedAreaLight(const SpatialFrame &frame, const QrTexturedAreaLightUploadInfo &source)
+{
+    QrTexturedAreaLightUploadInfo result = source;
+    result.A = SpatialPoint(frame, source.A);
+    result.B = SpatialPoint(frame, source.B);
+    result.C = SpatialPoint(frame, source.C);
+    result.normal = SpatialDirection(frame, source.normal);
+    result.area = frame.Area(source.area);
+    return result;
+}
+
+QrDtalGroupUploadInfo SpatialDtalGroup(const SpatialFrame &frame, const QrDtalGroupUploadInfo &source)
+{
+    QrDtalGroupUploadInfo result = source;
+    result.center = SpatialPoint(frame, source.center);
+    result.normal = SpatialDirection(frame, source.normal);
+    frame.Aabb(source.boundsMin, source.boundsMax, result.boundsMin, result.boundsMax);
+    result.area = frame.Area(source.area);
+    result.reach = frame.Length(source.reach);
+    result.boundsRadius = frame.Length(source.boundsRadius);
+    return result;
+}
+
+QrDtalMemberUpload SpatialDtalMember(const SpatialFrame &frame, const QrDtalMemberUpload &source)
+{
+    QrDtalMemberUpload result = source;
+    result.A = SpatialPoint(frame, source.A);
+    result.B = SpatialPoint(frame, source.B);
+    result.C = SpatialPoint(frame, source.C);
+    result.normal = SpatialDirection(frame, source.normal);
+    result.area = frame.Area(source.area);
+    return result;
+}
+
+QrClusterLightSource SpatialClusterLightSource(const SpatialFrame &frame, const QrClusterLightSource &source)
+{
+    QrClusterLightSource result = source;
+    result.origin = SpatialPoint(frame, source.origin);
+    result.reach = frame.Length(source.reach);
+    result.radius = frame.Length(source.radius);
+    return result;
+}
+
+QrFogVolume SpatialFogVolume(const SpatialFrame &frame, const QrFogVolume &source)
+{
+    QrFogVolume result = source;
+    result.pointA = SpatialPoint(frame, source.pointA);
+    result.pointB = SpatialPoint(frame, source.pointB);
+    result.halfExtinctionDistance = frame.Length(source.halfExtinctionDistance);
+    result.softface = frame.SoftFace(source.softface);
+    return result;
+}
+
+QrParticlePoint SpatialParticlePoint(const SpatialFrame &frame, const QrParticlePoint &source)
+{
+    QrParticlePoint result = source;
+    const QrFloat3D position = SpatialPoint(frame, { { source.position[0], source.position[1], source.position[2] } });
+    result.position[0] = position.data[0];
+    result.position[1] = position.data[1];
+    result.position[2] = position.data[2];
+    result.size = frame.Length(source.size);
+    return result;
+}
+
+QrPortalUploadInfo SpatialPortal(const SpatialFrame &frame, const QrPortalUploadInfo &source)
+{
+    QrPortalUploadInfo result = source;
+    result.inPosition = SpatialPoint(frame, source.inPosition);
+    result.outPosition = SpatialPoint(frame, source.outPosition);
+    result.outDirection = SpatialDirection(frame, source.outDirection);
+    result.outUp = SpatialDirection(frame, source.outUp);
+    return result;
+}
+
+}
+
+void VulkanDevice::SetSpatialConvention(const QrSpatialConvention *pConvention)
+{
+    if (pConvention == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    if (spatialFrameLocked)
+    {
+        throw QrException(QR_WRONG_FUNCTION_CALL, "The spatial convention must be set before spatial uploads");
+    }
+
+    if (!spatialFrame.Configure(*pConvention))
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Invalid spatial convention");
+    }
+
+    spatialConvention = *pConvention;
+}
+
+void VulkanDevice::GetSpatialConvention(QrSpatialConvention *pConvention) const
+{
+    if (pConvention == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    if (pConvention->size < sizeof(QrSpatialConvention))
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "QrSpatialConvention size is too small");
+    }
+
+    *pConvention = spatialConvention;
+}
+
+void VulkanDevice::SetSmokeWindDirection(const QrFloat3D *pDirection)
+{
+    if (pDirection == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    smokeWindDirection = *pDirection;
+    smokeWindDirectionSet = true;
+}
+
+void VulkanDevice::GetSmokeWindDirection(QrFloat3D *pDirection) const
+{
+    if (pDirection == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    *pDirection = smokeWindDirection;
+}
+
+void VulkanDevice::LockSpatialFrame()
+{
+    spatialFrameLocked = true;
+}
+
 VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
 {
     uint32_t frameIndex = currentFrameState.IncrementFrameIndexAndGet();
@@ -365,7 +577,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->polyLightSpotlightFactor   = std::max( 0.0f, drawInfo.pIlluminationParams->polygonalLightSpotlightFactor );
         gu->indirSecondBounce          = !!drawInfo.pIlluminationParams->enableSecondBounceForIndirect;
         gu->lightIndexIgnoreFPVShadows = scene->GetLightManager()->GetLightIndexIgnoreFPVShadows( currentFrameState.GetFrameIndex(), drawInfo.pIlluminationParams->lightUniqueIdIgnoreFirstPersonViewerShadows );
-        gu->cellWorldSize              = std::max( drawInfo.pIlluminationParams->cellWorldSize, 0.001f );
+        gu->cellWorldSize              = std::max( drawInfo.pIlluminationParams->cellWorldSize, 2.5e-5f );
         gu->gradientMultDiffuse        = std::clamp( drawInfo.pIlluminationParams->directDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultIndirect       = std::clamp( drawInfo.pIlluminationParams->indirectDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultSpecular       = std::clamp( drawInfo.pIlluminationParams->specularSensitivityToChange, 0.0f, 1.0f );
@@ -388,7 +600,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->polyLightSpotlightFactor   = 2.0f;
         gu->indirSecondBounce          = false;
         gu->lightIndexIgnoreFPVShadows = LIGHT_INDEX_NONE;
-        gu->cellWorldSize              = 1.0f;
+        gu->cellWorldSize              = 0.025f;
         gu->gradientMultDiffuse        = 0.5f;
         gu->gradientMultIndirect       = 0.2f;
         gu->gradientMultSpecular       = 0.5f;
@@ -403,7 +615,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;
-        gu->sunBounce[0]               = 2000.0f;
+        gu->sunBounce[0]               = 50.0f;
         gu->sunBounce[1]               = 1.0f;
     }
 
@@ -502,6 +714,21 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->waterTextureDerivativesMultiplier = 1.0f;
         gu->waterTextureAreaScale             = 1.0f;
 
+        // The fallbacks stand for the defaults a host would otherwise send, so
+        // they are expressed in meters and converted through the frame the
+        // same way SpatialFrame::ConvertDrawFrame does for a real draw.
+        if( !spatialFrame.IsIdentity() )
+        {
+            for( int channel = 0; channel < 3; channel++ )
+            {
+                gu->waterColorAndDensity[ channel ] = spatialFrame.Transmittance( gu->waterColorAndDensity[ channel ] );
+                gu->acidColorAndDensity[ channel ] = spatialFrame.Transmittance( gu->acidColorAndDensity[ channel ] );
+            }
+
+            gu->waterWaveSpeed        *= spatialFrame.Scale();
+            gu->waterTextureAreaScale *= spatialFrame.Scale();
+        }
+
         gu->noBackfaceReflForNoMediaChange = false;
         gu->glassBlur                      = false;
         gu->glassDenoise                   = false;
@@ -511,8 +738,37 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     gu->rayCullBackFaces  = rayCullBackFacingTriangles ? 1 : 0;
-    gu->rayLength         = clamp( drawInfo.rayLength, 0.1f, ( float )MAX_RAY_LENGTH );
-    gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 0.001f, gu->rayLength );
+    gu->rayLength         = clamp( drawInfo.rayLength, 0.0025f, ( float )MAX_RAY_LENGTH );
+    gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 2.5e-5f, gu->rayLength );
+
+    {
+        if( !smokeWindDirectionSet )
+        {
+            gu->smokeWindX = 0.45f;
+            gu->smokeWindY = 0.20f;
+            gu->smokeWindZ = 0.87f;
+        }
+        else
+        {
+            const QrFloat3D wind = spatialFrame.Direction( smokeWindDirection );
+            const float windLength = std::sqrt( wind.data[ 0 ] * wind.data[ 0 ] +
+                                                wind.data[ 1 ] * wind.data[ 1 ] +
+                                                wind.data[ 2 ] * wind.data[ 2 ] );
+
+            if( windLength > 0.000001f )
+            {
+                gu->smokeWindX = wind.data[ 0 ] / windLength;
+                gu->smokeWindY = wind.data[ 1 ] / windLength;
+                gu->smokeWindZ = wind.data[ 2 ] / windLength;
+            }
+            else
+            {
+                gu->smokeWindX = 0.45f;
+                gu->smokeWindY = 0.20f;
+                gu->smokeWindZ = 0.87f;
+            }
+        }
+    }
 
     {
         gu->rayCullMaskWorld = 0;
@@ -571,6 +827,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
 
     gu->waterNormalTextureIndex = textureManager->GetWaterNormalTextureIndex();
 
+    gu->sceneUnitsPerHostUnit = std::max( spatialFrame.Scale(), 1e-6f );
+
     gu->cameraRayConeSpreadAngle = atanf( ( 2.0f * tanf( drawInfo.fovYRadians * 0.5f ) ) / ( float )renderResolution.Height() );
 
     if( Utils::IsAlmostZero( drawInfo.worldUpVector ) )
@@ -587,10 +845,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     {
-        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 0.001f );
+        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 2.5e-5f );
         gu->volumeCameraFar  = std::min(
             drawInfo.cameraFar,
-            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 100.0f );
+            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 2.5f );
 
         if( drawInfo.pVolumetricParams )
         {
@@ -887,6 +1145,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     sky.disableRasterization = drawInfo.disableRasterization;
     sky.uniform = uniform;
     sky.tonemapping = tonemapping.get();
+    sky.disableEyeAdaptation = drawInfo.disableEyeAdaptation != 0;
     if (drawInfo.pTonemappingParams != nullptr)
     {
         sky.exposureBias = drawInfo.pTonemappingParams->exposureBias;
@@ -948,7 +1207,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
             for (int k = 0; k < 3; k++)
             {
-                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 1.0f);
+                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
                 sky.godRays.aabbMin[k] = aabbMin[k];
                 sky.godRays.aabbMax[k] = aabbMax[k];
                 sky.godRays.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
@@ -1022,8 +1281,8 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const uint32_t cloudsQuality = drawInfo.pSkyParams != nullptr
             ? std::min(drawInfo.pSkyParams->skyCloudsQuality, uint32_t(QR_SKY_CLOUDS_MAX_QUALITY))
             : 2;
-        float cloudAltitude = 140000.0f;
-        float cloudThickness = 90000.0f;
+        float cloudAltitude = 3500.0f;
+        float cloudThickness = 2250.0f;
 
         p.cloudColor[3] = globalUniform->time;
         if (drawInfo.pSkyParams)
@@ -1235,6 +1494,16 @@ void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
     if (drawInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    LockSpatialFrame();
+
+    SpatialFrameDrawStorage storage;
+
+    if (!spatialFrame.IsIdentity())
+    {
+        ConvertDrawFrame(spatialFrame, *drawInfo, storage);
+        drawInfo = &storage.info;
     }
 
     cpuFrameProfiler.Reset(drawInfo->enableCpuProfiling != 0);
@@ -1722,6 +1991,52 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Geometry's portal index must be in [0, 62]");
     }
 
+    LockSpatialFrame();
+
+    QrGeometryUploadInfo converted = *uploadInfo;
+    std::vector<uint32_t> convertedIndices;
+    std::vector<QrVertex> convertedVertices;
+
+    if (!spatialFrame.IsIdentity())
+    {
+        converted = spatialFrame.Geometry(*uploadInfo);
+    }
+
+    const bool reversesWinding = spatialFrame.ReversesWinding(uploadInfo->transform);
+
+    if (reversesWinding)
+    {
+        if (uploadInfo->pIndices != nullptr && uploadInfo->indexCount >= 3)
+        {
+            convertedIndices.assign(uploadInfo->pIndices, uploadInfo->pIndices + uploadInfo->indexCount);
+
+            for (uint32_t index = 0; index + 2 < uploadInfo->indexCount; index += 3)
+            {
+                std::swap(convertedIndices[index + 1], convertedIndices[index + 2]);
+            }
+
+            converted.pIndices = convertedIndices.data();
+        }
+        else if (uploadInfo->pIndices == nullptr && uploadInfo->vertexCount >= 3)
+        {
+            convertedVertices.assign(uploadInfo->pVertices, uploadInfo->pVertices + uploadInfo->vertexCount);
+
+            for (uint32_t vertex = 0; vertex + 2 < uploadInfo->vertexCount; vertex += 3)
+            {
+                std::swap(convertedVertices[vertex + 1], convertedVertices[vertex + 2]);
+            }
+
+            converted.pVertices = convertedVertices.data();
+        }
+    }
+
+    if (!spatialFrame.IsIdentity() || reversesWinding)
+    {
+        uploadInfo = &converted;
+    }
+
+    geometryWindingFlips[uploadInfo->uniqueID] = reversesWinding;
+
     scene->Upload(currentFrameState.GetFrameIndex(), *uploadInfo);
 }
 
@@ -1731,6 +2046,23 @@ void VulkanDevice::UpdateGeometryTransform(const QrUpdateTransformInfo *updateIn
     if (updateInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    LockSpatialFrame();
+
+    QrUpdateTransformInfo converted = *updateInfo;
+    const bool reversesWinding = spatialFrame.ReversesWinding(updateInfo->transform);
+    const auto flipIt = geometryWindingFlips.find(updateInfo->movableStaticUniqueID);
+
+    if (flipIt != geometryWindingFlips.end() && flipIt->second != reversesWinding)
+    {
+        throw QrException(QR_CANT_UPDATE_TRANSFORM, "Transform update of geometry with unique ID=" + std::to_string(updateInfo->movableStaticUniqueID) + " reverses its winding; re-upload the geometry instead");
+    }
+
+    if (!spatialFrame.IsIdentity())
+    {
+        converted.transform = SpatialTransform(spatialFrame, updateInfo->transform);
+        updateInfo = &converted;
     }
 
     scene->UpdateTransform(*updateInfo);
@@ -1790,6 +2122,90 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         return;
     }
 
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
+    {
+        LockSpatialFrame();
+    }
+
+    QrRasterizedGeometryUploadInfo converted = *pUploadInfo;
+    float convertedViewProjection[16] = {};
+    std::vector<QrVertex> convertedVertices;
+    std::vector<uint32_t> convertedIndices;
+
+    const bool spatialRenderType =
+        pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
+    const bool spatialConversion = !spatialFrame.IsIdentity() && spatialRenderType;
+    const bool reversesWinding = spatialRenderType &&
+        ShouldReverseRasterizedWinding(
+            spatialFrame.ReversesWinding(pUploadInfo->transform), pUploadInfo->pipelineState);
+
+    if (spatialConversion)
+    {
+        converted.transform = SpatialTransform(spatialFrame, pUploadInfo->transform);
+    }
+
+    if (reversesWinding)
+    {
+        if (pUploadInfo->pIndices != nullptr && pUploadInfo->indexCount >= 3)
+        {
+            const uint32_t *sourceIndices = static_cast<const uint32_t *>(pUploadInfo->pIndices);
+            convertedIndices.assign(sourceIndices, sourceIndices + pUploadInfo->indexCount);
+
+            for (uint32_t index = 0; index + 2 < pUploadInfo->indexCount; index += 3)
+            {
+                std::swap(convertedIndices[index + 1], convertedIndices[index + 2]);
+            }
+
+            converted.pIndices = convertedIndices.data();
+        }
+        else if (pUploadInfo->pIndices == nullptr && pUploadInfo->vertexCount >= 3)
+        {
+            convertedVertices.assign(pUploadInfo->pVertices, pUploadInfo->pVertices + pUploadInfo->vertexCount);
+
+            for (uint32_t vertex = 0; vertex + 2 < pUploadInfo->vertexCount; vertex += 3)
+            {
+                std::swap(convertedVertices[vertex + 1], convertedVertices[vertex + 2]);
+            }
+        }
+    }
+
+    if (spatialConversion)
+    {
+        if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
+        {
+            if (convertedVertices.empty())
+            {
+                convertedVertices.assign(pUploadInfo->pVertices, pUploadInfo->pVertices + pUploadInfo->vertexCount);
+            }
+
+            for (QrVertex &vertex : convertedVertices)
+            {
+                vertex.normal[1] = spatialFrame.Length(vertex.normal[1]);
+            }
+
+            converted.smokeNoise.data[0] *= spatialFrame.InvScale();
+            converted.smokeNoise.data[1] *= spatialFrame.InvScale();
+            converted.smokeNoise.data[2] *= spatialFrame.InvScale();
+            converted.smokeNoise.data[3] *= spatialFrame.Scale();
+        }
+
+        if (pViewProjection != nullptr)
+        {
+            spatialFrame.ViewProjection(pViewProjection, convertedViewProjection);
+            pViewProjection = convertedViewProjection;
+        }
+    }
+
+    if (!convertedVertices.empty())
+    {
+        converted.pVertices = convertedVertices.data();
+    }
+
+    if (spatialConversion || reversesWinding)
+    {
+        pUploadInfo = &converted;
+    }
+
     if (!rasterizedDataCollector->AddGeometry(currentFrameState.GetFrameIndex(), *pUploadInfo, pViewProjection, pViewport))
     {
         if (!printedRasterOverflow)
@@ -1824,6 +2240,26 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
         return QR_SUCCESS;
     }
 
+    LockSpatialFrame();
+
+    QrParticleUploadInfo converted = *pUploadInfo;
+    std::vector<QrParticlePoint> convertedPoints;
+
+    if (!spatialFrame.IsIdentity())
+    {
+        convertedPoints.resize(pUploadInfo->count);
+
+        for (uint32_t i = 0; i < pUploadInfo->count; i++)
+        {
+            convertedPoints[i] = SpatialParticlePoint(spatialFrame, pUploadInfo->pPoints[i]);
+        }
+
+        converted.pPoints = convertedPoints.data();
+        converted.viewRight = SpatialDirection(spatialFrame, pUploadInfo->viewRight);
+        converted.viewUp = SpatialDirection(spatialFrame, pUploadInfo->viewUp);
+        pUploadInfo = &converted;
+    }
+
     if (!rasterizedDataCollector->AddParticles(currentFrameState.GetFrameIndex(), *pUploadInfo))
     {
         if (!printedParticlePointOverflow || frameId - lastParticlePointOverflowWarnFrameId >= 120u)
@@ -1847,6 +2283,15 @@ void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    LockSpatialFrame();
+
+    QrDecalUploadInfo converted = *pUploadInfo;
+    if (!spatialFrame.IsIdentity())
+    {
+        converted.transform = SpatialTransform(spatialFrame, pUploadInfo->transform);
+        pUploadInfo = &converted;
+    }
+
     decalManager->Upload(currentFrameState.GetFrameIndex(), *pUploadInfo, textureManager);
 }
 
@@ -1856,6 +2301,15 @@ void VulkanDevice::UploadPortal(const QrPortalUploadInfo *pUploadInfo)
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    LockSpatialFrame();
+
+    QrPortalUploadInfo converted = *pUploadInfo;
+    if (!spatialFrame.IsIdentity())
+    {
+        converted = SpatialPortal(spatialFrame, *pUploadInfo);
+        pUploadInfo = &converted;
     }
 
     portalList->Upload(currentFrameState.GetFrameIndex(), *pUploadInfo);
@@ -1882,7 +2336,10 @@ void VulkanDevice::UploadDirectionalLight(const QrDirectionalLightUploadInfo *pL
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    scene->UploadLight(currentFrameState.GetFrameIndex(), *pLightInfo);
+    LockSpatialFrame();
+
+    QrDirectionalLightUploadInfo converted = SpatialDirectionalLight(spatialFrame, *pLightInfo);
+    scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
 }
 
 void VulkanDevice::UploadSphericalLight(const QrSphericalLightUploadInfo *pLightInfo)
@@ -1894,7 +2351,10 @@ void VulkanDevice::UploadSphericalLight(const QrSphericalLightUploadInfo *pLight
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    scene->UploadLight(currentFrameState.GetFrameIndex(), *pLightInfo);
+    LockSpatialFrame();
+
+    QrSphericalLightUploadInfo converted = SpatialSphericalLight(spatialFrame, *pLightInfo);
+    scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
 }
 
 void VulkanDevice::BeginDeferredLightUploads(uint32_t slot)
@@ -1939,7 +2399,10 @@ void VulkanDevice::UploadSpotlight(const QrSpotLightUploadInfo *pLightInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    scene->UploadLight(currentFrameState.GetFrameIndex(), *pLightInfo);
+    LockSpatialFrame();
+
+    QrSpotLightUploadInfo converted = SpatialSpotLight(spatialFrame, *pLightInfo);
+    scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
 }
 
 void VulkanDevice::UploadPolygonalLight(const QrPolygonalLightUploadInfo *pLightInfo)
@@ -1951,7 +2414,10 @@ void VulkanDevice::UploadPolygonalLight(const QrPolygonalLightUploadInfo *pLight
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    scene->UploadLight(currentFrameState.GetFrameIndex(), *pLightInfo);
+    LockSpatialFrame();
+
+    QrPolygonalLightUploadInfo converted = SpatialPolygonalLight(spatialFrame, *pLightInfo);
+    scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
 }
 
 void VulkanDevice::UploadTexturedAreaLight(const QrTexturedAreaLightUploadInfo *pLightInfo)
@@ -1963,10 +2429,13 @@ void VulkanDevice::UploadTexturedAreaLight(const QrTexturedAreaLightUploadInfo *
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    LockSpatialFrame();
+
     const MaterialTextures textures = textureManager->GetMaterialTextures(pLightInfo->material);
     const uint32_t textureIndex = textures.indices[MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX];
 
-    scene->UploadLight(currentFrameState.GetFrameIndex(), *pLightInfo, textureIndex);
+    QrTexturedAreaLightUploadInfo converted = SpatialTexturedAreaLight(spatialFrame, *pLightInfo);
+    scene->UploadLight(currentFrameState.GetFrameIndex(), converted, textureIndex);
 }
 
 void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo *pLightInfos, uint32_t count)
@@ -1977,6 +2446,8 @@ void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo 
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     const uint32_t materialCacheSize = 512;
     uint32_t cachedMaterial[materialCacheSize];
@@ -2005,7 +2476,8 @@ void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo 
             cachedValid[slot] = true;
         }
 
-        scene->UploadLight(frameIndex, *pLightInfo, textureIndex);
+        const QrTexturedAreaLightUploadInfo converted = SpatialTexturedAreaLight(spatialFrame, *pLightInfo);
+        scene->UploadLight(frameIndex, converted, textureIndex);
     }
 }
 
@@ -2016,9 +2488,34 @@ void VulkanDevice::UploadDtalGroups(const QrDtalGroupUploadBatch *pUploadInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    LockSpatialFrame();
+
     if (pUploadInfo->groupCount == 0 || pUploadInfo->pGroups == nullptr || pUploadInfo->pMembers == nullptr)
     {
         return;
+    }
+
+    std::vector<QrDtalGroupUploadInfo> convertedGroups;
+    std::vector<QrDtalMemberUpload> convertedMembers;
+    QrDtalGroupUploadBatch convertedBatch = *pUploadInfo;
+
+    if (!spatialFrame.IsIdentity())
+    {
+        convertedGroups.resize(pUploadInfo->groupCount);
+        convertedMembers.resize(pUploadInfo->memberCount);
+
+        for (uint32_t i = 0; i < pUploadInfo->groupCount; i++)
+        {
+            convertedGroups[i] = SpatialDtalGroup(spatialFrame, pUploadInfo->pGroups[i]);
+        }
+
+        for (uint32_t i = 0; i < pUploadInfo->memberCount; i++)
+        {
+            convertedMembers[i] = SpatialDtalMember(spatialFrame, pUploadInfo->pMembers[i]);
+        }
+
+        convertedBatch.pGroups = convertedGroups.data();
+        convertedBatch.pMembers = convertedMembers.data();
     }
 
     std::vector<uint32_t> textureIndices(pUploadInfo->groupCount);
@@ -2048,7 +2545,7 @@ void VulkanDevice::UploadDtalGroups(const QrDtalGroupUploadBatch *pUploadInfo)
         }
     }
 
-    if (!scene->UploadDtalGroups(currentFrameState.GetFrameIndex(), *pUploadInfo, textureIndices.data()))
+    if (!scene->UploadDtalGroups(currentFrameState.GetFrameIndex(), convertedBatch, textureIndices.data()))
     {
         throw QrException(QR_WRONG_ARGUMENT, "DTAL group batch did not fit the renderer light storage");
     }
@@ -2072,7 +2569,29 @@ void VulkanDevice::BeginClusterLightSources(const QrClusterLightSourcesUploadInf
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    clusterLightLists->BeginSources(*worldLights, *pInfo, scene->GetLightManager().get(), userPrint.get(),
+    LockSpatialFrame();
+
+    std::vector<QrClusterLightSource> convertedSources;
+    QrClusterLightSourcesUploadInfo converted = *pInfo;
+
+    if (!spatialFrame.IsIdentity())
+    {
+        converted.topUpReach = spatialFrame.Length(pInfo->topUpReach);
+
+        if (pInfo->pLights != nullptr)
+        {
+            convertedSources.resize(pInfo->numLights);
+
+            for (uint32_t i = 0; i < pInfo->numLights; i++)
+            {
+                convertedSources[i] = SpatialClusterLightSource(spatialFrame, pInfo->pLights[i]);
+            }
+
+            converted.pLights = convertedSources.data();
+        }
+    }
+
+    clusterLightLists->BeginSources(*worldLights, converted, scene->GetLightManager().get(), userPrint.get(),
                                     currentFrameState.GetFrameIndex(), sliceCount);
 }
 
@@ -2132,7 +2651,78 @@ void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    worldLights->Upload(*pInfo, userPrint.get());
+    LockSpatialFrame();
+
+    std::vector<QrFloat3D> clusterMins;
+    std::vector<QrFloat3D> clusterMaxs;
+    std::vector<QrWorldLightFace> faceRecords;
+    std::vector<QrVertex> faceVertices;
+    QrWorldLightsUploadInfo converted = *pInfo;
+
+    if (!spatialFrame.IsIdentity())
+    {
+        if (pInfo->pClusterMins != nullptr && pInfo->pClusterMaxs != nullptr)
+        {
+            clusterMins.resize(pInfo->numClusters);
+            clusterMaxs.resize(pInfo->numClusters);
+
+            for (uint32_t i = 0; i < pInfo->numClusters; i++)
+            {
+                spatialFrame.Aabb(pInfo->pClusterMins[i], pInfo->pClusterMaxs[i],
+                                  clusterMins[i], clusterMaxs[i]);
+            }
+
+            converted.pClusterMins = clusterMins.data();
+            converted.pClusterMaxs = clusterMaxs.data();
+        }
+
+        if (pInfo->pFaceVertices != nullptr)
+        {
+            faceVertices.resize(pInfo->numFaceVertices);
+
+            for (uint32_t i = 0; i < pInfo->numFaceVertices; i++)
+            {
+                faceVertices[i] = pInfo->pFaceVertices[i];
+                const QrFloat3D position = SpatialPoint(spatialFrame, { {
+                    pInfo->pFaceVertices[i].position[0],
+                    pInfo->pFaceVertices[i].position[1],
+                    pInfo->pFaceVertices[i].position[2],
+                } });
+                const QrFloat3D normal = SpatialDirection(spatialFrame, { {
+                    pInfo->pFaceVertices[i].normal[0],
+                    pInfo->pFaceVertices[i].normal[1],
+                    pInfo->pFaceVertices[i].normal[2],
+                } });
+                faceVertices[i].position[0] = position.data[0];
+                faceVertices[i].position[1] = position.data[1];
+                faceVertices[i].position[2] = position.data[2];
+                faceVertices[i].normal[0] = normal.data[0];
+                faceVertices[i].normal[1] = normal.data[1];
+                faceVertices[i].normal[2] = normal.data[2];
+            }
+
+            converted.pFaceVertices = faceVertices.data();
+        }
+    }
+
+    if (spatialFrame.IsMirrored() && pInfo->numFaces > 0)
+    {
+        if (pInfo->pFaces == nullptr || faceVertices.empty())
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Mirrored world-light faces require both face and vertex arrays");
+        }
+
+        faceRecords.assign(pInfo->pFaces, pInfo->pFaces + pInfo->numFaces);
+
+        if (!ReverseWorldLightFaceOrder(faceRecords, faceVertices))
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "World-light face range is outside the vertex array");
+        }
+
+        converted.pFaces = faceRecords.data();
+    }
+
+    worldLights->Upload(converted, userPrint.get());
 
     scene->GetLightManager()->SetClusterSkyVisibility(worldLights->GetClusterSkyVisibility(),
                                                       worldLights->GetClusterCount());
@@ -2140,6 +2730,8 @@ void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
 
 void VulkanDevice::SetFogVolumes(uint32_t count, const QrFogVolume *pVolumes)
 {
+    LockSpatialFrame();
+
     if (count == 0 || pVolumes == nullptr)
     {
         fogVolumeCount = 0;
@@ -2151,7 +2743,7 @@ void VulkanDevice::SetFogVolumes(uint32_t count, const QrFogVolume *pVolumes)
 
     for (uint32_t i = 0; i < count; i++)
     {
-        fogVolumes[i] = pVolumes[i];
+        fogVolumes[i] = spatialFrame.IsIdentity() ? pVolumes[i] : SpatialFogVolume(spatialFrame, pVolumes[i]);
     }
     fogVolumeCount = count;
 }

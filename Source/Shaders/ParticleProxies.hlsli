@@ -110,8 +110,8 @@ bool intersectParticleBillboard(const ShParticleProxy proxy, const float3 origin
     const float3 legBasisU = cross(legBasisR, d);
 
     const float3 rel = origin + planeT * d - proxy.center;
-    const float2 local = float2(dot(rel, legBasisR) / max(proxy.legRight, 1e-4),
-                                dot(rel, legBasisU) / max(proxy.legUp, 1e-4));
+    const float2 local = float2(dot(rel, legBasisR) / max(proxy.legRight, 2.5e-6),
+                                dot(rel, legBasisU) / max(proxy.legUp, 2.5e-6));
 
     // The centroid sits a third of each leg from the right-angle corner: the triangle is the
     // (0,0)-(1,0)-(0,1) affine image of the local basis, so the UVs are the affine coordinates.
@@ -316,7 +316,7 @@ void q2BlendParticleProxies(const float3 origin, const float3 dir, const float t
         return;
     }
 
-    const ShParticleHit hit = traceParticleProxy(origin, dir, 0.01, tMax, cbPix);
+    const ShParticleHit hit = traceParticleProxy(origin, dir, 2.5e-4, tMax, cbPix);
 
     if (!hit.valid)
     {

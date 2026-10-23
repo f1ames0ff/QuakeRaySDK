@@ -258,7 +258,7 @@ bool qray::Utils::GetNormalAndArea(const QrFloat3D positions[3], QrFloat3D &norm
     normal.data[2] /= len;
 
     area = len * 0.5f;
-    return area > 0.01f;
+    return area > 6.25e-6f;
 }
 
 void qray::Utils::SetMatrix3ToGLSLMat4(float dst[16], const QrMatrix3D &src)

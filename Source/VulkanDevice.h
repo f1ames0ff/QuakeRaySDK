@@ -50,6 +50,7 @@
 #include "FrameState.h"
 #include "LibraryConfig.h"
 #include "PortalList.h"
+#include "SpatialFrame.h"
 #include "WorldLights.h"
 #include "ClusterLightLists.h"
 #include "RayStats.h"
@@ -94,6 +95,11 @@ public:
     VulkanDevice(VulkanDevice&& other) noexcept = delete;
     VulkanDevice& operator=(const VulkanDevice& other) = delete;
     VulkanDevice& operator=(VulkanDevice&& other) noexcept = delete;
+
+    void SetSpatialConvention(const QrSpatialConvention *pConvention);
+    void GetSpatialConvention(QrSpatialConvention *pConvention) const;
+    void SetSmokeWindDirection(const QrFloat3D *pDirection);
+    void GetSmokeWindDirection(QrFloat3D *pDirection) const;
 
     void UploadGeometry(const QrGeometryUploadInfo *pUploadInfo);
     void UpdateGeometryTransform(const QrUpdateTransformInfo *pUpdateInfo);
@@ -209,6 +215,7 @@ private:
     void DestroyDevice();
     void DestroySyncPrimitives();
 
+    void LockSpatialFrame();
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
@@ -221,6 +228,22 @@ private:
     VkSurfaceKHR        surface;
 
     FrameState          currentFrameState;
+
+    SpatialFrame        spatialFrame;
+    QrSpatialConvention spatialConvention = {
+        sizeof(QrSpatialConvention),
+        QR_SPATIAL_CONVENTION_VERSION,
+        QR_AXIS_POSITIVE_X,
+        QR_AXIS_POSITIVE_Y,
+        QR_AXIS_POSITIVE_Z,
+        QR_TRUE,
+        0,
+        {},
+    };
+    bool                spatialFrameLocked = false;
+    bool                smokeWindDirectionSet = false;
+    QrFloat3D           smokeWindDirection = { { 0.45f, 0.20f, 0.87f } };
+    std::unordered_map<uint32_t, bool> geometryWindingFlips;
 
     uint32_t            frameId;
 

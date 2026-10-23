@@ -41,7 +41,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     CloudLayer layer;
     layer.altitude  = params.sunDirection.w;
-    layer.thickness = max(params.cloudLayer.x, 1.0);
+    layer.thickness = max(params.cloudLayer.x, 0.025);
     layer.coverage  = clamp(params.cloudLayer.y, 0.0, 0.99);
     layer.density   = max(params.cloudLayer.z, 0.0);
     layer.detail    = clamp(params.cloudLayer.w, 0.0, 0.9);
@@ -50,7 +50,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     int steps = CLOUD_SHADOW_STEPS;
 
-    float extent = max(params.mapProjection.z, 1.0);
+    float extent = max(params.mapProjection.z, 0.025);
     float2 flatPos = params.mapProjection.xy + ((float2)ipos + 0.5) / (float)size * extent;
 
     float3 sunDir = normalize(params.sunDirection.xyz);

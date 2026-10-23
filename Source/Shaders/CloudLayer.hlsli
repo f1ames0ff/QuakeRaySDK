@@ -47,7 +47,7 @@ float3 cloudSunSample(float3 p, float3 sunDir, float dist, float stepSize)
     float3 tangent = normalize(cross(helper, sunDir));
     float3 bitangent = cross(sunDir, tangent);
 
-    float angle = dist / max(stepSize, 1.0e-3) * 2.39996323;
+    float angle = dist / max(stepSize, 2.5e-5) * 2.39996323;
     float radius = CLOUD_LIGHT_CONE * dist * 0.5;
 
     return p + sunDir * dist + (cos(angle) * tangent + sin(angle) * bitangent) * radius;
@@ -125,7 +125,7 @@ float cloudDensity(CloudLayer layer, float3 p, bool detail)
         return 0.0;
     }
 
-    float2 wind = float2(layer.time * layer.speed * 30.0, layer.time * layer.speed * 12.0);
+    float2 wind = float2(layer.time * layer.speed * 0.75, layer.time * layer.speed * 0.30);
     float frequency = CLOUD_FREQUENCY / layer.thickness;
 
     float shape = cloudShape(float3(p.xy + wind, p.z / CLOUD_VERTICAL_STRETCH) * frequency, CLOUD_OCTAVES);

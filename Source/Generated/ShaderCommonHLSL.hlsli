@@ -157,7 +157,7 @@
 #define DEBUG_SHOW_FLAG_RAY_STATS (1 << 10)
 #define DEBUG_SHOW_FLAG_LUMA (1 << 11)
 #define RAY_STATS_CATEGORY_COUNT (6)
-#define MAX_RAY_LENGTH (10000.0)
+#define MAX_RAY_LENGTH (2.5e5)
 #define MEDIA_TYPE_VACUUM (0)
 #define MEDIA_TYPE_WATER (1)
 #define MEDIA_TYPE_GLASS (2)
@@ -196,7 +196,7 @@
 #define VOLUME_ENABLE_SIMPLE (1)
 #define VOLUME_ENABLE_VOLUMETRIC (2)
 
-#define SURFACE_POSITION_INCORRECT (10000000.0)
+#define SURFACE_POSITION_INCORRECT (250000.0)
 
 struct ShVertex
 {
@@ -261,9 +261,9 @@ struct ShGlobalUniform
     float rayLength;
     uint rayCullBackFaces;
     uint rayCullMaskWorld;
-    uint __pad2;
-    uint __pad3;
-    uint __pad4;
+    float smokeWindX;
+    float smokeWindY;
+    float smokeWindZ;
     float bloomIntensity;
     float bloomThreshold;
     float bloomEmissionMultiplier;
@@ -337,6 +337,10 @@ struct ShGlobalUniform
     uint glassBlur;
     uint glassDenoise;
     uint glassParticles;
+    float sceneUnitsPerHostUnit;
+    uint __pad7;
+    uint __pad8;
+    uint __pad9;
 };
 
 struct ShGeometryInstance
@@ -623,8 +627,8 @@ struct ShPortalInstance
 [[vk::binding(6, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufNormalGeometry_Prev;
 [[vk::binding(7, DESC_SET_FRAMEBUFFERS), vk::image_format("rg8")]] RWTexture2D<float4> framebufMetallicRoughness;
 [[vk::binding(8, DESC_SET_FRAMEBUFFERS), vk::image_format("rg8")]] RWTexture2D<float4> framebufMetallicRoughness_Prev;
-[[vk::binding(9, DESC_SET_FRAMEBUFFERS), vk::image_format("r16f")]] RWTexture2D<float4> framebufDepthWorld;
-[[vk::binding(10, DESC_SET_FRAMEBUFFERS), vk::image_format("r16f")]] RWTexture2D<float4> framebufDepthWorld_Prev;
+[[vk::binding(9, DESC_SET_FRAMEBUFFERS), vk::image_format("r32f")]] RWTexture2D<float4> framebufDepthWorld;
+[[vk::binding(10, DESC_SET_FRAMEBUFFERS), vk::image_format("r32f")]] RWTexture2D<float4> framebufDepthWorld_Prev;
 [[vk::binding(11, DESC_SET_FRAMEBUFFERS), vk::image_format("r16f")]] RWTexture2D<float4> framebufDepthGrad;
 [[vk::binding(12, DESC_SET_FRAMEBUFFERS), vk::image_format("r32f")]] RWTexture2D<float4> framebufDepthNdc;
 [[vk::binding(13, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufMotion;
