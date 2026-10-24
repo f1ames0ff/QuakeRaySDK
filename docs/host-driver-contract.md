@@ -164,9 +164,11 @@ owner thread; it is not a replacement for the host's task graph.
 - The SDK owns the device, swapchain, render targets, materials, BLAS and TLAS.
 - Host payloads are borrowed for their documented synchronous call.
 - Static rebind can wait for device idle and must not be hidden in `Refresh`.
-- Multi-view, arbitrary projection, traced-camera viewports, general history
-  reset, incremental static removal and material-handle replacement are
-  unsupported in contract version 1.0.
+- Contract version 1.0 represents one traced camera per `RenderFrame`.
+  Additional views are host-owned composition through additional draws or
+  flattened inputs. Arbitrary projection, traced-camera viewports, general
+  history reset, incremental static removal and material-handle replacement
+  likewise stay outside this contract rather than being renderer defects.
 
 ## Conformance
 

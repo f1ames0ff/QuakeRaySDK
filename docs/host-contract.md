@@ -151,26 +151,32 @@ minified raster sampling can therefore differ in filtering even when the alpha
 formula is the same. `SMOKE` and particle states are valid only for `DEFAULT`
 uploads and `SMOKE` is mutually exclusive with either particle bit.
 
-## 6. Effects that need an explicit fallback
+## 6. Host-owned renderer composition
 
-The following host features have no direct general-purpose ABI in this
-revision:
+The following operations are deliberately outside the SDK renderer contract.
+They are architectural host responsibilities, not missing SDK features or
+conformance failures:
 
-- arbitrary fixed-function texture environments and multi-pass shader graphs;
-- stencil tests/operations and render-to-texture feedback;
-- destination-alpha, subtract/min/max and separate alpha blending;
-- polygon smoothing, line stipple, stencil shadows and source-specific soft
-  shadow state;
-- skeletal deformation, vertex programs, tessellation and custom deformation
-  on the GPU;
-- multiple traced cameras in one frame or dynamic cubemap render targets;
-- game-specific portal recursion and reflection/refraction cameras.
+- **Skeletal, morph and vertex deformation:** the host evaluates the animation
+  graph and uploads final, meter-valued geometry. The SDK does not run engine
+  animation systems.
+- **Stencil, render-to-texture and multi-pass effects:** the host performs them
+  in its own renderer or precomposes their final contribution into supported
+  materials, geometry or UI uploads.
+- **Blend equations outside the exposed subset:** the host precomposes, splits
+  or approximates the effect, or renders that layer in a host-owned compositor.
+  The SDK rejects or leaves outside its path rather than silently changing a
+  visually required equation.
+- **Multiple traced cameras, multi-view and dynamic cubemap targets:** one
+  `qrDrawFrame` call represents one camera. The host schedules additional draws,
+  flattens the view-dependent result, or performs the composition itself.
+- **Portal recursion and reflection/refraction cameras:** the host either uses
+  the documented pass-through behavior or owns the recursive camera work.
 
-The adapter may bake these into textures, transform the vertices on the host,
-use a supported pass-through type, or keep the effect in the host renderer. It
-must not silently discard a visually required layer. Effects that do not
-affect the tested scene may be declared unsupported in the adapter's
-capability report.
+The adapter capability report must classify an unsupported effect as
+host-owned, an SDK core gap or out-of-scope integration. Effects that do not
+affect the tested scene may be declared unsupported, but a required layer must
+not be silently discarded.
 
 ## 7. Acceptance matrix
 
