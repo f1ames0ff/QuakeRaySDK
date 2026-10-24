@@ -33,11 +33,13 @@ set(renderer_CXX_STANDARD 20)
 # The renderer source + public headers + shaders live in this folder.
 set(renderer_PUBLIC_HEADERS
     Include/qray/qray.h
-    Include/qray/host_contract.h)
+    Include/qray/host_contract.h
+    Include/qray/gpu_context.h)
 
 set(renderer_SOURCES
     Source/qray.cpp
     Source/HostContracts.cpp
+    Source/GpuContext.cpp
     Source/VulkanDevice.cpp
     Source/VulkanDevice_Init.cpp
     Source/Buffer.cpp
@@ -227,6 +229,14 @@ if(QR_BUILD_TESTS)
     target_include_directories(qray_host_contract_tests PRIVATE Include)
     add_test(NAME qray_host_contract_tests COMMAND qray_host_contract_tests)
     set_tests_properties(qray_host_contract_tests PROPERTIES TIMEOUT 30)
+
+    add_executable(qray_gpu_context_tests Tests/GpuContextTests.cpp Source/GpuContext.cpp)
+    target_compile_features(qray_gpu_context_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_gpu_context_tests PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 NOMINMAX)
+    target_include_directories(qray_gpu_context_tests PRIVATE Include)
+    target_link_libraries(qray_gpu_context_tests PRIVATE Vulkan::Vulkan nvrhi)
+    add_test(NAME qray_gpu_context_tests COMMAND qray_gpu_context_tests)
+    set_tests_properties(qray_gpu_context_tests PROPERTIES TIMEOUT 30)
 
     add_executable(qray_readback_api_tests Tests/ReadbackApiTests.cpp)
     target_compile_features(qray_readback_api_tests PRIVATE cxx_std_20)
@@ -439,10 +449,8 @@ target_link_libraries(renderer PUBLIC Vulkan::Vulkan)
 
 # RHI layer: NVRHI built by the root CMakeLists (target nvrhi_vk is the static
 # Vulkan backend, nvrhi holds the shared interface and the validation layer).
-target_link_libraries(renderer PRIVATE
-    $<BUILD_INTERFACE:nvrhi_vk>
-    $<BUILD_INTERFACE:nvrhi>
-)
+target_link_libraries(renderer PUBLIC $<BUILD_INTERFACE:nvrhi>)
+target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:nvrhi_vk>)
 
 if(WIN32)
     set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include")
@@ -482,7 +490,7 @@ if(WIN32)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES Include/qray/qray.h Include/qray/host_contract.h
+    install(FILES Include/qray/qray.h Include/qray/host_contract.h Include/qray/gpu_context.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
     install(DIRECTORY "${QR_FFX_SDK_ROOT}/ffx-api/include/ffx_api"
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffx)
@@ -497,12 +505,13 @@ else()
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES Include/qray/qray.h Include/qray/host_contract.h
+    install(FILES Include/qray/qray.h Include/qray/host_contract.h Include/qray/gpu_context.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
 endif()
 
 install(FILES
     docs/api.md
+    docs/gpu-context.md
     docs/host-driver-contract.md
     docs/host-contract.md
     docs/sky-and-atmosphere.md

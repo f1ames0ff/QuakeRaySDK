@@ -18,12 +18,16 @@ Its meter conversion and generic authoring core remain future editor work.
 - `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.06.0000`.
 - `Include/qray/host_contract.h` — C++20 scene/frame/update/host/sidecar
   contracts over the C ABI.
+- `Include/qray/gpu_context.h` — SDK-owned shared NVRHI/Vulkan context,
+  create-time requirements and render-frame host callbacks.
 - `Source/` — renderer, RHI passes, lighting, shaders, and the FidelityFX API.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `cmake/nvrhi-max-binding-layouts.patch` — required NVRHI pin adjustment for the RT pipelines.
 - `Tests/` — engine-free GPU and policy tests.
 - `docs/api.md` — concise catalogue of the complete public renderer API.
 - `docs/host-contract.md` — adapter boundary and legacy-renderer feature mapping.
+- `docs/gpu-context.md` — device ownership, requirements, shared handles and
+  frame protocol for NVRHI hosts.
 - `docs/sky-and-atmosphere.md` — procedural sky, volumetric clouds, god rays and units.
 - `docs/sun-and-god-rays.md` — visible sun, directional lighting and shafts.
 - `docs/lights-and-sampling.md` — light records, dlights, DTAL, clusters and NEE.

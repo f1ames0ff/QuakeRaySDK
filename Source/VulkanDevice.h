@@ -18,6 +18,7 @@
 #pragma once
 
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 
 #include <array>
 #include <atomic>
@@ -88,7 +89,8 @@ class RhiTextureTable;
 class VulkanDevice
 {
 public:
-    explicit VulkanDevice(const QrInstanceCreateInfo *pInfo);
+    VulkanDevice(const QrInstanceCreateInfo *pInfo,
+                 const QrayGpuRequirements *pGpuRequirements = nullptr);
     ~VulkanDevice();
 
     VulkanDevice(const VulkanDevice& other) = delete;
@@ -192,6 +194,8 @@ public:
     };
 
     void GetAdapterInfo(QrAdapterInfo *pInfo) const;
+    QrResult GetGpuContext(QrayGpuContext *pContext) const;
+    QrResult SetGpuFrameHooks(const QrayGpuFrameHooks *pHooks);
 
     void RequestScreenshot(const char *pFilePath);
 
@@ -204,9 +208,10 @@ public:
     void Print(const char *pMessage) const;
 
 private:
-    void CreateInstance(const QrInstanceCreateInfo &info);
-    void CreateDevice();
-    void CreateNvrhiDevice();
+    void CreateInstance(const QrInstanceCreateInfo &info,
+                        const QrayGpuRequirements &gpuRequirements);
+    void CreateDevice(const QrayGpuRequirements &gpuRequirements);
+    void CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements);
     void CreateSyncPrimitives();
     static VkSurfaceKHR GetSurfaceFromUser(VkInstance instance, const QrInstanceCreateInfo &info);
     void ValidateCreateInfo(const QrInstanceCreateInfo *pInfo);
@@ -214,6 +219,7 @@ private:
     void DestroyInstance();
     void DestroyDevice();
     void DestroySyncPrimitives();
+    void Destroy() noexcept;
 
     void LockSpatialFrame();
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
@@ -311,6 +317,11 @@ private:
 
     std::vector<std::string>                enabledInstanceExtensions;
     std::vector<std::string>                enabledDeviceExtensions;
+    QrayGpuRequirements                     gpuRequirements = {};
+    bool                                    gpuRequirementsProvided = false;
+    bool                                    timelineSemaphoreEnabled = false;
+    QrayGpuFrameHooks                       gpuFrameHooks = {};
+    bool                                    inGpuFrameCallback = false;
 
     std::unique_ptr<NvrhiContext>           nvrhi;
     std::shared_ptr<rhi::RhiAccelStructs>   rhiAccelStructs;

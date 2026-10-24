@@ -23,6 +23,9 @@ a binary plugin ABI.
 - The host creates an `HWND` and supplies it through `QrInstanceCreateInfo`.
 - The SDK owns the Vulkan device, acceleration structures, render targets,
   swapchain and presentation. `qrDrawFrame` renders and presents.
+- A C++20 host can pass requirements before device creation and retrieve the
+  shared NVRHI/Vulkan context through `qray/gpu_context.h`. The SDK remains the
+  sole device owner. See [gpu-context.md](gpu-context.md).
 - The host owns game logic, scene extraction, assets, window lifetime, input
   and its application frame loop.
 - Non-Windows surfaces and host-owned Vulkan device/render-target embedding are
@@ -125,6 +128,22 @@ layer does not create a second scene path. It prevalidates borrowed input,
 creates and owns scene materials, preserves source/runtime identity separation
 and dispatches only supported updates. See
 [host-driver-contract.md](host-driver-contract.md).
+
+### Shared GPU context
+
+`qray/gpu_context.h` is the optional NVRHI/Vulkan contract. It is independent
+from the C scene transport and is versioned by `kGpuContextContractVersion`.
+
+| Function | Purpose |
+|---|---|
+| `qray::qrCreateInstanceWithGpuRequirements` | Create the SDK-owned device after merging host requirements |
+| `qray::qrGetGpuContext` | Retrieve borrowed NVRHI and native Vulkan handles |
+| `qray::qrSetGpuFrameHooks` | Record host work in `BeforeRenderer` or `BeforePresent` |
+| `qray::qrayValidateGpuRequirements` | Validate a requirements descriptor without creating a device |
+| `qray::qrayGetGpuContractInfo` | Query limits, contract version and minimum Vulkan version |
+
+See [gpu-context.md](gpu-context.md) for ownership, callbacks and the complete
+creation sequence.
 
 ### Instance, spatial frame and global scene state
 

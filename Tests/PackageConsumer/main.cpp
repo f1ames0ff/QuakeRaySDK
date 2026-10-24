@@ -1,5 +1,6 @@
 #include <nvrhi/nvrhi.h>
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 #include <qray/host_contract.h>
 
 static_assert(nvrhi::c_MaxBindingLayouts >= 13,
@@ -27,10 +28,13 @@ int main()
 
     const char *description = qrGetResultDescription(QR_SUCCESS);
     const uint32_t hostContractVersion = qray::qrayGetHostContractVersion();
+    const qray::QrayGpuContractInfo *gpuInfo = qray::qrayGetGpuContractInfo();
 
     return surface.hinstance != nullptr && description != nullptr &&
            std::strcmp(description, "QR_SUCCESS") == 0 &&
-           hostContractVersion == qray::kHostContractVersion
+           hostContractVersion == qray::kHostContractVersion &&
+           gpuInfo != nullptr &&
+           gpuInfo->contractVersion == qray::kGpuContextContractVersion
         ? 0
         : 1;
 }

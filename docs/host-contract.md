@@ -26,6 +26,11 @@ targets, acceleration structures, lighting runtime and presentation. A host
 owns the game loop, simulation, map/model/texture parsing, visibility,
 animation, audio, input and UI construction.
 
+A C++ NVRHI host can also use the SDK-owned device directly. It declares device
+requirements before creation, retrieves the borrowed shared context through
+`qray/gpu_context.h`, and records host work through the two frame phases. The
+SDK remains the only owner and submitter; see [gpu-context.md](gpu-context.md).
+
 The adapter's required output is a stream of:
 
 - meter-valued triangle geometry with stable IDs and renderer-neutral material

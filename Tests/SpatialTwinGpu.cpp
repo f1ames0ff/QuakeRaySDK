@@ -1,4 +1,5 @@
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 
 #include <windows.h>
 
@@ -367,6 +368,9 @@ public:
     ~TwinRenderer()
     {
         if (instance != nullptr)
+            qray::qrSetGpuFrameHooks(instance, nullptr);
+        hostProbeBuffer = nullptr;
+        if (instance != nullptr)
         {
             qrDestroyInstance(instance);
         }
@@ -406,10 +410,92 @@ public:
         info.overridenRoughnessMetallicEmissionTextureIsSRGB = 0;
         info.overridenNormalTextureIsSRGB = 0;
 
-        if (!Check(qrCreateInstance(&info, &instance), "create instance"))
+        const nvrhi::Feature requiredNvrhiFeature = nvrhi::Feature::RayTracingPipeline;
+        const char *requiredInstanceExtension = VK_KHR_SURFACE_EXTENSION_NAME;
+        const char *requiredDeviceExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        qray::QrayGpuFormatRequirement requiredFormat = {};
+        requiredFormat.format = VK_FORMAT_R8G8B8A8_UNORM;
+        requiredFormat.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        requiredFormat.tiling = VK_IMAGE_TILING_OPTIMAL;
+        requiredFormat.samples = VK_SAMPLE_COUNT_1_BIT;
+        requiredFormat.requiredFormatFeatures =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+        qray::QrayGpuRequirements gpuRequirements = {};
+        gpuRequirements.header = {
+            sizeof(qray::QrayGpuRequirements),
+            qray::kGpuContextContractVersion,
+        };
+        gpuRequirements.minVulkanApiVersion = VK_API_VERSION_1_3;
+        gpuRequirements.minimumFramesInFlight = 1;
+        gpuRequirements.requiredNvrhiFeatures = { &requiredNvrhiFeature, 1 };
+        gpuRequirements.requiredInstanceExtensions = { &requiredInstanceExtension, 1 };
+        gpuRequirements.requiredDeviceExtensions = { &requiredDeviceExtension, 1 };
+        gpuRequirements.requiredFormats = { &requiredFormat, 1 };
+
+        if (!Check(qray::qrCreateInstanceWithGpuRequirements(
+                       &info, &gpuRequirements, &instance),
+                   "create instance with GPU requirements"))
         {
             return false;
         }
+
+        qray::QrayGpuContext gpuContext = {};
+        gpuContext.header = { 0, qray::kGpuContextContractVersion };
+        if (qray::qrGetGpuContext(instance, &gpuContext) != QR_WRONG_ARGUMENT)
+        {
+            std::fprintf(stderr, "invalid GPU-context header was not rejected\n");
+            return false;
+        }
+
+        gpuContext = {};
+        gpuContext.header = {
+            sizeof(qray::QrayGpuContext),
+            qray::kGpuContextContractVersion,
+        };
+        if (!Check(qray::qrGetGpuContext(instance, &gpuContext), "get shared GPU context"))
+            return false;
+
+        if (gpuContext.pDevice == nullptr || gpuContext.pVulkanDevice == nullptr ||
+            gpuContext.nativeVulkan.instance == VK_NULL_HANDLE ||
+            gpuContext.nativeVulkan.physicalDevice == VK_NULL_HANDLE ||
+            gpuContext.nativeVulkan.device == VK_NULL_HANDLE ||
+            gpuContext.nativeVulkan.graphicsQueue == VK_NULL_HANDLE ||
+            gpuContext.capabilities.graphicsQueueCount == 0 ||
+            (gpuContext.capabilities.flags & qray::QRAY_GPU_CAP_SHARED_NVRHI_DEVICE) == 0)
+        {
+            std::fprintf(stderr, "shared GPU context is incomplete\n");
+            return false;
+        }
+
+        nvrhi::BufferDesc hostBufferDesc;
+        hostBufferDesc.byteSize = 256;
+        hostBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        hostBufferDesc.debugName = "Host GPU-context contract probe";
+        hostProbeBuffer = gpuContext.pDevice->createBuffer(hostBufferDesc);
+        if (hostProbeBuffer == nullptr)
+        {
+            std::fprintf(stderr, "host NVRHI resource creation failed\n");
+            return false;
+        }
+
+        qray::QrayGpuFrameHooks hooks = {};
+        hooks.header = { sizeof(qray::QrayGpuFrameHooks), qray::kGpuContextContractVersion };
+        hooks.reserved = 1;
+        if (qray::qrSetGpuFrameHooks(instance, &hooks) != QR_WRONG_ARGUMENT)
+        {
+            std::fprintf(stderr, "invalid GPU frame hooks were not rejected\n");
+            return false;
+        }
+
+        hooks = {};
+        hooks.header = {
+            sizeof(qray::QrayGpuFrameHooks),
+            qray::kGpuContextContractVersion,
+        };
+        hooks.pfnCallback = &TwinRenderer::FrameCallback;
+        hooks.pUserData = this;
+        if (!Check(qray::qrSetGpuFrameHooks(instance, &hooks), "set GPU frame hooks"))
+            return false;
 
         return true;
     }
@@ -822,6 +908,11 @@ public:
 
             if (requested && Check(qrGetFrameReadbackStatus(instance, requestId, &done), "readback status") && done)
             {
+                if (beforeRenderCalls == 0 || beforePresentCalls == 0)
+                {
+                    std::fprintf(stderr, "GPU frame hooks were not invoked\n");
+                    return false;
+                }
                 return true;
             }
         }
@@ -831,11 +922,30 @@ public:
     }
 
 private:
+    static void QRCONV FrameCallback(const qray::QrayGpuFrameCallbackInfo *pInfo, void *pUserData)
+    {
+        auto *self = static_cast<TwinRenderer *>(pUserData);
+        if (pInfo == nullptr || self == nullptr || pInfo->pCommandList == nullptr)
+            return;
+
+        if (pInfo->phase == qray::QrayGpuFramePhase::BeforeRenderer)
+        {
+            pInfo->pCommandList->setBufferState(
+                self->hostProbeBuffer.Get(), nvrhi::ResourceStates::CopyDest);
+            self->beforeRenderCalls++;
+        }
+        else if (pInfo->phase == qray::QrayGpuFramePhase::BeforePresent)
+            self->beforePresentCalls++;
+    }
+
     HWND window = nullptr;
     std::string shaderFolder;
     std::string blueNoisePath;
     QrInstance instance = nullptr;
     QrMaterial material = QR_NO_MATERIAL;
+    nvrhi::BufferHandle hostProbeBuffer;
+    uint32_t beforeRenderCalls = 0;
+    uint32_t beforePresentCalls = 0;
 };
 
 void MakeQuad(float canonicalVertices[4][3], uint32_t indices[6])

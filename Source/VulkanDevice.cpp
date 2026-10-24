@@ -29,6 +29,7 @@
 #include "Utils.h"
 #include "Const.h"
 #include "Generated/ShaderCommonC.h"
+#include "RHI/NvrhiContext.h"
 #include "RHI/NvrhiFrameSkeleton.h"
 #include "RHI/RhiAccelStructs.h"
 
@@ -1408,6 +1409,37 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
 
     fillInputs.Finish();
+    if (gpuFrameHooks.pfnCallback != nullptr)
+    {
+        sky.gpuFrameCallback = [this](QrayGpuFramePhase phase, nvrhi::ICommandList *pCommandList,
+                                      nvrhi::ITexture *pOutputColor, nvrhi::ITexture *pBackBuffer,
+                                      uint32_t frameIndex) {
+            if (inGpuFrameCallback)
+            {
+                Print("GPU frame callback re-entry is not allowed\n");
+                return;
+            }
+
+            QrayGpuFrameCallbackInfo info = {};
+            info.header = { sizeof(QrayGpuFrameCallbackInfo), kGpuContextContractVersion };
+            info.phase = phase;
+            info.frameIndex = frameIndex;
+            info.pCommandList = pCommandList;
+            info.pOutputColor = pOutputColor;
+            info.pBackBuffer = pBackBuffer;
+
+            inGpuFrameCallback = true;
+            try
+            {
+                gpuFrameHooks.pfnCallback(&info, gpuFrameHooks.pUserData);
+            }
+            catch (...)
+            {
+                Print("GPU frame callback threw an exception; the frame continues after the recorded host commands\n");
+            }
+            inGpuFrameCallback = false;
+        };
+    }
     if (!nvrhiFrameSkeleton->Render(swapchain.get(), frameIndex, sky, semaphoreToWait, renderFinishedSemaphore))
     {
         currentFrameState.SetSemaphore(semaphoreToWait, semaphoreWaitStage);
@@ -1758,6 +1790,79 @@ void VulkanDevice::GetAdapterInfo(QrAdapterInfo *pInfo) const
     pInfo->deviceId = properties.deviceID;
     pInfo->driverVersion = properties.driverVersion;
     pInfo->apiVersion = properties.apiVersion;
+}
+
+QrResult VulkanDevice::GetGpuContext(QrayGpuContext *pContext) const
+{
+    if (pContext == nullptr ||
+        pContext->header.size < sizeof(QrayGpuContext) ||
+        (pContext->header.version >> 16) != kGpuContextContractMajor)
+        return QR_WRONG_ARGUMENT;
+
+    if (nvrhi == nullptr || physDevice == nullptr || queues == nullptr)
+        return QR_FEATURE_UNAVAILABLE;
+
+    nvrhi::IDevice *pDevice = nvrhi->GetDevice();
+    if (pDevice == nullptr)
+        return QR_FEATURE_UNAVAILABLE;
+
+    pContext->pDevice = pDevice;
+    pContext->pVulkanDevice = dynamic_cast<nvrhi::vulkan::IDevice *>(pDevice);
+
+    QrayGpuCapabilities &capabilities = pContext->capabilities;
+    capabilities.header = { sizeof(QrayGpuCapabilities), kGpuContextContractVersion };
+    capabilities.flags = QRAY_GPU_CAP_SHARED_NVRHI_DEVICE | QRAY_GPU_CAP_NATIVE_VULKAN;
+    if (timelineSemaphoreEnabled)
+        capabilities.flags |= QRAY_GPU_CAP_TIMELINE_SEMAPHORE;
+    if (queues->GetGraphicsQueueCount() > 1 ||
+        queues->GetComputeQueueCount() > 1 ||
+        queues->GetTransferQueueCount() > 1)
+        capabilities.flags |= QRAY_GPU_CAP_ADDITIONAL_QUEUES;
+    capabilities.framesInFlight = MAX_FRAMES_IN_FLIGHT;
+    capabilities.vulkanApiVersion = physDevice->GetProperties().apiVersion;
+    capabilities.graphicsApi = pDevice->getGraphicsAPI();
+    capabilities.graphicsQueueCount = queues->GetGraphicsQueueCount();
+    capabilities.computeQueueCount = queues->GetComputeQueueCount();
+    capabilities.transferQueueCount = queues->GetTransferQueueCount();
+
+    QrayNativeVulkanInfo &native = pContext->nativeVulkan;
+    native.header = { sizeof(QrayNativeVulkanInfo), kGpuContextContractVersion };
+    native.instance = instance;
+    native.physicalDevice = physDevice->Get();
+    native.device = device;
+    native.surface = surface;
+    native.graphicsQueue = queues->GetGraphics();
+    native.graphicsQueueFamily = queues->GetIndexGraphics();
+    native.graphicsQueueIndex = 0;
+    native.graphicsQueueCount = queues->GetGraphicsQueueCount();
+    native.computeQueue = queues->GetCompute();
+    native.computeQueueFamily = queues->GetIndexCompute();
+    native.computeQueueIndex = 0;
+    native.computeQueueCount = queues->GetComputeQueueCount();
+    native.transferQueue = queues->GetTransfer();
+    native.transferQueueFamily = queues->GetIndexTransfer();
+    native.transferQueueIndex = 0;
+    native.transferQueueCount = queues->GetTransferQueueCount();
+    native.properties = physDevice->GetProperties();
+    native.memoryProperties = physDevice->GetMemoryProperties();
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::SetGpuFrameHooks(const QrayGpuFrameHooks *pHooks)
+{
+    if (pHooks == nullptr)
+    {
+        gpuFrameHooks = {};
+        return QR_SUCCESS;
+    }
+
+    if (pHooks->header.size < sizeof(QrayGpuFrameHooks) ||
+        (pHooks->header.version >> 16) != kGpuContextContractMajor ||
+        pHooks->reserved != 0)
+        return QR_WRONG_ARGUMENT;
+
+    gpuFrameHooks = *pHooks;
+    return QR_SUCCESS;
 }
 
 static uint64_t UploadNowNs()

@@ -19,6 +19,12 @@ set, sidecar boundary and failure semantics are in
 [host-driver-contract.md](host-driver-contract.md). The raw `qr*` calls remain
 available for engines with their own scene and task scheduling.
 
+NVRHI-based hosts that need the renderer's GPU device use
+`qray/gpu_context.h`. They pass all device requirements before creation and
+then receive the SDK-owned NVRHI/Vulkan context as a borrowed shared handle.
+See [gpu-context.md](gpu-context.md) for the required ordering, frame callbacks
+and destruction protocol.
+
 ## 1. Build and link
 
 The SDK is a static library on Windows. The host provides NVRHI and Vulkan:
