@@ -14,12 +14,14 @@ Use exactly one instance path for a render target:
 
 | Host needs | Creation path |
 |---|---|
-| C host or scene-only integration that does not need NVRHI/Vulkan resources | `qrCreateInstance` |
-| C++ NVRHI host that creates textures, buffers, pipelines or command lists on the renderer device | `qray::qrCreateInstanceWithGpuRequirements` |
+| C host, scene-only integration, or GPU host that accepts the SDK-default device requirements | `qrCreateInstance` |
+| C++ NVRHI host that must request custom extensions, features, queues or formats before creation | `qray::qrCreateInstanceWithGpuRequirements` |
 
 Do not call `qrCreateInstance` first and then create an unrelated
 `VkDevice`/NVRHI device for the same renderer or window. There must be one
 device for the SDK renderer and all participating host GPU resources.
+Both creation paths expose the SDK-owned device through `qrGetGpuContext`;
+`qrCreateInstanceWithGpuRequirements` only adds host-specific negotiation.
 If the host does not need GPU access, do not use `gpu_context.h`.
 
 ## Non-negotiable rules
@@ -33,8 +35,12 @@ If the host does not need GPU access, do not use `gpu_context.h`.
   `context.pDevice` (or the returned native `VkDevice` when NVRHI is not used).
 - The host may own resources and their allocators, but not the device,
   swapchain, queues or present operation.
+- If native Vulkan resources are required, keep their allocator on the returned
+  `context.nativeVulkan.device`; do not create a second device just to obtain a
+  separate allocator instance.
 - One `QrInstance` is one SDK-owned GPU context. Independent windows need
-  independent instances; do not create one instance per pass, camera or view.
+  independent instances; every instance creates another device and memory
+  context. Do not create one instance per pass, camera or view.
 - Destroy all host resources and remove frame hooks before
   `qrDestroyInstance`.
 
@@ -78,6 +84,12 @@ Requirements are passed to a separate creation function because
 The examples below assume `using namespace qray;`.
 
 ```cpp
+QrayGpuRequirements gpuRequirements = {};
+gpuRequirements.header = {
+    sizeof(QrayGpuRequirements),
+    qray::kGpuContextContractVersion,
+};
+
 QrInstance instance = nullptr;
 QrResult result = qray::qrCreateInstanceWithGpuRequirements(
     &instanceInfo,
@@ -85,7 +97,9 @@ QrResult result = qray::qrCreateInstanceWithGpuRequirements(
     &instance);
 ```
 
-The original `qrCreateInstance` remains valid and uses the SDK defaults.
+The original `qrCreateInstance` remains valid and uses the SDK defaults. Its
+resulting device can still be retrieved with `qrGetGpuContext`, but custom
+requirements must be passed through the dedicated function before creation.
 
 `QrayGpuRequirements` supports:
 
@@ -95,17 +109,23 @@ The original `qrCreateInstance` remains valid and uses the SDK defaults.
 | `minimumFramesInFlight` | Required frame slots; must not exceed `QrayGpuContractInfo::maximumFramesInFlight` |
 | `requiredInstanceExtensions` | Instance extensions that must be present before `vkCreateInstance` |
 | `requiredDeviceExtensions` | Device extensions that must be enabled at `vkCreateDevice` |
-| `requiredNvrhiFeatures` | NVRHI features checked on the negotiated device |
+| `requiredNvrhiFeatures` | NVRHI features checked immediately after NVRHI device creation |
 | `requiredFormats` | Image formats, usage, tiling and sample counts checked before device creation |
 | `queues` | Required graphics/present, compute and transfer queue counts |
 | `preferredPhysicalDevice` | Candidate tried first; other valid devices may remain fallbacks |
 | `pfnValidateDevice` | Optional host callback for limits, memory policy or other native checks |
 | `pfnGetVulkanFeatureChain` | Optional host feature-chain extension for native Vulkan features |
 
+`minimumFramesInFlight` is a lower bound; `QrayGpuContext::capabilities.framesInFlight`
+reports the actual SDK slot count.
+
 Queue defaults are one graphics/present queue, one compute queue and one
 transfer queue. A family may serve multiple roles. The dedicated flags require
-compute or transfer families without graphics capability. The current maximum
-is 16 queues per family and is reported by `qrayGetGpuContractInfo()`.
+a compute family without graphics capability, or a transfer family without
+graphics or compute capability. The current maximum is 16 queues per family and
+is reported by `qrayGetGpuContractInfo()`. The SDK's graphics/present family
+must also support compute and transfer; a graphics-only family is not a valid
+renderer queue.
 
 Format requirements are checked as 2D images:
 
@@ -118,12 +138,21 @@ format.samples = VK_SAMPLE_COUNT_1_BIT;
 format.requiredFormatFeatures =
     VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
     VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+gpuRequirements.requiredFormats = { &format, 1 };
 ```
 
 The SDK merges these requirements with its own RT, NVRHI and presentation
-requirements. A candidate that fails any required check is skipped. Creation
-returns `QR_CANT_FIND_PHYSICAL_DEVICE` if no candidate satisfies the complete
-set.
+requirements. Required instance extensions are checked against the Vulkan
+loader before `vkCreateInstance`; a missing extension returns
+`QR_GRAPHICS_API_ERROR`. API version, device extensions, queues, formats and
+host-validation failures reject a physical-device candidate. If no candidate
+passes those physical-device checks, creation returns
+`QR_CANT_FIND_PHYSICAL_DEVICE`.
+
+`requiredNvrhiFeatures` is different: NVRHI can report some features only after
+it wraps the selected Vulkan device. The SDK checks those features after NVRHI
+device creation and returns `QR_FEATURE_UNAVAILABLE` if one is missing; the
+constructor then releases the partially created device resources.
 All requirement arrays, strings, callbacks and callback-owned feature chains
 are borrowed only for the synchronous create call.
 
@@ -133,12 +162,19 @@ Use `pfnValidateDevice` for requirements that cannot be expressed by the common
 fields:
 
 ```cpp
-QrResult ValidateDevice(VkPhysicalDevice device, void *userData)
+struct ValidationData
+{
+    uint64_t requiredBytes;
+};
+
+QrResult QRCONV ValidateDevice(VkPhysicalDevice device, void *userData)
 {
     VkPhysicalDeviceProperties properties = {};
     vkGetPhysicalDeviceProperties(device, &properties);
 
-    return properties.limits.maxStorageBufferRange >= requiredBytes
+    const auto *required = static_cast<const ValidationData *>(userData);
+    return required != nullptr &&
+           properties.limits.maxStorageBufferRange >= required->requiredBytes
         ? QR_SUCCESS
         : QR_FEATURE_UNAVAILABLE;
 }
@@ -154,8 +190,12 @@ device outside the call.
 preserves its own chain and links the host chain at the end:
 
 ```cpp
-QrResult GetFeatures(VkPhysicalDevice device, VkBaseOutStructure **ppChain, void *userData)
+QrResult QRCONV GetFeatures(VkPhysicalDevice device, VkBaseOutStructure **ppChain, void *userData)
 {
+    if (ppChain == nullptr || userData == nullptr)
+        return QR_WRONG_ARGUMENT;
+    *ppChain = nullptr;
+
     auto *features = static_cast<VkPhysicalDeviceFooFeaturesEXT *>(userData);
     features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FOO_FEATURES_EXT;
     features->pNext = nullptr;
@@ -165,9 +205,13 @@ QrResult GetFeatures(VkPhysicalDevice device, VkBaseOutStructure **ppChain, void
 }
 ```
 
+`VkPhysicalDeviceFooFeaturesEXT` is a placeholder for the actual extension
+feature structure required by the host.
+
 The host must have checked support against the selected physical device and
 must keep the chain alive until the create function returns. The callback must
-not replace or unlink SDK-owned `pNext` entries.
+return only host-owned structures; the SDK links the returned chain at the end
+of its own feature chain.
 
 ## Retrieving the shared context
 
@@ -177,7 +221,9 @@ context.header = {
     sizeof(QrayGpuContext),
     qray::kGpuContextContractVersion,
 };
-QR_CHECK(qray::qrGetGpuContext(instance, &context));
+const QrResult contextResult = qray::qrGetGpuContext(instance, &context);
+if (contextResult != QR_SUCCESS)
+    return contextResult; // in a function returning QrResult
 
 nvrhi::IDevice *device = context.pDevice;
 ```
@@ -209,18 +255,23 @@ The host owns and releases every such resource. The SDK does not track or
 destroy unknown host resources. Release them before `qrDestroyInstance`.
 `memoryProperties` describes the shared physical device; host allocations made
 through the returned device consume the same device memory as SDK allocations.
-No CPU copy, separate device or separate swapchain is needed for shared use.
+For resources consumed through the returned device and frame callbacks, no CPU
+copy, second device or second swapchain is needed.
 
 ## Frame protocol
 
 Install at most one frame callback:
 
 ```cpp
+void QRCONV RecordHostWork(const QrayGpuFrameCallbackInfo *info, void *userData);
+
 QrayGpuFrameHooks hooks = {};
 hooks.header = { sizeof(hooks), qray::kGpuContextContractVersion };
 hooks.pfnCallback = RecordHostWork;
 hooks.pUserData = &hostRenderer;
-QR_CHECK(qray::qrSetGpuFrameHooks(instance, &hooks));
+const QrResult hooksResult = qray::qrSetGpuFrameHooks(instance, &hooks);
+if (hooksResult != QR_SUCCESS)
+    return hooksResult; // in a function returning QrResult
 ```
 
 The callback is record-only and runs synchronously on the frame owner thread.
@@ -229,7 +280,9 @@ It receives an already-open NVRHI command list. It must not:
 - open, close, submit or wait on the command list;
 - call `qrDrawFrame`, destroy the device or change frame hooks recursively;
 - retain the command list or textures after the callback returns;
-- submit work on another thread while the SDK is recording.
+- submit work on another thread while the SDK is recording;
+- throw exceptions. The SDK catches them, but commands already recorded remain
+  in the current frame.
 
 The SDK defines two phases:
 
@@ -241,6 +294,8 @@ The SDK defines two phases:
 `BeforeRenderer` has no output-color texture. `BeforePresent` exposes
 `pOutputColor` and the acquired `pBackBuffer`. The SDK performs state
 transitions and the actual queue submission after the callback.
+`frameIndex` is the SDK in-flight slot (`0 <= frameIndex < framesInFlight`),
+not a monotonic frame counter.
 `pOutputColor` can be null on a frame where the SDK has no valid composed
 target; hosts must handle that case. Use `pOutputColor` for pre-present
 composition; the SDK's present draw subsequently overwrites `pBackBuffer`.
@@ -253,10 +308,17 @@ owner thread.
 
 The SDK owns the main frame submission and present. Host command lists submitted
 outside the callback must be serialized by the host and submitted on the same
-owner thread. Same-queue submissions are ordered by submission order.
+owner thread. Submit them before `qrStartFrame` or after `qrDrawFrame`, never
+while the SDK is recording the frame. Same-queue submissions are ordered by
+submission order; work submitted after `qrDrawFrame` cannot affect that
+presented frame.
+If host work uses the compute or transfer queue and its result is consumed by
+the SDK graphics queue, add explicit Vulkan synchronization. Host-thread
+ordering alone does not order different queues. Raw Vulkan resources that move
+between queue families also follow Vulkan queue-family ownership rules.
 
 Do not call `vkDeviceWaitIdle` or an equivalent full-device wait in the normal
-frame path. Use NVRHI queue completion or SDK-provided frame boundaries.
+frame path. Use NVRHI queue completion and the documented frame boundaries.
 
 The current contract has one renderer camera and one SDK present per
 `qrDrawFrame`. Additional host work can be recorded in the two callback phases.
@@ -273,7 +335,7 @@ qrDestroyInstance(instance)
 
 The callback must not remain installed after its user data is released. Do not
 destroy the window while the instance is alive. The SDK destroys its renderer
-resources, NVRHI device, Vulkan device, surface and instance in that order.
+resources, NVRHI device, surface, Vulkan device and instance in that order.
 
 ## Compatibility and limits
 

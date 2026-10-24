@@ -1,5 +1,7 @@
 # Embedding QuakeRaySDK renderer
 
+See [README.md](README.md) for the complete documentation map.
+
 This guide is for a Win32 host that links `qray::renderer` and owns its window,
 assets and scene. The SDK owns the Vulkan/NVRHI device, swapchain and
 presentation. The host may use a right-handed or left-handed
@@ -20,14 +22,17 @@ set, sidecar boundary and failure semantics are in
 [host-driver-contract.md](host-driver-contract.md). The raw `qr*` calls remain
 available for engines with their own scene and task scheduling.
 
-NVRHI-based hosts that need the renderer's GPU device use
-`qray/gpu_context.h`. They pass all device requirements before creation and
-then receive the SDK-owned NVRHI/Vulkan context as a borrowed shared handle.
+NVRHI-based hosts that use the shared GPU context include
+`qray/gpu_context.h`. Hosts that need custom requirements pass them before
+creation; afterwards they receive the SDK-owned NVRHI/Vulkan context as a
+borrowed shared handle.
 See [gpu-context.md](gpu-context.md) for the required ordering, frame callbacks
 and destruction protocol.
-Do not create a second NVRHI/Vulkan device for the same host render target.
-If the host only uploads CPU scene data, use the ordinary `qrCreateInstance`
-path instead of the shared GPU context.
+The SDK-default device from `qrCreateInstance` can also be retrieved as shared
+GPU context; the dedicated function is required only to negotiate host
+requirements. Do not create a second NVRHI/Vulkan device for the same host
+render target. If the host only uploads CPU scene data, do not use the shared
+GPU context.
 
 ## 1. Build and link
 
@@ -56,7 +61,7 @@ definitions.
 Fill `QrInstanceCreateInfo`, including the Win32 surface, file callbacks,
 shader folder, blue-noise path, texture limits and optional overridden texture
 paths. A C host or scene-only consumer creates the instance with
-`qrCreateInstance`. A C++ NVRHI host that needs the renderer device uses
+`qrCreateInstance`. A C++ NVRHI host that needs custom device requirements uses
 `qray::qrCreateInstanceWithGpuRequirements` with the requirements described in
 [gpu-context.md](gpu-context.md).
 

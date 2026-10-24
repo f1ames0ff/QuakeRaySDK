@@ -1,5 +1,7 @@
 # Renderer API guide
 
+See [README.md](README.md) for the recommended integration reading order.
+
 This is the concise host-facing map of the QuakeRaySDK renderer. The normative
 C ABI and exact field layouts are in the installed `qray/qray.h`. Start
 with [embedding.md](embedding.md) for a walkthrough and use
@@ -13,9 +15,9 @@ Current API version: `QR_API_VERSION 1.06.0000`.
 
 The package is source-level: rebuild the host and SDK together when updating.
 `QR_API_VERSION`, `QR_SPATIAL_CONVENTION_VERSION` and the in/out
-`QrSpatialConvention` header are compatibility checks. The remaining public
-structs have no independent version field, and this revision does not promise
-a binary plugin ABI.
+`QrSpatialConvention` header are compatibility checks for the C ABI. The C++
+host/sidecar/GPU contracts use their own `QrayContractHeader` versions. This
+revision does not promise a binary plugin ABI.
 
 ## Supported integration model
 
@@ -35,8 +37,9 @@ a binary plugin ABI.
 ## Minimal lifecycle
 
 ```text
-qrCreateInstance                         (C/scene-only host)
-  or qrCreateInstanceWithGpuRequirements (C++ shared GPU host)
+qrCreateInstance                         (SDK-default requirements)
+  or qray::qrCreateInstanceWithGpuRequirements (host-specified requirements)
+qray::qrGetGpuContext                    (optional shared GPU access)
   qrSetSpatialConvention
   create materials / cubemaps
   upload static geometry
@@ -59,7 +62,8 @@ frame.
 
 ### Instance creation
 
-The create-info struct itself is borrowed only for `qrCreateInstance`. Its
+The create-info struct itself is borrowed only for instance creation, through
+either `qrCreateInstance` or `qray::qrCreateInstanceWithGpuRequirements`. Its
 Win32 surface must describe an `HWND` that outlives the instance, and the file
 callbacks plus `pUserLoadFileData` must remain callable for the instance
 lifetime. Keep every string and path alive through the creation call; do not
@@ -82,6 +86,8 @@ in-memory RGBA8 data or its own UTF-8 relative texture paths.
 |---|---|---|
 | `HWND` | Host | Must outlive `QrInstance`. Destroy the instance first. |
 | Vulkan/NVRHI device, swapchain, render targets, BLAS/TLAS | SDK | Owned and released by `qrDestroyInstance`. |
+| Shared `QrayGpuContext` | SDK | Borrowed through `qrGetGpuContext`; invalid after `qrDestroyInstance`. |
+| Host-created NVRHI/Vulkan resources | Host | Use the returned device; release before `qrDestroyInstance`. |
 | `QrMaterial`, `QrCubemap` | SDK object, host handle | Destroy with their API when no scene object references them; otherwise instance teardown releases them. |
 | Geometry `uniqueID` | Host-assigned | Stable for the object's rendered lifetime; changing winding sign requires re-upload. |
 | Upload pointers (`pVertices`, `pLights`, frame parameter pointers, readback `pDst`) | Host | Must remain valid for the duration of the call. The SDK copies scene uploads synchronously. |
@@ -145,6 +151,7 @@ from the C scene transport and is versioned by `kGpuContextContractVersion`.
 | `qray::qrSetGpuFrameHooks` | Record host work in `BeforeRenderer` or `BeforePresent` |
 | `qray::qrayValidateGpuRequirements` | Validate a requirements descriptor without creating a device |
 | `qray::qrayGetGpuContractInfo` | Query limits, contract version and minimum Vulkan version |
+| `qray::qrayGetGpuContextContractVersion` | Query the numeric GPU-context contract version |
 
 See [gpu-context.md](gpu-context.md) for ownership, callbacks and the complete
 creation sequence.
@@ -378,11 +385,13 @@ They are not required for a first correct integration.
 ## Error and initialization rules
 
 - Check every `QrResult`; fail initialization on `qrCreateInstance` or
-  `qrSetSpatialConvention` failure.
+  `qray::qrCreateInstanceWithGpuRequirements`, and on `qrSetSpatialConvention`
+  failure.
 - Zero-initialize public structs before filling them.
 - Call `qrSetSpatialConvention` before the first spatial upload or frame.
-- Do not pass host-owned Vulkan objects; this revision does not expose device
-  sharing.
+- The `qr*` C ABI does not accept host-owned Vulkan objects. Device sharing is
+  the separate C++ `gpu_context.h` contract: create host resources on the
+  returned device and use the documented frame callbacks.
 - Upload arrays are borrowed for the call. Do not free them while the call is
   executing.
 - Destroy the renderer instance before the Win32 window.

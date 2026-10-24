@@ -510,7 +510,9 @@ else()
 endif()
 
 install(FILES
+    docs/README.md
     docs/api.md
+    docs/editor-parity.md
     docs/gpu-context.md
     docs/host-driver-contract.md
     docs/host-contract.md

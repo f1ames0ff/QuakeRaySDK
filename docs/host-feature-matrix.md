@@ -6,7 +6,7 @@ by the SDK.
 
 | Feature | Public interface | Quake-host controls / notes |
 |---|---|---|
-| Initialization | `qrCreateInstance`, `qrSetSpatialConvention`, `qrStartFrame` | Host owns window, device lifetime and spatial convention. |
+| Initialization | `qrCreateInstance` or `qray::qrCreateInstanceWithGpuRequirements`, `qrSetSpatialConvention`, `qrStartFrame` | Host owns the window and supplies spatial convention; the SDK owns device lifetime. |
 | Geometry | `qrUploadGeometry`, `qrUploadRasterizedGeometry`, `qrUploadParticles` | Current raster/dynamic uploads are frame-scoped. |
 | Static scene | `qrBeginStaticGeometries`, `qrSubmitStaticGeometries` | Map lifetime until invalidation. |
 | Sky | `QrDrawFrameSkyParams.skyType` | `rt_physical_sky`, `r_fastsky`; see [sky-and-atmosphere.md](sky-and-atmosphere.md). |

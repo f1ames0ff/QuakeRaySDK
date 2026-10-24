@@ -27,6 +27,13 @@ using namespace qray;
 
 namespace
 {
+    bool IsFullQueue(VkQueueFlags flags)
+    {
+        return (flags & VK_QUEUE_GRAPHICS_BIT) != 0 &&
+               (flags & VK_QUEUE_COMPUTE_BIT) != 0 &&
+               (flags & VK_QUEUE_TRANSFER_BIT) != 0;
+    }
+
     bool IsComputeQueue(VkQueueFlags flags)
     {
         return (flags & VK_QUEUE_COMPUTE_BIT) != 0;
@@ -85,7 +92,7 @@ Queues::Queues(VkPhysicalDevice physDevice, VkSurfaceKHR surface,
         const VkQueueFlags flags = queueFamilyProperties[i].queueFlags;
         const uint32_t queueCount = queueFamilyProperties[i].queueCount;
 
-        if (presentSupported && (flags & VK_QUEUE_GRAPHICS_BIT) != 0 &&
+        if (presentSupported && IsFullQueue(flags) &&
             queueCount >= requirements.queues.graphicsQueueCount)
         {
             const uint32_t score = 1u +

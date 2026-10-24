@@ -30,6 +30,8 @@ enum QrayGpuQueueRequirementFlagBits : uint32_t
 
 struct QrayGpuQueueRequirements
 {
+    // The graphics family must support graphics, compute and transfer work and
+    // be able to present to the host surface.
     uint32_t graphicsQueueCount = 1;
     uint32_t computeQueueCount = 1;
     uint32_t transferQueueCount = 1;
@@ -108,6 +110,9 @@ struct QrayGpuCapabilities
 struct QrayNativeVulkanInfo
 {
     QrayContractHeader header;
+
+    // All native handles are borrowed from QrInstance and become invalid at
+    // qrDestroyInstance.
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;

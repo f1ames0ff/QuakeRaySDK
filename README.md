@@ -4,6 +4,9 @@ Source-level renderer package for QuakeRay. It owns the Vulkan/NVRHI ray-tracing
 renderer, the public `qray.h` C ABI, and the CMake package interface used by a
 host engine.
 
+Start with [docs/README.md](docs/README.md) for the complete integration
+documentation map.
+
 The renderer core does not include Quake game logic, map loaders, or host
 assets. The QuakeRay engine is the reference host; textures, materials, and
 cursor artwork stay in the host repository under `gfx/`. The optional
@@ -24,6 +27,7 @@ Its meter conversion and generic authoring core remain future editor work.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `cmake/nvrhi-max-binding-layouts.patch` — required NVRHI pin adjustment for the RT pipelines.
 - `Tests/` — engine-free GPU and policy tests.
+- `docs/README.md` — entry point and complete reading map for every SDK document.
 - `docs/api.md` — concise catalogue of the complete public renderer API.
 - `docs/host-contract.md` — adapter boundary and legacy-renderer feature mapping.
 - `docs/gpu-context.md` — device ownership, requirements, shared handles and
@@ -86,11 +90,14 @@ The install tree contains:
 
 ```text
 include/qray/qray.h
+include/qray/host_contract.h
+include/qray/gpu_context.h
 include/ffx/ffx_api/...
 lib/renderer.lib
 lib/amd_fidelityfx_vk.lib
 bin/amd_fidelityfx_vk.dll
 lib/cmake/qray_renderer/qray_rendererConfig.cmake
+share/doc/quakeray/...
 ```
 
 The imported target carries `QR_STATIC`, `QR_USE_SURFACE_WIN32` and `NOMINMAX`,

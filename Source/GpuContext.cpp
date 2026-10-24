@@ -143,6 +143,8 @@ bool HasRequiredQueues(VkPhysicalDevice physicalDevice,
 
         const VkQueueFlags flags = families[i].queueFlags;
         const bool graphics = (flags & VK_QUEUE_GRAPHICS_BIT) != 0 &&
+                              (flags & VK_QUEUE_COMPUTE_BIT) != 0 &&
+                              (flags & VK_QUEUE_TRANSFER_BIT) != 0 &&
                               presentSupported == VK_TRUE &&
                               families[i].queueCount >= queues.graphicsQueueCount;
         const bool compute = (flags & VK_QUEUE_COMPUTE_BIT) != 0 &&

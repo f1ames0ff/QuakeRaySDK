@@ -181,7 +181,7 @@ owner thread; it is not a replacement for the host's task graph.
 - source-key update dispatch and material-content updates;
 - missing per-frame material references rejected before frame start;
 - unsupported-history rejection before a frame starts;
-- sidecar duplicate-ID, unknown-flag and default-capability checks.
+- sidecar duplicate-ID, unknown-flag, stale-fingerprint and default-capability checks.
 
 The installed `Tests/PackageConsumer` compiles and links the public contract
 through `qray::renderer`.
