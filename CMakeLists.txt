@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(qray_renderer VERSION 0.1.0 LANGUAGES C CXX)
+    project(qray_renderer VERSION 0.2.0 LANGUAGES C CXX)
     set(QR_RENDERER_STANDALONE ON)
 else()
     set(QR_RENDERER_STANDALONE OFF)
@@ -481,7 +481,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 set(QRAY_RENDERER_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/qray_renderer")
-set(QRAY_RENDERER_VERSION "0.1.0")
+set(QRAY_RENDERER_VERSION "0.2.0")
 
 if(WIN32)
     install(TARGETS renderer
