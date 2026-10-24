@@ -118,7 +118,7 @@ cluster indices or GPU handles.
 The SDK validates an already-decoded sidecar:
 
 - schema and contract versions;
-- nonzero scene key;
+- nonzero scene key and matching bound-scene fingerprint;
 - nonzero and unique authoring IDs;
 - target key domains;
 - known patch flags, finite scalar values and supported entry kinds.
@@ -131,7 +131,8 @@ host's `IQrayHost::ApplySidecar` resolves entries and fills
 
 The host must validate the complete sidecar before applying any entry. A result
 capacity smaller than the entry count returns `QR_WRONG_ARGUMENT` without
-partial application.
+partial application. A sidecar from a different scene or geometry/dependency
+fingerprint is rejected as stale and must be rebased by the host.
 
 ## Lifecycle
 

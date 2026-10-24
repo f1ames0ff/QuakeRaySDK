@@ -349,6 +349,9 @@ void TestUnsupportedAndSidecar()
     MockHost host;
     qray::QraySidecarEntryResult results[2] = {};
     uint32_t resultCount = 0;
+    sidecar.fingerprint.geometry++;
+    assert(binding.ApplySidecar(host, sidecar, { results, 2 }, &resultCount) == QR_WRONG_ARGUMENT);
+    sidecar.fingerprint.geometry--;
     assert(binding.ApplySidecar(host, sidecar, { results, 2 }, &resultCount) == QR_SUCCESS);
     assert(resultCount == 2);
     assert(results[0].status == qray::QraySidecarEntryStatus::Applied);

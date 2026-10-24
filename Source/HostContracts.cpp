@@ -865,6 +865,7 @@ struct QraySceneBinding::Impl
 {
     QrInstance instance = nullptr;
     QrayStableKey sceneKey;
+    QraySceneFingerprint fingerprint;
     bool bound = false;
     bool poisoned = false;
     bool frameOpen = false;
@@ -1031,6 +1032,7 @@ QrResult QraySceneBinding::Bind(QrInstance instance, const QraySceneAsset &asset
 
     m_impl->instance = instance;
     m_impl->sceneKey = asset.sceneKey;
+    m_impl->fingerprint = asset.fingerprint;
     m_impl->bound = true;
     m_impl->poisoned = false;
     m_impl->materials = std::move(newMaterials);
@@ -1227,7 +1229,11 @@ QrResult QraySceneBinding::ApplySidecar(IQrayHost &host, const QraySidecar &side
     QrResult result = qrayValidateSidecar(&sidecar);
     if (result != QR_SUCCESS)
         return result;
-    if (!(sidecar.sceneKey == m_impl->sceneKey) || results.count < sidecar.entries.count ||
+    if (!(sidecar.sceneKey == m_impl->sceneKey) ||
+        sidecar.fingerprint.geometry != m_impl->fingerprint.geometry ||
+        sidecar.fingerprint.dependencies != m_impl->fingerprint.dependencies ||
+        sidecar.fingerprint.algorithm != m_impl->fingerprint.algorithm ||
+        results.count < sidecar.entries.count ||
         (results.count != 0 && results.pData == nullptr))
         return QR_WRONG_ARGUMENT;
 
