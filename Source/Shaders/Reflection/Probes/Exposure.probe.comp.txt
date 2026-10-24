@@ -27,6 +27,8 @@
 [22] offset 1612 float32
 [23] offset 1616 float32
 [24] offset 1620 uint32
+[25] offset 1624 float32
+[26] offset 1628 float32
 === block set 8 binding 0
 
 [0] offset 0 array[](float32) stride 4

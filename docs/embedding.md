@@ -1,13 +1,38 @@
 # Embedding QuakeRaySDK renderer
 
+See [README.md](README.md) for the complete documentation map.
+
 This guide is for a Win32 host that links `qray::renderer` and owns its window,
-swapchain, assets and scene. The host may use a right-handed or left-handed
+assets and scene. The SDK owns the Vulkan/NVRHI device, swapchain and
+presentation. The host may use a right-handed or left-handed
 Z-up or Y-up frame, but it must convert all spatial values to meters before
 calling the SDK. The renderer maps meter inputs into its private scene frame as
 described in [spatial-contract.md](spatial-contract.md).
 
 For the complete function-group catalogue and ownership rules, see
-[api.md](api.md). This page is the step-by-step first integration.
+[api.md](api.md). For the host/adapter boundary and a mapping of familiar
+pre-2006 renderer features, see [host-contract.md](host-contract.md). This page
+is the step-by-step first integration; sky and volumetric-cloud settings are
+described in [sky-and-atmosphere.md](sky-and-atmosphere.md), and
+[host-feature-matrix.md](host-feature-matrix.md) links the advanced lighting
+guides.
+Hosts that want the implemented high-level source contract can use
+`qray/host_contract.h` and `QraySceneBinding`; its lifecycle, supported update
+set, sidecar boundary and failure semantics are in
+[host-driver-contract.md](host-driver-contract.md). The raw `qr*` calls remain
+available for engines with their own scene and task scheduling.
+
+NVRHI-based hosts that use the shared GPU context include
+`qray/gpu_context.h`. Hosts that need custom requirements pass them before
+creation; afterwards they receive the SDK-owned NVRHI/Vulkan context as a
+borrowed shared handle.
+See [gpu-context.md](gpu-context.md) for the required ordering, frame callbacks
+and destruction protocol.
+The SDK-default device from `qrCreateInstance` can also be retrieved as shared
+GPU context; the dedicated function is required only to negotiate host
+requirements. Do not create a second NVRHI/Vulkan device for the same host
+render target. If the host only uploads CPU scene data, do not use the shared
+GPU context.
 
 ## 1. Build and link
 
@@ -20,15 +45,25 @@ find_package(qray_renderer CONFIG REQUIRED)
 target_link_libraries(my_host PRIVATE qray::renderer)
 ```
 
-The installed package also exports `qray::ffx`. The host must deploy the FSR
-provider DLL, compiled shaders and the blue-noise texture next to the
-executable.
+The SDK owns the shader sources/build script and installs the FidelityFX
+headers, import library and `qray::ffx` provider target. The host integration
+step is deployment: copy the FSR provider DLL, compiled shaders and blue-noise
+texture next to the executable and pass their paths to instance creation.
+An installed SDK package therefore does not require the host to implement
+NVRHI, shader compilation or FidelityFX tooling; the host must only provide
+compatible `nvrhi`/`nvrhi_vk` build targets. The `qray::renderer` target exports `QR_STATIC` and
+`QR_USE_SURFACE_WIN32`, plus `NOMINMAX` for the Win32 declarations; keep those
+switches on the target instead of copying them into unrelated host-wide
+definitions.
 
 ## 2. Create the instance
 
 Fill `QrInstanceCreateInfo`, including the Win32 surface, file callbacks,
 shader folder, blue-noise path, texture limits and optional overridden texture
-paths. Create the instance with `qrCreateInstance`.
+paths. A C host or scene-only consumer creates the instance with
+`qrCreateInstance`. A C++ NVRHI host that needs custom device requirements uses
+`qray::qrCreateInstanceWithGpuRequirements` with the requirements described in
+[gpu-context.md](gpu-context.md).
 
 Immediately after creation, declare the host frame:
 
@@ -119,10 +154,68 @@ the legacy positional-light calibration. `SWAPCHAIN` UI geometry remains in
 pixels. Treat the adapter and its identity-frame output as a regression oracle,
 not as the definition of the public spatial contract.
 
-The standalone editor is a parked workstream. It is not required for renderer
-embedding.
+The standalone `quakerayeditor` is independent of renderer embedding. It
+currently previews OBJ/BSP29 scenes and authors material, light and render
+settings; its remaining meter conversion and generic authoring work are separate
+from the host integration contract.
 
-## 6. Validation checklist
+## 6. Sprite and effect adapter pattern
+
+The SDK is a renderer, not a sprite subsystem. A host that loads `.spr` files,
+Quake 3 shader effects or an equivalent format owns the adapter:
+
+```text
+parse the effect / select the animation frame
+  -> build a camera-facing quad or point list in meters
+  -> choose the material (albedo/alpha) and the blend state
+  -> choose a traced or raster path
+  -> submit opaque/alpha-tested draws before blended draws, far-to-near
+  -> optionally register an emitter light
+```
+
+- **Traced path:** `qrUploadGeometry` with
+  `QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED` gives alpha-tested visibility,
+  cutout shadows and GI. The Quake adapter also sets
+  `QR_GEOMETRY_UPLOAD_ALPHA_TRANSMISSION_BIT` for its alpha-tested textures.
+  The cutout is binary at the alpha threshold; that bit adds stochastic alpha
+  transmission, not ordered smooth blending in primary RT rays.
+- **Raster path:** `qrUploadRasterizedGeometry` with
+  `QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE` and
+  `QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST` (no depth write) gives soft alpha
+  blending for smoke, fire, explosions and screen overlays. These draws do not
+  participate in GI or sun shadows; add a light with `qrUploadSphericalLight`
+  (or the host's own emitter path) if the effect should illuminate the scene.
+  Use `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN` for screen-space effects
+  and upload them in painter's order.
+- **Particles:** `qrUploadParticles` builds camera-facing point sprites in one
+  batch with fixed alpha-over blending. `packedColor.a` is a coverage
+  multiplier in the lit path; sort the points back-to-front before upload if
+  they use alpha blending. Use rasterized geometry when another blend equation
+  is required.
+- **Ordering:** the SDK preserves upload order inside each emitted category and
+  never sorts geometry.
+  Submit opaque and alpha-tested cutouts first, then blended draws from far to
+  near. Sort vertices/points inside a batch before upload when their overlap
+  makes order observable. Keep different views in separate ordered ranges.
+  Within `DEFAULT`, ordinary world, lit particle, point-particle and smoke
+  categories are emitted in a fixed sequence, so interleaving those categories
+  in upload order is not preserved. Concurrent calls are safe but their
+  relative order is unspecified, so serialize order-sensitive uploads. The
+  full contract is in the installed `qray/qray.h` next to the raster upload
+  API.
+- **Blend subset:** the SDK exposes source/destination pairs from
+  `QrBlendFactor` with an add operation. It does not expose DST_ALPHA,
+  subtract/min/max or a separate alpha equation; approximate a legacy mode
+  with the supported factors or keep it out of the SDK raster path.
+
+The Quake adapter in `Quake/r_sprite.c` is an example: an oriented or
+force-rasterized sprite becomes a raster quad with alpha test and depth write;
+the other sprites use the traced `qrUploadGeometry` path, whose pass-through
+type is alpha-tested unless the material is glass or water. Smoke is sorted by
+the host before upload. The SDK does not parse `.spr`, choose animation frames,
+build billboards or create emitter lights for the host.
+
+## 7. Validation checklist
 
 - Identity, Y-up and mirrored meter scenes must produce equivalent results.
   `qray_spatial_twin_gpu` covers geometry, camera, directional and spherical
@@ -137,3 +230,6 @@ embedding.
   exactly. Reflected host data still needs its own triangle order reversed.
 - Keep `rayLength` positive and finite. It is expressed in meters and is
   bounded by the 250,000 m safety ceiling; the depth buffer is `R32_SFLOAT`.
+- Exercise the host's opaque, alpha-tested and blended ordering, screen-space
+  UI, sky, particles and one dynamic-light path against the feature matrix in
+  [host-contract.md](host-contract.md).

@@ -345,6 +345,8 @@ public:
     //
     // The host records the call only while the frame wants rasterization (`!drawInfo.
     // disableRasterization`, VulkanDevice.cpp:1068); false in every shipped configuration.
+    // Within each list the pass records entries in vector order and does not sort;
+    // the host owns the transparent order (qray.h).
     void Render(nvrhi::ICommandList *pCommandList,
                 uint32_t frameIndex,
                 const Framebuffers *pFramebuffers,

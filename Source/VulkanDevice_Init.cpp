@@ -23,6 +23,7 @@
 
 #include "QrException.h"
 #include "Const.h"
+#include "GpuContextInternal.h"
 #include "Generated/ShaderCommonC.h"
 #include "LibraryConfig.h"
 #include "SwapchainPolicy.h"
@@ -54,7 +55,8 @@
 
 using namespace qray;
 
-VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
+VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
+                            const QrayGpuRequirements* pGpuRequirements )
     : instance( VK_NULL_HANDLE )
     , device( VK_NULL_HANDLE )
     , surface( VK_NULL_HANDLE )
@@ -72,26 +74,37 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
     , previousFrameTime( -1.0 / 60.0 )
     , currentFrameTime( 0 )
 {
+    try
+    {
     ValidateCreateInfo( info );
+    const QrayGpuRequirements defaultGpuRequirements = {};
+    gpuRequirements = pGpuRequirements != nullptr ? *pGpuRequirements : defaultGpuRequirements;
+    gpuRequirementsProvided = pGpuRequirements != nullptr;
+    const QrResult gpuRequirementsResult =
+        gpu::ValidateRequirements(gpuRequirementsProvided ? &gpuRequirements : nullptr, nullptr);
+    if (gpuRequirementsResult != QR_SUCCESS)
+        throw QrException(gpuRequirementsResult, "Invalid host GPU requirements");
 
     rhi::setShaderFileLoader( userFileLoad );
 
-    CreateInstance( *info );
+    CreateInstance( *info, gpuRequirements );
 
     surface = GetSurfaceFromUser( instance, *info );
 
     win32Hwnd = info->pWin32SurfaceInfo != nullptr ? info->pWin32SurfaceInfo->hwnd : nullptr;
 
-    physDevice = std::make_shared< PhysicalDevice >( instance );
-    queues     = std::make_shared< Queues >( physDevice->Get(), surface );
+    physDevice = std::make_shared< PhysicalDevice >( instance, surface,
+        gpuRequirementsProvided ? &gpuRequirements : nullptr );
+    queues     = std::make_shared< Queues >( physDevice->Get(), surface,
+        gpuRequirementsProvided ? &gpuRequirements : nullptr );
 
-    CreateDevice();
+    CreateDevice( gpuRequirements );
 
     CreateSyncPrimitives();
 
     queues->SetDevice( device );
 
-    CreateNvrhiDevice();
+    CreateNvrhiDevice( gpuRequirements );
 
     {
         const uint32_t maxTextureCount =
@@ -546,11 +559,23 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
             }
         }
     }
+    }
+    catch (...)
+    {
+        Destroy();
+        throw;
+    }
 }
 
 VulkanDevice::~VulkanDevice()
 {
-    vkDeviceWaitIdle(device);
+    Destroy();
+}
+
+void VulkanDevice::Destroy() noexcept
+{
+    if (device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(device);
 
     rhi::setShaderFileLoader( nullptr );
 
@@ -604,11 +629,21 @@ VulkanDevice::~VulkanDevice()
 
     memAllocator.reset();
 
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    DestroySyncPrimitives();
+    if (instance != VK_NULL_HANDLE && surface != VK_NULL_HANDLE)
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+    surface = VK_NULL_HANDLE;
 
-    DestroyDevice();
-    DestroyInstance();
+    if (device != VK_NULL_HANDLE)
+    {
+        DestroySyncPrimitives();
+        DestroyDevice();
+        device = VK_NULL_HANDLE;
+    }
+    if (instance != VK_NULL_HANDLE)
+    {
+        DestroyInstance();
+        instance = VK_NULL_HANDLE;
+    }
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
@@ -659,7 +694,8 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
     return VK_FALSE;
 }
 
-void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
+void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info,
+                                  const QrayGpuRequirements &gpuRequirements)
 {
     std::vector<const char *> layerNames;
 
@@ -708,6 +744,23 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
         extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
     }
 
+    std::string requirementError;
+    if (!gpu::HasRequiredInstanceExtensions(gpuRequirements, &requirementError))
+    {
+        throw QrException(QR_GRAPHICS_API_ERROR, requirementError);
+    }
+
+    for (uint32_t i = 0; i < gpuRequirements.requiredInstanceExtensions.count; ++i)
+    {
+        const char *required = gpuRequirements.requiredInstanceExtensions.pData[i];
+        if (std::find_if(extensions.begin(), extensions.end(), [required](const char *extension) {
+                return std::strcmp(extension, required) == 0;
+            }) == extensions.end())
+        {
+            extensions.push_back(required);
+        }
+    }
+
     for (const char *n : DLSS::GetDlssVulkanInstanceExtensions())
     {
         const bool isSupported = std::any_of(supportedInstanceExtensions.cbegin(), supportedInstanceExtensions.cend(),
@@ -732,7 +785,7 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
     }
 
     VkApplicationInfo appInfo = {};
-    appInfo.apiVersion = VK_API_VERSION_1_3;
+    appInfo.apiVersion = std::max(VK_API_VERSION_1_3, gpuRequirements.minVulkanApiVersion);
     appInfo.pApplicationName = info.pAppName;
 
     VkInstanceCreateInfo instanceInfo = {};
@@ -770,7 +823,7 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
     }
 }
 
-void VulkanDevice::CreateDevice()
+void VulkanDevice::CreateDevice(const QrayGpuRequirements &gpuRequirements)
 {
     VkPhysicalDeviceFeatures features = {};
     features.robustBufferAccess = 1;
@@ -855,6 +908,7 @@ void VulkanDevice::CreateDevice()
     }
 
     ApplyNvrhiRequirements(nvrhiRequirements, vulkan12Features);
+    timelineSemaphoreEnabled = nvrhiRequirements.timelineSemaphore;
 
     if (!unsupportedNvrhiFeatures.empty())
     {
@@ -1042,6 +1096,17 @@ void VulkanDevice::CreateDevice()
         deviceExtensions.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
     }
 
+    for (uint32_t i = 0; i < gpuRequirements.requiredDeviceExtensions.count; ++i)
+    {
+        const char *required = gpuRequirements.requiredDeviceExtensions.pData[i];
+        if (std::find_if(deviceExtensions.begin(), deviceExtensions.end(), [required](const char *extension) {
+                return std::strcmp(extension, required) == 0;
+            }) == deviceExtensions.end())
+        {
+            deviceExtensions.push_back(required);
+        }
+    }
+
     enabledDeviceExtensions.clear();
     for (const char *n : deviceExtensions)
     {
@@ -1059,6 +1124,14 @@ void VulkanDevice::CreateDevice()
     deviceCreateInfo.pNext = &physicalDeviceFeatures2;
     deviceCreateInfo.enabledExtensionCount = (uint32_t) deviceExtensions.size();
     deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+    std::string featureChainError;
+    const QrResult featureChainResult = gpu::AppendVulkanFeatureChain(
+        physDevice->Get(), &physicalDeviceFeatures2, gpuRequirements, &featureChainError);
+    if (featureChainResult != QR_SUCCESS)
+    {
+        throw QrException(featureChainResult, featureChainError);
+    }
 
     VkResult r = vkCreateDevice(physDevice->Get(), &deviceCreateInfo, nullptr, &device);
     VK_CHECKERROR(r);
@@ -1085,7 +1158,7 @@ void VulkanDevice::CreateDevice()
     }
 }
 
-void VulkanDevice::CreateNvrhiDevice()
+void VulkanDevice::CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements)
 {
     const NvrhiRequirements requirements = QueryNvrhiRequirements(physDevice->Get());
 
@@ -1130,6 +1203,15 @@ void VulkanDevice::CreateNvrhiDevice()
     {
         nvrhi.reset();
         throw QrException(QR_GRAPHICS_API_ERROR, errorMessage);
+    }
+
+    std::string featureError;
+    const QrResult featureResult =
+        gpu::CheckNvrhiFeatures(nvrhi->GetDevice(), gpuRequirements, &featureError);
+    if (featureResult != QR_SUCCESS)
+    {
+        nvrhi.reset();
+        throw QrException(featureResult, featureError);
     }
 
     nvrhi->LogCapabilities();

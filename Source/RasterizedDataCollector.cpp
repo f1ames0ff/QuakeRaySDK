@@ -476,6 +476,7 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
             proxy = ParticleProxy{};
             proxy.kind = PARTICLE_PROXY_KIND_BILLBOARD;
             proxy.blendOp = blendOp;
+            proxy.materialAlpha = info.color.data[3];
 
             for (int c = 0; c < 3; c++)
             {
@@ -551,16 +552,17 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
 
         ParticleProxy &proxy = particleProxies.emplace_back();
         proxy = ParticleProxy{};
-        proxy.kind         = PARTICLE_PROXY_KIND_TRIANGLE;
-        proxy.blendOp      = blendOp;
-        proxy.textureIndex = textureIndex;
-        proxy.cluster      = a.cluster;
-        proxy.packedColor  = a.packedColor;
-        proxy.unused2      = b.packedColor;
-        proxy.unused3      = c.packedColor;
-        proxy.direct       = lit ? info.smokeLook.data[1] : 0.0f;
-        proxy.gain         = lit ? info.smokeLook.data[2] : -1.0f;
-        proxy.lightFloor   = lit ? info.smokeLook.data[3] : 0.0f;
+            proxy.kind          = PARTICLE_PROXY_KIND_TRIANGLE;
+            proxy.blendOp       = blendOp;
+            proxy.materialAlpha = info.color.data[3];
+            proxy.textureIndex  = textureIndex;
+            proxy.cluster       = a.cluster;
+            proxy.packedColor   = a.packedColor;
+            proxy.unused2       = b.packedColor;
+            proxy.unused3       = c.packedColor;
+            proxy.direct        = lit ? info.smokeLook.data[1] : 0.0f;
+            proxy.gain          = lit ? info.smokeLook.data[2] : -1.0f;
+            proxy.lightFloor    = lit ? info.smokeLook.data[3] : 0.0f;
 
         float minimum[3];
         float maximum[3];
@@ -633,6 +635,7 @@ bool RasterizedDataCollector::CaptureParticlePointProxies(const QrParticleUpload
         proxy = ParticleProxy{};
         proxy.kind = PARTICLE_PROXY_KIND_BILLBOARD;
         proxy.blendOp = PARTICLE_BLEND_ALPHA_OVER;
+        proxy.materialAlpha = 1.0f;
 
         for (int c = 0; c < 3; c++)
         {

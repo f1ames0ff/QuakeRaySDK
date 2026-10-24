@@ -864,6 +864,8 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
 
     nvrhi::ICommandList *commandList = frameContext->GetCommandList(frameIndex);
     assert(commandList != nullptr);
+    if (sky.gpuFrameCallback)
+        sky.gpuFrameCallback(QrayGpuFramePhase::BeforeRenderer, commandList, nullptr, backBuffer, frameIndex);
 
     {
         CpuProfileScope queries(cpuProfiler, QR_CPU_PASS_GPU_TIMINGS);
@@ -1906,6 +1908,8 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     }
 
     nvrhi::ITexture *directTexture = albedo != nullptr ? ResolvePresentDirectTexture(frameIndex, sky) : nullptr;
+    if (sky.gpuFrameCallback)
+        sky.gpuFrameCallback(QrayGpuFramePhase::BeforePresent, commandList, albedo, backBuffer, frameIndex);
 
     if (albedo == nullptr)
     {

@@ -29,6 +29,7 @@
 #include "Utils.h"
 #include "Const.h"
 #include "Generated/ShaderCommonC.h"
+#include "RHI/NvrhiContext.h"
 #include "RHI/NvrhiFrameSkeleton.h"
 #include "RHI/RhiAccelStructs.h"
 
@@ -1408,6 +1409,37 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
 
     fillInputs.Finish();
+    if (gpuFrameHooks.pfnCallback != nullptr)
+    {
+        sky.gpuFrameCallback = [this](QrayGpuFramePhase phase, nvrhi::ICommandList *pCommandList,
+                                      nvrhi::ITexture *pOutputColor, nvrhi::ITexture *pBackBuffer,
+                                      uint32_t frameIndex) {
+            if (inGpuFrameCallback)
+            {
+                Print("GPU frame callback re-entry is not allowed\n");
+                return;
+            }
+
+            QrayGpuFrameCallbackInfo info = {};
+            info.header = { sizeof(QrayGpuFrameCallbackInfo), kGpuContextContractVersion };
+            info.phase = phase;
+            info.frameIndex = frameIndex;
+            info.pCommandList = pCommandList;
+            info.pOutputColor = pOutputColor;
+            info.pBackBuffer = pBackBuffer;
+
+            inGpuFrameCallback = true;
+            try
+            {
+                gpuFrameHooks.pfnCallback(&info, gpuFrameHooks.pUserData);
+            }
+            catch (...)
+            {
+                Print("GPU frame callback threw an exception; the frame continues after the recorded host commands\n");
+            }
+            inGpuFrameCallback = false;
+        };
+    }
     if (!nvrhiFrameSkeleton->Render(swapchain.get(), frameIndex, sky, semaphoreToWait, renderFinishedSemaphore))
     {
         currentFrameState.SetSemaphore(semaphoreToWait, semaphoreWaitStage);
@@ -1760,6 +1792,79 @@ void VulkanDevice::GetAdapterInfo(QrAdapterInfo *pInfo) const
     pInfo->apiVersion = properties.apiVersion;
 }
 
+QrResult VulkanDevice::GetGpuContext(QrayGpuContext *pContext) const
+{
+    if (pContext == nullptr ||
+        pContext->header.size < sizeof(QrayGpuContext) ||
+        (pContext->header.version >> 16) != kGpuContextContractMajor)
+        return QR_WRONG_ARGUMENT;
+
+    if (nvrhi == nullptr || physDevice == nullptr || queues == nullptr)
+        return QR_FEATURE_UNAVAILABLE;
+
+    nvrhi::IDevice *pDevice = nvrhi->GetDevice();
+    if (pDevice == nullptr)
+        return QR_FEATURE_UNAVAILABLE;
+
+    pContext->pDevice = pDevice;
+    pContext->pVulkanDevice = dynamic_cast<nvrhi::vulkan::IDevice *>(pDevice);
+
+    QrayGpuCapabilities &capabilities = pContext->capabilities;
+    capabilities.header = { sizeof(QrayGpuCapabilities), kGpuContextContractVersion };
+    capabilities.flags = QRAY_GPU_CAP_SHARED_NVRHI_DEVICE | QRAY_GPU_CAP_NATIVE_VULKAN;
+    if (timelineSemaphoreEnabled)
+        capabilities.flags |= QRAY_GPU_CAP_TIMELINE_SEMAPHORE;
+    if (queues->GetGraphicsQueueCount() > 1 ||
+        queues->GetComputeQueueCount() > 1 ||
+        queues->GetTransferQueueCount() > 1)
+        capabilities.flags |= QRAY_GPU_CAP_ADDITIONAL_QUEUES;
+    capabilities.framesInFlight = MAX_FRAMES_IN_FLIGHT;
+    capabilities.vulkanApiVersion = physDevice->GetProperties().apiVersion;
+    capabilities.graphicsApi = pDevice->getGraphicsAPI();
+    capabilities.graphicsQueueCount = queues->GetGraphicsQueueCount();
+    capabilities.computeQueueCount = queues->GetComputeQueueCount();
+    capabilities.transferQueueCount = queues->GetTransferQueueCount();
+
+    QrayNativeVulkanInfo &native = pContext->nativeVulkan;
+    native.header = { sizeof(QrayNativeVulkanInfo), kGpuContextContractVersion };
+    native.instance = instance;
+    native.physicalDevice = physDevice->Get();
+    native.device = device;
+    native.surface = surface;
+    native.graphicsQueue = queues->GetGraphics();
+    native.graphicsQueueFamily = queues->GetIndexGraphics();
+    native.graphicsQueueIndex = 0;
+    native.graphicsQueueCount = queues->GetGraphicsQueueCount();
+    native.computeQueue = queues->GetCompute();
+    native.computeQueueFamily = queues->GetIndexCompute();
+    native.computeQueueIndex = 0;
+    native.computeQueueCount = queues->GetComputeQueueCount();
+    native.transferQueue = queues->GetTransfer();
+    native.transferQueueFamily = queues->GetIndexTransfer();
+    native.transferQueueIndex = 0;
+    native.transferQueueCount = queues->GetTransferQueueCount();
+    native.properties = physDevice->GetProperties();
+    native.memoryProperties = physDevice->GetMemoryProperties();
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::SetGpuFrameHooks(const QrayGpuFrameHooks *pHooks)
+{
+    if (pHooks == nullptr)
+    {
+        gpuFrameHooks = {};
+        return QR_SUCCESS;
+    }
+
+    if (pHooks->header.size < sizeof(QrayGpuFrameHooks) ||
+        (pHooks->header.version >> 16) != kGpuContextContractMajor ||
+        pHooks->reserved != 0)
+        return QR_WRONG_ARGUMENT;
+
+    gpuFrameHooks = *pHooks;
+    return QR_SUCCESS;
+}
+
 static uint64_t UploadNowNs()
 {
     return static_cast<uint64_t>(
@@ -2108,6 +2213,31 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         throw QrException(QR_WRONG_ARGUMENT, "Index data / count must be both not null or null");
     }
 
+    const uint32_t particleFlags =
+        QR_RASTERIZED_GEOMETRY_STATE_PARTICLE | QR_RASTERIZED_GEOMETRY_STATE_PARTICLE_SPRITE;
+
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT &&
+        (pUploadInfo->pipelineState &
+         (QR_RASTERIZED_GEOMETRY_STATE_SMOKE | particleFlags)) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT,
+                          "Smoke and particle states are only valid for DEFAULT rasterized geometry");
+    }
+
+    if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0 &&
+        (pUploadInfo->pipelineState & particleFlags) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT,
+                          "SMOKE and PARTICLE raster states are mutually exclusive");
+    }
+
+    if (pUploadInfo->renderType == QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN &&
+        (pUploadInfo->pipelineState &
+         (QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST | QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE)) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "SWAPCHAIN rasterized geometry cannot use depth state");
+    }
+
     // An upload outside a started frame cannot be drawn -- the collector is
     // reset when the next frame starts -- so it is dropped here instead of
     // piling up while frames are skipped (a minimized window keeps the game,
@@ -2218,6 +2348,7 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
 QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 {
+    UploadLockScope geometryLock(*this, g_uploadLane);
     statsApiCallsRasterized++;
 
     if (pUploadInfo == nullptr)
@@ -2374,6 +2505,8 @@ void VulkanDevice::FlushDeferredLightUploads()
 
 void VulkanDevice::SetParticleProxyGate(uint32_t gate, uint32_t glassParticles)
 {
+    std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+
     const bool hasGlass = rhiAccelStructs != nullptr && rhiAccelStructs->HasGlassInstances();
     const bool enabled = gate == 0u ? true : (gate == 2u ? false : (glassParticles != 0u && (lastReflRefrTraced || hasGlass)));
 

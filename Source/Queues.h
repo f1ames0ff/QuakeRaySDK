@@ -24,10 +24,13 @@
 namespace qray
 {
 
+struct QrayGpuRequirements;
+
 class Queues
 {
 public:
-    explicit Queues(VkPhysicalDevice physDevice, VkSurfaceKHR surface);
+    Queues(VkPhysicalDevice physDevice, VkSurfaceKHR surface,
+           const QrayGpuRequirements *pRequirements = nullptr);
     ~Queues();
 
     Queues(const Queues &other) = delete;
@@ -42,18 +45,31 @@ public:
     uint32_t GetIndexGraphics() const;
     uint32_t GetIndexCompute() const;
     uint32_t GetIndexTransfer() const;
+    uint32_t GetGraphicsQueueCount() const;
+    uint32_t GetComputeQueueCount() const;
+    uint32_t GetTransferQueueCount() const;
 
     VkQueue GetGraphics() const;
     VkQueue GetCompute() const;
     VkQueue GetTransfer() const;
 
 private:
+    struct QueueFamilyRequest
+    {
+        uint32_t index = 0;
+        uint32_t count = 0;
+    };
+
     std::vector<VkQueueFamilyProperties> queueFamilyProperties;
-    float defaultQueuePriority;
+    std::vector<QueueFamilyRequest> queueFamilyRequests;
+    std::vector<float> queuePriorities;
 
     uint32_t indexGraphics;
     uint32_t indexCompute;
     uint32_t indexTransfer;
+    uint32_t graphicsQueueCount;
+    uint32_t computeQueueCount;
+    uint32_t transferQueueCount;
 
     VkQueue graphics;
     VkQueue compute;

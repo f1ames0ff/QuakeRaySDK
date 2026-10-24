@@ -26,6 +26,7 @@
 #include <nvrhi/vulkan.h>
 
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 
 #include "../Common.h"
 #include "../CpuFrameProfiler.h"
@@ -182,6 +183,8 @@ public:
         bool disableRasterization = false;
         bool renderUiOnly = false;
         CpuFrameProfiler *cpuProfiler = nullptr;
+        std::function<void(QrayGpuFramePhase, nvrhi::ICommandList *, nvrhi::ITexture *,
+                           nvrhi::ITexture *, uint32_t)> gpuFrameCallback;
 
         // -- the god rays and their shadow map (A5.2) --
         // The host block of the legacy frame (VulkanDevice.cpp:908-1007) precomputed: the final
