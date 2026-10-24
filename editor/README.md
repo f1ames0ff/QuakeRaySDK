@@ -243,7 +243,9 @@ What is left of the material table is the handful of parameters the SDK has no
 field for - `texture_overlay`, `force_rasterize`, the `luma:` colour blocks and
 the `light_*` emitter group - which need new upload fields first.
 
-PAK handling, wal textures from the game archive and sidecar persistence also
-remain. The current loader uses Quake units and Z-up; `QrSpatialConvention`
-already accepts that as a host convention, but the editor does not yet author in
-a different one.
+PAK handling and WAL textures from the game archive also remain. The current
+loader still uploads BSP/OBJ coordinates unchanged and does not call
+`qrSetSpatialConvention`. API 1.06 requires meter-valued host input, so the
+editor needs the same unit conversion as the Quake reference host before it can
+be treated as a host-independent scene consumer. This is a known editor
+limitation; it does not change the renderer API contract.

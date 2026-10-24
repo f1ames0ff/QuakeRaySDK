@@ -48,9 +48,9 @@
 [43] offset 808 float32
 [44] offset 812 uint32
 [45] offset 816 uint32
-[46] offset 820 uint32
-[47] offset 824 uint32
-[48] offset 828 uint32
+[46] offset 820 float32
+[47] offset 824 float32
+[48] offset 828 float32
 [49] offset 832 float32
 [50] offset 836 float32
 [51] offset 840 float32
@@ -124,6 +124,10 @@
 [119] offset 3360 uint32
 [120] offset 3364 uint32
 [121] offset 3368 uint32
+[122] offset 3372 float32
+[123] offset 3376 uint32
+[124] offset 3380 uint32
+[125] offset 3384 uint32
 === builtin GlobalInvocationId
 v3(int32)
 === capability Shader
@@ -146,13 +150,13 @@ UniformConstant
 image:2D:0:0:0:2:R32ui
 === descriptor set 0 binding 121: storage class
 UniformConstant
-=== descriptor set 0 binding 132
-image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 132: storage class
+=== descriptor set 0 binding 123
+image:2D:0:0:0:2:R32ui
+=== descriptor set 0 binding 123: storage class
 UniformConstant
-=== descriptor set 0 binding 135
+=== descriptor set 0 binding 133
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 135: storage class
+=== descriptor set 0 binding 133: storage class
 UniformConstant
 === descriptor set 0 binding 136
 image:2D:0:0:0:1:Unknown
@@ -162,37 +166,37 @@ UniformConstant
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 137: storage class
 UniformConstant
-=== descriptor set 0 binding 139
+=== descriptor set 0 binding 138
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 139: storage class
+=== descriptor set 0 binding 138: storage class
 UniformConstant
-=== descriptor set 0 binding 144
+=== descriptor set 0 binding 140
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 144: storage class
+=== descriptor set 0 binding 140: storage class
 UniformConstant
-=== descriptor set 0 binding 151
+=== descriptor set 0 binding 145
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 151: storage class
+=== descriptor set 0 binding 145: storage class
 UniformConstant
-=== descriptor set 0 binding 155
+=== descriptor set 0 binding 152
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 155: storage class
+=== descriptor set 0 binding 152: storage class
 UniformConstant
-=== descriptor set 0 binding 157
+=== descriptor set 0 binding 156
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 157: storage class
+=== descriptor set 0 binding 156: storage class
+UniformConstant
+=== descriptor set 0 binding 158
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 158: storage class
 UniformConstant
 === descriptor set 0 binding 19
 image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 19: storage class
 UniformConstant
-=== descriptor set 0 binding 209
+=== descriptor set 0 binding 210
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 209: storage class
-UniformConstant
-=== descriptor set 0 binding 211
-image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 211: storage class
+=== descriptor set 0 binding 210: storage class
 UniformConstant
 === descriptor set 0 binding 212
 image:2D:0:0:0:1:Unknown
@@ -202,25 +206,33 @@ UniformConstant
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 213: storage class
 UniformConstant
-=== descriptor set 0 binding 215
+=== descriptor set 0 binding 214
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 215: storage class
+=== descriptor set 0 binding 214: storage class
 UniformConstant
-=== descriptor set 0 binding 217
+=== descriptor set 0 binding 216
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 217: storage class
+=== descriptor set 0 binding 216: storage class
+UniformConstant
+=== descriptor set 0 binding 218
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 218: storage class
 UniformConstant
 === descriptor set 0 binding 23
 image:2D:0:0:0:2:Rgba16f
 === descriptor set 0 binding 23: storage class
 UniformConstant
-=== descriptor set 0 binding 247
+=== descriptor set 0 binding 248
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 247: storage class
+=== descriptor set 0 binding 248: storage class
 UniformConstant
-=== descriptor set 0 binding 253
+=== descriptor set 0 binding 254
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 253: storage class
+=== descriptor set 0 binding 254: storage class
+UniformConstant
+=== descriptor set 0 binding 256
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 256: storage class
 UniformConstant
 === descriptor set 0 binding 3
 image:2D:0:0:0:2:R32ui

@@ -2108,6 +2108,31 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         throw QrException(QR_WRONG_ARGUMENT, "Index data / count must be both not null or null");
     }
 
+    const uint32_t particleFlags =
+        QR_RASTERIZED_GEOMETRY_STATE_PARTICLE | QR_RASTERIZED_GEOMETRY_STATE_PARTICLE_SPRITE;
+
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT &&
+        (pUploadInfo->pipelineState &
+         (QR_RASTERIZED_GEOMETRY_STATE_SMOKE | particleFlags)) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT,
+                          "Smoke and particle states are only valid for DEFAULT rasterized geometry");
+    }
+
+    if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0 &&
+        (pUploadInfo->pipelineState & particleFlags) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT,
+                          "SMOKE and PARTICLE raster states are mutually exclusive");
+    }
+
+    if (pUploadInfo->renderType == QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN &&
+        (pUploadInfo->pipelineState &
+         (QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST | QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE)) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "SWAPCHAIN rasterized geometry cannot use depth state");
+    }
+
     // An upload outside a started frame cannot be drawn -- the collector is
     // reset when the next frame starts -- so it is dropped here instead of
     // piling up while frames are skipped (a minimized window keeps the game,
@@ -2218,6 +2243,7 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
 QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 {
+    UploadLockScope geometryLock(*this, g_uploadLane);
     statsApiCallsRasterized++;
 
     if (pUploadInfo == nullptr)
@@ -2374,6 +2400,8 @@ void VulkanDevice::FlushDeferredLightUploads()
 
 void VulkanDevice::SetParticleProxyGate(uint32_t gate, uint32_t glassParticles)
 {
+    std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+
     const bool hasGlass = rhiAccelStructs != nullptr && rhiAccelStructs->HasGlassInstances();
     const bool enabled = gate == 0u ? true : (gate == 2u ? false : (glassParticles != 0u && (lastReflRefrTraced || hasGlass)));
 

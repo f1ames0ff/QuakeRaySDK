@@ -54,9 +54,9 @@
 [43] offset 808 float32
 [44] offset 812 uint32
 [45] offset 816 uint32
-[46] offset 820 uint32
-[47] offset 824 uint32
-[48] offset 828 uint32
+[46] offset 820 float32
+[47] offset 824 float32
+[48] offset 828 float32
 [49] offset 832 float32
 [50] offset 836 float32
 [51] offset 840 float32
@@ -130,6 +130,10 @@
 [119] offset 3360 uint32
 [120] offset 3364 uint32
 [121] offset 3368 uint32
+[122] offset 3372 float32
+[123] offset 3376 uint32
+[124] offset 3380 uint32
+[125] offset 3384 uint32
 === block set 6 binding 8
 
 [0] offset 0 array[](uint32) stride 4

@@ -25,6 +25,7 @@ if(WIN32)
         set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
             CACHE PATH "FidelityFX SDK root (contains ffx-api/include and PrebuiltSignedDLL)")
     endif()
+    file(TO_CMAKE_PATH "${QR_FFX_SDK_ROOT}" QR_FFX_SDK_ROOT)
 endif()
 
 set(renderer_CXX_STANDARD 20)
@@ -182,11 +183,28 @@ if(QR_RENDERER_STANDALONE)
         if(NOT DEFINED QR_NVRHI_SOURCE_DIR)
             set(QR_NVRHI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nvrhi")
         endif()
+        file(TO_CMAKE_PATH "${QR_NVRHI_SOURCE_DIR}" QR_NVRHI_SOURCE_DIR)
 
         if(NOT EXISTS "${QR_NVRHI_SOURCE_DIR}/CMakeLists.txt")
             message(FATAL_ERROR
                 "NVRHI was not found. Set QR_NVRHI_SOURCE_DIR to the NVRHI source tree "
                 "or provide an existing nvrhi target.")
+        endif()
+
+        set(QR_NVRHI_HEADER "${QR_NVRHI_SOURCE_DIR}/include/nvrhi/nvrhi.h")
+        if(EXISTS "${QR_NVRHI_HEADER}")
+            file(READ "${QR_NVRHI_HEADER}" QR_NVRHI_HEADER_TEXT)
+            if(QR_NVRHI_HEADER_TEXT MATCHES
+                "c_MaxBindingLayouts[ \t\r\n]*=[ \t\r\n]*([0-9]+)")
+                if(CMAKE_MATCH_1 LESS 13)
+                    message(FATAL_ERROR
+                        "QuakeRaySDK requires NVRHI c_MaxBindingLayouts >= 13. "
+                        "Apply cmake/nvrhi-max-binding-layouts.patch or use a compatible NVRHI fork.")
+                endif()
+            else()
+                message(FATAL_ERROR
+                    "Could not read nvrhi::c_MaxBindingLayouts from ${QR_NVRHI_HEADER}.")
+            endif()
         endif()
 
         set(NVRHI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -397,6 +415,16 @@ target_include_directories(renderer PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
+# qray.h selects the surface declarations and the static-library calling
+# convention from these definitions. They must travel with the exported target;
+# directory-scope definitions do not reach a host in another CMake directory.
+target_compile_definitions(renderer
+    INTERFACE
+        QR_STATIC
+        QR_USE_SURFACE_WIN32
+        $<$<COMPILE_LANGUAGE:CXX>:NOMINMAX>
+)
+
 # Vulkan (found in the parent scope or by the standalone package setup)
 target_link_libraries(renderer PUBLIC Vulkan::Vulkan)
 
@@ -462,7 +490,22 @@ else()
     install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
 endif()
 
-install(FILES docs/api.md docs/spatial-contract.md docs/embedding.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES
+    docs/api.md
+    docs/host-contract.md
+    docs/sky-and-atmosphere.md
+    docs/sun-and-god-rays.md
+    docs/lights-and-sampling.md
+    docs/gi-and-denoiser.md
+    docs/host-feature-matrix.md
+    docs/spatial-contract.md
+    docs/embedding.md
+    cmake/nvrhi-max-binding-layouts.patch
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}
+)
+
+set(QRAY_FFX_INCLUDE_INSTALL_DIR "${CMAKE_INSTALL_INCLUDEDIR}/ffx")
+set(QRAY_FFX_LIBRARY_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}")
 
 install(EXPORT qray_rendererTargets
     FILE qray_rendererTargets.cmake
@@ -474,6 +517,7 @@ configure_package_config_file(
     cmake/qray_rendererConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/qray_rendererConfig.cmake"
     INSTALL_DESTINATION ${QRAY_RENDERER_CONFIG_INSTALL_DIR}
+    PATH_VARS QRAY_FFX_INCLUDE_INSTALL_DIR QRAY_FFX_LIBRARY_INSTALL_DIR
 )
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/qray_rendererConfigVersion.cmake"

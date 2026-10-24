@@ -325,6 +325,8 @@ struct SceneOptions
     bool acid = false;
     bool ui = false;
     bool particles = true;
+    uint8_t particleAlpha = 128;
+    bool glassParticles = true;
     float waterWaveSpeed = 0.05f;
     float waterTextureAreaScale = 0.0025f;
     float acidDensity = 0.6f;
@@ -567,7 +569,7 @@ public:
             particle.position[0] = particlePosition[0];
             particle.position[1] = particlePosition[1];
             particle.position[2] = particlePosition[2];
-            particle.packedColor = 0x80FFFFFFu;
+            particle.packedColor = (static_cast<uint32_t>(options.particleAlpha) << 24) | 0x00FFFFFFu;
             particle.size = particleSize;
             particle.cluster = 0xFFFFFFFFu;
 
@@ -680,6 +682,7 @@ public:
         reflectRefract.waterColor = options.waterColor;
         reflectRefract.acidColor = options.acidColor;
         reflectRefract.acidDensity = options.acidDensity;
+        reflectRefract.glassParticles = options.glassParticles ? QR_TRUE : QR_FALSE;
 
         QrDrawFrameLevelFogParams levelFog = {};
         levelFog.color = { 0.02f, 0.03f, 0.05f };
@@ -783,6 +786,29 @@ public:
 
             if (!UploadOverlays(options, particlePosition, particleSize, particleRight, particleUp))
             {
+                return false;
+            }
+
+            QrVertex rejectedVertex = {};
+            QrRasterizedGeometryUploadInfo rejected = {};
+            rejected.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT;
+            rejected.vertexCount = 1;
+            rejected.pVertices = &rejectedVertex;
+            rejected.pipelineState = QR_RASTERIZED_GEOMETRY_STATE_SMOKE |
+                                     QR_RASTERIZED_GEOMETRY_STATE_PARTICLE;
+
+            if (qrUploadRasterizedGeometry(instance, &rejected, nullptr, nullptr) != QR_WRONG_ARGUMENT)
+            {
+                std::fprintf(stderr, "SMOKE|PARTICLE raster state was not rejected\n");
+                return false;
+            }
+
+            rejected.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
+            rejected.pipelineState = QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST;
+
+            if (qrUploadRasterizedGeometry(instance, &rejected, nullptr, nullptr) != QR_WRONG_ARGUMENT)
+            {
+                std::fprintf(stderr, "depth-tested SWAPCHAIN raster state was not rejected\n");
                 return false;
             }
 
@@ -1433,6 +1459,38 @@ int main(int argc, char **argv)
                        mirrorParticleUp, result);
     };
 
+    auto runProxyAlpha = [&](uint8_t alpha, RenderResult &result) {
+        SceneVertices proxyVertices = identityVertices;
+        const float waterPositions[4][3] = {
+            { -3.0f, 0.0f, -2.0f },
+            { 3.0f, 0.0f, -2.0f },
+            { 3.0f, 0.0f, 4.0f },
+            { -3.0f, 0.0f, 4.0f },
+        };
+        for (int vertex = 0; vertex < 4; vertex++)
+        {
+            std::memcpy(proxyVertices.water[vertex].position, waterPositions[vertex], sizeof(float) * 3);
+            proxyVertices.water[vertex].normal[0] = 0.0f;
+            proxyVertices.water[vertex].normal[1] = -1.0f;
+            proxyVertices.water[vertex].normal[2] = 0.0f;
+        }
+
+        SceneOptions proxy = identityOptions;
+        proxy.opaque = false;
+        proxy.water = true;
+        proxy.acid = false;
+        proxy.ui = false;
+        proxy.particles = true;
+        proxy.particleAlpha = alpha;
+
+        const float proxyParticlePosition[3] = { 0.0f, 1.0f, 1.0f };
+        return RunPass(window, shaderFolder, blueNoisePath, identity, proxyVertices, indices, proxy,
+                       identitySky, canonicalView, canonicalEye, canonicalUp, 0.1f, 100.0f, 100.0f,
+                       canonicalFogDensity, canonicalSun, canonicalPointPosition, canonicalPointNormal,
+                       canonicalPointRadius, canonicalPointColor, canonicalClusterMin, canonicalClusterMax,
+                       proxyParticlePosition, 0.75f, canonicalParticleRight, canonicalParticleUp, result);
+    };
+
     if (!runYUp(yUpOptions, yUpSky, yUpResult))
     {
         DestroyWindow(window);
@@ -1457,6 +1515,9 @@ int main(int argc, char **argv)
     SceneOptions noUi = identityOptions;
     noUi.ui = false;
 
+    SceneOptions transparentParticle = identityOptions;
+    transparentParticle.particleAlpha = 0;
+
     SceneOptions emptyScene = identityOptions;
     emptyScene.opaque = false;
     emptyScene.water = false;
@@ -1472,6 +1533,9 @@ int main(int argc, char **argv)
     RenderResult noUiResult;
     RenderResult noCloudsResult;
     RenderResult emptySceneResult;
+    RenderResult transparentParticleResult;
+    RenderResult proxyParticleResult;
+    RenderResult proxyZeroAlphaResult;
 
     bool gates = true;
 
@@ -1479,6 +1543,9 @@ int main(int argc, char **argv)
         !runIdentity(noAcid, identitySky, noAcidResult) ||
         !runIdentity(noUi, identitySky, noUiResult) ||
         !runIdentity(identityOptions, noClouds, noCloudsResult) ||
+        !runIdentity(transparentParticle, identitySky, transparentParticleResult) ||
+        !runProxyAlpha(128, proxyParticleResult) ||
+        !runProxyAlpha(0, proxyZeroAlphaResult) ||
         !runIdentity(emptyScene, noClouds, emptySceneResult))
     {
         DestroyWindow(window);
@@ -1490,6 +1557,8 @@ int main(int argc, char **argv)
     gates = RequireContribution("acid", identityResult, noAcidResult) && gates;
     gates = RequireContribution("ui", identityResult, noUiResult) && gates;
     gates = RequireContribution("geometry", identityResult, emptySceneResult) && gates;
+    gates = RequireContribution("particle-alpha", identityResult, transparentParticleResult) && gates;
+    gates = RequireContribution("particle-proxy-alpha", proxyParticleResult, proxyZeroAlphaResult) && gates;
 
 
     const bool yUpSame = CompareImages("y-up-meters", identityResult, yUpResult);

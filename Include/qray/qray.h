@@ -29,7 +29,7 @@
     #define QRCONV __cdecl
 #else
     #define QRAPI
-    #define QRCONV
+    #define QRCONV __cdecl
 #endif
 
 #define QR_API_VERSION "1.06.0000"
@@ -314,6 +314,8 @@ typedef struct QrVertex
     float       texCoordLayer1[2];
     float       texCoordLayer2[2];
 
+    /* RGBA8, little-endian. Its alpha is straight coverage and multiplies
+       the draw color alpha and sampled texture alpha; it does not scale RGB. */
     uint32_t    packedColor;
     uint32_t    cluster;
     uint32_t    lightStyles;
@@ -521,6 +523,49 @@ typedef struct QrRect2D
     uint32_t    height;
 } QrRect2D;
 
+/* Raster draw ordering contract
+   -----------------------------
+   Raster draws preserve relative upload order within each emitted category,
+   separately for DEFAULT world, lit particle, point-particle, smoke,
+   SWAPCHAIN and SKY streams. The SDK does not infer a depth key or sort
+   geometry. The host owns the order:
+     - In the DEFAULT world list, upload opaque and alpha-tested cutouts
+       before blended draws.
+     - Upload blended draws from far to near for the current view.
+     - Keep different views (main, portals, reflections, viewmodel) in
+       separate ordered ranges; depths from different view-projections are
+       not comparable.
+     - If overlapping vertices or points inside one upload need a specific
+       blend order, sort them on the host before calling the SDK. Draw-level
+       order cannot fix compositing inside one batch, such as the points of
+       qrUploadParticles or the puffs of one smoke upload.
+     - For SWAPCHAIN, upload in painter's order; the SDK does not sort the
+       2D overlay.
+     - Calls from different host threads have no relative order guarantee.
+       Serialize uploads themselves when their blend order matters; the
+       collector lock only makes concurrent calls safe, not deterministic.
+
+   A blended draw should not set DEPTH_WRITE unless it intentionally
+   occludes later transparent draws. Alpha-tested cutouts that write depth
+   are order-independent and belong to the opaque group.
+
+   The raster overlay records DEFAULT world entries first, then DEFAULT
+   entries carrying QR_RASTERIZED_GEOMETRY_STATE_PARTICLE, then the
+   qrUploadParticles points, then DEFAULT entries carrying
+   QR_RASTERIZED_GEOMETRY_STATE_SMOKE. QR_RASTERIZED_GEOMETRY_STATE_PARTICLE
+   selects the lit particle pipeline; QR_RASTERIZED_GEOMETRY_STATE_PARTICLE_SPRITE
+   alone does not move an unlit sprite out of the world list. If a dedicated
+   particle or smoke pass is unavailable, its entries stay in the world list
+   and keep their upload order. SWAPCHAIN and SKY are recorded by their own
+   passes. Blending is applied in this record order; interleaving uploads
+   across these categories does not survive.
+
+   Supported blending is a source/destination pair from QrBlendFactor with
+   an add operation. DST_ALPHA, ONE_MINUS_DST_ALPHA, subtract/min/max and
+   separate alpha equations are not part of this revision. A host that
+   needs a legacy mode outside this set must approximate it with the
+   supported factors or keep that effect out of the SDK raster path. */
+
 typedef enum QrRasterizedGeometryStateFlagBits
 {
     QR_RASTERIZED_GEOMETRY_STATE_ALPHA_TEST         = 1,
@@ -602,6 +647,14 @@ QRAPI QrResult QRCONV qrUploadRasterizedGeometry(
     const float                             *pViewProjection,
     const QrViewport                        *pViewport);
 
+/* packedColor is RGBA8, little-endian: R in bits 0..7, G in 8..15, B in
+   16..23 and A in 24..31. In the lit and unlit particle paths the output
+   alpha is drawColor.a * vertexColor.a * texture.a, so lowering either
+   alpha fades the sprite. Alpha does not scale RGB; for premultiplied or
+   additive modes whose source factor does not use alpha, premultiply the
+   color on the host if the fade must affect the additive contribution.
+   The smoke path derives its alpha from smokeLook and age, not from
+   packedColor.a. */
 typedef struct QrParticlePoint
 {
     float       position[3];

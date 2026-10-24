@@ -67,12 +67,16 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
     RsParticleFragOutput o;
     if (debug)
     {
-        o.outColor = float4(inLit.r, ambient.r, min(factor.r, 1.0), albedo.a);
+        o.outColor = float4(inLit.r, ambient.r, min(factor.r, 1.0),
+                            albedo.a * inColor.a * rasterizerFragInfo.color.a);
         o.outScreenEmission = (float3)0.0;
         return o;
     }
 
-    o.outColor = float4(inColor.rgb * rasterizerFragInfo.color.rgb * factor, 1.0) * albedo;
+    /* The draw color alpha and the vertex color alpha are per-sprite coverage;
+       albedo.a is the texture mask. All are straight alpha. */
+    o.outColor = float4(inColor.rgb * rasterizerFragInfo.color.rgb * factor,
+                        inColor.a * rasterizerFragInfo.color.a) * albedo;
     o.outScreenEmission = (float3)0.0;
     return o;
 }

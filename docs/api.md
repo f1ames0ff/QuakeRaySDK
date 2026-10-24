@@ -1,11 +1,21 @@
 # Renderer API guide
 
 This is the concise host-facing map of the QuakeRaySDK renderer. The normative
-C ABI and exact field layouts are in [qray.h](../Include/qray/qray.h). Start
+C ABI and exact field layouts are in the installed `qray/qray.h`. Start
 with [embedding.md](embedding.md) for a walkthrough and use
+[host-contract.md](host-contract.md) for the adapter boundary,
+[sky-and-atmosphere.md](sky-and-atmosphere.md) for sky/cloud setup and
 [spatial-contract.md](spatial-contract.md) for units, axes and handedness.
+The [host feature matrix](host-feature-matrix.md) links the focused guides for
+sun/god rays, lights/DTAL/NEE, GI/ReSTIR/denoiser and other frame blocks.
 
 Current API version: `QR_API_VERSION 1.06.0000`.
+
+The package is source-level: rebuild the host and SDK together when updating.
+`QR_API_VERSION`, `QR_SPATIAL_CONVENTION_VERSION` and the in/out
+`QrSpatialConvention` header are compatibility checks. The remaining public
+structs have no independent version field, and this revision does not promise
+a binary plugin ABI.
 
 ## Supported integration model
 
@@ -40,6 +50,25 @@ There is no separate `qrEndFrame`: `qrDrawFrame` ends, submits and presents the
 frame. If `qrStartFrame` succeeds, call `qrDrawFrame` before starting another
 frame.
 
+### Instance creation
+
+The create-info struct itself is borrowed only for `qrCreateInstance`. Its
+Win32 surface must describe an `HWND` that outlives the instance, and the file
+callbacks plus `pUserLoadFileData` must remain callable for the instance
+lifetime. Keep every string and path alive through the creation call; do not
+assume the SDK retains those character buffers.
+
+The create info must contain a valid Win32 surface and a non-zero
+`rasterizedSkyCubemapSize`; both albedo-layer limits must not exceed the
+renderer's three-layer material limit. A host should also set an application
+name, shader folder, blue-noise file, file callbacks and sensible raster vertex
+and index capacities.
+
+`pConfigPath` selects the renderer's local configuration file and may be null.
+The full set of texture-override paths and color-space flags controls optional
+asset overrides; they are not required for a host that creates materials from
+in-memory RGBA8 data or its own UTF-8 relative texture paths.
+
 ## Ownership and lifetime
 
 | Item | Owner | Lifetime rule |
@@ -56,6 +85,18 @@ Use one render/frame thread unless a narrower concurrency rule is explicitly
 documented. Upload-lane and dynamic-shape calls are diagnostics or tuning, not
 a general promise that arbitrary host containers are thread-safe.
 
+### State lifetime
+
+| State | Lifetime |
+|---|---|
+| Spatial convention | Instance lifetime after the first spatial/fog upload or drawn frame; set it before either. |
+| Static and static-movable geometry, cluster topology, world-light faces | Persistent until explicitly replaced or the instance is destroyed. |
+| Dynamic geometry | Current frame; upload it again after every `qrStartFrame` in which it is visible. |
+| Rasterized geometry, particle points, decals and portals | Current frame; the queues are reset at the frame boundary. |
+| Frame lights and deferred-light batch | Current frame. |
+| Fog volumes, smoke wind, material and cubemap handles | Persistent until replaced/destroyed or the instance is destroyed. |
+| `QrDrawFrameInfo` and its parameter blocks | Borrowed only for `qrDrawFrame`. |
+
 ## Public handles and common types
 
 - `QrInstance` - renderer/device/swapchain instance.
@@ -67,6 +108,8 @@ a general promise that arbitrary host containers are thread-safe.
 - `QrFloat2D`, `QrFloat3D`, `QrFloat4D`, `QrExtent2D`, `QrExtent3D`,
   `QrRect2D`, `QrViewport`, `QrTransform`, `QrMatrix3D` - shared value types.
 - `QrBool32` uses `QR_TRUE` / `QR_FALSE`; zero initialization is safe.
+- `packedColor` in `QrVertex` and `QrParticlePoint` is little-endian RGBA8:
+  red in bits 0..7, green in 8..15, blue in 16..23 and alpha in 24..31.
 
 ## API catalogue
 
@@ -107,11 +150,37 @@ lights and renderer-side matching remain coherent.
 | `qrUploadParticles` | Upload per-frame camera-facing or smoke particle points. |
 | `qrUploadDecal` | Upload a decal transform and material. |
 | `qrUploadPortal` | Upload the two-sided transform data for a portal. |
-| `qrSetParticleProxyGate` | Tell the renderer whether particle proxies may be traced behind glass. |
+| `qrSetParticleProxyGate` | Control traced particle proxies behind reflection/refraction surfaces. `gate`: `0` force open, `1` automatic, `2` force closed; `glassParticles` enables proxy capture for the frame. |
 
 `DEFAULT` and `SKY` are world-space. `SWAPCHAIN` is screen-space in pixels and
 is used for HUD, menus and other overlays. `FORCE_LINE_LIST` geometry is not
 triangle-rewound. The raster upload limits come from `QrInstanceCreateInfo`.
+`SWAPCHAIN` has no depth attachment and rejects depth-test/depth-write state.
+For `SWAPCHAIN`, positions use a top-left pixel origin and `pViewProjection`
+converts them to clip space; `scissor` uses the same pixel origin. A
+full-viewport orthographic matrix has `m[0] = 2/width`,
+`m[5] = 2/height`, `m[10] = -1`, `m[12] = m[13] = -1` and `m[15] = 1`
+in the column-major array.
+
+Raster entries preserve upload order only inside each emitted category. The
+overlay records ordinary `DEFAULT` world draws, lit particle geometry,
+point-particle batches and smoke in that fixed order; `SKY` and `SWAPCHAIN`
+remain separate ordered streams. The SDK does not sort opaque, alpha-tested or
+blended draws. Submit opaque/alpha-tested first, then blended far-to-near, and
+sort vertices/points inside a batch before upload when their overlap makes
+order observable. The full contract is in the public header and the host
+pattern is in
+[embedding.md](embedding.md#6-sprite-and-effect-adapter-pattern). Blend state is
+a source/destination pair from `QrBlendFactor` with an add operation;
+DST_ALPHA, subtract/min/max and separate alpha equations are not exposed.
+Concurrent upload calls are made safe by the renderer lock, but their relative
+order is unspecified; a host must serialize calls itself when blending makes
+that order observable.
+
+`SMOKE` and particle state are valid only for `DEFAULT` geometry. `SMOKE` and
+`PARTICLE` are mutually exclusive. `qrUploadParticles` is a specialized
+point-sprite batch and always uses `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`; use
+`qrUploadRasterizedGeometry` when another blend equation is required.
 
 ### Materials and cubemaps
 
@@ -128,7 +197,19 @@ triangle-rewound. The raster upload limits come from `QrInstanceCreateInfo`.
 
 Materials are referenced by `QrLayeredMaterial` in geometry and by raster,
 decal and area-light payloads. The primary texture contract is three logical
-inputs: albedo/alpha, combined roughness/metallic/emission and normal.
+inputs: albedo/alpha, combined roughness/metallic/emission and normal. An
+in-memory texture is one tightly packed RGBA8 level of
+`QrMaterialCreateInfo.size`; the SDK generates mipmaps unless
+`QR_MATERIAL_CREATE_DONT_GENERATE_MIPMAPS_BIT` is set. The
+`QrTextureSwizzling` value defines the RME channel order. Albedo follows the
+instance's original/override sRGB flags; material data and normals are linear.
+A host that owns palette, 16-bit or compressed source formats must decode them
+before this upload.
+
+Cubemap faces are RGBA8 and square, with `sideSize` applying to in-memory
+faces. The face order in `QrCubemapFaceData` and `QrCubemapFacePaths` is the
+field order: `+X`, `-X`, `+Y`, `-Y`, `+Z`, `-Z`. Supply either six in-memory
+faces or six relative paths; the host owns any source-image decoding.
 
 ### Scene and dynamic lights
 
@@ -179,6 +260,12 @@ task graph can use the begin/slice/finish/publish/commit sequence directly.
 Cluster IDs and PVS bytes are topology, not spatial units. Omitting both PVS
 tables requests the SDK's all-visible fallback.
 
+World-light vertices and cluster topology are persistent scene state. An
+ordinary host uploads the complete light set relevant to the current frame
+after `qrStartFrame`; stable light `uniqueID` values let diagnostics and
+cluster grant queries identify those submissions. The SDK does not parse the
+host's entity or map format.
+
 ### Frame lifecycle, fog and global availability
 
 | Function | Purpose |
@@ -207,7 +294,7 @@ owns all output images. Optional pointer blocks select rendering features:
 | `QrDrawFrameTonemappingParams` | Exposure and tone curve. |
 | `QrDrawFrameBloomParams` | Bloom intensity and threshold. |
 | `QrDrawFrameReflectRefractParams` | Water, acid, glass, portals and their media properties. |
-| `QrDrawFrameSkyParams` | Sky type, sun disc, clouds, god rays and cubemap rotation. |
+| `QrDrawFrameSkyParams` | Sky type, sun disc, clouds, god rays and cubemap rotation; see [sky-and-atmosphere.md](sky-and-atmosphere.md). |
 | `QrDrawFrameTexturesParams` | Normal strength, material sampling, emission and light-style behavior. |
 | `QrDrawFrameLevelFogParams` | Global level fog color and density. |
 | `QrDrawFrameDebugParams` | Diagnostic visualization flags. |
@@ -265,6 +352,9 @@ They are not required for a first correct integration.
 - Destroy the renderer instance before the Win32 window.
 - Deploy compiled shaders, the blue-noise texture and the FidelityFX provider
   next to the executable or configure their paths explicitly.
+- Link through `qray::renderer`; the target exports the required `QR_STATIC`,
+  `QR_USE_SURFACE_WIN32` and `NOMINMAX` compile definitions. Do not mix a
+  DLL-style `qray.h` declaration with the static `renderer.lib`.
 
 ## Conformance expectations
 
@@ -272,3 +362,5 @@ The engine-free tests exercise spatial conversion, frame readback, world-light
 fallback, mirrored scenes, clouds, post effects, dynamic geometry and
 non-uniform vertex transforms. A new host adapter should preserve the API
 contract rather than reproducing QuakeRay's native units or coordinate frame.
+The adapter-side feature mapping and unsupported legacy effects are in
+[host-contract.md](host-contract.md).
