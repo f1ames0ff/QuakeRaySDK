@@ -35,7 +35,8 @@ a binary plugin ABI.
 ## Minimal lifecycle
 
 ```text
-qrCreateInstance
+qrCreateInstance                         (C/scene-only host)
+  or qrCreateInstanceWithGpuRequirements (C++ shared GPU host)
   qrSetSpatialConvention
   create materials / cubemaps
   upload static geometry
@@ -48,6 +49,9 @@ repeat each frame:
 
 qrDestroyInstance before destroying the HWND
 ```
+
+Use only one creation path. A host that needs the shared NVRHI device must not
+create a second device after `qrCreateInstance`.
 
 There is no separate `qrEndFrame`: `qrDrawFrame` ends, submits and presents the
 frame. If `qrStartFrame` succeeds, call `qrDrawFrame` before starting another

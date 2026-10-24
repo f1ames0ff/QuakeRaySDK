@@ -8,6 +8,36 @@ This is a source-level C++20 contract over the existing renderer package. The
 C ABI in `qray.h` remains the transport for scene and frame data. The GPU
 contract does not create a second renderer or a second scene path.
 
+## Choose one ownership path
+
+Use exactly one instance path for a render target:
+
+| Host needs | Creation path |
+|---|---|
+| C host or scene-only integration that does not need NVRHI/Vulkan resources | `qrCreateInstance` |
+| C++ NVRHI host that creates textures, buffers, pipelines or command lists on the renderer device | `qray::qrCreateInstanceWithGpuRequirements` |
+
+Do not call `qrCreateInstance` first and then create an unrelated
+`VkDevice`/NVRHI device for the same renderer or window. There must be one
+device for the SDK renderer and all participating host GPU resources.
+If the host does not need GPU access, do not use `gpu_context.h`.
+
+## Non-negotiable rules
+
+- The SDK owns the one `VkInstance`, `VkPhysicalDevice`, `VkDevice` and NVRHI
+  device associated with a `QrInstance`.
+- The host must not create a second Vulkan/NVRHI device for the same rendering
+  context. Different `VkDevice` objects cannot share ordinary images, buffers
+  or memory without an explicit external-memory protocol.
+- Every host resource that participates in SDK frames must be created through
+  `context.pDevice` (or the returned native `VkDevice` when NVRHI is not used).
+- The host may own resources and their allocators, but not the device,
+  swapchain, queues or present operation.
+- One `QrInstance` is one SDK-owned GPU context. Independent windows need
+  independent instances; do not create one instance per pass, camera or view.
+- Destroy all host resources and remove frame hooks before
+  `qrDestroyInstance`.
+
 The host must provide the same compatible `nvrhi` and `nvrhi_vk` targets as the
 rest of the package:
 
@@ -44,6 +74,7 @@ swapchain. A `QrayGpuContext` and all pointers inside it become invalid when
 
 Requirements are passed to a separate creation function because
 `QrInstanceCreateInfo` has no extensible header:
+
 The examples below assume `using namespace qray;`.
 
 ```cpp
@@ -176,6 +207,9 @@ nvrhi::BufferHandle buffer = device->createBuffer(desc);
 
 The host owns and releases every such resource. The SDK does not track or
 destroy unknown host resources. Release them before `qrDestroyInstance`.
+`memoryProperties` describes the shared physical device; host allocations made
+through the returned device consume the same device memory as SDK allocations.
+No CPU copy, separate device or separate swapchain is needed for shared use.
 
 ## Frame protocol
 

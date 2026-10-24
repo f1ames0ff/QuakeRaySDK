@@ -1,7 +1,8 @@
 # Embedding QuakeRaySDK renderer
 
 This guide is for a Win32 host that links `qray::renderer` and owns its window,
-swapchain, assets and scene. The host may use a right-handed or left-handed
+assets and scene. The SDK owns the Vulkan/NVRHI device, swapchain and
+presentation. The host may use a right-handed or left-handed
 Z-up or Y-up frame, but it must convert all spatial values to meters before
 calling the SDK. The renderer maps meter inputs into its private scene frame as
 described in [spatial-contract.md](spatial-contract.md).
@@ -24,6 +25,9 @@ NVRHI-based hosts that need the renderer's GPU device use
 then receive the SDK-owned NVRHI/Vulkan context as a borrowed shared handle.
 See [gpu-context.md](gpu-context.md) for the required ordering, frame callbacks
 and destruction protocol.
+Do not create a second NVRHI/Vulkan device for the same host render target.
+If the host only uploads CPU scene data, use the ordinary `qrCreateInstance`
+path instead of the shared GPU context.
 
 ## 1. Build and link
 
@@ -51,7 +55,10 @@ definitions.
 
 Fill `QrInstanceCreateInfo`, including the Win32 surface, file callbacks,
 shader folder, blue-noise path, texture limits and optional overridden texture
-paths. Create the instance with `qrCreateInstance`.
+paths. A C host or scene-only consumer creates the instance with
+`qrCreateInstance`. A C++ NVRHI host that needs the renderer device uses
+`qray::qrCreateInstanceWithGpuRequirements` with the requirements described in
+[gpu-context.md](gpu-context.md).
 
 Immediately after creation, declare the host frame:
 
