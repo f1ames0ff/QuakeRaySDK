@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(qray_renderer VERSION 1.6.0 LANGUAGES C CXX)
+    project(qray_renderer VERSION 0.1.0 LANGUAGES C CXX)
     set(QR_RENDERER_STANDALONE ON)
 else()
     set(QR_RENDERER_STANDALONE OFF)
@@ -32,10 +32,12 @@ set(renderer_CXX_STANDARD 20)
 
 # The renderer source + public headers + shaders live in this folder.
 set(renderer_PUBLIC_HEADERS
-    Include/qray/qray.h)
+    Include/qray/qray.h
+    Include/qray/host_contract.h)
 
 set(renderer_SOURCES
     Source/qray.cpp
+    Source/HostContracts.cpp
     Source/VulkanDevice.cpp
     Source/VulkanDevice_Init.cpp
     Source/Buffer.cpp
@@ -219,6 +221,13 @@ if(QR_RENDERER_STANDALONE)
 endif()
 
 if(QR_BUILD_TESTS)
+    add_executable(qray_host_contract_tests Tests/HostContractTests.cpp Source/HostContracts.cpp)
+    target_compile_features(qray_host_contract_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_host_contract_tests PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 NOMINMAX)
+    target_include_directories(qray_host_contract_tests PRIVATE Include)
+    add_test(NAME qray_host_contract_tests COMMAND qray_host_contract_tests)
+    set_tests_properties(qray_host_contract_tests PROPERTIES TIMEOUT 30)
+
     add_executable(qray_readback_api_tests Tests/ReadbackApiTests.cpp)
     target_compile_features(qray_readback_api_tests PRIVATE cxx_std_20)
     target_include_directories(qray_readback_api_tests PRIVATE Include)
@@ -464,7 +473,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 set(QRAY_RENDERER_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/qray_renderer")
-set(QRAY_RENDERER_VERSION "1.6.0")
+set(QRAY_RENDERER_VERSION "0.1.0")
 
 if(WIN32)
     install(TARGETS renderer
@@ -473,7 +482,8 @@ if(WIN32)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
+    install(FILES Include/qray/qray.h Include/qray/host_contract.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
     install(DIRECTORY "${QR_FFX_SDK_ROOT}/ffx-api/include/ffx_api"
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffx)
     install(FILES "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib"
@@ -487,11 +497,13 @@ else()
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
+    install(FILES Include/qray/qray.h Include/qray/host_contract.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
 endif()
 
 install(FILES
     docs/api.md
+    docs/host-driver-contract.md
     docs/host-contract.md
     docs/sky-and-atmosphere.md
     docs/sun-and-god-rays.md

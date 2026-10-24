@@ -13,6 +13,12 @@ The normative types and functions are in the installed `qray/qray.h`.
 [host-feature-matrix.md](host-feature-matrix.md) connects host controls to the
 public sky, sun, light-sampling, GI and denoiser records.
 
+The optional C++20 host-driver layer is in `qray/host_contract.h`. Its
+`QraySceneAsset`, `QrayFrameView`, `QrayFrameUpdates`, `IQrayHost` and
+`QraySidecar` contracts lower to the same C transport. Ownership, supported
+updates, failure semantics and the host-owned file-codec boundary are defined
+in [host-driver-contract.md](host-driver-contract.md).
+
 ## 1. Boundary
 
 QuakeRaySDK owns the Win32 surface integration, Vulkan/NVRHI device, render
@@ -185,9 +191,10 @@ evidence:
 | QuakeRay host | The parent build and CTest suite pass against the exact SDK checkout used by the host |
 
 The QuakeRay host is the reference integration, not proof that another game's
-material, visibility or asset decoder is correct. A second host must record
-its own captures and unsupported-feature report before the compatibility claim
-is promoted from contract to verified implementation.
+material, visibility or asset decoder is correct. A second real host is not a
+release prerequisite for contract version 1.0: the SDK claim covers the
+source-level contract and the QuakeRay production path. Each external host
+validates its own adapter, captures and unsupported-feature report.
 
 In the SDK source tree, `Tests/PackageConsumer` is the minimal
 installed-package probe. Configure it against an install prefix with

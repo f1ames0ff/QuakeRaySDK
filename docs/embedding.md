@@ -13,6 +13,11 @@ is the step-by-step first integration; sky and volumetric-cloud settings are
 described in [sky-and-atmosphere.md](sky-and-atmosphere.md), and
 [host-feature-matrix.md](host-feature-matrix.md) links the advanced lighting
 guides.
+Hosts that want the implemented high-level source contract can use
+`qray/host_contract.h` and `QraySceneBinding`; its lifecycle, supported update
+set, sidecar boundary and failure semantics are in
+[host-driver-contract.md](host-driver-contract.md). The raw `qr*` calls remain
+available for engines with their own scene and task scheduling.
 
 ## 1. Build and link
 
@@ -25,9 +30,13 @@ find_package(qray_renderer CONFIG REQUIRED)
 target_link_libraries(my_host PRIVATE qray::renderer)
 ```
 
-The installed package also exports `qray::ffx`. The host must deploy the FSR
-provider DLL, compiled shaders and the blue-noise texture next to the
-executable. The `qray::renderer` target exports `QR_STATIC` and
+The SDK owns the shader sources/build script and installs the FidelityFX
+headers, import library and `qray::ffx` provider target. The host integration
+step is deployment: copy the FSR provider DLL, compiled shaders and blue-noise
+texture next to the executable and pass their paths to instance creation.
+An installed SDK package therefore does not require the host to implement
+NVRHI, shader compilation or FidelityFX tooling; the host must only provide
+compatible `nvrhi`/`nvrhi_vk` build targets. The `qray::renderer` target exports `QR_STATIC` and
 `QR_USE_SURFACE_WIN32`, plus `NOMINMAX` for the Win32 declarations; keep those
 switches on the target instead of copying them into unrelated host-wide
 definitions.

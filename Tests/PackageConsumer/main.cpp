@@ -1,5 +1,6 @@
 #include <nvrhi/nvrhi.h>
 #include <qray/qray.h>
+#include <qray/host_contract.h>
 
 static_assert(nvrhi::c_MaxBindingLayouts >= 13,
               "QuakeRaySDK needs the NVRHI binding-layout limit from its pinned patch");
@@ -25,9 +26,11 @@ int main()
     surface.hinstance = GetModuleHandleW(nullptr);
 
     const char *description = qrGetResultDescription(QR_SUCCESS);
+    const uint32_t hostContractVersion = qray::qrayGetHostContractVersion();
 
     return surface.hinstance != nullptr && description != nullptr &&
-           std::strcmp(description, "QR_SUCCESS") == 0
+           std::strcmp(description, "QR_SUCCESS") == 0 &&
+           hostContractVersion == qray::kHostContractVersion
         ? 0
         : 1;
 }

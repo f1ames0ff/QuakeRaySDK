@@ -113,6 +113,19 @@ a general promise that arbitrary host containers are thread-safe.
 
 ## API catalogue
 
+### Host driver contract layer
+
+`qray/host_contract.h` is an optional C++20 source-level layer over the C ABI.
+It defines `QraySceneAsset`, `QrayFrameView`, `QrayFrameUpdates`,
+`IQrayHost` and `QraySidecar`, plus `QraySceneBinding` for lowering scene and
+frame records into the existing `qr*` calls.
+
+The C ABI remains normative for transport and resource ownership. The contract
+layer does not create a second scene path. It prevalidates borrowed input,
+creates and owns scene materials, preserves source/runtime identity separation
+and dispatches only supported updates. See
+[host-driver-contract.md](host-driver-contract.md).
+
 ### Instance, spatial frame and global scene state
 
 | Function | Purpose |
