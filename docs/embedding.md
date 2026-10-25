@@ -142,6 +142,14 @@ presentation. The host owns window messages, input, simulation and asset
 loading. Do not submit a projection matrix; `QrDrawFrameInfo.view` is
 world-to-view only.
 
+For normal interactive output, request `QR_PRESENT_MODE_VSYNC` with
+`maxFrameLatency = 1`. The SDK then uses the waitable FIFO path and waits for
+the previous displayed frame before acquiring the next image, which prevents
+submitted FPS from outrunning an uneven display cadence. `maxFrameLatency = 0`
+leaves the host free to queue ahead and is appropriate only for explicit
+benchmarks or diagnostics. Other presentation modes are host choices and may
+not provide this pacing.
+
 Use `qrGetFrameReadbackRequirements`, `qrRequestFrameReadback` and
 `qrGetFrameReadbackStatus` for asynchronous final LDR capture. The readback
 path is not a scene inspection API and includes the composited UI.

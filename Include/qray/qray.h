@@ -1231,7 +1231,11 @@ typedef enum QrPresentMode
 
 typedef struct QrStartFrameInfo
 {
+    // FIFO with maxFrameLatency=1 is the recommended paced presentation path.
+    // The other modes are explicit host choices for tearing, diagnostics or benchmarks.
     QrPresentMode   presentMode;
+    // 0 leaves presentation uncapped, allowing submitted FPS to outrun displayed
+    // frames. 1 waits for the previous waitable FIFO present and is the smooth default.
     uint32_t        maxFrameLatency;
     QrBool32        requestShaderReload;
     QrBool32        wantFullscreenExclusive;

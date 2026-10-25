@@ -270,7 +270,6 @@ private:
     PFN_vkAcquireFullScreenExclusiveModeEXT acquireFullScreenExclusiveMode = nullptr;
     PFN_vkReleaseFullScreenExclusiveModeEXT releaseFullScreenExclusiveMode = nullptr;
     std::string                             printedPresentModeName;
-    bool                                    printedPresentWaitActive = false;
     bool                                    printedRasterUploadWithoutFrame = false;
     bool                                    printedRasterOverflow = false;
     bool                                    printedParticlePointOverflow = false;

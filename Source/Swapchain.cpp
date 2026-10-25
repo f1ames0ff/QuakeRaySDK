@@ -248,12 +248,13 @@ bool Swapchain::IsPresentWaitActive() const
 
 const char *Swapchain::GetPresentModeName() const
 {
-    switch (isPresentMode)
+    switch (GetVkPresentMode(isPresentMode))
     {
-    case QR_PRESENT_MODE_VSYNC:     return "fifo";
-    case QR_PRESENT_MODE_ADAPTIVE:  return "fifo_relaxed";
-    case QR_PRESENT_MODE_IMMEDIATE: return "immediate";
-    default:                        return "mailbox";
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:    return "immediate";
+    case VK_PRESENT_MODE_MAILBOX_KHR:      return "mailbox";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo_relaxed";
+    case VK_PRESENT_MODE_FIFO_KHR:         return "fifo";
+    default:                               return "unknown";
     }
 }
 

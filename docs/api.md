@@ -322,6 +322,11 @@ host's entity or map format.
 After `qrStartFrame`, upload all frame-scoped geometry, overlays, particles and
 frame lights, then call `qrDrawFrame` exactly once.
 
+For interactive presentation use `QR_PRESENT_MODE_VSYNC` and
+`maxFrameLatency = 1`. This enables waitable FIFO pacing. A latency of `0`
+allows several submitted frames to precede their display and is intended for
+throughput measurements, not normal gameplay.
+
 ### Frame payload
 
 The required camera portion of `QrDrawFrameInfo` contains the column-major

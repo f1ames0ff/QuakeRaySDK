@@ -265,19 +265,15 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     swapchain->SetFullscreenExclusive(startInfo.wantFullscreenExclusive != 0, startInfo.hasFocus != 0);
     swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
 
-    if (swapchain->IsPresentWaitActive() && !printedPresentWaitActive)
     {
-        printedPresentWaitActive = true;
-        Print("RHI: present wait is active, the swapchain caps the frames queued for display");
-    }
-
-    {
-        const std::string presentModeName = swapchain->GetPresentModeName();
+        const std::string presentModeName =
+            std::string(swapchain->GetPresentModeName()) + ", images " + std::to_string(swapchain->GetImageCount()) +
+            (swapchain->IsPresentWaitActive() ? ", present wait on" : ", present wait off");
 
         if (presentModeName != printedPresentModeName)
         {
             printedPresentModeName = presentModeName;
-            Print(("RHI: the swapchain present mode is " + presentModeName).c_str());
+            Print(("RHI: the swapchain uses " + presentModeName).c_str());
         }
     }
 
