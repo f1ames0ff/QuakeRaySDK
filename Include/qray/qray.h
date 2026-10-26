@@ -1246,11 +1246,6 @@ QRAPI QrResult QRCONV qrStartFrame(
     QrInstance                          qrInstance,
     const QrStartFrameInfo              *pStartInfo);
 
-/* Acquire the swapchain image before qrDrawFrame. This may be called from a
- * worker after qrStartFrame while the host prepares the rest of the frame.
- * qrDrawFrame may record scene work while this call is still waiting and joins
- * it before the present pass; qrDrawFrame also acquires lazily when the host
- * does not call it. */
 QRAPI QrResult QRCONV qrAcquireFrame(
     QrInstance                          qrInstance);
 

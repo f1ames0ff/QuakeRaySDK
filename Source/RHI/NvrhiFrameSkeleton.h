@@ -190,10 +190,6 @@ public:
         bool disableRasterization = false;
         bool renderUiOnly = false;
         CpuFrameProfiler *cpuProfiler = nullptr;
-        // When set, the scene is recorded before the swapchain image is acquired. The callback
-        // acquires the image while the presentation wait is hidden by scene recording and fills
-        // the submission synchronization. GPU-frame hooks leave it empty because BeforeRenderer
-        // receives a real backbuffer in that public contract.
         std::function<bool()> acquireSwapchainForPresent;
         std::function<void(QrayGpuFramePhase, nvrhi::ICommandList *, nvrhi::ITexture *,
                            nvrhi::ITexture *, uint32_t)> gpuFrameCallback;
@@ -449,10 +445,6 @@ public:
     // The raster world sub-pass is not recorded in the two traced modes; the raster sky's ALBEDO
     // half is, for the SKY_TYPE_RASTERIZED_GEOMETRY frame only, together with the raster sky pass's
     // cube half right before the primary (see Render's implementation).
-    // 'submission' carries the semaphores the presentation engine waits on. They are filled by
-    // the caller before Render or by SkyFrameInputs::acquireSwapchainForPresent when scene
-    // recording is allowed to overlap the presentation wait. Returns false if the pass is
-    // unavailable.
     bool Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
                 FrameSubmissionSynchronization &submission);
 

@@ -1132,9 +1132,6 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const auto prepare = asManager->PrepareForBuildingTLAS(
             frameIndex, *uniform->GetData(), uniform->GetData()->rayCullMaskWorld,
             allowGeometryWithSkyFlag, drawInfo.disableRayTracedGeometry);
-        // The RHI path owns and binds its own TLAS. Preparation still supplies the host uniform
-        // instance ranges and ShVertPreprocessing state consumed below, but the legacy TLAS that
-        // BuildTLAS would build has no consumer on this path.
         preprocessing = prepare.second;
     }
 
