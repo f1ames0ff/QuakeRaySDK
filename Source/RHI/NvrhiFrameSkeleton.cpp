@@ -835,7 +835,7 @@ bool NvrhiFrameSkeleton::GetGpuTimings(float *pFrameMs, float *pPassMs) const
 }
 
 bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
-                                VkSemaphore semaphoreToWait, VkSemaphore semaphoreToSignal)
+                                FrameSubmissionSynchronization &submission)
 {
     if (unavailable)
     {
@@ -849,14 +849,22 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         return false;
     }
 
-    const uint32_t imageIndex = pSwapchain->GetCurrentImageIndex();
-    if (imageIndex >= swapchainFramebuffers.size())
-    {
-        return false;
-    }
+    bool swapchainReady = !sky.acquireSwapchainForPresent;
+    uint32_t imageIndex = 0;
+    nvrhi::ITexture *backBuffer = nullptr;
+    nvrhi::IFramebuffer *framebuffer = nullptr;
 
-    nvrhi::ITexture *backBuffer = swapchainTextures[imageIndex];
-    nvrhi::IFramebuffer *framebuffer = swapchainFramebuffers[imageIndex];
+    if (swapchainReady)
+    {
+        imageIndex = pSwapchain->GetCurrentImageIndex();
+        if (imageIndex >= swapchainFramebuffers.size())
+        {
+            return false;
+        }
+
+        backBuffer = swapchainTextures[imageIndex];
+        framebuffer = swapchainFramebuffers[imageIndex];
+    }
 
     // The frame context owns the frame model: BeginSlot waits for the slot's previous submission,
     // drains the slot's retire queue and opens its list, so no long-lived list is opened here.
@@ -867,6 +875,11 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
 
     nvrhi::ICommandList *commandList = frameContext->GetCommandList(frameIndex);
     assert(commandList != nullptr);
+    if (sky.gpuFrameCallback)
+    {
+        assert(swapchainReady);
+        sky.gpuFrameCallback(QrayGpuFramePhase::BeforeRenderer, commandList, nullptr, backBuffer, frameIndex);
+    }
 
     {
         CpuProfileScope queries(cpuProfiler, QR_CPU_PASS_GPU_TIMINGS);
@@ -1643,7 +1656,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         if (rtComposePass != nullptr && sky.tonemapping != nullptr && sky.uniform != nullptr)
         {
             sky.tonemapping->PrepareExposureParams(frameIndex, sky.uniform, sky.exposureBias, sky.tonemapPower,
-                                                   sky.tonemapType, sky.exposureParams);
+                                                   sky.tonemapType, sky.exposureParams, sky.disableEyeAdaptation);
         }
 
         // The raster overlay (A5.5) draws the DEFAULT list inside the compose chain's window, from
@@ -1874,7 +1887,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                 const float dx = cur[0] - prev[0];
                 const float dy = cur[1] - prev[1];
                 const float dz = cur[2] - prev[2];
-                constexpr float kTeleportDist = 100.0f;
+                constexpr float kTeleportDist = 2.5f;
                 const bool reset = resetHistory || (dx * dx + dy * dy + dz * dz) > (kTeleportDist * kTeleportDist);
 
                 upscaledByFsr = fsrPass->Render(
@@ -1950,6 +1963,24 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         RenderPostUi(commandList, frameIndex, sky);
     }
 
+    if (!swapchainReady)
+    {
+        if (!sky.acquireSwapchainForPresent())
+        {
+            return false;
+        }
+
+        imageIndex = pSwapchain->GetCurrentImageIndex();
+        if (imageIndex >= swapchainFramebuffers.size())
+        {
+            return false;
+        }
+
+        backBuffer = swapchainTextures[imageIndex];
+        framebuffer = swapchainFramebuffers[imageIndex];
+        swapchainReady = true;
+    }
+
     // The present samples the source of this slot: the ALBEDO wrap of the raster and diagnostic
     // modes (the sky pass is the only owner of that wrap), or the compose pass's TAAU output when
     // it ran - both are borrowed and only valid until their pass re-wraps the slot. The TAAU
@@ -1973,6 +2004,8 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     }
 
     nvrhi::ITexture *directTexture = albedo != nullptr ? ResolvePresentDirectTexture(frameIndex, sky) : nullptr;
+    if (sky.gpuFrameCallback)
+        sky.gpuFrameCallback(QrayGpuFramePhase::BeforePresent, commandList, albedo, backBuffer, frameIndex);
 
     if (albedo == nullptr)
     {
@@ -2117,7 +2150,9 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     // queue state and the execute used to be.
     {
         CpuProfileScope submit(cpuProfiler, QR_CPU_PASS_RHI_SUBMIT);
-        frameContext->EndSlot(frameIndex, semaphoreToWait, semaphoreToSignal);
+        assert(submission.semaphoreToWait != VK_NULL_HANDLE);
+        assert(submission.semaphoreToSignal != VK_NULL_HANDLE);
+        frameContext->EndSlot(frameIndex, submission.semaphoreToWait, submission.semaphoreToSignal);
     }
     previousFrameUiOnly = sky.renderUiOnly;
 

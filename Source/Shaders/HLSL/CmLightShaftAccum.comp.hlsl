@@ -153,5 +153,3 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     accumulated = lerp(accumulated, current, 1.0 / historyLength);
     lightShaftHistory[pixelPos] = float4(accumulated * 0.01, historyLength);
 }
-
-

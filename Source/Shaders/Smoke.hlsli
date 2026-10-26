@@ -4,9 +4,7 @@
 // texture and no matrix, and it includes nothing itself.
 //
 // Spellings that had to change:
-//   * vec2/vec3 -> float2/float3. The one constructor that could look like a scalar one,
-//     SMOKE_WIND_DIR's vec3(0.45, 0.20, 0.87), carries three distinct components and keeps them
-//     in the same order, spelled float3(0.45, 0.20, 0.87).
+//   * vec2/vec3 -> float2/float3, keeping component order.
 //   * mix -> lerp and fract -> frac, the same substitutions Smoke's value noise needs and every
 //     other port of the base makes.
 //   * the #ifndef SMOKE_H_ / #define SMOKE_H_ guard -> #ifndef SMOKE_HLSLI_ / #define SMOKE_HLSLI_,
@@ -35,7 +33,7 @@ struct SmokeLook
     float edgeGain;
 };
 
-#define SMOKE_WIND_DIR      float3(0.45, 0.20, 0.87)
+
 
 #define SMOKE_FEATURE_SEED    0.35
 
@@ -47,7 +45,7 @@ struct SmokeLook
 
 #define SMOKE_EDGE_FIELD    0.6
 
-#define SMOKE_DEPTH_FADE    24.0
+#define SMOKE_DEPTH_FADE    0.6
 
 #define SMOKE_LIFE_POWER    1.0
 
@@ -114,7 +112,7 @@ struct SmokeField
 SmokeField smokeSampleField(float3 worldPos, float seed, float time, const SmokeLook look)
 {
     const float3 phase = float3(seed * SMOKE_FEATURE_SEED, seed * SMOKE_FEATURE_SEED * 0.6, seed * SMOKE_FEATURE_SEED * 0.8);
-    const float3 drift = SMOKE_WIND_DIR * (look.windSpeed * time);
+    const float3 drift = float3(globalUniform.smokeWindX, globalUniform.smokeWindY, globalUniform.smokeWindZ) * (look.windSpeed * time);
     const float3 q     = worldPos + phase + drift;
 
     SmokeField f;

@@ -33,7 +33,7 @@ namespace qray
 constexpr double kPi = 3.1415926535897932384626433;
 
     constexpr float kMinColorSum = LightManager::kLightMinColorSum;
-constexpr float kMinSphereRadius = 0.005f;
+constexpr float kMinSphereRadius = 0.000125f;
 
 constexpr uint32_t kLightArrayMaxSize = LightManager::LIGHT_ARRAY_ENTRY_COUNT;
 

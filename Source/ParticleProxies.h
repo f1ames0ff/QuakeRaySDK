@@ -71,7 +71,9 @@ struct ParticleProxy
     float uv1[2];
     float uv2[2];
     uint32_t unused3;
-    uint32_t unused4;
+    // The raster particle shader's per-upload color alpha, stored in the spare final word so
+    // raster and traced copies use the same coverage.
+    float materialAlpha;
 };
 
 static_assert(sizeof(ParticleProxy) == 128, "ParticleProxy must match ShParticleProxy");
@@ -83,5 +85,6 @@ static_assert(offsetof(ParticleProxy, edge2) == 80, "");
 static_assert(offsetof(ParticleProxy, uv0) == 96, "");
 static_assert(offsetof(ParticleProxy, uv1) == 104, "");
 static_assert(offsetof(ParticleProxy, uv2) == 112, "");
+static_assert(offsetof(ParticleProxy, materialAlpha) == 124, "");
 
 }

@@ -385,7 +385,7 @@ CONST = {
 
     "RAY_STATS_CATEGORY_COUNT"              : 6,
 
-    "MAX_RAY_LENGTH"                        : "10000.0",
+    "MAX_RAY_LENGTH"                        : "2.5e5",
 
     "MEDIA_TYPE_VACUUM"                     : 0,
     "MEDIA_TYPE_WATER"                      : 1,
@@ -438,7 +438,7 @@ CONST = {
 }
 
 CONST_SHADER_ONLY = {
-    "SURFACE_POSITION_INCORRECT"            : 10000000.0,
+    "SURFACE_POSITION_INCORRECT"            : 250000.0,
 }
 
 
@@ -538,9 +538,9 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 1, "rayLength",                     1),
     (UINT32, 1, "rayCullBackFaces",               1),
     (UINT32, 1, "rayCullMaskWorld",               1),
-    (UINT32, 1, "__pad2",                         1),
-    (UINT32, 1, "__pad3",                         1),
-    (UINT32, 1, "__pad4",                         1),
+    (FLOAT32, 1, "smokeWindX",                    1),
+    (FLOAT32, 1, "smokeWindY",                    1),
+    (FLOAT32, 1, "smokeWindZ",                    1),
 
     (FLOAT32, 1, "bloomIntensity",                1),
     (FLOAT32, 1, "bloomThreshold",                1),
@@ -645,6 +645,16 @@ GLOBAL_UNIFORM_MEMBERS = [
     (UINT32, 1, "glassBlur",                      1),
     (UINT32, 1, "glassDenoise",                   1),
     (UINT32, 1, "glassParticles",                 1),
+
+    # Scene units per host unit, so shader constants authored per host unit (media fog
+    # density, ray offsets) stay host independent. Kept at the tail, with the padding that
+    # keeps the block a multiple of 16 bytes: inserting it between the existing fields moved
+    # the following float4 constants off their 16-byte boundary, and the compiler then
+    # realigned them, shifting every later member in the shader's view of the block.
+    (FLOAT32, 1, "sceneUnitsPerHostUnit",         1),
+    (UINT32, 1, "__pad7",                         1),
+    (UINT32, 1, "__pad8",                         1),
+    (UINT32, 1, "__pad9",                         1),
 ]
 
 GEOM_INSTANCE_MEMBERS = [
@@ -839,7 +849,7 @@ FRAMEBUFFERS = {
     "Normal"                            : (UINT32,    CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
     "NormalGeometry"                    : (UINT32,    CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
     "MetallicRoughness"                 : (UNORM8,    CHANNELS_RG,   FRAMEBUF_FLAGS_STORE_PREV),
-    "DepthWorld"                        : (FLOAT16,   CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
+    "DepthWorld"                        : (FLOAT32,   CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
     "DepthGrad"                         : (FLOAT16,   CHANNELS_R,    0),
     "DepthNdc"                          : (FLOAT32,   CHANNELS_R,    0),
     "Motion"                            : (FLOAT16,   CHANNELS_RGBA, 0),

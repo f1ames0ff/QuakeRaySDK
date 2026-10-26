@@ -23,6 +23,7 @@
 #include "RhiResources.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace qray
@@ -355,12 +356,13 @@ uint32_t RhiCloudsPass::GetViewSteps(uint32_t quality)
 
 float RhiCloudsPass::GetWindSpeed(float setting, float altitude)
 {
-    return setting * altitude / 1400.0f;
+    constexpr float kReferenceAltitude = 35.0f;
+    return setting * altitude / kReferenceAltitude;
 }
 
 std::array<float, 4> RhiCloudsPass::MakeShadowPlacement(const LayerParams &params)
 {
-    const float extent = std::max(params.cloudLayer[0] * SHADOW_VOLUME_EXTENT_PER_ALTITUDE, 1.0f);
+    const float extent = std::max(params.cloudLayer[0] * SHADOW_VOLUME_EXTENT_PER_ALTITUDE, 0.025f);
     const bool enabled = params.sunDirection[3] > 0.5f && params.sunDirection[2] > 0.05f;
     return { enabled ? 1.0f : 0.0f, params.cloudAnchor[0] - extent * 0.5f,
              params.cloudAnchor[1] - extent * 0.5f, extent };
@@ -409,7 +411,29 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
         layer.sunDirection[3] = 0.0f;
         shadowValid = false;
     }
-    if (layerValid && std::memcmp(&layer, &lastLayerParams, sizeof(layer)) == 0 &&
+    LayerParams structuralLayer = layer;
+    LayerParams structuralLast = lastLayerParams;
+    structuralLayer.cloudColor[3] = structuralLast.cloudColor[3] = 0.0f;
+    structuralLayer.cloudMarch[1] = structuralLast.cloudMarch[1] = 0.0f;
+    std::fill(std::begin(structuralLayer.cloudAnchor), std::end(structuralLayer.cloudAnchor), 0.0f);
+    std::fill(std::begin(structuralLast.cloudAnchor), std::end(structuralLast.cloudAnchor), 0.0f);
+    std::fill(std::begin(structuralLayer.cloudShadowPlacement), std::end(structuralLayer.cloudShadowPlacement), 0.0f);
+    std::fill(std::begin(structuralLast.cloudShadowPlacement), std::end(structuralLast.cloudShadowPlacement), 0.0f);
+
+    const float layerHalfTexel = std::max(
+        layer.cloudLayer[0] * 0.5f * (3.14159265358979323846f * 0.5f) / float(layerTexture->getDesc().width),
+        0.025f);
+    const bool layerJump = !layerValid ||
+        std::abs(layer.cloudAnchor[0] - lastLayerParams.cloudAnchor[0]) > layerHalfTexel ||
+        std::abs(layer.cloudAnchor[1] - lastLayerParams.cloudAnchor[1]) > layerHalfTexel ||
+        std::abs(layer.cloudAnchor[2] - lastLayerParams.cloudAnchor[2]) > layerHalfTexel;
+    const bool layerStructureChanged = layerJump ||
+        std::memcmp(&structuralLayer, &structuralLast, sizeof(layer)) != 0;
+    const bool layerMotionChanged =
+        std::memcmp(&layer.cloudColor[3], &lastLayerParams.cloudColor[3], sizeof(float)) != 0 ||
+        std::memcmp(layer.cloudAnchor, lastLayerParams.cloudAnchor, sizeof(layer.cloudAnchor)) != 0;
+
+    if (layerValid && !layerStructureChanged && !layerMotionChanged &&
         std::memcmp(&shadow, &lastShadowParams, sizeof(shadow)) == 0)
     {
         return false;
@@ -432,8 +456,6 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
     pCommandList->setTextureState(shadowTexture, nvrhi::AllSubresources,
                                   nvrhi::ResourceStates::NonPixelShaderResource);
 
-    rhi::writeBuffer(pCommandList, layerParamsBuffers[frameIndex], &layer, sizeof(layer));
-
     {
         nvrhi::ComputeState state;
         state.pipeline = layerPipeline;
@@ -441,7 +463,12 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
         pCommandList->setComputeState(state);
 
         const uint32_t groups = Utils::GetWorkGroupCount(layerTexture->getDesc().width, THREAD_GROUP_SIZE);
-        pCommandList->dispatch(groups, groups, LAYER_CUBEMAP_FACE_COUNT);
+        const uint32_t faceOffset = layerStructureChanged ? 0u : nextLayerFaceOffset;
+        const uint32_t faceCount = layerStructureChanged ? LAYER_CUBEMAP_FACE_COUNT : 3u;
+        layer.cloudMarch[1] = float(faceOffset);
+        rhi::writeBuffer(pCommandList, layerParamsBuffers[frameIndex], &layer, sizeof(layer));
+        pCommandList->dispatch(groups, groups, faceCount);
+        nextLayerFaceOffset = (faceOffset + faceCount) % LAYER_CUBEMAP_FACE_COUNT;
     }
 
     pCommandList->setTextureState(layerTexture, nvrhi::AllSubresources,

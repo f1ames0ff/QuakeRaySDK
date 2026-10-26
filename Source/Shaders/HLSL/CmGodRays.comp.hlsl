@@ -157,7 +157,7 @@ float getDensity(float3 p)
 float getStep(float t, float density)
 {
     const float scale = clamp(godRaysParams[0].sunStepScale, 0.25, 4.0);
-    return max(1.0, lerp(20.0, 5.0, density) * scale);
+    return max(1.0, lerp(20.0, 5.0, density) * scale) * globalUniform.sceneUnitsPerHostUnit;
 }
 
 [numthreads(16, 16, 1)]
@@ -255,7 +255,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     // the sky stays empty - there the legacy screen-space volumetric renders
     // the sky shafts. For sky pixels the stored surface position is invalid,
     // so the march starts from the camera.
-    const bool isSky = rayDistance > MAX_RAY_LENGTH;
+    const bool isSky = rayDistance > globalUniform.rayLength;
     if (isSky && globalUniform.coreQ2RTX == 0)
     {
         if (push.passIndex == 0)
@@ -373,7 +373,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         // don't leak through thin walls or at grazing angles. The final step
         // before the surface is not sampled (Q2RTX breaks here), which keeps
         // the surface-facing samples from being pushed behind the geometry.
-        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0;
+        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0 * globalUniform.sceneUnitsPerHostUnit;
         const float shadow = GetShadow(currentPos + shadowBias) *
             getCloudSunTransmittance(currentPos, godRaysParams[0].sunDirection.xyz, true);
 

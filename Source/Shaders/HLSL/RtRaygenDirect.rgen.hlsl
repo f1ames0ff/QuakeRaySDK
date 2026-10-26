@@ -160,5 +160,5 @@ void main()
 
     imageStoreUnfilteredDirect(pix, directDiffuse);
     imageStoreUnfilteredSpecular(pix, demodulateSpecular(directSpecular, surf.specularColor));
-    framebufViewDirection[pix] = float4(-surf.toViewerDir, MAX_RAY_LENGTH);
+    framebufViewDirection[pix] = float4(-surf.toViewerDir, globalUniform.rayLength);
 }

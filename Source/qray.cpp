@@ -17,6 +17,7 @@
 
 #include "VulkanDevice.h"
 #include "QrException.h"
+#include <qray/gpu_context.h>
 
 #include <atomic>
 
@@ -56,9 +57,21 @@ static void TryPrintError(QrInstance qrInstance, const char *pMessage)
     }
 }
 
-QrResult qrCreateInstance(const QrInstanceCreateInfo *pInfo, QrInstance *pResult)
+static QrResult CreateInstanceInternal(const QrInstanceCreateInfo *pInfo,
+                                       const QrayGpuRequirements *pGpuRequirements,
+                                       QrInstance *pResult)
 {
+    if (pResult == nullptr)
+        return QR_WRONG_ARGUMENT;
+
     *pResult = nullptr;
+
+    if (pInfo == nullptr)
+        return QR_WRONG_ARGUMENT;
+
+    const QrResult requirementsResult = qray::qrayValidateGpuRequirements(pGpuRequirements);
+    if (requirementsResult != QR_SUCCESS)
+        return requirementsResult;
 
     if (G_DEVICES.size() >= MAX_DEVICE_COUNT)
     {
@@ -70,12 +83,12 @@ QrResult qrCreateInstance(const QrInstanceCreateInfo *pInfo, QrInstance *pResult
 
     try
     {
-        G_DEVICES[qrInstance] = std::make_unique<VulkanDevice>(pInfo);
+        G_DEVICES[qrInstance] = std::make_unique<VulkanDevice>(pInfo, pGpuRequirements);
         *pResult = qrInstance;
     }
     catch (QrException &e)
     {
-        if (pInfo->pfnPrint != nullptr)
+        if (pInfo != nullptr && pInfo->pfnPrint != nullptr)
         {
             pInfo->pfnPrint(e.what(), pInfo->pUserPrintData);
         }
@@ -83,6 +96,46 @@ QrResult qrCreateInstance(const QrInstanceCreateInfo *pInfo, QrInstance *pResult
         return e.GetErrorCode();
     }
     return QR_SUCCESS;
+}
+
+QrResult qrCreateInstance(const QrInstanceCreateInfo *pInfo, QrInstance *pResult)
+{
+    return CreateInstanceInternal(pInfo, nullptr, pResult);
+}
+
+QrResult qray::qrCreateInstanceWithGpuRequirements(
+    const QrInstanceCreateInfo *pInfo,
+    const QrayGpuRequirements *pGpuRequirements,
+    QrInstance *pResult)
+{
+    return CreateInstanceInternal(pInfo, pGpuRequirements, pResult);
+}
+
+QrResult qray::qrGetGpuContext(QrInstance qrInstance, QrayGpuContext *pContext)
+{
+    try
+    {
+        return GetDevice(qrInstance).GetGpuContext(pContext);
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
+}
+
+QrResult qray::qrSetGpuFrameHooks(QrInstance qrInstance,
+                                  const QrayGpuFrameHooks *pHooks)
+{
+    try
+    {
+        return GetDevice(qrInstance).SetGpuFrameHooks(pHooks);
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
 }
 
 QrResult qrDestroyInstance(QrInstance qrInstance)
@@ -154,6 +207,44 @@ static auto Call(QrInstance qrInstance, Func f, Args&&... args)
         TryPrintError(qrInstance, e.what());
     }
     return ReturnType{};
+}
+
+template<typename Func, typename... Args>
+static QrResult CallAlways(QrInstance qrInstance, Func f, Args&&... args)
+{
+    try
+    {
+        VulkanDevice &dev = GetDevice(qrInstance);
+
+        G_EntryPointCalls.fetch_add(1, std::memory_order_relaxed);
+        (dev.*f)(std::forward<Args>(args)...);
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
+    return QR_SUCCESS;
+}
+
+QrResult qrSetSpatialConvention(QrInstance qrInstance, const QrSpatialConvention *pConvention)
+{
+    return CallAlways(qrInstance, &VulkanDevice::SetSpatialConvention, pConvention);
+}
+
+QrResult qrGetSpatialConvention(QrInstance qrInstance, QrSpatialConvention *pConvention)
+{
+    return CallAlways(qrInstance, &VulkanDevice::GetSpatialConvention, pConvention);
+}
+
+QrResult qrSetSmokeWindDirection(QrInstance qrInstance, const QrFloat3D *pDirection)
+{
+    return CallAlways(qrInstance, &VulkanDevice::SetSmokeWindDirection, pDirection);
+}
+
+QrResult qrGetSmokeWindDirection(QrInstance qrInstance, QrFloat3D *pDirection)
+{
+    return CallAlways(qrInstance, &VulkanDevice::GetSmokeWindDirection, pDirection);
 }
 
 QrResult qrUploadGeometry(QrInstance qrInstance, const QrGeometryUploadInfo *pUploadInfo)
@@ -415,6 +506,11 @@ QrResult qrStartFrame(QrInstance qrInstance, const QrStartFrameInfo *pStartInfo)
     return Call(qrInstance, &VulkanDevice::StartFrame, pStartInfo);
 }
 
+QrResult qrAcquireFrame(QrInstance qrInstance)
+{
+    return Call(qrInstance, &VulkanDevice::AcquireFrame);
+}
+
 QrResult qrDrawFrame(QrInstance qrInstance, const QrDrawFrameInfo *pDrawInfo)
 {
     return Call(qrInstance, &VulkanDevice::DrawFrame, pDrawInfo);
@@ -513,6 +609,11 @@ const char *qrGetCpuPassName(uint32_t passIndex)
         "RHI submit",
         "legacy submit",
         "present",
+        "frame fence wait",
+        "present wait",
+        "image acquire",
+        "begin other",
+        "present fence wait",
     };
     return passIndex < QR_CPU_PASS_COUNT ? names[passIndex] : "";
 }

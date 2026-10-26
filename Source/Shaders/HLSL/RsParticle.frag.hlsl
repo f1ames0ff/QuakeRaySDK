@@ -45,7 +45,7 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
     if (rasterizerFragInfo.particleProxy != 0u && globalUniform.glassParticles != 0u)
     {
         const float4 glassMask = framebufQ2GlassFilter_Sampled.Load(int3(cbPix, 0));
-        if (abs(glassMask.a) >= 4.0 && inViewDepth > glassMask.z + max(0.01, glassMask.z * 1e-4))
+        if (abs(glassMask.a) >= 4.0 && inViewDepth > glassMask.z + max(2.5e-4, glassMask.z * 1e-4))
         {
             discard;
         }
@@ -67,12 +67,16 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
     RsParticleFragOutput o;
     if (debug)
     {
-        o.outColor = float4(inLit.r, ambient.r, min(factor.r, 1.0), albedo.a);
+        o.outColor = float4(inLit.r, ambient.r, min(factor.r, 1.0),
+                            albedo.a * inColor.a * rasterizerFragInfo.color.a);
         o.outScreenEmission = (float3)0.0;
         return o;
     }
 
-    o.outColor = float4(inColor.rgb * rasterizerFragInfo.color.rgb * factor, 1.0) * albedo;
+    /* The draw color alpha and the vertex color alpha are per-sprite coverage;
+       albedo.a is the texture mask. All are straight alpha. */
+    o.outColor = float4(inColor.rgb * rasterizerFragInfo.color.rgb * factor,
+                        inColor.a * rasterizerFragInfo.color.a) * albedo;
     o.outScreenEmission = (float3)0.0;
     return o;
 }
