@@ -1223,10 +1223,10 @@ QRAPI QrResult QRCONV qrDestroyCubemap(
 
 typedef enum QrPresentMode
 {
-    QR_PRESENT_MODE_MAILBOX = 0,
-    QR_PRESENT_MODE_VSYNC,
-    QR_PRESENT_MODE_ADAPTIVE,
-    QR_PRESENT_MODE_IMMEDIATE,
+    QR_PRESENT_MODE_MAILBOX = 0,   // Uncapped rendering using native Mailbox presentation.
+    QR_PRESENT_MODE_VSYNC,         // Display-paced FIFO presentation.
+    QR_PRESENT_MODE_ADAPTIVE,      // Display-paced unless a frame is late.
+    QR_PRESENT_MODE_IMMEDIATE,     // Unsynchronised presentation; tearing is expected.
 } QrPresentMode;
 
 typedef struct QrStartFrameInfo
@@ -1245,6 +1245,9 @@ typedef struct QrStartFrameInfo
 QRAPI QrResult QRCONV qrStartFrame(
     QrInstance                          qrInstance,
     const QrStartFrameInfo              *pStartInfo);
+
+QRAPI QrResult QRCONV qrAcquireFrame(
+    QrInstance                          qrInstance);
 
 typedef enum QrSkyType
 {
@@ -1777,6 +1780,11 @@ typedef enum QrCpuPassIndex
     QR_CPU_PASS_RHI_SUBMIT,
     QR_CPU_PASS_LEGACY_SUBMIT,
     QR_CPU_PASS_PRESENT,
+    QR_CPU_PASS_FRAME_FENCE_WAIT,
+    QR_CPU_PASS_PRESENT_WAIT,
+    QR_CPU_PASS_IMAGE_ACQUIRE,
+    QR_CPU_PASS_BEGIN_OTHER,
+    QR_CPU_PASS_PRESENT_FENCE_WAIT,
     QR_CPU_PASS_COUNT,
 } QrCpuPassIndex;
 
@@ -1805,7 +1813,7 @@ typedef struct QrFrameStats
 {
     uint32_t    raysTotal;
     uint32_t    raysPerCategory[QR_RAY_STATS_CATEGORY_COUNT];
-    uint32_t    fpsX10;
+    uint32_t    fpsX10; // completed-presentation FPS when fences are available; render FPS otherwise
     QrBool32    gpuTimingValid;
     float       gpuFrameMs;
     float       gpuPassMs[QR_GPU_PASS_COUNT];

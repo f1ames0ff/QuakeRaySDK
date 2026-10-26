@@ -38,6 +38,12 @@ using namespace qray;
 namespace
 {
 
+float ElapsedMilliseconds(std::chrono::steady_clock::time_point begin,
+                          std::chrono::steady_clock::time_point end)
+{
+    return std::chrono::duration<float, std::milli>(end - begin).count();
+}
+
 QrFloat3D SpatialPoint(const SpatialFrame &frame, const QrFloat3D &value)
 {
     return frame.IsIdentity() ? value : frame.Point(value);
@@ -249,8 +255,13 @@ void VulkanDevice::LockSpatialFrame()
 
 VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
 {
+    using Clock = std::chrono::steady_clock;
+
+    const Clock::time_point beginStart = Clock::now();
+    const uint32_t previousFrameIndex = currentFrameState.GetFrameIndex();
     uint32_t frameIndex = currentFrameState.IncrementFrameIndexAndGet();
 
+    const Clock::time_point fenceWaitStart = Clock::now();
     if (!waitForOutOfFrameFence)
     {
         Utils::WaitAndResetFence(device, frameFences[frameIndex]);
@@ -259,47 +270,15 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     {
         Utils::WaitAndResetFences(device, frameFences[frameIndex], outOfFrameFences[frameIndex]);
     }
+    const Clock::time_point fenceWaitEnd = Clock::now();
 
     swapchain->RequestPresentMode(startInfo.presentMode);
     swapchain->SetMaxFrameLatency(startInfo.maxFrameLatency);
     swapchain->SetFullscreenExclusive(startInfo.wantFullscreenExclusive != 0, startInfo.hasFocus != 0);
-    swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
 
-    {
-        const std::string presentModeName =
-            std::string(swapchain->GetPresentModeName()) + ", images " + std::to_string(swapchain->GetImageCount()) +
-            (swapchain->IsPresentWaitActive() ? ", present wait on" : ", present wait off");
-
-        if (presentModeName != printedPresentModeName)
-        {
-            printedPresentModeName = presentModeName;
-            Print(("RHI: the swapchain uses " + presentModeName).c_str());
-        }
-    }
-
-    VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
-    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-
-    {
-        VkCommandBuffer preFrameCmd = currentFrameState.GetPreFrameCmdAndRemove();
-        if (preFrameCmd != VK_NULL_HANDLE)
-        {
-            cmdManager->Submit(preFrameCmd,
-                               semaphoreToWaitOnSubmit, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                               inFrameSemaphores[frameIndex],
-                               outOfFrameFences[(frameIndex + 1) % MAX_FRAMES_IN_FLIGHT]);
-
-            semaphoreToWaitOnSubmit = inFrameSemaphores[frameIndex];
-            semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-
-            waitForOutOfFrameFence = true;
-        }
-        else
-        {
-            waitForOutOfFrameFence = false;
-        }
-    }
-    currentFrameState.SetSemaphore(semaphoreToWaitOnSubmit, semaphoreWaitStage);
+    assert(pendingPreFrameCmd == VK_NULL_HANDLE);
+    pendingPreFrameCmd = currentFrameState.GetPreFrameCmdAndRemove(previousFrameIndex);
+    pendingPreFrameCmdFrameIndex = previousFrameIndex;
 
     if (startInfo.requestShaderReload)
     {
@@ -321,7 +300,68 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
 
     scene->PrepareForFrame(cmd, frameIndex);
 
+    const Clock::time_point beginEnd = Clock::now();
+    const float beginTotalMs = ElapsedMilliseconds(beginStart, beginEnd);
+    const float frameFenceWaitMs = ElapsedMilliseconds(fenceWaitStart, fenceWaitEnd);
+    pendingBeginFrameCpuTimings.frameFenceWaitMs = frameFenceWaitMs;
+    pendingBeginFrameCpuTimings.presentWaitMs = 0.0f;
+    pendingBeginFrameCpuTimings.imageAcquireMs = 0.0f;
+    pendingBeginFrameCpuTimings.beginOtherMs = std::max(0.0f, beginTotalMs - frameFenceWaitMs);
+
     return cmd;
+}
+
+void VulkanDevice::AcquireFrame()
+{
+    if (!currentFrameState.WasFrameStarted())
+    {
+        throw QrException(QR_FRAME_WASNT_STARTED);
+    }
+
+    frameAcquireGate.Acquire([this] {
+        AcquireFrameImage();
+    });
+}
+
+void VulkanDevice::AcquireFrameImage()
+{
+    const uint32_t frameIndex = currentFrameState.GetFrameIndex();
+    const SwapchainAcquireTimings acquireTimings =
+        swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
+
+    {
+        const std::string presentModeName =
+            std::string(swapchain->GetPresentModeName()) + ", images " + std::to_string(swapchain->GetImageCount()) +
+            (swapchain->IsPresentWaitActive() ? ", present wait on" : ", present wait off");
+
+        if (presentModeName != printedPresentModeName)
+        {
+            printedPresentModeName = presentModeName;
+            Print(("RHI: the swapchain uses " + presentModeName).c_str());
+        }
+    }
+
+    VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
+    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    waitForOutOfFrameFence = false;
+
+    if (pendingPreFrameCmd != VK_NULL_HANDLE)
+    {
+        cmdManager->SubmitForFrame(pendingPreFrameCmdFrameIndex,
+                                   pendingPreFrameCmd,
+                                   semaphoreToWaitOnSubmit, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   inFrameSemaphores[frameIndex],
+                                   outOfFrameFences[(frameIndex + 1) % MAX_FRAMES_IN_FLIGHT]);
+
+        pendingPreFrameCmd = VK_NULL_HANDLE;
+        semaphoreToWaitOnSubmit = inFrameSemaphores[frameIndex];
+        semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        waitForOutOfFrameFence = true;
+    }
+
+    currentFrameState.SetSemaphore(semaphoreToWaitOnSubmit, semaphoreWaitStage);
+    pendingBeginFrameCpuTimings.presentWaitMs = acquireTimings.presentWaitMs;
+    pendingBeginFrameCpuTimings.imageAcquireMs = acquireTimings.imageAcquireMs;
 }
 
 #define QR_SET_VEC3( dst, x, y, z ) \
@@ -1092,7 +1132,6 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const auto prepare = asManager->PrepareForBuildingTLAS(
             frameIndex, *uniform->GetData(), uniform->GetData()->rayCullMaskWorld,
             allowGeometryWithSkyFlag, drawInfo.disableRayTracedGeometry);
-        asManager->BuildTLAS(currentFrameState.GetCmdBuffer(), frameIndex, prepare.first);
         preprocessing = prepare.second;
     }
 
@@ -1390,23 +1429,38 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         sky.proceduralSkyParams = p;
     }
 
-    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    const VkSemaphore semaphoreToWait = currentFrameState.GetSemaphoreForWaitAndRemove(&semaphoreWaitStage);
-
-    assert(semaphoreToWait != VK_NULL_HANDLE);
-
     if (!pendingScreenshotPath.empty())
     {
         nvrhiFrameSkeleton->RequestScreenshot(pendingScreenshotPath);
         pendingScreenshotPath.clear();
     }
 
-    const VkSemaphore renderFinishedSemaphore =
-        swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
+    FrameSubmissionSynchronization submission;
+    const auto acquireForSubmission = [&] {
+        AcquireFrame();
+
+        submission.semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        submission.semaphoreToWait =
+            currentFrameState.GetSemaphoreForWaitAndRemove(&submission.semaphoreWaitStage);
+        submission.semaphoreToSignal =
+            swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
+
+        assert(submission.semaphoreToWait != VK_NULL_HANDLE);
+        assert(submission.semaphoreToSignal != VK_NULL_HANDLE);
+
+        if (cpuProfiler != nullptr)
+        {
+            cpuProfiler->Add(QR_CPU_PASS_FRAME_FENCE_WAIT, pendingBeginFrameCpuTimings.frameFenceWaitMs);
+            cpuProfiler->Add(QR_CPU_PASS_PRESENT_WAIT, pendingBeginFrameCpuTimings.presentWaitMs);
+            cpuProfiler->Add(QR_CPU_PASS_IMAGE_ACQUIRE, pendingBeginFrameCpuTimings.imageAcquireMs);
+            cpuProfiler->Add(QR_CPU_PASS_BEGIN_OTHER, pendingBeginFrameCpuTimings.beginOtherMs);
+        }
+    };
 
     fillInputs.Finish();
     if (gpuFrameHooks.pfnCallback != nullptr)
     {
+        acquireForSubmission();
         sky.gpuFrameCallback = [this](QrayGpuFramePhase phase, nvrhi::ICommandList *pCommandList,
                                       nvrhi::ITexture *pOutputColor, nvrhi::ITexture *pBackBuffer,
                                       uint32_t frameIndex) {
@@ -1436,9 +1490,20 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
             inGpuFrameCallback = false;
         };
     }
-    if (!nvrhiFrameSkeleton->Render(swapchain.get(), frameIndex, sky, semaphoreToWait, renderFinishedSemaphore))
+    else
     {
-        currentFrameState.SetSemaphore(semaphoreToWait, semaphoreWaitStage);
+        sky.acquireSwapchainForPresent = [&acquireForSubmission] {
+            acquireForSubmission();
+            return true;
+        };
+    }
+
+    if (!nvrhiFrameSkeleton->Render(swapchain.get(), frameIndex, sky, submission))
+    {
+        if (submission.semaphoreToWait != VK_NULL_HANDLE)
+        {
+            currentFrameState.SetSemaphore(submission.semaphoreToWait, submission.semaphoreWaitStage);
+        }
         return false;
     }
 
@@ -1455,7 +1520,12 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
     {
         CpuProfileScope present(cpuProfiler, QR_CPU_PASS_PRESENT);
-        swapchain->Present(queues, renderFinishedSemaphore);
+        const SwapchainPresentTimings presentTimings =
+            swapchain->Present(queues, submission.semaphoreToSignal);
+        if (cpuProfiler != nullptr)
+        {
+            cpuProfiler->Add(QR_CPU_PASS_PRESENT_FENCE_WAIT, presentTimings.fenceWaitMs);
+        }
     }
 
     frameId++;
@@ -1464,6 +1534,8 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
 void VulkanDevice::EndFrame(VkCommandBuffer cmd)
 {
+    AcquireFrame();
+
     CpuFrameProfiler *cpuProfiler = cpuFrameProfiler.IsEnabled() ? &cpuFrameProfiler : nullptr;
     uint32_t frameIndex = currentFrameState.GetFrameIndex();
     VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
@@ -1484,7 +1556,11 @@ void VulkanDevice::EndFrame(VkCommandBuffer cmd)
 
     {
         CpuProfileScope present(cpuProfiler, QR_CPU_PASS_PRESENT);
-        swapchain->Present(queues, renderFinishedSemaphore);
+        const SwapchainPresentTimings presentTimings = swapchain->Present(queues, renderFinishedSemaphore);
+        if (cpuProfiler != nullptr)
+        {
+            cpuProfiler->Add(QR_CPU_PASS_PRESENT_FENCE_WAIT, presentTimings.fenceWaitMs);
+        }
     }
 
     frameId++;
@@ -1508,6 +1584,7 @@ void VulkanDevice::StartFrame(const QrStartFrameInfo *startInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    frameAcquireGate.Reset();
     VkCommandBuffer newFrameCmd = BeginFrame(*startInfo);
     currentFrameState.OnBeginFrame(newFrameCmd);
 }
@@ -1680,13 +1757,20 @@ void VulkanDevice::Print(const char *pMessage) const
 
 void VulkanDevice::GetFrameStats(uint32_t *pRays, uint32_t *pFpsX10) const
 {
+    uint32_t fpsX10 = statsFpsX10;
+    uint32_t presentFpsX10 = 0;
+    if (swapchain && swapchain->GetPresentFpsX10(&presentFpsX10))
+    {
+        fpsX10 = presentFpsX10;
+    }
+
     if (pRays != nullptr)
     {
         *pRays = statsRays;
     }
     if (pFpsX10 != nullptr)
     {
-        *pFpsX10 = statsFpsX10;
+        *pFpsX10 = fpsX10;
     }
 }
 
@@ -1708,6 +1792,11 @@ void VulkanDevice::GetFrameStatsEx(QrFrameStats *pStats) const
     }
     pStats->raysParticle = statsRaysPerCategory[RAY_STATS_CATEGORY_PARTICLE];
     pStats->fpsX10 = statsFpsX10;
+    uint32_t presentFpsX10 = 0;
+    if (swapchain && swapchain->GetPresentFpsX10(&presentFpsX10))
+    {
+        pStats->fpsX10 = presentFpsX10;
+    }
 
     pStats->gpuTimingValid = statsGpuTimingValid ? 1 : 0;
     pStats->gpuFrameMs = statsGpuFrameMs;

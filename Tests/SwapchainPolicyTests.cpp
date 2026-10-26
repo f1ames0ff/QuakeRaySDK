@@ -94,6 +94,24 @@ static void TestExtensions()
     }
 }
 
+static void TestPresentModes()
+{
+    Check(TryMapPresentMode(QR_PRESENT_MODE_MAILBOX) == VK_PRESENT_MODE_MAILBOX_KHR,
+          "Mailbox must map to VK_PRESENT_MODE_MAILBOX_KHR");
+    Check(TryMapPresentMode(QR_PRESENT_MODE_VSYNC) == VK_PRESENT_MODE_FIFO_KHR,
+          "VSync must map to VK_PRESENT_MODE_FIFO_KHR");
+    Check(TryMapPresentMode(QR_PRESENT_MODE_ADAPTIVE) == VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+          "Adaptive must map to VK_PRESENT_MODE_FIFO_RELAXED_KHR");
+    Check(TryMapPresentMode(QR_PRESENT_MODE_IMMEDIATE) == VK_PRESENT_MODE_IMMEDIATE_KHR,
+          "Immediate must map to VK_PRESENT_MODE_IMMEDIATE_KHR");
+    Check(!TryMapPresentMode(static_cast<QrPresentMode>(99)), "Unknown present modes must be rejected");
+
+    Check(UsesPresentWait2(QR_PRESENT_MODE_VSYNC), "VSync must use present wait");
+    Check(UsesPresentWait2(QR_PRESENT_MODE_ADAPTIVE), "Adaptive must use present wait");
+    Check(!UsesPresentWait2(QR_PRESENT_MODE_MAILBOX), "Mailbox must not use present wait");
+    Check(!UsesPresentWait2(QR_PRESENT_MODE_IMMEDIATE), "Immediate must not use present wait");
+}
+
 int main()
 {
     try
@@ -107,7 +125,8 @@ int main()
             Check(!Frame(state, VK_SUCCESS, VK_SUCCESS), "Optimal frames must not force recreation");
         }
         TestExtensions();
-        std::cout << "PASS: suboptimal episodes and 64 extension/order profiles\n";
+        TestPresentModes();
+        std::cout << "PASS: suboptimal episodes, 64 extension/order profiles and explicit present modes\n";
         return 0;
     }
     catch (const std::exception &error)
