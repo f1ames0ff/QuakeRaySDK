@@ -362,13 +362,24 @@ Starting another frame before drawing the active one follows the existing
 `QR_FRAME_WASNT_ENDED` path, and an invalid instance returns
 `QR_WRONG_INSTANCE`. Check the result before continuing to `qrDrawFrame`.
 
+The SDK maps presentation modes explicitly and does not substitute another
+mode when the surface does not support the requested one:
+
+| Mode | Vulkan present mode | Behavior |
+|---|---|---|
+| `QR_PRESENT_MODE_MAILBOX` | `VK_PRESENT_MODE_MAILBOX_KHR` | Uncapped rendering; the latest queued image is displayed. |
+| `QR_PRESENT_MODE_VSYNC` | `VK_PRESENT_MODE_FIFO_KHR` | Display-paced FIFO presentation. |
+| `QR_PRESENT_MODE_ADAPTIVE` | `VK_PRESENT_MODE_FIFO_RELAXED_KHR` | Display-paced until a frame is late. |
+| `QR_PRESENT_MODE_IMMEDIATE` | `VK_PRESENT_MODE_IMMEDIATE_KHR` | Unsynchronised experimental presentation with tearing. |
+
 For interactive presentation use `QR_PRESENT_MODE_VSYNC` and
 `maxFrameLatency = 1`. This enables waitable FIFO pacing. A latency of `0`
 allows several submitted frames to precede their display and is intended for
 throughput measurements, not normal gameplay. With waitable FIFO pacing,
 `qrAcquireFrame` is the explicit point that waits for the previous displayed
 frame; the wait can overlap scene recording, and the lazy acquire in
-`qrDrawFrame` has the same behavior.
+`qrDrawFrame` has the same behavior. Mailbox and Immediate presentation do not
+use this wait.
 
 ### Frame payload
 

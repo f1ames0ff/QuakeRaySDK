@@ -246,7 +246,7 @@ if(QR_BUILD_TESTS)
 
     add_executable(qray_swapchain_policy Tests/SwapchainPolicyTests.cpp)
     target_compile_features(qray_swapchain_policy PRIVATE cxx_std_20)
-    target_include_directories(qray_swapchain_policy PRIVATE Source ${Vulkan_INCLUDE_DIRS})
+    target_include_directories(qray_swapchain_policy PRIVATE Include Source ${Vulkan_INCLUDE_DIRS})
     add_test(NAME qray_swapchain_policy COMMAND qray_swapchain_policy)
     set_tests_properties(qray_swapchain_policy PROPERTIES TIMEOUT 30)
 

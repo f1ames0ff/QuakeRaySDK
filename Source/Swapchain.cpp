@@ -56,6 +56,19 @@ namespace
 
         return {};
     }
+
+    const char *VkPresentModeName(VkPresentModeKHR mode)
+    {
+        switch (mode)
+        {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate";
+        case VK_PRESENT_MODE_MAILBOX_KHR: return "mailbox";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo_relaxed";
+        case VK_PRESENT_MODE_FIFO_LATEST_READY_KHR: return "fifo_latest_ready";
+        case VK_PRESENT_MODE_FIFO_KHR: return "fifo";
+        default: return "unknown";
+        }
+    }
 }
 
 Swapchain::Swapchain(
@@ -74,10 +87,7 @@ Swapchain::Swapchain(
     , physDevice(_physDevice)
     , cmdManager(std::move(_cmdManager))
     , surfaceFormat{}
-    , presentModeVsync(VK_PRESENT_MODE_FIFO_KHR)
-    , presentModeAdaptive(VK_PRESENT_MODE_FIFO_KHR)
-    , presentModeMailbox(VK_PRESENT_MODE_FIFO_KHR)
-    , presentModeImmediate(VK_PRESENT_MODE_FIFO_KHR)
+    , supportedPresentModes{}
     , fullScreenExclusiveSupported(_fullScreenExclusiveSupported)
     , exclusiveWin32Hwnd(_win32Hwnd)
     , acquireFullScreenExclusive(_acquireFullScreenExclusiveMode)
@@ -95,6 +105,9 @@ Swapchain::Swapchain(
     , currentPresentId(0)
     , waitablePresentId(0)
     , maxFrameLatency(0)
+    , presentSampleStartUs(0)
+    , presentSampleFrames(0)
+    , presentFpsX10(0)
     , currentSwapchainIndex(UINT32_MAX)
     , subscribers{}
     , cachedSurfaceCaps{}
@@ -120,26 +133,7 @@ Swapchain::Swapchain(
     r = vkGetPhysicalDeviceSurfacePresentModesKHR(physDevice, surface, &presentModeCount, presentModes.data());
     VK_CHECKERROR(r);
 
-    for (const VkPresentModeKHR mode : presentModes)
-    {
-        if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
-        {
-            presentModeMailbox = mode;
-        }
-        else if (mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR)
-        {
-            presentModeAdaptive = mode;
-        }
-        else if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
-        {
-            presentModeImmediate = mode;
-        }
-    }
-
-    if (presentModeImmediate == VK_PRESENT_MODE_FIFO_KHR)
-    {
-        presentModeImmediate = presentModeMailbox;
-    }
+    supportedPresentModes = std::move(presentModes);
 }
 
 bool Swapchain::IsExtentOptimal() const
@@ -212,6 +206,24 @@ VkExtent2D Swapchain::GetOptimalExtent() const
 
 bool Swapchain::RequestPresentMode(QrPresentMode mode)
 {
+    const VkPresentModeKHR vkMode = GetVkPresentMode(mode);
+    if (std::find(supportedPresentModes.begin(), supportedPresentModes.end(), vkMode) == supportedPresentModes.end())
+    {
+        std::string message = std::string("Requested Vulkan present mode ") + VkPresentModeName(vkMode) + " is unsupported (surface supports:";
+        for (const VkPresentModeKHR supported : supportedPresentModes)
+        {
+            message += ' ';
+            message += VkPresentModeName(supported);
+        }
+        message += ')';
+
+        if (print)
+        {
+            print(message.c_str());
+        }
+        throw QrException(QR_FEATURE_UNAVAILABLE, message);
+    }
+
     requestedPresentMode = mode;
     return requestedPresentMode != isPresentMode;
 }
@@ -247,33 +259,35 @@ bool Swapchain::IsPresentWaitActive() const
     return usePresentWait2;
 }
 
+bool Swapchain::GetPresentFpsX10(uint32_t *pFpsX10) const
+{
+    const uint32_t fpsX10 = presentFpsX10.load(std::memory_order_acquire);
+    if (pFpsX10 != nullptr)
+    {
+        *pFpsX10 = fpsX10;
+    }
+    return fpsX10 != 0;
+}
+
 const char *Swapchain::GetPresentModeName() const
 {
-    switch (GetVkPresentMode(isPresentMode))
-    {
-    case VK_PRESENT_MODE_IMMEDIATE_KHR:    return "immediate";
-    case VK_PRESENT_MODE_MAILBOX_KHR:      return "mailbox";
-    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo_relaxed";
-    case VK_PRESENT_MODE_FIFO_KHR:         return "fifo";
-    default:                               return "unknown";
-    }
+    return VkPresentModeName(GetVkPresentMode(isPresentMode));
 }
 
 VkPresentModeKHR Swapchain::GetVkPresentMode(QrPresentMode mode) const
 {
-    switch (mode)
+    const std::optional<VkPresentModeKHR> vkMode = TryMapPresentMode(mode);
+    if (!vkMode)
     {
-    case QR_PRESENT_MODE_VSYNC:     return presentModeVsync;
-    case QR_PRESENT_MODE_ADAPTIVE:  return presentModeAdaptive;
-    case QR_PRESENT_MODE_IMMEDIATE: return presentModeImmediate;
-    default:                        return presentModeMailbox;
+        throw QrException(QR_WRONG_ARGUMENT, "Unknown QrPresentMode");
     }
+
+    return *vkMode;
 }
 
 bool Swapchain::IsWaitablePresentMode(QrPresentMode mode) const
 {
-    const VkPresentModeKHR vkMode = GetVkPresentMode(mode);
-    return vkMode == VK_PRESENT_MODE_FIFO_KHR || vkMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    return UsesPresentWait2(mode);
 }
 
 SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
@@ -286,7 +300,8 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
 
     const VkExtent2D requestedExtent = GetOptimalExtent();
 
-    const bool wantPresentWait2 = surfacePresentWait2Supported && maxFrameLatency > 0 && IsWaitablePresentMode(requestedPresentMode);
+    const bool wantPresentWait2 =
+        surfacePresentWait2Supported && maxFrameLatency > 0 && IsWaitablePresentMode(requestedPresentMode);
     const bool parametersChanged =
         !AreExtentsEqual(requestedExtent, surfaceExtent) || requestedPresentMode != isPresentMode ||
         usePresentWait2 != wantPresentWait2 || WantFullscreenExclusive() != createdExclusive;
@@ -300,6 +315,8 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
     {
         TryRecreate(requestedExtent, requestedPresentMode, true);
     }
+
+    PollPresentFences();
 
     if (usePresentWait2 && sVkWaitForPresent2KHR != nullptr && currentPresentId + 1 > maxFrameLatency)
     {
@@ -325,7 +342,6 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
             }
         }
     }
-
     if (createdExclusive && !exclusiveAcquired && acquireFullScreenExclusive != nullptr)
     {
         if (acquireFullScreenExclusive(device, swapchain) == VK_SUCCESS)
@@ -463,12 +479,68 @@ SwapchainPresentTimings Swapchain::Present(const std::shared_ptr<Queues> &queues
     return timings;
 }
 
+void Swapchain::PollPresentFences()
+{
+    if (!usePresentFences)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < presentFences.size(); i++)
+    {
+        if (!presentFencePending[i])
+        {
+            continue;
+        }
+
+        const VkResult result = vkGetFenceStatus(device, presentFences[i]);
+        if (result == VK_NOT_READY)
+        {
+            continue;
+        }
+
+        VK_CHECKERROR(result);
+        VK_CHECKERROR(vkResetFences(device, 1, &presentFences[i]));
+        presentFencePending[i] = 0;
+        ObservePresentCompletion();
+    }
+}
+
+void Swapchain::ObservePresentCompletion()
+{
+    using Clock = std::chrono::steady_clock;
+
+    const uint64_t nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count());
+
+    if (presentSampleStartUs == 0)
+    {
+        presentSampleStartUs = nowUs;
+    }
+
+    presentSampleFrames++;
+
+    const uint64_t elapsedUs = nowUs - presentSampleStartUs;
+    if (elapsedUs < 500000)
+    {
+        return;
+    }
+
+    const double fps = static_cast<double>(presentSampleFrames) * 1000000.0 / static_cast<double>(elapsedUs);
+    const uint32_t fpsX10 = static_cast<uint32_t>(std::clamp(fps * 10.0, 0.0, 99999.0));
+    presentFpsX10.store(fpsX10, std::memory_order_release);
+
+    presentSampleStartUs = nowUs;
+    presentSampleFrames = 0;
+}
+
 bool Swapchain::TryRecreate(const VkExtent2D &newExtent, QrPresentMode mode, bool force)
 {
-    const bool wantPresentWait2 = surfacePresentWait2Supported && maxFrameLatency > 0 && IsWaitablePresentMode(mode);
+    const bool wantPresentWait2 =
+        surfacePresentWait2Supported && maxFrameLatency > 0 && IsWaitablePresentMode(mode);
 
-    if (!force && AreExtentsEqual(surfaceExtent, newExtent) && isPresentMode == mode && usePresentWait2 == wantPresentWait2 &&
-        WantFullscreenExclusive() == createdExclusive)
+    if (!force && AreExtentsEqual(surfaceExtent, newExtent) && isPresentMode == mode &&
+        usePresentWait2 == wantPresentWait2 && WantFullscreenExclusive() == createdExclusive)
     {
         return false;
     }
@@ -487,6 +559,9 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
     surfaceExtent = { newWidth, newHeight };
     currentPresentId = 0;
     waitablePresentId = 0;
+    presentSampleStartUs = 0;
+    presentSampleFrames = 0;
+    presentFpsX10.store(0, std::memory_order_release);
     exclusiveAcquired = false;
 
     ResetSurfaceCapabilitiesCache();
@@ -527,8 +602,13 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
         presentWait2Capabilities.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR;
         presentWait2Capabilities.pNext = &presentId2Capabilities;
 
+        VkSurfacePresentModeKHR presentModeInfo = {};
+        presentModeInfo.sType = VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR;
+        presentModeInfo.presentMode = GetVkPresentMode(mode);
+
         VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = {};
         surfaceInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR;
+        surfaceInfo.pNext = &presentModeInfo;
         surfaceInfo.surface = surface;
 
         VkSurfaceCapabilities2KHR surfaceCapabilities2 = {};
@@ -542,6 +622,13 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
     }
 
     usePresentWait2 = surfacePresentWait2Supported && maxFrameLatency > 0 && IsWaitablePresentMode(mode);
+    if (print)
+    {
+        const std::string message =
+            std::string("RHI: present wait 2 is ") + (surfacePresentWait2Supported ? "supported" : "unsupported") +
+            " for " + GetPresentModeName();
+        print(message.c_str());
+    }
 
     VkSwapchainCreateInfoKHR swapchainInfo{};
     swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -667,7 +754,7 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
         }
     }
 
-    const VkCommandBuffer cmd = cmdManager->StartGraphicsCmd();
+    const VkCommandBuffer cmd = cmdManager->StartMaintenanceCmd();
 
     for (uint32_t i = 0; i < imageCount; i++)
     {
@@ -677,7 +764,7 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
 
-    cmdManager->Submit(cmd);
+    cmdManager->SubmitMaintenance(cmd);
     cmdManager->WaitGraphicsIdle();
 
     CallCreateSubscribers();

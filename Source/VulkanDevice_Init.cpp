@@ -135,8 +135,9 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
 
     uniform             = std::make_shared<GlobalUniform>(device, memAllocator);
 
-    swapchain           = std::make_shared<Swapchain>(device, surface, physDevice->Get(), cmdManager, presentWait2Enabled, swapchainMaintenance1Enabled,
-                                                       fullScreenExclusiveSupported, win32Hwnd, acquireFullScreenExclusiveMode, releaseFullScreenExclusiveMode);
+    swapchain           = std::make_shared<Swapchain>(device, surface, physDevice->Get(), cmdManager, presentWait2Enabled,
+                                                       swapchainMaintenance1Enabled, fullScreenExclusiveSupported, win32Hwnd,
+                                                       acquireFullScreenExclusiveMode, releaseFullScreenExclusiveMode);
     swapchain->SetPrintFunction([this](const char *message) { Print(message); });
 
     worldSamplerManager     = std::make_shared<SamplerManager>(device, 8, info->textureSamplerForceMinificationFilterLinear,

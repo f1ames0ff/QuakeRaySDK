@@ -188,8 +188,10 @@ the previous displayed frame before acquiring the next image. Scene recording
 can overlap that wait, which prevents submitted FPS from outrunning an uneven
 display cadence without serializing all backend recording behind it.
 `maxFrameLatency = 0` leaves the host free to queue ahead and is appropriate
-only for explicit benchmarks or diagnostics. Other presentation modes are
-host choices and may not provide this pacing.
+only for explicit benchmarks or diagnostics. Mailbox requests
+`VK_PRESENT_MODE_MAILBOX_KHR` directly. VSync, Adaptive and Immediate map
+directly to their Vulkan modes. The SDK reports `QR_FEATURE_UNAVAILABLE`
+instead of substituting an unrelated mode.
 
 Use `qrGetFrameReadbackRequirements`, `qrRequestFrameReadback` and
 `qrGetFrameReadbackStatus` for asynchronous final LDR capture. The readback
