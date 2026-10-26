@@ -22,7 +22,12 @@
 
 #include <qray/qray.h>
 
+#include <array>
+#include <cstdint>
+#include <memory>
+
 #include "Common.h"
+#include "CommandBufferManager.h"
 
 namespace qray
 {
@@ -30,19 +35,20 @@ namespace qray
 struct FrameState
 {
 private:
-    uint32_t            frameIndex;
-    VkCommandBuffer     frameCmd;
-    VkSemaphore         semaphoreToWait;
-    VkPipelineStageFlags semaphoreWaitStage;
-    VkCommandBuffer     preFrameCmd;
+    struct Slot
+    {
+        VkCommandBuffer      frameCmd = VK_NULL_HANDLE;
+        VkSemaphore          semaphoreToWait = VK_NULL_HANDLE;
+        VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkCommandBuffer      preFrameCmd = VK_NULL_HANDLE;
+    };
+
+    uint32_t                 frameIndex;
+    std::array<Slot, MAX_FRAMES_IN_FLIGHT> slots;
 
 public:
     FrameState() :
-        frameIndex(MAX_FRAMES_IN_FLIGHT - 1),
-        frameCmd(VK_NULL_HANDLE),
-        semaphoreToWait(VK_NULL_HANDLE),
-        semaphoreWaitStage(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT),
-        preFrameCmd(VK_NULL_HANDLE)
+        frameIndex(MAX_FRAMES_IN_FLIGHT - 1)
     {}
 
     FrameState(const FrameState &other) = delete;
@@ -70,65 +76,91 @@ public:
 
     void OnBeginFrame(VkCommandBuffer cmd)
     {
-        assert(frameCmd == VK_NULL_HANDLE);
-        frameCmd = cmd;
+        Slot &slot = GetSlot();
+
+        assert(slot.frameCmd == VK_NULL_HANDLE);
+        slot.frameCmd = cmd;
     }
 
     void OnEndFrame()
     {
-        assert(frameCmd != VK_NULL_HANDLE);
-        assert(preFrameCmd == VK_NULL_HANDLE);
-        frameCmd = VK_NULL_HANDLE;
+        Slot &slot = GetSlot();
+
+        assert(slot.frameCmd != VK_NULL_HANDLE);
+        assert(slot.preFrameCmd == VK_NULL_HANDLE);
+        slot.frameCmd = VK_NULL_HANDLE;
     }
 
     VkCommandBuffer GetCmdBuffer() const
     {
+        const Slot &slot = GetSlot();
+
         assert(WasFrameStarted());
-        return frameCmd;
+        return slot.frameCmd;
     }
 
     VkCommandBuffer GetCmdBufferForMaterials(const std::shared_ptr<CommandBufferManager> &cmdManager)
     {
+        Slot &slot = GetSlot();
+
         if (WasFrameStarted())
         {
             return GetCmdBuffer();
         }
 
-        if (preFrameCmd == VK_NULL_HANDLE)
+        if (slot.preFrameCmd == VK_NULL_HANDLE)
         {
-            preFrameCmd = cmdManager->StartGraphicsCmd();
+            slot.preFrameCmd = cmdManager->StartGraphicsCmd();
         }
 
-        return preFrameCmd;
+        return slot.preFrameCmd;
     }
 
-    VkCommandBuffer GetPreFrameCmdAndRemove()
+    VkCommandBuffer GetPreFrameCmdAndRemove(uint32_t slotIndex)
     {
-        VkCommandBuffer c = preFrameCmd;
+        assert(slotIndex < MAX_FRAMES_IN_FLIGHT);
+        Slot &slot = slots[slotIndex];
+        VkCommandBuffer c = slot.preFrameCmd;
 
-        preFrameCmd = VK_NULL_HANDLE;
+        slot.preFrameCmd = VK_NULL_HANDLE;
         return c;
     }
 
     bool WasFrameStarted() const
     {
-        return frameCmd != VK_NULL_HANDLE;
+        return GetSlot().frameCmd != VK_NULL_HANDLE;
     }
 
     void SetSemaphore(VkSemaphore s, VkPipelineStageFlags waitStage)
     {
-        semaphoreToWait = s;
-        semaphoreWaitStage = waitStage;
+        Slot &slot = GetSlot();
+
+        slot.semaphoreToWait = s;
+        slot.semaphoreWaitStage = waitStage;
     }
 
     VkSemaphore GetSemaphoreForWaitAndRemove(VkPipelineStageFlags *outWaitStage)
     {
-        VkSemaphore s = semaphoreToWait;
+        Slot &slot = GetSlot();
+        VkSemaphore s = slot.semaphoreToWait;
 
-        semaphoreToWait = VK_NULL_HANDLE;
-        *outWaitStage = semaphoreWaitStage;
+        slot.semaphoreToWait = VK_NULL_HANDLE;
+        *outWaitStage = slot.semaphoreWaitStage;
 
         return s;
+    }
+
+private:
+    Slot &GetSlot()
+    {
+        assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
+        return slots[frameIndex];
+    }
+
+    const Slot &GetSlot() const
+    {
+        assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
+        return slots[frameIndex];
     }
 };
 

@@ -506,6 +506,11 @@ QrResult qrStartFrame(QrInstance qrInstance, const QrStartFrameInfo *pStartInfo)
     return Call(qrInstance, &VulkanDevice::StartFrame, pStartInfo);
 }
 
+QrResult qrAcquireFrame(QrInstance qrInstance)
+{
+    return Call(qrInstance, &VulkanDevice::AcquireFrame);
+}
+
 QrResult qrDrawFrame(QrInstance qrInstance, const QrDrawFrameInfo *pDrawInfo)
 {
     return Call(qrInstance, &VulkanDevice::DrawFrame, pDrawInfo);
@@ -604,6 +609,11 @@ const char *qrGetCpuPassName(uint32_t passIndex)
         "RHI submit",
         "legacy submit",
         "present",
+        "frame fence wait",
+        "present wait",
+        "image acquire",
+        "begin other",
+        "present fence wait",
     };
     return passIndex < QR_CPU_PASS_COUNT ? names[passIndex] : "";
 }

@@ -180,6 +180,35 @@ void CommandBufferManager::Submit(VkCommandBuffer cmd, VkSemaphore waitSemaphore
     VK_CHECKERROR(vkQueueSubmit(queue, 1, &submitInfo, fence));
 }
 
+void CommandBufferManager::SubmitForFrame(uint32_t frameIndex,
+                                          VkCommandBuffer cmd,
+                                          VkSemaphore waitSemaphore,
+                                          VkPipelineStageFlags waitStages,
+                                          VkSemaphore signalSemaphore,
+                                          VkFence fence)
+{
+    assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
+    VK_CHECKERROR(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &waitSemaphore;
+    submitInfo.pWaitDstStageMask = &waitStages;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &signalSemaphore;
+
+    auto &frameQueues = cmdQueues[frameIndex];
+    assert(frameQueues.find(cmd) != frameQueues.end());
+
+    const VkQueue queue = frameQueues[cmd];
+    frameQueues.erase(cmd);
+
+    VK_CHECKERROR(vkQueueSubmit(queue, 1, &submitInfo, fence));
+}
+
 void CommandBufferManager::WaitGraphicsIdle()
 {
     if (const std::shared_ptr<Queues> aliveQueues = queues.lock())

@@ -32,6 +32,17 @@
 namespace qray
 {
 
+struct SwapchainAcquireTimings
+{
+    float presentWaitMs = 0.0f;
+    float imageAcquireMs = 0.0f;
+};
+
+struct SwapchainPresentTimings
+{
+    float fenceWaitMs = 0.0f;
+};
+
 class Swapchain
 {
 public:
@@ -61,8 +72,8 @@ public:
     void SetPrintFunction(PrintFunction pfnPrint);
     bool IsPresentWaitActive() const;
 
-    void AcquireImage(VkSemaphore imageAvailableSemaphore);
-    void Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
+    SwapchainAcquireTimings AcquireImage(VkSemaphore imageAvailableSemaphore);
+    SwapchainPresentTimings Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
 
     void Subscribe(std::shared_ptr<ISwapchainDependency> subscriber);
     void Unsubscribe(const ISwapchainDependency *subscriber);

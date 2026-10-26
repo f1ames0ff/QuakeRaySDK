@@ -48,6 +48,7 @@
 #include "RenderResolutionHelper.h"
 #include "DecalManager.h"
 #include "FSR.h"
+#include "FrameAcquireGate.h"
 #include "FrameState.h"
 #include "LibraryConfig.h"
 #include "PortalList.h"
@@ -158,6 +159,7 @@ public:
     void DestroyCubemap(QrCubemap cubemap);
 
     void StartFrame(const QrStartFrameInfo *pStartInfo);
+    void AcquireFrame();
     void DrawFrame(const QrDrawFrameInfo *pFrameInfo);
 
     bool IsSuspended() const;
@@ -208,6 +210,14 @@ public:
     void Print(const char *pMessage) const;
 
 private:
+    struct BeginFrameCpuTimings
+    {
+        float frameFenceWaitMs = 0.0f;
+        float presentWaitMs = 0.0f;
+        float imageAcquireMs = 0.0f;
+        float beginOtherMs = 0.0f;
+    };
+
     void CreateInstance(const QrInstanceCreateInfo &info,
                         const QrayGpuRequirements &gpuRequirements);
     void CreateDevice(const QrayGpuRequirements &gpuRequirements);
@@ -225,6 +235,7 @@ private:
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
+    void AcquireFrameImage();
     bool RenderThroughRhi(const QrDrawFrameInfo &drawInfo);
     void EndFrame(VkCommandBuffer cmd);
 
@@ -270,7 +281,6 @@ private:
     PFN_vkAcquireFullScreenExclusiveModeEXT acquireFullScreenExclusiveMode = nullptr;
     PFN_vkReleaseFullScreenExclusiveModeEXT releaseFullScreenExclusiveMode = nullptr;
     std::string                             printedPresentModeName;
-    bool                                    printedPresentWaitActive = false;
     bool                                    printedRasterUploadWithoutFrame = false;
     bool                                    printedRasterOverflow = false;
     bool                                    printedParticlePointOverflow = false;
@@ -386,6 +396,10 @@ private:
     std::atomic<uint64_t>                   uploadLockCalls[QR_UPLOAD_LANE_COUNT]{};
     std::atomic<bool>                       uploadLockTracing{false};
     CpuFrameProfiler                        cpuFrameProfiler;
+    BeginFrameCpuTimings                    pendingBeginFrameCpuTimings;
+    FrameAcquireGate                        frameAcquireGate;
+    VkCommandBuffer                         pendingPreFrameCmd = VK_NULL_HANDLE;
+    uint32_t                                pendingPreFrameCmdFrameIndex = 0;
     bool                                    statsCpuTimingValid = false;
     bool                                    statsRenderedUiOnly = false;
     std::atomic<uint32_t>                   statsApiCallsGeometry{0};
