@@ -39,6 +39,19 @@ CommandBufferManager::CommandBufferManager(VkDevice _device, std::shared_ptr<Que
         poolInfo.queueFamilyIndex = _queues->GetIndexTransfer();
         VK_CHECKERROR(vkCreateCommandPool(device, &poolInfo, nullptr, &transferCmds[i].pool));
     }
+
+    VkCommandPoolCreateInfo maintenancePoolInfo{};
+    maintenancePoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    maintenancePoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    maintenancePoolInfo.queueFamilyIndex = _queues->GetIndexGraphics();
+    VK_CHECKERROR(vkCreateCommandPool(device, &maintenancePoolInfo, nullptr, &maintenancePool));
+
+    VkCommandBufferAllocateInfo maintenanceAllocInfo{};
+    maintenanceAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    maintenanceAllocInfo.commandPool = maintenancePool;
+    maintenanceAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    maintenanceAllocInfo.commandBufferCount = 1;
+    VK_CHECKERROR(vkAllocateCommandBuffers(device, &maintenanceAllocInfo, &maintenanceCmd));
 }
 
 CommandBufferManager::~CommandBufferManager()
@@ -51,6 +64,8 @@ CommandBufferManager::~CommandBufferManager()
         vkDestroyCommandPool(device, computeCmds[i].pool, nullptr);
         vkDestroyCommandPool(device, transferCmds[i].pool, nullptr);
     }
+
+    vkDestroyCommandPool(device, maintenancePool, nullptr);
 }
 
 void CommandBufferManager::PrepareForFrame(uint32_t frameIndex)
@@ -138,6 +153,24 @@ VkCommandBuffer CommandBufferManager::StartTransferCmd()
     return StartCmd(currentFrameIndex, transferCmds[currentFrameIndex], aliveQueues->GetTransfer());
 }
 
+VkCommandBuffer CommandBufferManager::StartMaintenanceCmd()
+{
+    const std::shared_ptr<Queues> aliveQueues = queues.lock();
+
+    if (!aliveQueues || maintenanceCmd == VK_NULL_HANDLE)
+    {
+        return VK_NULL_HANDLE;
+    }
+
+    VK_CHECKERROR(vkResetCommandPool(device, maintenancePool, 0));
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECKERROR(vkBeginCommandBuffer(maintenanceCmd, &beginInfo));
+    return maintenanceCmd;
+}
+
 void CommandBufferManager::Submit(VkCommandBuffer cmd, VkFence fence)
 {
     VK_CHECKERROR(vkEndCommandBuffer(cmd));
@@ -154,6 +187,24 @@ void CommandBufferManager::Submit(VkCommandBuffer cmd, VkFence fence)
     frameQueues.erase(cmd);
 
     VK_CHECKERROR(vkQueueSubmit(queue, 1, &submitInfo, fence));
+}
+
+void CommandBufferManager::SubmitMaintenance(VkCommandBuffer cmd)
+{
+    const std::shared_ptr<Queues> aliveQueues = queues.lock();
+
+    if (!aliveQueues || cmd == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    VK_CHECKERROR(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    VK_CHECKERROR(vkQueueSubmit(aliveQueues->GetGraphics(), 1, &submitInfo, VK_NULL_HANDLE));
 }
 
 void CommandBufferManager::Submit(VkCommandBuffer cmd, VkSemaphore waitSemaphore, VkPipelineStageFlags waitStages,

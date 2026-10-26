@@ -1757,13 +1757,20 @@ void VulkanDevice::Print(const char *pMessage) const
 
 void VulkanDevice::GetFrameStats(uint32_t *pRays, uint32_t *pFpsX10) const
 {
+    uint32_t fpsX10 = statsFpsX10;
+    uint32_t presentFpsX10 = 0;
+    if (swapchain && swapchain->GetPresentFpsX10(&presentFpsX10))
+    {
+        fpsX10 = presentFpsX10;
+    }
+
     if (pRays != nullptr)
     {
         *pRays = statsRays;
     }
     if (pFpsX10 != nullptr)
     {
-        *pFpsX10 = statsFpsX10;
+        *pFpsX10 = fpsX10;
     }
 }
 
@@ -1785,6 +1792,11 @@ void VulkanDevice::GetFrameStatsEx(QrFrameStats *pStats) const
     }
     pStats->raysParticle = statsRaysPerCategory[RAY_STATS_CATEGORY_PARTICLE];
     pStats->fpsX10 = statsFpsX10;
+    uint32_t presentFpsX10 = 0;
+    if (swapchain && swapchain->GetPresentFpsX10(&presentFpsX10))
+    {
+        pStats->fpsX10 = presentFpsX10;
+    }
 
     pStats->gpuTimingValid = statsGpuTimingValid ? 1 : 0;
     pStats->gpuFrameMs = statsGpuFrameMs;

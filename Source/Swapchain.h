@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <list>
 #include <vector>
@@ -71,6 +72,7 @@ public:
     void SetFullscreenExclusive(bool want, bool focus);
     void SetPrintFunction(PrintFunction pfnPrint);
     bool IsPresentWaitActive() const;
+    bool GetPresentFpsX10(uint32_t *pFpsX10) const;
 
     SwapchainAcquireTimings AcquireImage(VkSemaphore imageAvailableSemaphore);
     SwapchainPresentTimings Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
@@ -113,6 +115,8 @@ private:
     VkSwapchainKHR DestroyWithoutSwapchain();
 
     void WaitPresentFences();
+    void PollPresentFences();
+    void ObservePresentCompletion();
 
     void CallCreateSubscribers();
     void CallDestroySubscribers();
@@ -160,6 +164,9 @@ private:
     uint64_t currentPresentId;
     uint64_t waitablePresentId;
     uint64_t maxFrameLatency;
+    uint64_t presentSampleStartUs;
+    uint32_t presentSampleFrames;
+    std::atomic<uint32_t> presentFpsX10;
 
     SwapchainRecreateState recreateState;
 
