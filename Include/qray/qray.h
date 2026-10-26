@@ -1246,6 +1246,14 @@ QRAPI QrResult QRCONV qrStartFrame(
     QrInstance                          qrInstance,
     const QrStartFrameInfo              *pStartInfo);
 
+/* Acquire the swapchain image before qrDrawFrame. This may be called from a
+ * worker after qrStartFrame while the host prepares the rest of the frame.
+ * qrDrawFrame may record scene work while this call is still waiting and joins
+ * it before the present pass; qrDrawFrame also acquires lazily when the host
+ * does not call it. */
+QRAPI QrResult QRCONV qrAcquireFrame(
+    QrInstance                          qrInstance);
+
 typedef enum QrSkyType
 {
     QR_SKY_TYPE_COLOR,
@@ -1777,6 +1785,11 @@ typedef enum QrCpuPassIndex
     QR_CPU_PASS_RHI_SUBMIT,
     QR_CPU_PASS_LEGACY_SUBMIT,
     QR_CPU_PASS_PRESENT,
+    QR_CPU_PASS_FRAME_FENCE_WAIT,
+    QR_CPU_PASS_PRESENT_WAIT,
+    QR_CPU_PASS_IMAGE_ACQUIRE,
+    QR_CPU_PASS_BEGIN_OTHER,
+    QR_CPU_PASS_PRESENT_FENCE_WAIT,
     QR_CPU_PASS_COUNT,
 } QrCpuPassIndex;
 

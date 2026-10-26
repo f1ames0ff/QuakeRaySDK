@@ -829,6 +829,11 @@ public:
                 return false;
             }
 
+            if (!Check(qrAcquireFrame(instance), "acquire frame"))
+            {
+                return false;
+            }
+
             if (!sized)
             {
                 if (!Check(qrGetFrameReadbackRequirements(instance, QR_FRAME_READBACK_FORMAT_RGBA8_UNORM, QR_TRUE,

@@ -67,6 +67,13 @@ class RhiFrameContext;
 class RhiTextureTable;
 }
 
+struct FrameSubmissionSynchronization
+{
+    VkSemaphore semaphoreToWait = VK_NULL_HANDLE;
+    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkSemaphore semaphoreToSignal = VK_NULL_HANDLE;
+};
+
 // The RHI frame skeleton: the frame is recorded and submitted through the RHI
 // layer instead of the Vulkan command buffers of the renderer. It drives the
 // rasterized sky - the first real engine pass on the RHI path (RHI/RhiSkyPass.h)
@@ -183,6 +190,11 @@ public:
         bool disableRasterization = false;
         bool renderUiOnly = false;
         CpuFrameProfiler *cpuProfiler = nullptr;
+        // When set, the scene is recorded before the swapchain image is acquired. The callback
+        // acquires the image while the presentation wait is hidden by scene recording and fills
+        // the submission synchronization. GPU-frame hooks leave it empty because BeforeRenderer
+        // receives a real backbuffer in that public contract.
+        std::function<bool()> acquireSwapchainForPresent;
         std::function<void(QrayGpuFramePhase, nvrhi::ICommandList *, nvrhi::ITexture *,
                            nvrhi::ITexture *, uint32_t)> gpuFrameCallback;
 
@@ -437,10 +449,12 @@ public:
     // The raster world sub-pass is not recorded in the two traced modes; the raster sky's ALBEDO
     // half is, for the SKY_TYPE_RASTERIZED_GEOMETRY frame only, together with the raster sky pass's
     // cube half right before the primary (see Render's implementation).
-    // 'semaphoreToWait' is the semaphore the swapchain signals on acquire, 'semaphoreToSignal' is
-    // the one the presentation engine waits on. Returns false if the pass is unavailable.
+    // 'submission' carries the semaphores the presentation engine waits on. They are filled by
+    // the caller before Render or by SkyFrameInputs::acquireSwapchainForPresent when scene
+    // recording is allowed to overlap the presentation wait. Returns false if the pass is
+    // unavailable.
     bool Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
-                VkSemaphore semaphoreToWait, VkSemaphore semaphoreToSignal);
+                FrameSubmissionSynchronization &submission);
 
     // True if the pass cannot be used at all, so that the caller can avoid
     // taking the frame apart on every frame.

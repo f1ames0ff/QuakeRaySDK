@@ -18,6 +18,7 @@
 #include "Swapchain.h"
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 
 #include "QrException.h"
@@ -275,8 +276,12 @@ bool Swapchain::IsWaitablePresentMode(QrPresentMode mode) const
     return vkMode == VK_PRESENT_MODE_FIFO_KHR || vkMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
 }
 
-void Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
+SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
 {
+    using Clock = std::chrono::steady_clock;
+
+    SwapchainAcquireTimings timings;
+
     ResetSurfaceCapabilitiesCache();
 
     const VkExtent2D requestedExtent = GetOptimalExtent();
@@ -302,12 +307,16 @@ void Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
 
         if (targetPresentId <= waitablePresentId)
         {
+            const Clock::time_point waitStart = Clock::now();
+
             VkPresentWait2InfoKHR waitInfo = {};
             waitInfo.sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR;
             waitInfo.presentId = targetPresentId;
             waitInfo.timeout = 50ull * 1000ull * 1000ull;
 
             const VkResult waitResult = sVkWaitForPresent2KHR(device, swapchain, &waitInfo);
+            timings.presentWaitMs +=
+                std::chrono::duration<float, std::milli>(Clock::now() - waitStart).count();
 
             if (waitResult == VK_ERROR_OUT_OF_DATE_KHR)
             {
@@ -344,21 +353,24 @@ void Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
 
     while (true)
     {
+        const Clock::time_point acquireStart = Clock::now();
         const VkResult r = vkAcquireNextImageKHR(
             device, swapchain, UINT64_MAX,
             imageAvailableSemaphore,
             VK_NULL_HANDLE, &currentSwapchainIndex);
+        timings.imageAcquireMs +=
+            std::chrono::duration<float, std::milli>(Clock::now() - acquireStart).count();
 
         recreateState.Acquired(r);
 
         if (r == VK_SUCCESS)
         {
-            return;
+            return timings;
         }
 
         if (r == VK_SUBOPTIMAL_KHR)
         {
-            return;
+            return timings;
         }
 
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
@@ -372,8 +384,12 @@ void Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
     }
 }
 
-void Swapchain::Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore)
+SwapchainPresentTimings Swapchain::Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore)
 {
+    using Clock = std::chrono::steady_clock;
+
+    SwapchainPresentTimings timings;
+
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -387,8 +403,11 @@ void Swapchain::Present(const std::shared_ptr<Queues> &queues, VkSemaphore rende
     {
         if (presentFencePending[currentSwapchainIndex])
         {
+            const Clock::time_point waitStart = Clock::now();
             VK_CHECKERROR(vkWaitForFences(device, 1, &presentFences[currentSwapchainIndex], VK_TRUE, UINT64_MAX));
             VK_CHECKERROR(vkResetFences(device, 1, &presentFences[currentSwapchainIndex]));
+            timings.fenceWaitMs +=
+                std::chrono::duration<float, std::milli>(Clock::now() - waitStart).count();
             presentFencePending[currentSwapchainIndex] = 0;
         }
 
@@ -440,6 +459,8 @@ void Swapchain::Present(const std::shared_ptr<Queues> &queues, VkSemaphore rende
         ResetSurfaceCapabilitiesCache();
         TryRecreate(GetOptimalExtent(), requestedPresentMode, true);
     }
+
+    return timings;
 }
 
 bool Swapchain::TryRecreate(const VkExtent2D &newExtent, QrPresentMode mode, bool force)

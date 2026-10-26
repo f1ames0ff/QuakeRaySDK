@@ -47,7 +47,11 @@ qray::qrGetGpuContext                    (optional shared GPU access)
 
 repeat each frame:
   qrStartFrame
-  upload dynamic geometry / overlays / particles / frame lights
+  concurrently:
+    renderer worker: qrAcquireFrame
+    host: upload dynamic geometry / overlays / particles / frame lights
+          and fill QrDrawFrameInfo
+  join host producer work
   qrDrawFrame
 
 qrDestroyInstance before destroying the HWND
@@ -55,6 +59,21 @@ qrDestroyInstance before destroying the HWND
 
 Use only one creation path. A host that needs the shared NVRHI device must not
 create a second device after `qrCreateInstance`.
+
+`qrStartFrame` begins the frame but does not acquire its swapchain image. The
+recommended split issues `qrAcquireFrame` after a successful start on a worker
+while host CPU producer work runs concurrently. `qrAcquireFrame` performs the
+swapchain acquire and waits for the waitable-FIFO present dependency. Join the
+host producer branch before `qrDrawFrame`; an acquire still waiting may remain
+in flight. The renderer records the scene first and joins the acquire
+immediately before its present pass, so scene recording overlaps the display
+wait. Pending pre-frame material commands are submitted after acquire and before
+the main frame submission.
+
+The original sequence remains compatible: a host may continue directly from
+`qrStartFrame` to its frame uploads and then call `qrDrawFrame`. In that case
+`qrDrawFrame` performs the acquire lazily after scene recording and before the
+present pass.
 
 There is no separate `qrEndFrame`: `qrDrawFrame` ends, submits and presents the
 frame. If `qrStartFrame` succeeds, call `qrDrawFrame` before starting another
@@ -95,8 +114,14 @@ in-memory RGBA8 data or its own UTF-8 relative texture paths.
 | Shaders, blue-noise asset, FSR DLL | Host deployment | Paths are supplied to instance creation; files must exist at runtime. |
 
 Use one render/frame thread unless a narrower concurrency rule is explicitly
-documented. Upload-lane and dynamic-shape calls are diagnostics or tuning, not
-a general promise that arbitrary host containers are thread-safe.
+documented. `qrAcquireFrame` is such a rule: after `qrStartFrame`, one caller
+may run the acquire on a worker concurrently with host CPU producer work. This
+does not make other uploads or arbitrary host containers thread-safe. Keep one
+owner for the explicit acquire. Join every producer before `qrDrawFrame`; the
+acquire may still be running and is joined inside `qrDrawFrame` at the present
+boundary. Keep the instance and window alive for the worker call.
+Upload-lane and dynamic-shape calls are diagnostics or tuning, not a general
+thread-safety promise.
 
 ### State lifetime
 
@@ -313,19 +338,37 @@ host's entity or map format.
 
 | Function | Purpose |
 |---|---|
-| `qrStartFrame` | Acquire a frame slot and swapchain image from `QrStartFrameInfo`. |
-| `qrDrawFrame` | Consume `QrDrawFrameInfo`, render, submit and present. |
+| `qrStartFrame` | Begin the frame slot described by `QrStartFrameInfo` and prepare its frame-scoped state. It does not acquire the swapchain image. |
+| `qrAcquireFrame` | After `qrStartFrame`, acquire the swapchain image and wait for the waitable-FIFO present dependency. It may run on a worker concurrently with host CPU producer work and renderer scene recording. |
+| `qrDrawFrame` | Consume `QrDrawFrameInfo`, record the scene, join a pending acquire at the present boundary, submit and present. If no explicit acquire occurred, it acquires lazily at that boundary. |
 | `qrSetFogVolumes` | Replace the persistent local fog-volume set. |
 | `qrIsSuspended` | Query whether presentation is currently suspended (for example when minimized). |
 | `qrIsRenderUpscaleTechniqueAvailable` | Query FSR/DLSS/fallback availability before selecting frame resolution settings. |
 
-After `qrStartFrame`, upload all frame-scoped geometry, overlays, particles and
-frame lights, then call `qrDrawFrame` exactly once.
+For the recommended flow, call `qrAcquireFrame` after a successful
+`qrStartFrame` and run it alongside preparation and upload of frame-scoped
+geometry, overlays, particles and frame lights. Join the host producer branch,
+then call `qrDrawFrame` exactly once; the still-running acquire is joined after
+scene recording and before present. Pre-frame material commands are submitted
+after acquire and before the main frame submission. A host that omits the
+explicit acquire keeps the legacy sequence: upload the frame data, then call
+`qrDrawFrame`, which acquires lazily at the same present boundary.
+
+As with other `qr*` calls, a suspended instance follows the existing `Call`
+behavior (`QR_SUCCESS` without invoking the acquire). Calling
+`qrAcquireFrame` while no frame is active, including before a successful
+`qrStartFrame` or after `qrDrawFrame`, returns `QR_FRAME_WASNT_STARTED`.
+Starting another frame before drawing the active one follows the existing
+`QR_FRAME_WASNT_ENDED` path, and an invalid instance returns
+`QR_WRONG_INSTANCE`. Check the result before continuing to `qrDrawFrame`.
 
 For interactive presentation use `QR_PRESENT_MODE_VSYNC` and
 `maxFrameLatency = 1`. This enables waitable FIFO pacing. A latency of `0`
 allows several submitted frames to precede their display and is intended for
-throughput measurements, not normal gameplay.
+throughput measurements, not normal gameplay. With waitable FIFO pacing,
+`qrAcquireFrame` is the explicit point that waits for the previous displayed
+frame; the wait can overlap scene recording, and the lazy acquire in
+`qrDrawFrame` has the same behavior.
 
 ### Frame payload
 

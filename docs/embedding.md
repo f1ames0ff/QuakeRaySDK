@@ -127,15 +127,54 @@ change after spatial state exists.
 
 ## 4. Frame loop
 
-For each frame:
+For a host with a task graph, the recommended sequence splits frame start from
+swapchain acquisition:
+
+```text
+qrStartFrame
+  -> run concurrently:
+       renderer worker: qrAcquireFrame
+       host: prepare/upload dynamic geometry, particles and raster overlays,
+             and fill QrDrawFrameInfo (column-major view, FOV,
+             near/far/ray length, up vector, sky/fog/volumetric/material
+             parameters)
+  -> join host producer work
+  -> qrDrawFrame
+```
+
+`qrStartFrame` establishes and prepares the frame but does not acquire its
+swapchain image. After a successful start, one caller can run
+`qrAcquireFrame` on a worker while the host performs CPU producer work. The
+acquire call performs the swapchain acquire and waits for the waitable-FIFO
+present dependency. Its wait can therefore overlap the host's producer work and
+renderer scene recording. All producers must be joined before `qrDrawFrame`, but
+the acquire may still be running; `qrDrawFrame` records the scene first and joins
+it before the present pass. Pending pre-frame material commands are submitted
+after acquire and before the main frame submission.
+
+This worker exception applies specifically to `qrAcquireFrame`. It does not
+make other uploads or arbitrary host containers thread-safe; continue to
+follow each producer call's ordering and synchronization rules. The SDK owns
+the swapchain and acquired image, while the host owns the task graph, producer
+lifetimes and the producer join. Use one explicit-acquire caller per frame; the
+SDK's acquire gate makes a later `qrDrawFrame` join idempotently at present.
+
+The original single-threaded sequence remains compatible:
 
 ```text
 qrStartFrame
   -> upload dynamic geometry, particles and raster overlays for this frame
-  -> fill QrDrawFrameInfo (column-major view, FOV, near/far/ray length,
-     up vector, sky/fog/volumetric/material parameters)
+  -> fill QrDrawFrameInfo
   -> qrDrawFrame
 ```
+
+When `qrAcquireFrame` is omitted, `qrDrawFrame` calls it lazily after scene
+recording and before the present pass. Existing hosts therefore do not need to
+adopt the explicit split.
+Before a successful `qrStartFrame`, `qrAcquireFrame` returns
+`QR_FRAME_WASNT_STARTED`; a suspended instance follows the existing `qr*`
+`Call` behavior. Check the result and retain the requirement to call
+`qrDrawFrame` before starting another frame after a successful start.
 
 The renderer owns the projection, acceleration structures, render targets and
 presentation. The host owns window messages, input, simulation and asset
@@ -143,12 +182,14 @@ loading. Do not submit a projection matrix; `QrDrawFrameInfo.view` is
 world-to-view only.
 
 For normal interactive output, request `QR_PRESENT_MODE_VSYNC` with
-`maxFrameLatency = 1`. The SDK then uses the waitable FIFO path and waits for
-the previous displayed frame before acquiring the next image, which prevents
-submitted FPS from outrunning an uneven display cadence. `maxFrameLatency = 0`
-leaves the host free to queue ahead and is appropriate only for explicit
-benchmarks or diagnostics. Other presentation modes are host choices and may
-not provide this pacing.
+`maxFrameLatency = 1`. The SDK then uses the waitable FIFO path, and
+`qrAcquireFrame` (including the lazy acquire inside `qrDrawFrame`) waits for
+the previous displayed frame before acquiring the next image. Scene recording
+can overlap that wait, which prevents submitted FPS from outrunning an uneven
+display cadence without serializing all backend recording behind it.
+`maxFrameLatency = 0` leaves the host free to queue ahead and is appropriate
+only for explicit benchmarks or diagnostics. Other presentation modes are
+host choices and may not provide this pacing.
 
 Use `qrGetFrameReadbackRequirements`, `qrRequestFrameReadback` and
 `qrGetFrameReadbackStatus` for asynchronous final LDR capture. The readback
