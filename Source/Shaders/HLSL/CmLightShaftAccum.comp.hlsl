@@ -65,7 +65,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const int2 cbPix = getCheckerboardPix(pixelPos);
     const float rayDistance = framebufDepthWorld_Sampled.Load(int3(cbPix, 0)).x;
 
-    if (shaftCount == 0 || rayDistance <= 0.0 || rayDistance > MAX_RAY_LENGTH)
+    if (shaftCount == 0 || rayDistance <= 0.0 || rayDistance > globalUniform.rayLength)
     {
         lightShaftHistory[pixelPos] = (float4)0;
         return;

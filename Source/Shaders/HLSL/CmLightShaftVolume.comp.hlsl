@@ -83,7 +83,7 @@ bool lightShaftVisible(float3 origin, float3 target)
     const float3 delta = target - origin;
     const float distance = length(delta);
 
-    if (distance <= 0.05)
+    if (distance <= 0.001)
     {
         return true;
     }
@@ -94,8 +94,8 @@ bool lightShaftVisible(float3 origin, float3 target)
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = delta / distance;
-    ray.TMin = 0.05;
-    ray.TMax = distance - 0.05;
+    ray.TMin = 0.001;
+    ray.TMax = distance - 0.001;
 
     query.TraceRayInline(topLevelAS, RAY_FLAG_NONE, globalUniform.rayCullMaskWorld, ray);
 
