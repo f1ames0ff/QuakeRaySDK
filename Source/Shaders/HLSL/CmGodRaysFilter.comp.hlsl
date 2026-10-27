@@ -1,4 +1,4 @@
-// Copyright (C) 2019, NVIDIA CORPORATION. All rights reserved.
+﻿// Copyright (C) 2019, NVIDIA CORPORATION. All rights reserved.
 // Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This file is a port of shader/god_rays_filter.comp from Quake 2 RTX (https://github.com/NVIDIA/Q2RTX),
@@ -116,6 +116,33 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         result.rgba = fallbackResult.rgba / 16.0;
     }
 
-    const float3 lightShafts = lightShaftScatter.Load(int3(iPosition, 0)).rgb;
+    float3 shaftSum = (float3)0.0;
+    float shaftWeightSum = 0.0;
+
+    for (int shaftY = -1; shaftY <= 1; shaftY++)
+    {
+        for (int shaftX = -1; shaftX <= 1; shaftX++)
+        {
+            const int2 shaftPos = iPosition + int2(shaftX, shaftY);
+            if (any(shaftPos < (int2)0) ||
+                any(shaftPos >= int2(globalUniform.renderWidth, globalUniform.renderHeight)))
+            {
+                continue;
+            }
+
+            const float shaftDepth =
+                abs(framebufQ2ViewDepth_Sampled.Load(int3(getCheckerboardPix(shaftPos), 0)).r);
+            const float shaftWeight =
+                clamp(1.0 - 10.0 * abs(shaftDepth - referenceViewDepth) /
+                            max(abs(referenceViewDepth), 1e-6), 0.0, 1.0);
+
+            shaftSum += lightShaftScatter.Load(int3(shaftPos, 0)).rgb * shaftWeight;
+            shaftWeightSum += shaftWeight;
+        }
+    }
+
+    const float3 lightShafts = shaftWeightSum > 0.0
+        ? shaftSum / shaftWeightSum
+        : lightShaftScatter.Load(int3(iPosition, 0)).rgb;
     framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, 0.0);
 }

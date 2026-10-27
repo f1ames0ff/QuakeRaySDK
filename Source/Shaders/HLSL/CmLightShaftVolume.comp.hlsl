@@ -25,10 +25,6 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "LightShafts.hlsli"
 
-#define LIGHT_SHAFT_VOLUME_SIZE_X 192
-#define LIGHT_SHAFT_VOLUME_SIZE_Y 108
-#define LIGHT_SHAFT_VOLUME_SIZE_Z 96
-
 [[vk::binding(0, DESC_SET_TLAS)]] RaytracingAccelerationStructure topLevelAS;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
@@ -60,10 +56,10 @@ float3 volumeRayDirection(float2 cellUv)
 float3 volumeGetCenter(int3 cell)
 {
     const float2 cellUv = ((float2)cell.xy + 0.5) /
-                          float2(LIGHT_SHAFT_VOLUME_SIZE_X, LIGHT_SHAFT_VOLUME_SIZE_Y);
+                          float2((float)params.volumeSizeX, (float)params.volumeSizeY);
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
-    const float t = saturate((cell.z + 0.5) / (float)LIGHT_SHAFT_VOLUME_SIZE_Z);
+    const float t = saturate((cell.z + 0.5) / (float)params.volumeSizeZ);
     const float distance = nearPlane + (farPlane - nearPlane) * t * t;
     return globalUniform.cameraPosition.xyz + volumeRayDirection(cellUv) * distance;
 }
@@ -110,8 +106,8 @@ bool lightShaftVisible(float3 origin, float3 target)
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     const int3 cell = int3(dispatchThreadID);
-    if (cell.x >= LIGHT_SHAFT_VOLUME_SIZE_X || cell.y >= LIGHT_SHAFT_VOLUME_SIZE_Y ||
-        cell.z >= LIGHT_SHAFT_VOLUME_SIZE_Z)
+    if (cell.x >= (int)params.volumeSizeX || cell.y >= (int)params.volumeSizeY ||
+        cell.z >= (int)params.volumeSizeZ)
     {
         return;
     }

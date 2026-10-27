@@ -33,6 +33,10 @@ struct LightShaftVolumeParams_BT
 {
     uint lightShaftCount;
     uint lightShaftSamples;
+    uint volumeSizeX;
+    uint volumeSizeY;
+    uint volumeSizeZ;
+    uint pad0;
     uint pad1;
     uint pad2;
     float4 worldCenter;

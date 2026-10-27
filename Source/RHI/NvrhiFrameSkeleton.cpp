@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -1429,8 +1429,17 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                         sky.godRays.lightShaftCount > 0)
                     {
                         RhiLightShaftVolumePass::Params volumeParams = {};
+                        static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{128u, 72u, 64u},
+                                                                                   {192u, 108u, 96u},
+                                                                                   {256u, 144u, 128u}};
+                        const uint32_t lightShaftQuality =
+                            std::max(1u, std::min(sky.godRays.lightShaftSamples, 3u)) - 1u;
+
                         volumeParams.lightShaftCount = sky.godRays.lightShaftCount;
                         volumeParams.lightShaftSamples = sky.godRays.lightShaftSamples;
+                        volumeParams.volumeSizeX = lightShaftVolumeSizes[lightShaftQuality][0];
+                        volumeParams.volumeSizeY = lightShaftVolumeSizes[lightShaftQuality][1];
+                        volumeParams.volumeSizeZ = lightShaftVolumeSizes[lightShaftQuality][2];
                         memcpy(volumeParams.worldCenter, sky.godRays.worldCenter,
                                sizeof(volumeParams.worldCenter));
                         memcpy(volumeParams.worldHalfSizeInv, sky.godRays.worldHalfSizeInv,

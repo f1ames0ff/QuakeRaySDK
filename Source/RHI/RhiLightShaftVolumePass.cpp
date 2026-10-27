@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include "RhiPipeline.h"
 #include "RhiResources.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -137,6 +138,7 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
         desc.setComputeShader(prefixShader);
         desc.addBindingLayout(volumeLayout);
         desc.addBindingLayout(uniformLayout);
+        desc.addBindingLayout(paramsLayout);
         prefixPipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass prefix");
     }
 
@@ -164,9 +166,9 @@ bool RhiLightShaftVolumePass::CreateVolumeTarget(Target &target, uint32_t frameI
     nvrhi::TextureDesc textureDesc;
     textureDesc.dimension = nvrhi::TextureDimension::Texture3D;
     textureDesc.format = nvrhi::Format::RGBA16_FLOAT;
-    textureDesc.width = VOLUME_SIZE_X;
-    textureDesc.height = VOLUME_SIZE_Y;
-    textureDesc.depth = VOLUME_SIZE_Z;
+    textureDesc.width = volumeSizeX;
+    textureDesc.height = volumeSizeY;
+    textureDesc.depth = volumeSizeZ;
     textureDesc.mipLevels = 1;
     textureDesc.isUAV = true;
     textureDesc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
@@ -279,6 +281,25 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
         return false;
     }
 
+    const uint32_t requestedX = std::clamp(params.volumeSizeX, 32u, 512u);
+    const uint32_t requestedY = std::clamp(params.volumeSizeY, 32u, 512u);
+    const uint32_t requestedZ = std::clamp(params.volumeSizeZ, 16u, 256u);
+
+    if (requestedX != volumeSizeX || requestedY != volumeSizeY || requestedZ != volumeSizeZ)
+    {
+        volumeSizeX = requestedX;
+        volumeSizeY = requestedY;
+        volumeSizeZ = requestedZ;
+
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            if (!CreateVolumeTarget(targets[i], i))
+            {
+                return false;
+            }
+        }
+    }
+
     Target &target = targets[frameIndex];
     if (target.texture == nullptr || target.uavSet == nullptr || target.paramsSet == nullptr)
     {
@@ -302,9 +323,9 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
     state.addBindingSet(target.uavSet);
     pCommandList->setComputeState(state);
 
-    const uint32_t groupsX = (VOLUME_SIZE_X + GROUP_SIZE_X - 1) / GROUP_SIZE_X;
-    const uint32_t groupsY = (VOLUME_SIZE_Y + GROUP_SIZE_Y - 1) / GROUP_SIZE_Y;
-    pCommandList->dispatch(groupsX, groupsY, VOLUME_SIZE_Z);
+    const uint32_t groupsX = (volumeSizeX + GROUP_SIZE_X - 1) / GROUP_SIZE_X;
+    const uint32_t groupsY = (volumeSizeY + GROUP_SIZE_Y - 1) / GROUP_SIZE_Y;
+    pCommandList->dispatch(groupsX, groupsY, volumeSizeZ);
 
     pCommandList->commitBarriers();
 
@@ -312,8 +333,9 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
     prefixState.setPipeline(prefixPipeline);
     prefixState.addBindingSet(target.uavSet);
     prefixState.addBindingSet(target.uniformSet);
+    prefixState.addBindingSet(target.paramsSet);
     pCommandList->setComputeState(prefixState);
-    pCommandList->dispatch((VOLUME_SIZE_X + 7) / 8, (VOLUME_SIZE_Y + 7) / 8, 1);
+    pCommandList->dispatch((volumeSizeX + 7) / 8, (volumeSizeY + 7) / 8, 1);
 
     pCommandList->setTextureState(target.texture, nvrhi::AllSubresources,
                                   nvrhi::ResourceStates::NonPixelShaderResource);

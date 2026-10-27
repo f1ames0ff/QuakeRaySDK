@@ -62,6 +62,10 @@ public:
     {
         uint32_t lightShaftCount;
         uint32_t lightShaftSamples;
+        uint32_t volumeSizeX;
+        uint32_t volumeSizeY;
+        uint32_t volumeSizeZ;
+        uint32_t pad0;
         uint32_t pad1;
         uint32_t pad2;
         float worldCenter[4];
@@ -126,10 +130,14 @@ private:
     nvrhi::ComputePipelineHandle prefixPipeline;
     nvrhi::SamplerHandle sampler;
 
+    uint32_t volumeSizeX = VOLUME_SIZE_X;
+    uint32_t volumeSizeY = VOLUME_SIZE_Y;
+    uint32_t volumeSizeZ = VOLUME_SIZE_Z;
+
     Target targets[MAX_FRAMES_IN_FLIGHT];
 };
 
-static_assert(sizeof(RhiLightShaftVolumePass::Params) == 6192,
-              "LightShaftVolumeParams_BT is 6192 bytes");
+static_assert(sizeof(RhiLightShaftVolumePass::Params) == 6208,
+              "LightShaftVolumeParams_BT is 6208 bytes");
 
 }

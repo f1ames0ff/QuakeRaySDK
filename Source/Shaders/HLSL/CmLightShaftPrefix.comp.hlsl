@@ -19,12 +19,12 @@
 
 #define DESC_SET_LIGHT_SHAFT_VOLUME 0
 #define DESC_SET_GLOBAL_UNIFORM 1
+#define DESC_SET_LIGHT_SHAFT_PARAMS 2
 
 #include "ShaderCommonHLSLFunc.hlsli"
+#include "LightShafts.hlsli"
 
-#define LIGHT_SHAFT_VOLUME_SIZE_X 192
-#define LIGHT_SHAFT_VOLUME_SIZE_Y 108
-#define LIGHT_SHAFT_VOLUME_SIZE_Z 96
+[[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
 
@@ -32,7 +32,7 @@
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     const int2 column = int2(dispatchThreadID.xy);
-    if (column.x >= LIGHT_SHAFT_VOLUME_SIZE_X || column.y >= LIGHT_SHAFT_VOLUME_SIZE_Y)
+    if (column.x >= (int)params.volumeSizeX || column.y >= (int)params.volumeSizeY)
     {
         return;
     }
@@ -41,11 +41,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
     float3 accumulated = (float3)0;
 
-    for (int z = 0; z < LIGHT_SHAFT_VOLUME_SIZE_Z; z++)
+    for (int z = 0; z < (int)params.volumeSizeZ; z++)
     {
         const int3 cell = int3(column, z);
-        const float t0 = (float)z / (float)LIGHT_SHAFT_VOLUME_SIZE_Z;
-        const float t1 = (float)(z + 1) / (float)LIGHT_SHAFT_VOLUME_SIZE_Z;
+        const float t0 = (float)z / (float)params.volumeSizeZ;
+        const float t1 = (float)(z + 1) / (float)params.volumeSizeZ;
         const float stepLength = (farPlane - nearPlane) * (t1 * t1 - t0 * t0);
         const float4 current = lightShaftVolume[cell];
         accumulated += current.rgb * stepLength;
