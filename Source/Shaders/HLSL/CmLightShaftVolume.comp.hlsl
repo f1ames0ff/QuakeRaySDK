@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -25,9 +25,9 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "LightShafts.hlsli"
 
-#define LIGHT_SHAFT_VOLUME_SIZE_X 160
-#define LIGHT_SHAFT_VOLUME_SIZE_Y 88
-#define LIGHT_SHAFT_VOLUME_SIZE_Z 64
+#define LIGHT_SHAFT_VOLUME_SIZE_X 192
+#define LIGHT_SHAFT_VOLUME_SIZE_Y 108
+#define LIGHT_SHAFT_VOLUME_SIZE_Z 96
 
 [[vk::binding(0, DESC_SET_TLAS)]] RaytracingAccelerationStructure topLevelAS;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
@@ -181,7 +181,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                                    shaft.tangentV.xyz * (v * shaft.tangentV.w);
                 }
 
-                const float3 emitter = sourcePoint + lightDir * max(radius, 0.5);
+                const float3 emitter = sourcePoint + lightDir * 0.001;
                 const float3 fromLight = center - emitter;
                 const float distToLight = length(fromLight);
 
@@ -203,7 +203,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                     continue;
                 }
 
-                const float sourceRadius = max(radius, 0.5);
+                const float sourceRadius = max(radius, 0.15);
                 const float attenuation =
                     sourceRadius * sourceRadius / (distToLight * distToLight + sourceRadius * sourceRadius);
                 const float phase = shaftPhase(

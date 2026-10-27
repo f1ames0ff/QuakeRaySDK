@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,9 +22,9 @@
 
 #include "ShaderCommonHLSLFunc.hlsli"
 
-#define LIGHT_SHAFT_VOLUME_SIZE_X 160
-#define LIGHT_SHAFT_VOLUME_SIZE_Y 88
-#define LIGHT_SHAFT_VOLUME_SIZE_Z 64
+#define LIGHT_SHAFT_VOLUME_SIZE_X 192
+#define LIGHT_SHAFT_VOLUME_SIZE_Y 108
+#define LIGHT_SHAFT_VOLUME_SIZE_Z 96
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
 

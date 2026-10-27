@@ -906,9 +906,20 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
                         shaft.tangentU[k] = member.A.data[k] / lengthA;
                         shaft.tangentV[k] = member.B.data[k] / lengthB;
                     }
-                    const float halfArea = 0.5f * std::sqrt(std::max(info.area, 0.0f));
-                    shaft.tangentU[3] = halfArea;
-                    shaft.tangentV[3] = halfArea;
+
+                    float extent[3];
+                    float halfU = 0.0f;
+                    float halfV = 0.0f;
+
+                    for (int k = 0; k < 3; k++)
+                    {
+                        extent[k] = std::abs(info.boundsMax.data[k] - info.boundsMin.data[k]);
+                        halfU += extent[k] * std::abs(shaft.tangentU[k]);
+                        halfV += extent[k] * std::abs(shaft.tangentV[k]);
+                    }
+
+                    shaft.tangentU[3] = std::max(0.5f * halfU, 1e-3f);
+                    shaft.tangentV[3] = std::max(0.5f * halfV, 1e-3f);
                 }
 
                 AddLightShaft(shaft);

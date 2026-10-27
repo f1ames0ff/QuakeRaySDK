@@ -35,9 +35,9 @@ struct LightShaftParams_BT
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<LightShaftParams_BT> lightShaftParams;
 
-#define LIGHT_SHAFT_VOLUME_SIZE_X 160
-#define LIGHT_SHAFT_VOLUME_SIZE_Y 88
-#define LIGHT_SHAFT_VOLUME_SIZE_Z 64
+#define LIGHT_SHAFT_VOLUME_SIZE_X 192
+#define LIGHT_SHAFT_VOLUME_SIZE_Y 108
+#define LIGHT_SHAFT_VOLUME_SIZE_Z 96
 
 float3 lightShaftVolumeUVW(float3 world)
 {
@@ -83,9 +83,19 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     const float3 uvw = lightShaftVolumeUVW(surfacePos);
-    const float3 current = lightShaftVolume.SampleLevel(
-        lightShaftVolumeSampler, saturate(uvw), 0.0).rgb;
+    const float3 cell = float3(1.0 / (float)LIGHT_SHAFT_VOLUME_SIZE_X,
+                               1.0 / (float)LIGHT_SHAFT_VOLUME_SIZE_Y,
+                               1.0 / (float)LIGHT_SHAFT_VOLUME_SIZE_Z);
+
+    float3 shaft = lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw), 0.0).rgb * 2.0;
+    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw + float3(cell.x, 0.0, 0.0)), 0.0).rgb;
+    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw - float3(cell.x, 0.0, 0.0)), 0.0).rgb;
+    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw + float3(0.0, cell.y, 0.0)), 0.0).rgb;
+    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw - float3(0.0, cell.y, 0.0)), 0.0).rgb;
+    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw + float3(0.0, 0.0, cell.z)), 0.0).rgb;
+    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw - float3(0.0, 0.0, cell.z)), 0.0).rgb;
+    shaft *= 0.125;
 
     lightShaftHistory[pixelPos] = float4(
-        current * 0.01 * lightShaftParams[0].lightShaftIntensity, 1.0);
+        shaft * 0.01 * lightShaftParams[0].lightShaftIntensity, 1.0);
 }
