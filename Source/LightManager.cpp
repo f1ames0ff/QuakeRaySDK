@@ -756,7 +756,7 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
 
     AddLight(frameIndex, info.uniqueID, EncodeAsTexturedAreaLight(info, textureIndex));
 
-    if (info.lightShafts && info.projector > 0.5f && info.angleOuter > 0.0f && info.numVerts > 0)
+    if (info.lightShafts && info.numVerts > 0)
     {
         float s = 0.0f, t = 0.0f;
 
@@ -792,8 +792,10 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
             shaft.color[0] = info.color.data[0] * power;
             shaft.color[1] = info.color.data[1] * power;
             shaft.color[2] = info.color.data[2] * power;
-            shaft.cone[0] = std::cos(std::max(0.0f, std::min(info.angleInner, info.angleOuter)));
-            shaft.cone[1] = std::cos(std::max(0.0f, info.angleOuter));
+            const float angleOuter = info.angleOuter > 0.0f ? info.angleOuter : kPi * 0.5f;
+            const float angleInner = info.angleOuter > 0.0f ? std::min(info.angleInner, angleOuter) : 0.0f;
+            shaft.cone[0] = std::cos(std::max(0.0f, angleInner));
+            shaft.cone[1] = std::cos(angleOuter);
 
             const float lengthA = std::sqrt(info.A.data[0] * info.A.data[0] +
                                             info.A.data[1] * info.A.data[1] +
@@ -856,7 +858,7 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
         AddLight(frameIndex, info.uniqueID, encoded);
         published++;
 
-        if (info.lightShafts && info.projector > 0.5f && info.angleOuter > 0.0f)
+        if (info.lightShafts)
         {
             float direction[3] = {info.normal.data[0], info.normal.data[1], info.normal.data[2]};
             const float directionLength =
@@ -881,8 +883,10 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
                 shaft.color[0] = info.color.data[0] * power;
                 shaft.color[1] = info.color.data[1] * power;
                 shaft.color[2] = info.color.data[2] * power;
-                shaft.cone[0] = std::cos(std::max(0.0f, std::min(info.angleInner, info.angleOuter)));
-                shaft.cone[1] = std::cos(std::max(0.0f, info.angleOuter));
+                const float angleOuter = info.angleOuter > 0.0f ? info.angleOuter : kPi * 0.5f;
+                const float angleInner = info.angleOuter > 0.0f ? std::min(info.angleInner, angleOuter) : 0.0f;
+                shaft.cone[0] = std::cos(std::max(0.0f, angleInner));
+                shaft.cone[1] = std::cos(angleOuter);
 
                 const QrDtalMemberUpload *pMember = batch.pMembers != nullptr
                     ? &batch.pMembers[info.memberBase] : nullptr;

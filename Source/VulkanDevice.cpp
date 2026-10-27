@@ -1221,7 +1221,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const bool lightShaftsOn = lightShaftCount > 0;
         const bool godRaysOn = sunShaftsOn || lightShaftsOn;
 
-        static constexpr float kGodRaysRadianceScale = 50000.0f;
+        static constexpr float kGodRaysRadianceScale = 500.0f;
         const float lightShaftIntensity = (drawInfo.pSkyParams != nullptr)
             ? std::max(drawInfo.pSkyParams->lightShaftsIntensity, 0.0f) : 1.0f;
 
