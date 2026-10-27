@@ -1423,6 +1423,10 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                sizeof(godRaysParams.lightShafts[i].tangentU));
                         memcpy(godRaysParams.lightShafts[i].tangentV, sky.godRays.lightShafts[i].tangentV,
                                sizeof(godRaysParams.lightShafts[i].tangentV));
+                        memcpy(godRaysParams.lightShafts[i].surface, sky.godRays.lightShafts[i].surface,
+                               sizeof(godRaysParams.lightShafts[i].surface));
+                        memcpy(godRaysParams.lightShafts[i].emission, sky.godRays.lightShafts[i].emission,
+                               sizeof(godRaysParams.lightShafts[i].emission));
                     }
 
                     if (lightShaftVolumePass != nullptr && lightShaftVolumePass->IsCreated() &&
@@ -1430,8 +1434,8 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                     {
                         RhiLightShaftVolumePass::Params volumeParams = {};
                         static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{128u, 72u, 64u},
-                                                                                   {192u, 108u, 96u},
-                                                                                   {256u, 144u, 128u}};
+                                                                                   {160u, 88u, 80u},
+                                                                                   {192u, 108u, 96u}};
                         const uint32_t lightShaftQuality =
                             std::max(1u, std::min(sky.godRays.lightShaftSamples, 3u)) - 1u;
 
@@ -1459,11 +1463,16 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                    sizeof(volumeParams.lightShafts[i].tangentU));
                             memcpy(volumeParams.lightShafts[i].tangentV, sky.godRays.lightShafts[i].tangentV,
                                    sizeof(volumeParams.lightShafts[i].tangentV));
+                            memcpy(volumeParams.lightShafts[i].surface, sky.godRays.lightShafts[i].surface,
+                                   sizeof(volumeParams.lightShafts[i].surface));
+                            memcpy(volumeParams.lightShafts[i].emission, sky.godRays.lightShafts[i].emission,
+                                   sizeof(volumeParams.lightShafts[i].emission));
                         }
 
                         if (lightShaftVolumePass->Render(
                                 commandList, frameIndex, worldUniformBuffer.Get(),
                                 accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
+                                rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex) : nullptr,
                                 volumeParams))
                         {
                             godRaysPass->SetLightShaftVolume(lightShaftVolumePass->GetTexture(frameIndex),

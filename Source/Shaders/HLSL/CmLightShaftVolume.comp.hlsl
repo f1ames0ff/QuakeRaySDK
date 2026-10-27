@@ -21,9 +21,12 @@
 #define DESC_SET_LIGHT_SHAFT_PARAMS 1
 #define DESC_SET_GLOBAL_UNIFORM 2
 #define DESC_SET_LIGHT_SHAFT_VOLUME 3
+#define DESC_SET_TEXTURES 4
+#define DESC_SET_LIGHT_SOURCES 5
 
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "LightShafts.hlsli"
+#include "Light.hlsli"
 
 [[vk::binding(0, DESC_SET_TLAS)]] RaytracingAccelerationStructure topLevelAS;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
@@ -133,6 +136,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint i = 0; i < shaftCount; ++i)
     {
         const LightShaft_BT shaft = params.lightShafts[i];
+        const uint memberBase = (uint)shaft.surface.x;
+        const uint memberCount = (uint)shaft.surface.y;
+        const uint textureIndex = (uint)shaft.surface.z;
+        const float meanEmiss = shaft.surface.w;
+        const bool projector = shaft.emission.x > 0.5;
+
         const float3 source = shaft.positionRadius.xyz;
         const float radius = max(shaft.positionRadius.w, 0.001);
         float3 lightDir = shaft.direction.xyz;
@@ -144,7 +153,20 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         lightDir = normalize(lightDir);
 
-        const bool isArea = abs(shaft.tangentU.w) + abs(shaft.tangentV.w) > 0.0001;
+        const float reach = shaft.emission.y;
+        const float3 toCell = center - source;
+        const float cellDistance = length(toCell);
+
+        if (reach > 0.0 && cellDistance > reach)
+        {
+            continue;
+        }
+
+        if (cellDistance > 0.001 && dot(toCell / cellDistance, lightDir) < shaft.cone.y - 0.001)
+        {
+            continue;
+        }
+
         const uint samples = max(1u, min(params.lightShaftSamples, 3u));
         float3 sampleSum = (float3)0;
 
@@ -152,32 +174,90 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         {
             for (uint sx = 0; sx < samples; sx++)
             {
-                float3 sourcePoint = source;
+                const uint sampleIndex = sy * samples + sx;
+                const uint seed = (uint)(cell.x * 1973 + cell.y * 9277 + cell.z * 4391 +
+                                         (int)i * 65537 + (int)sampleIndex * 131);
 
-                if (isArea)
+                float3 emitter = source;
+                float3 emitted = (float3)0;
+
+                if (memberCount > 0u)
                 {
-                    float u;
-                    float v;
+                    const float memberRnd = hash1(seed);
+                    const int column = aliasColumn(memberRnd, (int)memberCount);
+                    const ShDtalMember columnMember = dtalMembers[memberBase + (uint)column];
+                    const uint chosen = aliasChoice(memberRnd, (int)memberCount, column,
+                                                    columnMember.prob, columnMember.aliasIndex);
 
-                    if (samples > 1)
+                    if (chosen >= memberCount)
                     {
-                        u = ((float)sx + 0.5) * 2.0 / (float)samples - 1.0;
-                        v = ((float)sy + 0.5) * 2.0 / (float)samples - 1.0;
-                    }
-                    else
-                    {
-                        const float3 sourceDelta = center - source;
-                        u = clamp(dot(sourceDelta, shaft.tangentU.xyz) / max(abs(shaft.tangentU.w), 0.0001),
-                                  -1.0, 1.0);
-                        v = clamp(dot(sourceDelta, shaft.tangentV.xyz) / max(abs(shaft.tangentV.w), 0.0001),
-                                  -1.0, 1.0);
+                        continue;
                     }
 
-                    sourcePoint += shaft.tangentU.xyz * (u * shaft.tangentU.w) +
-                                   shaft.tangentV.xyz * (v * shaft.tangentV.w);
+                    const ShDtalMember m = dtalMembers[memberBase + chosen];
+                    const float memberPdf = max(m.marginalProb, 1e-6);
+
+                    TexturedAreaLight tal;
+                    tal.A = m.A;
+                    tal.B = m.B;
+                    tal.C = m.C;
+                    tal.normal = m.normal;
+                    tal.area = m.area;
+                    tal.textureIndex = textureIndex;
+                    tal.meanEmiss = meanEmiss;
+                    tal.coneCosInner = shaft.cone.x;
+                    tal.coneCosOuter = shaft.cone.y;
+                    tal.projector = projector ? 1.0 : 0.0;
+                    tal.numVerts = clamp((int)m.numVerts, 0, MAX_TEXTURED_AREA_LIGHT_VERTS);
+                    tal.color = shaft.color.rgb;
+
+                    for (int v = 0; v < MAX_TEXTURED_AREA_LIGHT_VERTS; v++)
+                    {
+                        tal.uvVerts[v] = m.uv[v];
+                    }
+
+                    const LightSample ls = sampleTexturedAreaLight(
+                        tal, center, float2(hash1(seed + 7u), hash1(seed + 13u)));
+
+                    if (!(ls.dw > 0.0))
+                    {
+                        continue;
+                    }
+
+                    emitter = ls.position;
+                    emitted = ls.color * (ls.dw / memberPdf);
+                }
+                else
+                {
+                    const float3 fromSource = center - source;
+                    const float distToSource = length(fromSource);
+
+                    if (distToSource < 0.001)
+                    {
+                        continue;
+                    }
+
+                    const float cosAngle = dot(fromSource / distToSource, lightDir);
+                    const float cone = smoothstep(shaft.cone.y, shaft.cone.x, cosAngle);
+
+                    if (cone <= 0.0)
+                    {
+                        continue;
+                    }
+
+                    const float sourceRadius = max(radius, 0.15);
+                    const float attenuation =
+                        sourceRadius * sourceRadius / (distToSource * distToSource + sourceRadius * sourceRadius);
+
+                    emitter = source + lightDir * 0.001;
+                    emitted = shaft.color.rgb * (cone * attenuation);
                 }
 
-                const float3 emitter = sourcePoint + lightDir * 0.001;
+                if (!lightShaftVisible(center, emitter))
+                {
+                    continue;
+                }
+
                 const float3 fromLight = center - emitter;
                 const float distToLight = length(fromLight);
 
@@ -186,26 +266,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                     continue;
                 }
 
-                const float cosAngle = dot(fromLight / distToLight, lightDir);
-                const float cone = smoothstep(shaft.cone.y, shaft.cone.x, cosAngle);
-
-                if (cone <= 0.0)
-                {
-                    continue;
-                }
-
-                if (!lightShaftVisible(center, emitter))
-                {
-                    continue;
-                }
-
-                const float sourceRadius = max(radius, 0.15);
-                const float attenuation =
-                    sourceRadius * sourceRadius / (distToLight * distToLight + sourceRadius * sourceRadius);
-                const float phase = shaftPhase(
-                    dot(-fromLight / distToLight, toViewer), 0.5);
-
-                sampleSum += shaft.color.rgb * (cone * attenuation * phase);
+                const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), 0.5);
+                sampleSum += emitted * phase;
             }
         }
 

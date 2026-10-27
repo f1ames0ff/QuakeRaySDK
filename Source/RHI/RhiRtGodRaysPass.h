@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -256,6 +256,8 @@ public:
         float cone[4];
         float tangentU[4];
         float tangentV[4];
+        float surface[4];
+        float emission[4];
     };
 
     struct Params
@@ -620,7 +622,7 @@ private:
 // The CPU mirror has to match the measured member layout member by member; the shader's element
 // stride is GOD_RAYS_PARAMS_STRIDE, not this size, which is why the buffer is created with the
 // stride, not with sizeof().
-static_assert(sizeof(RhiRtGodRaysPass::Params) == 6304,
+static_assert(sizeof(RhiRtGodRaysPass::Params) == 8352,
               "GodRaysParams_BT is 6304 bytes; the structured buffer uses the 6304-byte stride");
 static_assert(offsetof(RhiRtGodRaysPass::Params, sunDirection) == 0, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, sunColor) == 16, "measured member offset");

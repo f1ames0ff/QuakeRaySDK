@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -1282,6 +1282,8 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
             memcpy (sky.godRays.lightShafts[i].cone, lightShafts[i].cone, sizeof (lightShafts[i].cone));
             memcpy (sky.godRays.lightShafts[i].tangentU, lightShafts[i].tangentU, sizeof (lightShafts[i].tangentU));
             memcpy (sky.godRays.lightShafts[i].tangentV, lightShafts[i].tangentV, sizeof (lightShafts[i].tangentV));
+            memcpy (sky.godRays.lightShafts[i].surface, lightShafts[i].surface, sizeof (lightShafts[i].surface));
+            memcpy (sky.godRays.lightShafts[i].emission, lightShafts[i].emission, sizeof (lightShafts[i].emission));
         }
 
         sky.godRays.hasAabb = scene->HasAABB();

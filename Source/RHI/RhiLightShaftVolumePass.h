@@ -34,6 +34,7 @@ namespace qray
 namespace rhi
 {
 class RhiFrameContext;
+class RhiTextureTable;
 }
 
 class RhiLightShaftVolumePass final
@@ -56,6 +57,8 @@ public:
         float cone[4];
         float tangentU[4];
         float tangentV[4];
+        float surface[4];
+        float emission[4];
     };
 
     struct Params
@@ -83,6 +86,8 @@ public:
 
     bool Create(nvrhi::IDevice *pDevice,
                 rhi::RhiFrameContext *pFrameContext,
+                rhi::RhiTextureTable *pTextureTable,
+                nvrhi::IBindingLayout *pLightLayout,
                 const char *pShaderFolderPath,
                 PrintFunction pfnPrint);
 
@@ -92,6 +97,7 @@ public:
                 uint32_t frameIndex,
                 nvrhi::IBuffer *pUniformBuffer,
                 nvrhi::rt::IAccelStruct *pTopLevel,
+                nvrhi::IBindingSet *pLightSet,
                 const Params &params);
 
     nvrhi::ITexture *GetTexture(uint32_t frameIndex) const;
@@ -116,6 +122,8 @@ private:
 
     nvrhi::IDevice *device = nullptr;
     rhi::RhiFrameContext *frameContext = nullptr;
+    rhi::RhiTextureTable *textureTable = nullptr;
+    nvrhi::BindingLayoutHandle lightLayout;
     std::string shaderFolderPath;
     PrintFunction print;
     bool created = false;
@@ -137,7 +145,7 @@ private:
     Target targets[MAX_FRAMES_IN_FLIGHT];
 };
 
-static_assert(sizeof(RhiLightShaftVolumePass::Params) == 6208,
+static_assert(sizeof(RhiLightShaftVolumePass::Params) == 8256,
               "LightShaftVolumeParams_BT is 6208 bytes");
 
 }

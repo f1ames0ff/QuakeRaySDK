@@ -211,6 +211,8 @@ public:
             float cone[4] = {};
             float tangentU[4] = {};
             float tangentV[4] = {};
+            float surface[4] = {};
+            float emission[4] = {};
         };
 
         struct GodRays

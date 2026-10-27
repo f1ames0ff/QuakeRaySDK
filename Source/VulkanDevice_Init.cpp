@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -413,7 +413,9 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
 
                                 rhiLightShaftVolumePass = std::make_shared<RhiLightShaftVolumePass>();
                                 if (!rhiLightShaftVolumePass->Create(
-                                        nvrhi->GetDevice(), rhiFrameContext.get(), info->pShaderFolderPath,
+                                        nvrhi->GetDevice(), rhiFrameContext.get(), rhiTextureTable.get(),
+                                        rhiRtDirectPass != nullptr ? rhiRtDirectPass->GetLightLayout() : nullptr,
+                                        info->pShaderFolderPath,
                                         [this](const char *pMessage) { Print(pMessage); }))
                                 {
                                     rhiLightShaftVolumePass.reset();

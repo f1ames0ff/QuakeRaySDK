@@ -27,6 +27,8 @@ struct LightShaft_BT
     float4 cone;
     float4 tangentU;
     float4 tangentV;
+    float4 surface;
+    float4 emission;
 };
 
 struct LightShaftVolumeParams_BT

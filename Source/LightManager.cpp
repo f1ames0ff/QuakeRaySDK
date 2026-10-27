@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -796,6 +796,11 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
             const float angleInner = info.angleOuter > 0.0f ? std::min(info.angleInner, angleOuter) : 0.0f;
             shaft.cone[0] = std::cos(std::max(0.0f, angleInner));
             shaft.cone[1] = std::cos(angleOuter);
+            shaft.surface[0] = 0.0f;
+            shaft.surface[1] = 0.0f;
+            shaft.surface[2] = static_cast<float>(textureIndex);
+            shaft.surface[3] = info.meanEmiss;
+            shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
 
             const float lengthA = std::sqrt(info.A.data[0] * info.A.data[0] +
                                             info.A.data[1] * info.A.data[1] +
@@ -887,6 +892,12 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
                 const float angleInner = info.angleOuter > 0.0f ? std::min(info.angleInner, angleOuter) : 0.0f;
                 shaft.cone[0] = std::cos(std::max(0.0f, angleInner));
                 shaft.cone[1] = std::cos(angleOuter);
+                shaft.surface[0] = static_cast<float>(info.memberBase);
+                shaft.surface[1] = static_cast<float>(info.memberCount);
+                shaft.surface[2] = static_cast<float>(pTextureIndices[i]);
+                shaft.surface[3] = info.meanEmiss;
+                shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
+                shaft.emission[1] = info.reach;
 
                 const QrDtalMemberUpload *pMember = batch.pMembers != nullptr
                     ? &batch.pMembers[info.memberBase] : nullptr;

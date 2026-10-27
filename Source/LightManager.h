@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -52,6 +52,8 @@ public:
         float cone[4];
         float tangentU[4];
         float tangentV[4];
+        float surface[4];
+        float emission[4];
     };
 
     uint32_t CollectLightShafts(LightShaft *out, uint32_t max);

@@ -19,6 +19,7 @@
 #include "RhiFrameContext.h"
 #include "RhiPipeline.h"
 #include "RhiResources.h"
+#include "RhiTextureTable.h"
 
 #include <algorithm>
 #include <cstring>
@@ -49,6 +50,8 @@ RhiLightShaftVolumePass::~RhiLightShaftVolumePass() = default;
 
 bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
                                      rhi::RhiFrameContext *pFrameContext,
+                                     rhi::RhiTextureTable *pTextureTable,
+                                     nvrhi::IBindingLayout *pLightLayout,
                                      const char *pShaderFolderPath,
                                      PrintFunction pfnPrint)
 {
@@ -59,6 +62,8 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
 
     device = pDevice;
     frameContext = pFrameContext;
+    textureTable = pTextureTable;
+    lightLayout = pLightLayout;
     shaderFolderPath = pShaderFolderPath != nullptr ? pShaderFolderPath : "";
     print = std::move(pfnPrint);
 
@@ -130,6 +135,14 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
         desc.addBindingLayout(paramsLayout);
         desc.addBindingLayout(uniformLayout);
         desc.addBindingLayout(volumeLayout);
+        if (textureTable != nullptr && textureTable->GetLayout() != nullptr)
+        {
+            desc.addBindingLayout(textureTable->GetLayout());
+        }
+        if (lightLayout != nullptr)
+        {
+            desc.addBindingLayout(lightLayout);
+        }
         volumePipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass");
     }
 
@@ -274,6 +287,7 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
                                      uint32_t frameIndex,
                                      nvrhi::IBuffer *pUniformBuffer,
                                      nvrhi::rt::IAccelStruct *pTopLevel,
+                                     nvrhi::IBindingSet *pLightSet,
                                      const Params &params)
 {
     if (!created || pCommandList == nullptr || frameIndex >= MAX_FRAMES_IN_FLIGHT)
@@ -300,6 +314,11 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
         }
     }
 
+    if (pLightSet == nullptr || textureTable == nullptr || textureTable->GetTable() == nullptr)
+    {
+        return false;
+    }
+
     Target &target = targets[frameIndex];
     if (target.texture == nullptr || target.uavSet == nullptr || target.paramsSet == nullptr)
     {
@@ -321,6 +340,8 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
     state.addBindingSet(target.paramsSet);
     state.addBindingSet(target.uniformSet);
     state.addBindingSet(target.uavSet);
+    state.addBindingSet(textureTable->GetTable());
+    state.addBindingSet(pLightSet);
     pCommandList->setComputeState(state);
 
     const uint32_t groupsX = (volumeSizeX + GROUP_SIZE_X - 1) / GROUP_SIZE_X;
