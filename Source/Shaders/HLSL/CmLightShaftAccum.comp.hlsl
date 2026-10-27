@@ -99,6 +99,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                                     mul(globalUniform.viewPrev, float4(surfacePos, 1.0)));
     const float2 previousPos = (previousClip.xy / previousClip.w * 0.5 + 0.5) *
                                float2(globalUniform.renderWidth, globalUniform.renderHeight);
+    const float2 pixelCenter = (float2)pixelPos + 0.5;
+    const bool reprojectionValid = !any(isnan(previousPos)) &&
+                                   length(previousPos - pixelCenter) < 64.0;
     const float2 previousBaseFloat = floor(previousPos - 0.5);
     const int2 previousBase = int2(previousBaseFloat);
     const float2 previousSub = previousPos - 0.5 - previousBaseFloat;
@@ -107,7 +110,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float historyLength = 0.0;
     float weightSum = 0.0;
 
-    for (int yy = 0; yy <= 1; yy++)
+    for (int yy = 0; reprojectionValid && yy <= 1; yy++)
     {
         for (int xx = 0; xx <= 1; xx++)
         {
@@ -148,9 +151,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         historyLength = 0.0;
     }
 
-    const float maxHistory = (float)clamp(lightShaftParams[0].lightShaftSteps, 4u, 32u);
+    const float maxHistory = (float)clamp(lightShaftParams[0].lightShaftSteps, 4u, 8u);
     historyLength = clamp(historyLength + 1.0, 1.0, maxHistory);
     accumulated = lerp(accumulated, current, 1.0 / historyLength);
+    accumulated = min(accumulated, current * 4.0);
     lightShaftHistory[pixelPos] = float4(
         accumulated * 0.01 * lightShaftParams[0].lightShaftIntensity, historyLength);
 }
