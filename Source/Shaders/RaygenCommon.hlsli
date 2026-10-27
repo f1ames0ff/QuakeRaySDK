@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -378,7 +378,7 @@ float evalSkyNeePdf(const float3 n, const float3 direction)
 
 #if LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
 
-#define SHADOW_RAY_EPS       (0.01 * globalUniform.sceneUnitsPerHostUnit)
+#define SHADOW_RAY_EPS       (2.5e-4 * globalUniform.sceneUnitsPerHostUnit)
 #define RAY_ORIGIN_LEAK_BIAS 2.5e-4
 
 /* One segment per pane the light may cross, plus the segment that reaches it. */
@@ -429,7 +429,7 @@ float3 traceShadowRay(uint surfInstCustomIndex, float3 start, float3 end, bool i
 
         RayDesc rayDesc;
         rayDesc.Origin = origin;
-        rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
+        rayDesc.TMin = 2.5e-5 * globalUniform.sceneUnitsPerHostUnit;
         rayDesc.Direction = l;
         rayDesc.TMax = maxDistance - SHADOW_RAY_EPS;
 
