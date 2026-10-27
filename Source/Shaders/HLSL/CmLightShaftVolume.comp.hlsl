@@ -124,10 +124,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     const float3 center0 = volumeGetCenter(cell);
-    const float3 centerZ = volumeGetCenter(cell + int3(0, 0, 1));
-    const uint seed = (uint)(cell.x * 1973 + cell.y * 9277 + (int)globalUniform.frameId * 7331);
-    const float jitter = hash1(seed) - 0.5;
-    const float3 center = center0 + jitter * (centerZ - center0);
+    const float3 center = center0;
     const float3 toViewer = normalize(globalUniform.cameraPosition.xyz - center);
     const float density = 0.02 * shaftDensity(center);
     if (density <= 0.0)

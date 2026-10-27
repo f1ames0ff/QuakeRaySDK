@@ -82,79 +82,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    const float3 normal = texelFetchNormal(cbPix);
-    const uint seed = getRandomSeed(pixelPos, globalUniform.frameId);
-    const float3 noise = rndBlueNoise8(seed, 1).xyz;
-
-    float3 uvw = lightShaftVolumeUVW(surfacePos);
-    uvw += (noise * 2.0 - 1.0) *
-           float3(2.0 / LIGHT_SHAFT_VOLUME_SIZE_X,
-                  2.0 / LIGHT_SHAFT_VOLUME_SIZE_Y,
-                  2.0 / LIGHT_SHAFT_VOLUME_SIZE_Z);
-
+    const float3 uvw = lightShaftVolumeUVW(surfacePos);
     const float3 current = lightShaftVolume.SampleLevel(
         lightShaftVolumeSampler, saturate(uvw), 0.0).rgb;
 
-    const float4 previousClip = mul(globalUniform.projectionPrev,
-                                    mul(globalUniform.viewPrev, float4(surfacePos, 1.0)));
-    const float2 previousPos = (previousClip.xy / previousClip.w * 0.5 + 0.5) *
-                               float2(globalUniform.renderWidth, globalUniform.renderHeight);
-    const float2 pixelCenter = (float2)pixelPos + 0.5;
-    const bool reprojectionValid = !any(isnan(previousPos)) &&
-                                   length(previousPos - pixelCenter) < 64.0;
-    const float2 previousBaseFloat = floor(previousPos - 0.5);
-    const int2 previousBase = int2(previousBaseFloat);
-    const float2 previousSub = previousPos - 0.5 - previousBaseFloat;
-
-    float3 accumulated = (float3)0;
-    float historyLength = 0.0;
-    float weightSum = 0.0;
-
-    for (int yy = 0; reprojectionValid && yy <= 1; yy++)
-    {
-        for (int xx = 0; xx <= 1; xx++)
-        {
-            const int2 previousPixel = previousBase + int2(xx, yy);
-            if (any(previousPixel < (int2)0) || any(previousPixel >= renderSize))
-            {
-                continue;
-            }
-
-            const int2 previousCbPixel = getCheckerboardPix(previousPixel);
-            const float previousDepth = framebufDepthWorld_Prev_Sampled.Load(
-                int3(previousCbPixel, 0)).x;
-            const float3 previousNormal = texelFetchNormal_Prev(previousCbPixel);
-
-            if (!testReprojectedDepth(rayDistance, previousDepth, 0.0) ||
-                !testReprojectedNormal(normal, previousNormal))
-            {
-                continue;
-            }
-
-            const float weight = (xx != 0 ? previousSub.x : 1.0 - previousSub.x) *
-                                 (yy != 0 ? previousSub.y : 1.0 - previousSub.y);
-            const float4 previous = lightShaftHistoryPrev.Load(int3(previousPixel, 0));
-            accumulated += previous.rgb * weight;
-            historyLength += previous.a * weight;
-            weightSum += weight;
-        }
-    }
-
-    if (weightSum > 0.0001)
-    {
-        accumulated /= weightSum;
-        historyLength /= weightSum;
-    }
-    else
-    {
-        accumulated = current;
-        historyLength = 0.0;
-    }
-
-    const float maxHistory = (float)clamp(lightShaftParams[0].lightShaftSteps, 4u, 8u);
-    historyLength = clamp(historyLength + 1.0, 1.0, maxHistory);
-    accumulated = lerp(accumulated, current, 1.0 / historyLength);
-    accumulated = min(accumulated, current * 4.0);
     lightShaftHistory[pixelPos] = float4(
-        accumulated * 0.01 * lightShaftParams[0].lightShaftIntensity, historyLength);
+        current * 0.01 * lightShaftParams[0].lightShaftIntensity, 1.0);
 }
