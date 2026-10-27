@@ -1221,8 +1221,12 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const bool lightShaftsOn = lightShaftCount > 0;
         const bool godRaysOn = sunShaftsOn || lightShaftsOn;
 
+        static constexpr float kGodRaysRadianceScale = 50000.0f;
+        const float lightShaftIntensity = (drawInfo.pSkyParams != nullptr)
+            ? std::max(drawInfo.pSkyParams->lightShaftsIntensity, 0.0f) : 1.0f;
+
         sky.godRays.enabled = godRaysOn;
-        sky.godRays.intensity = 0.05f * godRaysIntensity;
+        sky.godRays.intensity = kGodRaysRadianceScale * godRaysIntensity;
         sky.godRays.eccentricity = 0.75f;
         {
             static constexpr float stepScales[5] = {2.0f, 1.5f, 1.0f, 0.75f, 0.5f};
@@ -1231,7 +1235,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
             sky.godRays.sunStepScale = stepScales[quality];
         }
         sky.godRays.lightShaftCount = lightShaftCount;
-        sky.godRays.lightShaftIntensity = 1.0f;
+        sky.godRays.lightShaftIntensity = lightShaftIntensity;
         sky.godRays.lightShaftSteps = (drawInfo.pSkyParams != nullptr)
             ? std::min(16u, 8u + std::min(drawInfo.pSkyParams->lightShaftsResolution, 2u) * 4u) : 12u;
 

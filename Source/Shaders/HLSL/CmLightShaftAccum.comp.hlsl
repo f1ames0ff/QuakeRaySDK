@@ -151,5 +151,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float maxHistory = (float)clamp(lightShaftParams[0].lightShaftSteps, 4u, 32u);
     historyLength = clamp(historyLength + 1.0, 1.0, maxHistory);
     accumulated = lerp(accumulated, current, 1.0 / historyLength);
-    lightShaftHistory[pixelPos] = float4(accumulated * 0.01, historyLength);
+    lightShaftHistory[pixelPos] = float4(
+        accumulated * 0.01 * lightShaftParams[0].lightShaftIntensity, historyLength);
 }

@@ -123,6 +123,7 @@ float GetShadow(float3 worldPos)
 }
 
 static const float PI = 3.1415926535;
+static const float Q2_UNIT_IN_METERS = 0.0254;
 
 float ScatterPhase_HenyeyGreenstein(float cosa, float g)
 {
@@ -157,7 +158,7 @@ float getDensity(float3 p)
 float getStep(float t, float density)
 {
     const float scale = clamp(godRaysParams[0].sunStepScale, 0.25, 4.0);
-    return max(1.0, lerp(20.0, 5.0, density) * scale) * globalUniform.sceneUnitsPerHostUnit;
+    return max(1.0, lerp(20.0, 5.0, density) * scale) * Q2_UNIT_IN_METERS;
 }
 
 [numthreads(16, 16, 1)]
@@ -373,7 +374,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         // don't leak through thin walls or at grazing angles. The final step
         // before the surface is not sampled (Q2RTX breaks here), which keeps
         // the surface-facing samples from being pushed behind the geometry.
-        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0 * globalUniform.sceneUnitsPerHostUnit;
+        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0 * Q2_UNIT_IN_METERS;
         const float shadow = GetShadow(currentPos + shadowBias) *
             getCloudSunTransmittance(currentPos, godRaysParams[0].sunDirection.xyz, true);
 

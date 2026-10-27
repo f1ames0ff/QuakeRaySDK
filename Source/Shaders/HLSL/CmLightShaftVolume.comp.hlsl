@@ -187,7 +187,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             continue;
         }
 
-        const float attenuation = radius * radius / (distToLight * distToLight + radius * radius);
+        const float sourceRadius = max(radius, 0.5);
+        const float attenuation =
+            sourceRadius * sourceRadius / (distToLight * distToLight + sourceRadius * sourceRadius);
         const float phase = shaftPhase(
             dot(-fromLight / distToLight, toViewer), 0.5);
 
