@@ -37,13 +37,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    const float stepLength = max(globalUniform.volumeCameraFar - globalUniform.volumeCameraNear, 0.001) /
-                             (float)LIGHT_SHAFT_VOLUME_SIZE_Z;
+    const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
+    const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
     float3 accumulated = (float3)0;
 
     for (int z = 0; z < LIGHT_SHAFT_VOLUME_SIZE_Z; z++)
     {
         const int3 cell = int3(column, z);
+        const float t0 = (float)z / (float)LIGHT_SHAFT_VOLUME_SIZE_Z;
+        const float t1 = (float)(z + 1) / (float)LIGHT_SHAFT_VOLUME_SIZE_Z;
+        const float stepLength = (farPlane - nearPlane) * (t1 * t1 - t0 * t0);
         const float4 current = lightShaftVolume[cell];
         accumulated += current.rgb * stepLength;
         lightShaftVolume[cell] = float4(accumulated, current.a);

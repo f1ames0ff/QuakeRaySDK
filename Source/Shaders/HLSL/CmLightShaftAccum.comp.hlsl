@@ -47,7 +47,7 @@ float3 lightShaftVolumeUVW(float3 world)
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
     const float radialDistance = length(world - globalUniform.cameraPosition.xyz);
     const float normalizedDepth = (radialDistance - nearPlane) / (farPlane - nearPlane);
-    return float3(screen, saturate(normalizedDepth));
+    return float3(screen, saturate(sqrt(saturate(normalizedDepth))));
 }
 
 [numthreads(16, 16, 1)]

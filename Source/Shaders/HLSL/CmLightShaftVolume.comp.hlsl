@@ -63,8 +63,8 @@ float3 volumeGetCenter(int3 cell)
                           float2(LIGHT_SHAFT_VOLUME_SIZE_X, LIGHT_SHAFT_VOLUME_SIZE_Y);
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
-    const float distance = nearPlane + (farPlane - nearPlane) * saturate((cell.z + 0.5) /
-                                                                          (float)LIGHT_SHAFT_VOLUME_SIZE_Z);
+    const float t = saturate((cell.z + 0.5) / (float)LIGHT_SHAFT_VOLUME_SIZE_Z);
+    const float distance = nearPlane + (farPlane - nearPlane) * t * t;
     return globalUniform.cameraPosition.xyz + volumeRayDirection(cellUv) * distance;
 }
 
@@ -149,48 +149,71 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         lightDir = normalize(lightDir);
 
         const bool isArea = abs(shaft.tangentU.w) + abs(shaft.tangentV.w) > 0.0001;
-        float3 sourcePoint = source;
+        const uint samples = max(1u, min(params.lightShaftSamples, 3u));
+        float3 sampleSum = (float3)0;
 
-        if (isArea)
+        for (uint sy = 0; sy < samples; sy++)
         {
-            const float3 sourceDelta = center - source;
-            const float u = clamp(dot(sourceDelta, shaft.tangentU.xyz) / max(abs(shaft.tangentU.w), 0.0001),
+            for (uint sx = 0; sx < samples; sx++)
+            {
+                float3 sourcePoint = source;
+
+                if (isArea)
+                {
+                    float u;
+                    float v;
+
+                    if (samples > 1)
+                    {
+                        u = ((float)sx + 0.5) * 2.0 / (float)samples - 1.0;
+                        v = ((float)sy + 0.5) * 2.0 / (float)samples - 1.0;
+                    }
+                    else
+                    {
+                        const float3 sourceDelta = center - source;
+                        u = clamp(dot(sourceDelta, shaft.tangentU.xyz) / max(abs(shaft.tangentU.w), 0.0001),
                                   -1.0, 1.0);
-            const float v = clamp(dot(sourceDelta, shaft.tangentV.xyz) / max(abs(shaft.tangentV.w), 0.0001),
+                        v = clamp(dot(sourceDelta, shaft.tangentV.xyz) / max(abs(shaft.tangentV.w), 0.0001),
                                   -1.0, 1.0);
-            sourcePoint += shaft.tangentU.xyz * (u * shaft.tangentU.w) +
-                           shaft.tangentV.xyz * (v * shaft.tangentV.w);
+                    }
+
+                    sourcePoint += shaft.tangentU.xyz * (u * shaft.tangentU.w) +
+                                   shaft.tangentV.xyz * (v * shaft.tangentV.w);
+                }
+
+                const float3 emitter = sourcePoint + lightDir * max(radius, 0.5);
+                const float3 fromLight = center - emitter;
+                const float distToLight = length(fromLight);
+
+                if (distToLight < 0.001)
+                {
+                    continue;
+                }
+
+                const float cosAngle = dot(fromLight / distToLight, lightDir);
+                const float cone = smoothstep(shaft.cone.y, shaft.cone.x, cosAngle);
+
+                if (cone <= 0.0)
+                {
+                    continue;
+                }
+
+                if (!lightShaftVisible(center, emitter))
+                {
+                    continue;
+                }
+
+                const float sourceRadius = max(radius, 0.5);
+                const float attenuation =
+                    sourceRadius * sourceRadius / (distToLight * distToLight + sourceRadius * sourceRadius);
+                const float phase = shaftPhase(
+                    dot(-fromLight / distToLight, toViewer), 0.5);
+
+                sampleSum += shaft.color.rgb * (cone * attenuation * phase);
+            }
         }
 
-        const float3 emitter = sourcePoint + lightDir * max(radius, 0.5);
-        const float3 fromLight = center - emitter;
-        const float distToLight = length(fromLight);
-
-        if (distToLight < 0.001)
-        {
-            continue;
-        }
-
-        const float cosAngle = dot(fromLight / distToLight, lightDir);
-        const float cone = smoothstep(shaft.cone.y, shaft.cone.x, cosAngle);
-
-        if (cone <= 0.0)
-        {
-            continue;
-        }
-
-        if (!lightShaftVisible(center, emitter))
-        {
-            continue;
-        }
-
-        const float sourceRadius = max(radius, 0.5);
-        const float attenuation =
-            sourceRadius * sourceRadius / (distToLight * distToLight + sourceRadius * sourceRadius);
-        const float phase = shaftPhase(
-            dot(-fromLight / distToLight, toViewer), 0.5);
-
-        radiance += shaft.color.rgb * (cone * attenuation * phase);
+        radiance += sampleSum / (float)(samples * samples);
     }
 
     lightShaftVolume[cell] = float4(radiance * density, 0.0);

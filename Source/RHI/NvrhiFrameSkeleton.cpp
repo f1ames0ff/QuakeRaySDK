@@ -1430,6 +1430,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                     {
                         RhiLightShaftVolumePass::Params volumeParams = {};
                         volumeParams.lightShaftCount = sky.godRays.lightShaftCount;
+                        volumeParams.lightShaftSamples = sky.godRays.lightShaftSamples;
                         memcpy(volumeParams.worldCenter, sky.godRays.worldCenter,
                                sizeof(volumeParams.worldCenter));
                         memcpy(volumeParams.worldHalfSizeInv, sky.godRays.worldHalfSizeInv,
