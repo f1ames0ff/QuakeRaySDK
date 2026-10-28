@@ -441,16 +441,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
         else
         {
-            uint slot;
-            InterlockedAdd(rayCounter[0], 1u, slot);
-            if (params.rayBudget == 0u || slot < params.rayBudget)
-            {
-                visibility = lightShaftVisible(center, center + sunDirection * MAX_RAY_LENGTH) ? 1.0 : 0.0;
-            }
-            else
-            {
-                visibility = 1.0;
-            }
+            visibility = lightShaftVisible(center, center + sunDirection * MAX_RAY_LENGTH) ? 1.0 : 0.0;
         }
 
         radiance += params.sunColor.rgb * visibility * shaftPhase(dot(-sunDirection, toViewer), 0.5);
