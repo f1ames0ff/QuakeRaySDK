@@ -97,14 +97,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 shaft = centerSample.rgb * 2.0;
     float transmittance = centerSample.a * 2.0;
 
-    const float3 offsets[6] =
+    const float3 offsets[4] =
     {
         float3(cell.x, 0.0, 0.0), float3(-cell.x, 0.0, 0.0),
-        float3(0.0, cell.y, 0.0), float3(0.0, -cell.y, 0.0),
-        float3(0.0, 0.0, cell.z), float3(0.0, 0.0, -cell.z)
+        float3(0.0, cell.y, 0.0), float3(0.0, -cell.y, 0.0)
     };
 
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 4; i++)
     {
         const float4 tap = lightShaftVolume.SampleLevel(
             lightShaftVolumeSampler, saturate(uvw + offsets[i]), 0.0);
@@ -112,8 +111,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         transmittance += tap.a;
     }
 
-    shaft *= 0.125;
-    transmittance = saturate(transmittance * 0.125);
+    shaft /= 6.0;
+    transmittance = saturate(transmittance / 6.0);
 
     const uint debugMode = lightShaftParams[0].accumDebugMode;
     if (debugMode != 0u)

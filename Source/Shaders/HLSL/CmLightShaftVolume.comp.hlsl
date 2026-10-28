@@ -133,7 +133,7 @@ bool lightShaftVisible(float3 origin, float3 target)
     InterlockedAdd(rayCounter[0], 1u, slot);
     if (params.rayBudget != 0u && slot >= params.rayBudget)
     {
-        return true;
+        return false;
     }
 
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |

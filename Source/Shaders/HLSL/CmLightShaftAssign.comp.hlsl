@@ -144,7 +144,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     {
         uint slot;
         InterlockedAdd(rayCounter[0], 1u, slot);
-        bool visible = true;
+        bool visible = false;
         if (params.rayBudget == 0u || slot < params.rayBudget)
         {
             const float3 direction = normalize(params.sunDirection.xyz);

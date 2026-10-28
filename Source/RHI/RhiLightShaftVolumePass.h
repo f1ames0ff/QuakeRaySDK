@@ -43,8 +43,8 @@ public:
     using PrintFunction = std::function<void(const char *)>;
 
     static constexpr uint32_t MAX_LIGHT_SHAFTS = 64;
-    static constexpr uint32_t VOLUME_SIZE_X = 192;
-    static constexpr uint32_t VOLUME_SIZE_Y = 108;
+    static constexpr uint32_t VOLUME_SIZE_X = 384;
+    static constexpr uint32_t VOLUME_SIZE_Y = 216;
     static constexpr uint32_t VOLUME_SIZE_Z = 96;
     static constexpr uint32_t GROUP_SIZE_X = 4;
     static constexpr uint32_t GROUP_SIZE_Y = 4;

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -232,7 +232,7 @@ public:
             bool lightShaftTemporal = true;
             bool lightShaftSun = false;
             uint32_t lightShaftDebug = 0;
-            uint32_t lightShaftRayBudget = 131072;
+            uint32_t lightShaftRayBudget = 1048576;
             uint32_t lightShaftSteps = 8;
             uint32_t lightShaftSamples = 1;
             uint32_t lightShaftCount = 0;

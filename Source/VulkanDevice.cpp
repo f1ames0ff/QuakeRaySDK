@@ -1253,7 +1253,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         sky.godRays.lightShaftDebug = drawInfo.pSkyParams != nullptr
             ? std::min(drawInfo.pSkyParams->lightShaftsDebug, 5u) : 0u;
         sky.godRays.lightShaftRayBudget = drawInfo.pSkyParams != nullptr
-            ? drawInfo.pSkyParams->lightShaftsRayBudget : 131072u;
+            ? drawInfo.pSkyParams->lightShaftsRayBudget : 1048576u;
         if (drawInfo.pSkyParams != nullptr)
         {
             for (int k = 0; k < 3; k++)

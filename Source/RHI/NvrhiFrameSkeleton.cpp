@@ -1414,9 +1414,9 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                     godRaysParams.lightShaftIntensity = sky.godRays.lightShaftIntensity;
                     godRaysParams.lightShaftSteps = sky.godRays.lightShaftSteps;
 
-                    static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{128u, 72u, 64u},
-                                                                               {160u, 88u, 80u},
-                                                                               {192u, 108u, 96u}};
+                    static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{256u, 144u, 64u},
+                                                                               {320u, 176u, 80u},
+                                                                               {384u, 216u, 96u}};
                     const uint32_t lightShaftQuality =
                         std::max(1u, std::min(sky.godRays.lightShaftSamples, 3u)) - 1u;
                     godRaysParams.accumVolumeSizeX = lightShaftVolumeSizes[lightShaftQuality][0];
