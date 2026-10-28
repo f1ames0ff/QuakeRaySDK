@@ -23,6 +23,7 @@
 
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "LightShafts.hlsli"
+#include "Medium.hlsli"
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
 
@@ -58,8 +59,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float t1 = (float)(z + 1) / (float)params.volumeSizeZ;
         const float stepLength = (farPlane - nearPlane) * (t1 * t1 - t0 * t0);
         const float sigma = max(current.a, 0.0);
-        const float stepTransmittance = exp(-sigma * stepLength);
-        const float integration = sigma > 1e-6 ? (1.0 - stepTransmittance) / sigma : stepLength;
+        const float stepTransmittance = mediumTransmittance(sigma, stepLength);
+        const float integration = mediumIntegration(sigma, stepLength);
 
         accumulated += transmittance * current.rgb * integration;
         transmittance *= stepTransmittance;

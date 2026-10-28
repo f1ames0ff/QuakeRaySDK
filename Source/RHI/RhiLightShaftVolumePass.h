@@ -127,6 +127,7 @@ public:
                 const Params &params);
 
     nvrhi::ITexture *GetTexture(uint32_t frameIndex) const;
+    nvrhi::ITexture *GetInjectionTexture(uint32_t frameIndex) const;
     nvrhi::ISampler *GetSampler() const { return sampler; }
     bool ConsumeHistoryReset();
 

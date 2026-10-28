@@ -8,9 +8,11 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "Random.hlsli"
 #include "LightShafts.hlsli"
+#include "Medium.hlsli"
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME)]] Texture3D<float4> lightShaftVolume;
 [[vk::binding(1, DESC_SET_LIGHT_SHAFT_VOLUME)]] SamplerState lightShaftVolumeSampler;
+[[vk::binding(2, DESC_SET_LIGHT_SHAFT_VOLUME)]] Texture3D<float4> lightShaftInjection;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_HISTORY)]] Texture2D<float4> lightShaftHistoryPrev;
 [[vk::binding(1, DESC_SET_LIGHT_SHAFT_HISTORY), vk::image_format("rgba16f")]] RWTexture2D<float4> lightShaftHistory;
 [[vk::binding(2, DESC_SET_LIGHT_SHAFT_HISTORY)]] SamplerState lightShaftHistorySampler;
@@ -89,26 +91,55 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         uvw = lightShaftVolumeUVW(surfacePos);
     }
+
     const float3 clampedUvw = saturate(uvw);
     const int3 volumeSize = int3((int)lightShaftParams[0].accumVolumeSizeX,
                                  (int)lightShaftParams[0].accumVolumeSizeY,
                                  (int)lightShaftParams[0].accumVolumeSizeZ);
+
+    const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
+    const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
+    const int cellCount = max(volumeSize.z, 1);
+    const int cellIndex = clamp((int)floor(clampedUvw.z * (float)cellCount), 0, cellCount - 1);
+    const int baseCell = max(cellIndex - 1, 0);
+    const float cellStart = nearPlane + (farPlane - nearPlane) *
+                            ((float)cellIndex / (float)cellCount) *
+                            ((float)cellIndex / (float)cellCount);
+    const float cellEnd = nearPlane + (farPlane - nearPlane) *
+                          ((float)(cellIndex + 1) / (float)cellCount) *
+                          ((float)(cellIndex + 1) / (float)cellCount);
+    const float radialDistance = nearPlane + (farPlane - nearPlane) * clampedUvw.z * clampedUvw.z;
+    const float visibleLength = clamp(radialDistance - cellStart, 0.0, cellEnd - cellStart);
 
     const float2 coordinate = clampedUvw.xy * float2(volumeSize.xy) - 0.5;
     const int x0 = clamp((int)floor(coordinate.x), 0, volumeSize.x - 1);
     const int y0 = clamp((int)floor(coordinate.y), 0, volumeSize.y - 1);
     const int x1 = min(x0 + 1, volumeSize.x - 1);
     const int y1 = min(y0 + 1, volumeSize.y - 1);
-    const int z = clamp((int)floor(clampedUvw.z * (float)volumeSize.z - 0.5), 0, volumeSize.z - 1);
 
     const float fx = saturate(coordinate.x - floor(coordinate.x));
     const float fy = saturate(coordinate.y - floor(coordinate.y));
 
-    const float4 s00 = lightShaftVolume.Load(int4(x0, y0, z, 0));
-    const float4 s10 = lightShaftVolume.Load(int4(x1, y0, z, 0));
-    const float4 s01 = lightShaftVolume.Load(int4(x0, y1, z, 0));
-    const float4 s11 = lightShaftVolume.Load(int4(x1, y1, z, 0));
-    const float4 sample = lerp(lerp(s00, s10, fx), lerp(s01, s11, fx), fy);
+    const float4 base00 = cellIndex > 0 ? lightShaftVolume.Load(int4(x0, y0, baseCell, 0)) : float4(0.0, 0.0, 0.0, 1.0);
+    const float4 base10 = cellIndex > 0 ? lightShaftVolume.Load(int4(x1, y0, baseCell, 0)) : float4(0.0, 0.0, 0.0, 1.0);
+    const float4 base01 = cellIndex > 0 ? lightShaftVolume.Load(int4(x0, y1, baseCell, 0)) : float4(0.0, 0.0, 0.0, 1.0);
+    const float4 base11 = cellIndex > 0 ? lightShaftVolume.Load(int4(x1, y1, baseCell, 0)) : float4(0.0, 0.0, 0.0, 1.0);
+
+    const float4 source00 = lightShaftInjection.Load(int4(x0, y0, cellIndex, 0));
+    const float4 source10 = lightShaftInjection.Load(int4(x1, y0, cellIndex, 0));
+    const float4 source01 = lightShaftInjection.Load(int4(x0, y1, cellIndex, 0));
+    const float4 source11 = lightShaftInjection.Load(int4(x1, y1, cellIndex, 0));
+
+    float t00 = base00.a;
+    float t10 = base10.a;
+    float t01 = base01.a;
+    float t11 = base11.a;
+    const float3 l00 = base00.rgb + mediumAccumulate(source00.rgb, source00.a, visibleLength, t00);
+    const float3 l10 = base10.rgb + mediumAccumulate(source10.rgb, source10.a, visibleLength, t10);
+    const float3 l01 = base01.rgb + mediumAccumulate(source01.rgb, source01.a, visibleLength, t01);
+    const float3 l11 = base11.rgb + mediumAccumulate(source11.rgb, source11.a, visibleLength, t11);
+    const float4 sample = lerp(lerp(float4(l00, t00), float4(l10, t10), fx),
+                               lerp(float4(l01, t01), float4(l11, t11), fx), fy);
 
     float3 shaft = sample.rgb;
     float transmittance = saturate(sample.a);

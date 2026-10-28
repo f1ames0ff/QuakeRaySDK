@@ -367,7 +367,8 @@ public:
     // it, a replaced one rebuilds the set; the entry points skip until a valid texture is set.
     void SetBlueNoiseTexture(nvrhi::ITexture *pBlueNoise);
 
-    void SetLightShaftVolume(nvrhi::ITexture *pVolume, nvrhi::ISampler *pVolumeSampler);
+    void SetLightShaftVolume(nvrhi::ITexture *pVolume, nvrhi::ITexture *pInjection,
+                             nvrhi::ISampler *pVolumeSampler);
 
     // The input half of the frame's god-rays block (the legacy :964-1006, with the trace(0) at
     // :1003): the params write, the primary march (passIndex 0) and, on the two self-contained
@@ -455,6 +456,7 @@ private:
         nvrhi::BindingSetHandle uniformSet;
         nvrhi::BindingSetHandle lightShaftVolumeSet;
         nvrhi::ITexture *lightShaftVolumeTexture = nullptr;
+        nvrhi::ITexture *lightShaftInjectionTexture = nullptr;
         nvrhi::ISampler *lightShaftVolumeSampler = nullptr;
 
         // The frame-scoped hand-off of the split entry points: set by RenderInput on the path that
@@ -593,6 +595,7 @@ private:
     nvrhi::SamplerHandle lightShaftVolumeFallbackSampler;
     bool lightShaftVolumeFallbackCleared = false;
     nvrhi::ITexture *lightShaftVolumeTexture = nullptr;
+    nvrhi::ITexture *lightShaftInjectionTexture = nullptr;
     nvrhi::ISampler *lightShaftVolumeSampler = nullptr;
 
     nvrhi::SamplerHandle lightShaftHistorySampler;

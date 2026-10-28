@@ -1544,11 +1544,12 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                 volumeLightSet.Get(), volumeParams))
                         {
                             godRaysPass->SetLightShaftVolume(lightShaftVolumePass->GetTexture(frameIndex),
+                                                             lightShaftVolumePass->GetInjectionTexture(frameIndex),
                                                              lightShaftVolumePass->GetSampler());
                         }
                         else
                         {
-                            godRaysPass->SetLightShaftVolume(nullptr, nullptr);
+                            godRaysPass->SetLightShaftVolume(nullptr, nullptr, nullptr);
                             godRaysParams.lightShaftCount = 0;
                         }
                     }

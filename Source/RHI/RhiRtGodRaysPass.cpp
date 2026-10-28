@@ -284,6 +284,7 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
     lightShaftVolumeFallback = nullptr;
     lightShaftVolumeFallbackSampler = nullptr;
     lightShaftVolumeTexture = nullptr;
+    lightShaftInjectionTexture = nullptr;
     lightShaftVolumeSampler = nullptr;
     uniformLayout = nullptr;
     filterFramebufferLayout = nullptr;
@@ -396,6 +397,7 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
                                    .setSamplerOffset(0));
         desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
         desc.addItem(nvrhi::BindingLayoutItem::Sampler(1));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2));
 
         lightShaftVolumeLayout = device->createBindingLayout(desc);
     }
@@ -682,9 +684,11 @@ void RhiRtGodRaysPass::SetBlueNoiseTexture(nvrhi::ITexture *pBlueNoise)
     blueNoiseTexture = pBlueNoise;
 }
 
-void RhiRtGodRaysPass::SetLightShaftVolume(nvrhi::ITexture *pVolume, nvrhi::ISampler *pVolumeSampler)
+void RhiRtGodRaysPass::SetLightShaftVolume(nvrhi::ITexture *pVolume, nvrhi::ITexture *pInjection,
+                                           nvrhi::ISampler *pVolumeSampler)
 {
     lightShaftVolumeTexture = pVolume;
+    lightShaftInjectionTexture = pInjection;
     lightShaftVolumeSampler = pVolumeSampler;
 }
 
@@ -692,16 +696,19 @@ bool RhiRtGodRaysPass::PrepareLightShaftVolumeSet(Target &target, nvrhi::IComman
 {
     nvrhi::ITexture *texture = lightShaftVolumeTexture != nullptr
         ? lightShaftVolumeTexture : lightShaftVolumeFallback.Get();
+    nvrhi::ITexture *injection = lightShaftInjectionTexture != nullptr
+        ? lightShaftInjectionTexture : lightShaftVolumeFallback.Get();
     nvrhi::ISampler *sampler = lightShaftVolumeSampler != nullptr
         ? lightShaftVolumeSampler : lightShaftVolumeFallbackSampler.Get();
 
-    if (texture == nullptr || sampler == nullptr)
+    if (texture == nullptr || injection == nullptr || sampler == nullptr)
     {
         return false;
     }
 
     if (target.lightShaftVolumeSet != nullptr &&
         target.lightShaftVolumeTexture == texture &&
+        target.lightShaftInjectionTexture == injection &&
         target.lightShaftVolumeSampler == sampler)
     {
         return true;
@@ -725,6 +732,7 @@ bool RhiRtGodRaysPass::PrepareLightShaftVolumeSet(Target &target, nvrhi::IComman
     nvrhi::BindingSetDesc setDesc;
     setDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, texture));
     setDesc.addItem(nvrhi::BindingSetItem::Sampler(1, sampler));
+    setDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(2, injection));
     target.lightShaftVolumeSet = device->createBindingSet(setDesc, lightShaftVolumeLayout);
     if (target.lightShaftVolumeSet == nullptr)
     {
@@ -733,6 +741,7 @@ bool RhiRtGodRaysPass::PrepareLightShaftVolumeSet(Target &target, nvrhi::IComman
     }
 
     target.lightShaftVolumeTexture = texture;
+    target.lightShaftInjectionTexture = injection;
     target.lightShaftVolumeSampler = sampler;
     return true;
 }
@@ -1511,6 +1520,7 @@ void RhiRtGodRaysPass::ReleaseTarget(Target &target)
 
     target.lightShaftVolumeSet = nullptr;
     target.lightShaftVolumeTexture = nullptr;
+    target.lightShaftInjectionTexture = nullptr;
     target.lightShaftVolumeSampler = nullptr;
 
     // A released frame has no recorded input to continue from; a resize between the two entry

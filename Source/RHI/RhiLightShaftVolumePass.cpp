@@ -543,6 +543,16 @@ nvrhi::ITexture *RhiLightShaftVolumePass::GetTexture(uint32_t frameIndex) const
     return targets[frameIndex].integratedTexture;
 }
 
+nvrhi::ITexture *RhiLightShaftVolumePass::GetInjectionTexture(uint32_t frameIndex) const
+{
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+    {
+        return nullptr;
+    }
+
+    return targets[frameIndex].texture;
+}
+
 bool RhiLightShaftVolumePass::ConsumeHistoryReset()
 {
     const bool reset = historyReset;
