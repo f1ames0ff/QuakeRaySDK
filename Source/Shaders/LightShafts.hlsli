@@ -29,6 +29,7 @@ struct LightShaft_BT
     float4 tangentV;
     float4 surface;
     float4 emission;
+    float4 source;
 };
 
 struct LightShaftVolumeParams_BT
@@ -38,11 +39,27 @@ struct LightShaftVolumeParams_BT
     uint volumeSizeX;
     uint volumeSizeY;
     uint volumeSizeZ;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint debugMode;
+    uint rayBudget;
+    uint lightListCapacity;
+    uint tilesX;
+    uint tilesY;
+    uint zBins;
+    uint lightListClusterCount;
+    float mediumSigma;
+    float mediumAlbedo;
+    float mediumLocalScale;
+    float mediumHistoryWeight;
     float4 worldCenter;
     float4 worldHalfSizeInv;
+    float4 sunDirection;
+    float4 sunColor;
+    float4 mediumEmissive;
+    float4 prevCameraPosition;
+    uint historyValid;
+    uint sunEnabled;
+    uint temporalEnabled;
+    uint pad0;
     LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
 };
 

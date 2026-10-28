@@ -26,7 +26,8 @@
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
 
-[[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
+[[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME)]] Texture3D<float4> lightShaftInjection;
+[[vk::binding(1, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
@@ -40,15 +41,28 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
     float3 accumulated = (float3)0;
+    float transmittance = 1.0;
 
     for (int z = 0; z < (int)params.volumeSizeZ; z++)
     {
         const int3 cell = int3(column, z);
+        const float4 current = lightShaftInjection.Load(int4(cell, 0));
+
+        if (params.debugMode != 0u && params.debugMode != 3u)
+        {
+            lightShaftVolume[cell] = current;
+            continue;
+        }
+
         const float t0 = (float)z / (float)params.volumeSizeZ;
         const float t1 = (float)(z + 1) / (float)params.volumeSizeZ;
         const float stepLength = (farPlane - nearPlane) * (t1 * t1 - t0 * t0);
-        const float4 current = lightShaftVolume[cell];
-        accumulated += current.rgb * stepLength;
-        lightShaftVolume[cell] = float4(accumulated, current.a);
+        const float sigma = max(current.a, 0.0);
+        const float stepTransmittance = exp(-sigma * stepLength);
+        const float integration = sigma > 1e-6 ? (1.0 - stepTransmittance) / sigma : stepLength;
+
+        accumulated += transmittance * current.rgb * integration;
+        transmittance *= stepTransmittance;
+        lightShaftVolume[cell] = float4(accumulated, transmittance);
     }
 }

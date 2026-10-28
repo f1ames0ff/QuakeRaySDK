@@ -48,6 +48,15 @@ public:
     static constexpr uint32_t VOLUME_SIZE_Z = 96;
     static constexpr uint32_t GROUP_SIZE_X = 4;
     static constexpr uint32_t GROUP_SIZE_Y = 4;
+    static constexpr uint32_t LIGHT_LIST_CAPACITY = 32;
+    static constexpr uint32_t LIGHT_LIST_TILE = 8;
+    static constexpr uint32_t LIGHT_LIST_Z_BINS = 8;
+    static constexpr uint32_t LIGHT_LIST_MAX_TILES_X =
+        (VOLUME_SIZE_X + LIGHT_LIST_TILE - 1) / LIGHT_LIST_TILE;
+    static constexpr uint32_t LIGHT_LIST_MAX_TILES_Y =
+        (VOLUME_SIZE_Y + LIGHT_LIST_TILE - 1) / LIGHT_LIST_TILE;
+    static constexpr uint32_t LIGHT_LIST_MAX_CLUSTERS =
+        LIGHT_LIST_MAX_TILES_X * LIGHT_LIST_MAX_TILES_Y * LIGHT_LIST_Z_BINS;
 
     struct LightShaft
     {
@@ -59,6 +68,7 @@ public:
         float tangentV[4];
         float surface[4];
         float emission[4];
+        float source[4];
     };
 
     struct Params
@@ -68,11 +78,27 @@ public:
         uint32_t volumeSizeX;
         uint32_t volumeSizeY;
         uint32_t volumeSizeZ;
-        uint32_t pad0;
-        uint32_t pad1;
-        uint32_t pad2;
+        uint32_t debugMode;
+        uint32_t rayBudget;
+        uint32_t lightListCapacity;
+        uint32_t tilesX;
+        uint32_t tilesY;
+        uint32_t zBins;
+        uint32_t lightListClusterCount;
+        float mediumSigma;
+        float mediumAlbedo;
+        float mediumLocalScale;
+        float mediumHistoryWeight;
         float worldCenter[4];
         float worldHalfSizeInv[4];
+        float sunDirection[4];
+        float sunColor[4];
+        float mediumEmissive[4];
+        float prevCameraPosition[4];
+        uint32_t historyValid;
+        uint32_t sunEnabled;
+        uint32_t temporalEnabled;
+        uint32_t pad0;
         LightShaft lightShafts[MAX_LIGHT_SHAFTS];
     };
 
@@ -102,23 +128,31 @@ public:
 
     nvrhi::ITexture *GetTexture(uint32_t frameIndex) const;
     nvrhi::ISampler *GetSampler() const { return sampler; }
+    bool ConsumeHistoryReset();
 
 private:
     struct Target
     {
         nvrhi::TextureHandle texture;
+        nvrhi::TextureHandle integratedTexture;
         nvrhi::BindingSetHandle uavSet;
+        nvrhi::BindingSetHandle integratedUavSet;
+        nvrhi::BindingSetHandle prefixSet;
         nvrhi::BindingSetHandle paramsSet;
+        nvrhi::BindingSetHandle assignSet;
         nvrhi::BindingSetHandle uniformSet;
         nvrhi::BindingSetHandle tlasSet;
         nvrhi::BufferHandle paramsBuffer;
+        nvrhi::BufferHandle lightListBuffer;
+        nvrhi::BufferHandle sunVisibilityBuffer;
+        nvrhi::BufferHandle rayCounterBuffer;
         nvrhi::IBuffer *uniformBuffer = nullptr;
         nvrhi::rt::IAccelStruct *topLevel = nullptr;
     };
 
+    bool CreateVolumeTargets();
     bool PrepareUniformSet(Target &target, nvrhi::IBuffer *pUniformBuffer);
     bool PrepareTlasSet(Target &target, nvrhi::rt::IAccelStruct *pTopLevel);
-    bool CreateVolumeTarget(Target &target, uint32_t frameIndex);
 
     nvrhi::IDevice *device = nullptr;
     rhi::RhiFrameContext *frameContext = nullptr;
@@ -129,23 +163,28 @@ private:
     bool created = false;
 
     nvrhi::ShaderHandle volumeShader;
+    nvrhi::ShaderHandle prefixShader;
+    nvrhi::ShaderHandle assignShader;
     nvrhi::BindingLayoutHandle tlasLayout;
     nvrhi::BindingLayoutHandle paramsLayout;
     nvrhi::BindingLayoutHandle uniformLayout;
     nvrhi::BindingLayoutHandle volumeLayout;
-    nvrhi::ShaderHandle prefixShader;
+    nvrhi::BindingLayoutHandle prefixLayout;
+    nvrhi::BindingLayoutHandle assignLayout;
     nvrhi::ComputePipelineHandle volumePipeline;
     nvrhi::ComputePipelineHandle prefixPipeline;
+    nvrhi::ComputePipelineHandle assignPipeline;
     nvrhi::SamplerHandle sampler;
 
     uint32_t volumeSizeX = VOLUME_SIZE_X;
     uint32_t volumeSizeY = VOLUME_SIZE_Y;
     uint32_t volumeSizeZ = VOLUME_SIZE_Z;
+    bool historyReset = true;
 
     Target targets[MAX_FRAMES_IN_FLIGHT];
 };
 
-static_assert(sizeof(RhiLightShaftVolumePass::Params) == 8256,
-              "LightShaftVolumeParams_BT is 6208 bytes");
+static_assert(sizeof(RhiLightShaftVolumePass::Params) == 9392,
+              "LightShaftVolumeParams_BT layout does not match the C++ mirror");
 
 }

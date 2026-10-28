@@ -54,6 +54,7 @@ public:
         float tangentV[4];
         float surface[4];
         float emission[4];
+        float source[4];
     };
 
     uint32_t CollectLightShafts(LightShaft *out, uint32_t max);

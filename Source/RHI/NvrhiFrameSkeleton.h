@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -213,6 +213,7 @@ public:
             float tangentV[4] = {};
             float surface[4] = {};
             float emission[4] = {};
+            float source[4] = {};
         };
 
         struct GodRays
@@ -223,6 +224,15 @@ public:
             float eccentricity = 0.75f;
             float sunStepScale = 1.0f;
             float lightShaftIntensity = 0.0f;
+            float lightShaftDensity = 0.002f;
+            float lightShaftAlbedo = 1.0f;
+            float lightShaftLocalFogScale = 1.0f;
+            float lightShaftEmissive[3] = {};
+            float lightShaftHistoryWeight = 0.15f;
+            bool lightShaftTemporal = true;
+            bool lightShaftSun = false;
+            uint32_t lightShaftDebug = 0;
+            uint32_t lightShaftRayBudget = 131072;
             uint32_t lightShaftSteps = 8;
             uint32_t lightShaftSamples = 1;
             uint32_t lightShaftCount = 0;
@@ -806,6 +816,8 @@ private:
     float gpuFrameMs = 0.0f;
     float gpuPassMs[GPU_PASS_COUNT] = {};
     bool gpuTimingValid = false;
+    float lightShaftPrevCamera[3] = {};
+    bool lightShaftPrevCameraValid = false;
 
     // Set after the one-time warning that there is no ALBEDO wrap to present.
     bool warnedMissingAlbedo = false;

@@ -1240,6 +1240,27 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
             ? std::min(16u, 8u + std::min(drawInfo.pSkyParams->lightShaftsResolution, 2u) * 4u) : 12u;
         sky.godRays.lightShaftSamples = (drawInfo.pSkyParams != nullptr)
             ? 1u + std::min(drawInfo.pSkyParams->lightShaftsResolution, 2u) : 1u;
+        sky.godRays.lightShaftDensity = (drawInfo.pSkyParams != nullptr)
+            ? std::max(drawInfo.pSkyParams->lightShaftsDensity, 0.0f) : 0.002f;
+        sky.godRays.lightShaftAlbedo = (drawInfo.pSkyParams != nullptr)
+            ? std::clamp(drawInfo.pSkyParams->lightShaftsAlbedo, 0.0f, 1.0f) : 1.0f;
+        sky.godRays.lightShaftLocalFogScale = (drawInfo.pSkyParams != nullptr)
+            ? std::max(drawInfo.pSkyParams->lightShaftsLocalFogScale, 0.0f) : 1.0f;
+        sky.godRays.lightShaftTemporal = drawInfo.pSkyParams != nullptr &&
+            drawInfo.pSkyParams->lightShaftsTemporal != 0;
+        sky.godRays.lightShaftSun = drawInfo.pSkyParams != nullptr &&
+            drawInfo.pSkyParams->lightShaftsSun != 0;
+        sky.godRays.lightShaftDebug = drawInfo.pSkyParams != nullptr
+            ? std::min(drawInfo.pSkyParams->lightShaftsDebug, 5u) : 0u;
+        sky.godRays.lightShaftRayBudget = drawInfo.pSkyParams != nullptr
+            ? drawInfo.pSkyParams->lightShaftsRayBudget : 131072u;
+        if (drawInfo.pSkyParams != nullptr)
+        {
+            for (int k = 0; k < 3; k++)
+            {
+                sky.godRays.lightShaftEmissive[k] = drawInfo.pSkyParams->lightShaftsEmissive.data[k];
+            }
+        }
 
         if (godRaysOn)
         {
@@ -1284,6 +1305,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
             memcpy (sky.godRays.lightShafts[i].tangentV, lightShafts[i].tangentV, sizeof (lightShafts[i].tangentV));
             memcpy (sky.godRays.lightShafts[i].surface, lightShafts[i].surface, sizeof (lightShafts[i].surface));
             memcpy (sky.godRays.lightShafts[i].emission, lightShafts[i].emission, sizeof (lightShafts[i].emission));
+            memcpy (sky.godRays.lightShafts[i].source, lightShafts[i].source, sizeof (lightShafts[i].source));
         }
 
         sky.godRays.hasAabb = scene->HasAABB();

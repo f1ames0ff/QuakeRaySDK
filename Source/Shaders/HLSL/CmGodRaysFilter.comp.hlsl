@@ -22,8 +22,8 @@
 // Bilateral spatial upscale of the half-resolution god rays to full screen
 // resolution. Ported 1:1 from Quake 2 RTX (god_rays_filter.comp), GPL v2.
 // Q2RTX additionally blends the result onto the color buffer in this shader;
-// in qray the additive compositing happens in CmPrepareFinal, so this pass
-// only writes the filtered volumetric sunlight to framebufGodRaysFiltered.
+// in qray the compositing happens in CmPrepareHdr. The filtered volumetric
+// sunlight is written to RGB and the light-shaft transmittance to alpha.
 
 
 // HLSL counterpart of CmGodRaysFilter.comp.
@@ -117,6 +117,7 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     }
 
     float3 shaftSum = (float3)0.0;
+    float shaftTransmittanceSum = 0.0;
     float shaftWeightSum = 0.0;
 
     for (int shaftY = -1; shaftY <= 1; shaftY++)
@@ -136,13 +137,17 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
                 clamp(1.0 - 10.0 * abs(shaftDepth - referenceViewDepth) /
                             max(abs(referenceViewDepth), 1e-6), 0.0, 1.0);
 
-            shaftSum += lightShaftScatter.Load(int3(shaftPos, 0)).rgb * shaftWeight;
+            const float4 shaftSample = lightShaftScatter.Load(int3(shaftPos, 0));
+            shaftSum += shaftSample.rgb * shaftWeight;
+            shaftTransmittanceSum += shaftSample.a * shaftWeight;
             shaftWeightSum += shaftWeight;
         }
     }
 
-    const float3 lightShafts = shaftWeightSum > 0.0
-        ? shaftSum / shaftWeightSum
-        : lightShaftScatter.Load(int3(iPosition, 0)).rgb;
-    framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, 0.0);
+    const float4 centerShaft = lightShaftScatter.Load(int3(iPosition, 0));
+    const float3 lightShafts = shaftWeightSum > 0.0 ? shaftSum / shaftWeightSum : centerShaft.rgb;
+    const float shaftTransmittance = shaftWeightSum > 0.0
+        ? saturate(shaftTransmittanceSum / shaftWeightSum)
+        : saturate(centerShaft.a);
+    framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, shaftTransmittance);
 }

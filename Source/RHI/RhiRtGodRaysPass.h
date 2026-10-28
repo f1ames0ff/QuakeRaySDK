@@ -89,7 +89,7 @@ class RhiFrameContext;
 // wrapped once per slot with `rhi::wrapEngineStorageImage` (VK_IMAGE_LAYOUT_GENERAL = NVRHI's
 // UnorderedAccess, `keepInitialState = false`, so every list announces the state):
 //   63  GOD_RAYS                       B10G11R11_UFLOAT_PACK32  `(w + 1) / 2 x (h + 1) / 2`  UAV + SRV (filter)
-//   64  GOD_RAYS_FILTERED              B10G11R11_UFLOAT_PACK32  `w x h`                      UAV
+//   64  GOD_RAYS_FILTERED              R16G16B16A16_SFLOAT      `w x h`                      UAV
 //   9   DEPTH_WORLD                   R16_SFLOAT               `w x h`                      SRV
 //   19  SURFACE_POSITION              R32G32B32A32_SFLOAT      `w x h`                      SRV
 //   23  VIEW_DIRECTION                R16G16B16A16_SFLOAT      `w x h`                      SRV
@@ -258,6 +258,7 @@ public:
         float tangentV[4];
         float surface[4];
         float emission[4];
+        float source[4];
     };
 
     struct Params
@@ -291,12 +292,16 @@ public:
         float lightShaftIntensity;
         uint32_t lightShaftSteps;
         LightShaft lightShafts[MAX_LIGHT_SHAFTS];
+        uint32_t accumVolumeSizeX;
+        uint32_t accumVolumeSizeY;
+        uint32_t accumVolumeSizeZ;
+        uint32_t accumDebugMode;
     };
 
     // The shader's structured-buffer element stride, and the size of the one-element buffer that
     // carries Params.
     static constexpr uint32_t GOD_RAYS_PARAMS_STRIDE =
-        160 + MAX_LIGHT_SHAFTS * uint32_t(sizeof(LightShaft));
+        160 + MAX_LIGHT_SHAFTS * uint32_t(sizeof(LightShaft)) + 16;
 
     // The `GodRaysPush_BT` push constant: one uint passIndex at offset 0 (measured; GodRays.cpp:170-174).
     static constexpr uint32_t GOD_RAYS_PUSH_SIZE = 4;
@@ -622,8 +627,8 @@ private:
 // The CPU mirror has to match the measured member layout member by member; the shader's element
 // stride is GOD_RAYS_PARAMS_STRIDE, not this size, which is why the buffer is created with the
 // stride, not with sizeof().
-static_assert(sizeof(RhiRtGodRaysPass::Params) == 8352,
-              "GodRaysParams_BT is 6304 bytes; the structured buffer uses the 6304-byte stride");
+static_assert(sizeof(RhiRtGodRaysPass::Params) == 9392,
+              "GodRaysParams_BT must match the structured-buffer element stride");
 static_assert(offsetof(RhiRtGodRaysPass::Params, sunDirection) == 0, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, sunColor) == 16, "measured member offset");
 static_assert(offsetof(RhiRtGodRaysPass::Params, worldCenter) == 32, "measured member offset");

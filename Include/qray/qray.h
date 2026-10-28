@@ -719,6 +719,8 @@ typedef struct QrSphericalLightUploadInfo
 
     float           radius;
     QrFloat3D       normal;
+    QrBool32        lightShafts;
+    float           lightShaftsPower;
 } QrSphericalLightUploadInfo;
 
 typedef struct QrPolygonalLightUploadInfo
@@ -1342,6 +1344,14 @@ typedef struct QrDrawFrameSkyParams
     QrBool32    lightShaftsEnabled;
     float       lightShaftsIntensity;
     uint32_t    lightShaftsResolution;
+    float       lightShaftsDensity;
+    float       lightShaftsAlbedo;
+    float       lightShaftsLocalFogScale;
+    QrFloat3D   lightShaftsEmissive;
+    QrBool32    lightShaftsTemporal;
+    QrBool32    lightShaftsSun;
+    uint32_t    lightShaftsDebug;
+    uint32_t    lightShaftsRayBudget;
 } QrDrawFrameSkyParams;
 
 #define QR_LIGHT_STYLE_COUNT 64

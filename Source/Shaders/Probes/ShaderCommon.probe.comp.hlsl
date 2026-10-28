@@ -543,7 +543,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     v += float(framebufGodRays_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufGodRays_Sampler, uv, 0.0).x;
 
-    // framebufGodRaysFiltered  r11g11b10f
+    // framebufGodRaysFiltered  rgba16f
     framebufGodRaysFiltered[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufGodRaysFiltered[pix].x);
     v += float(framebufGodRaysFiltered_Sampled.Load(int3(pix, 0)).x);

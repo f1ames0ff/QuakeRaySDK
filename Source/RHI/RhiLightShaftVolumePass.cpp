@@ -33,6 +33,7 @@ namespace
 
 constexpr const char *VOLUME_SHADER_FILE_NAME = "CmLightShaftVolume.comp.spv";
 constexpr const char *PREFIX_SHADER_FILE_NAME = "CmLightShaftPrefix.comp.spv";
+constexpr const char *ASSIGN_SHADER_FILE_NAME = "CmLightShaftAssign.comp.spv";
 
 void LogMessage(const RhiLightShaftVolumePass::PrintFunction &print, const char *pMessage)
 {
@@ -77,7 +78,9 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
                                    nvrhi::ShaderType::Compute, "RhiLightShaftVolumePass shader");
     prefixShader = rhi::loadShader(device, shaderFolderPath + PREFIX_SHADER_FILE_NAME,
                                    nvrhi::ShaderType::Compute, "RhiLightShaftVolumePass prefix shader");
-    if (volumeShader == nullptr || prefixShader == nullptr)
+    assignShader = rhi::loadShader(device, shaderFolderPath + ASSIGN_SHADER_FILE_NAME,
+                                   nvrhi::ShaderType::Compute, "RhiLightShaftVolumePass assign shader");
+    if (volumeShader == nullptr || prefixShader == nullptr || assignShader == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to load the light-shaft volume shader");
         return false;
@@ -93,8 +96,15 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
     {
         nvrhi::BindingLayoutDesc desc;
         desc.visibility = nvrhi::ShaderType::Compute;
-        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setConstantBufferOffset(0));
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setConstantBufferOffset(0)
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
         desc.addItem(nvrhi::BindingLayoutItem::ConstantBuffer(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(2));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(3));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4));
         paramsLayout = device->createBindingLayout(desc);
     }
 
@@ -114,6 +124,26 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
         volumeLayout = device->createBindingLayout(desc);
     }
 
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_UAV(1));
+        prefixLayout = device->createBindingLayout(desc);
+    }
+
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(1));
+        assignLayout = device->createBindingLayout(desc);
+    }
+
     sampler = rhi::createSampler(device, nvrhi::SamplerDesc()
                                              .setMinFilter(true)
                                              .setMagFilter(true)
@@ -122,7 +152,7 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
                                  "RhiLightShaftVolumePass sampler");
 
     if (tlasLayout == nullptr || paramsLayout == nullptr || uniformLayout == nullptr ||
-        volumeLayout == nullptr || sampler == nullptr)
+        volumeLayout == nullptr || prefixLayout == nullptr || assignLayout == nullptr || sampler == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a light-shaft volume binding layout");
         return false;
@@ -149,78 +179,202 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
     {
         nvrhi::ComputePipelineDesc desc;
         desc.setComputeShader(prefixShader);
-        desc.addBindingLayout(volumeLayout);
+        desc.addBindingLayout(prefixLayout);
         desc.addBindingLayout(uniformLayout);
         desc.addBindingLayout(paramsLayout);
         prefixPipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass prefix");
     }
 
-    if (volumePipeline == nullptr || prefixPipeline == nullptr)
+    {
+        nvrhi::ComputePipelineDesc desc;
+        desc.setComputeShader(assignShader);
+        desc.addBindingLayout(paramsLayout);
+        desc.addBindingLayout(assignLayout);
+        desc.addBindingLayout(uniformLayout);
+        desc.addBindingLayout(tlasLayout);
+        assignPipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass assign");
+    }
+
+    if (volumePipeline == nullptr || prefixPipeline == nullptr || assignPipeline == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create the light-shaft volume pipeline");
         return false;
     }
 
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    if (!CreateVolumeTargets())
     {
-        if (!CreateVolumeTarget(targets[i], i))
-        {
-            LogMessage(print, "Warning: RHI: failed to create a light-shaft volume target");
-            return false;
-        }
+        LogMessage(print, "Warning: RHI: failed to create a light-shaft volume target");
+        return false;
     }
 
     created = true;
     return true;
 }
 
-bool RhiLightShaftVolumePass::CreateVolumeTarget(Target &target, uint32_t frameIndex)
+bool RhiLightShaftVolumePass::CreateVolumeTargets()
 {
-    nvrhi::TextureDesc textureDesc;
-    textureDesc.dimension = nvrhi::TextureDimension::Texture3D;
-    textureDesc.format = nvrhi::Format::RGBA16_FLOAT;
-    textureDesc.width = volumeSizeX;
-    textureDesc.height = volumeSizeY;
-    textureDesc.depth = volumeSizeZ;
-    textureDesc.mipLevels = 1;
-    textureDesc.isUAV = true;
-    textureDesc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
-    textureDesc.keepInitialState = true;
+    const uint32_t lightListEntries =
+        (1u + LIGHT_LIST_CAPACITY) * LIGHT_LIST_MAX_CLUSTERS;
 
-    const std::string debugName = "RhiLightShaftVolumePass slot " + std::to_string(frameIndex);
-    target.texture = rhi::createTexture(device, textureDesc, debugName);
-    if (target.texture == nullptr)
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
-        return false;
+        Target &target = targets[i];
+
+        if (frameContext != nullptr)
+        {
+            frameContext->Retire(std::move(target.uavSet));
+            frameContext->Retire(std::move(target.integratedUavSet));
+            frameContext->Retire(std::move(target.prefixSet));
+            frameContext->Retire(std::move(target.paramsSet));
+            frameContext->Retire(std::move(target.assignSet));
+            frameContext->Retire(std::move(target.uniformSet));
+            frameContext->Retire(std::move(target.tlasSet));
+            frameContext->Retire(std::move(target.texture));
+            frameContext->Retire(std::move(target.integratedTexture));
+            frameContext->Retire(std::move(target.paramsBuffer));
+            frameContext->Retire(std::move(target.lightListBuffer));
+            frameContext->Retire(std::move(target.sunVisibilityBuffer));
+            frameContext->Retire(std::move(target.rayCounterBuffer));
+        }
+
+        target.uavSet = nullptr;
+        target.integratedUavSet = nullptr;
+        target.prefixSet = nullptr;
+        target.paramsSet = nullptr;
+        target.assignSet = nullptr;
+        target.uniformSet = nullptr;
+        target.tlasSet = nullptr;
+        target.texture = nullptr;
+        target.integratedTexture = nullptr;
+        target.paramsBuffer = nullptr;
+        target.lightListBuffer = nullptr;
+        target.sunVisibilityBuffer = nullptr;
+        target.rayCounterBuffer = nullptr;
+        target.uniformBuffer = nullptr;
+        target.topLevel = nullptr;
+
+        nvrhi::TextureDesc textureDesc;
+        textureDesc.dimension = nvrhi::TextureDimension::Texture3D;
+        textureDesc.format = nvrhi::Format::RGBA16_FLOAT;
+        textureDesc.width = volumeSizeX;
+        textureDesc.height = volumeSizeY;
+        textureDesc.depth = volumeSizeZ;
+        textureDesc.mipLevels = 1;
+        textureDesc.isUAV = true;
+        textureDesc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+        textureDesc.keepInitialState = true;
+
+        const std::string prefix = "RhiLightShaftVolumePass slot " + std::to_string(i);
+        target.texture = rhi::createTexture(device, textureDesc, prefix + " inject");
+        target.integratedTexture = rhi::createTexture(device, textureDesc, prefix + " integrated");
+        if (target.texture == nullptr || target.integratedTexture == nullptr)
+        {
+            return false;
+        }
+
+        nvrhi::BufferDesc bufferDesc;
+        bufferDesc.isConstantBuffer = true;
+        bufferDesc.byteSize = sizeof(Params);
+        bufferDesc.initialState = nvrhi::ResourceStates::ConstantBuffer;
+        bufferDesc.keepInitialState = true;
+        bufferDesc.debugName = prefix + " params";
+        target.paramsBuffer = rhi::createBuffer(device, bufferDesc, bufferDesc.debugName);
+        if (target.paramsBuffer == nullptr)
+        {
+            return false;
+        }
+
+        nvrhi::BufferDesc listDesc;
+        listDesc.byteSize = uint64_t(lightListEntries) * sizeof(uint32_t);
+        listDesc.structStride = sizeof(uint32_t);
+        listDesc.canHaveUAVs = true;
+        listDesc.keepInitialState = true;
+        listDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        listDesc.debugName = prefix + " light list";
+        target.lightListBuffer = rhi::createBuffer(device, listDesc, listDesc.debugName);
+        if (target.lightListBuffer == nullptr)
+        {
+            return false;
+        }
+
+        nvrhi::BufferDesc sunDesc;
+        sunDesc.byteSize = uint64_t(LIGHT_LIST_MAX_CLUSTERS) * sizeof(float);
+        sunDesc.structStride = sizeof(float);
+        sunDesc.canHaveUAVs = true;
+        sunDesc.keepInitialState = true;
+        sunDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        sunDesc.debugName = prefix + " sun visibility";
+        target.sunVisibilityBuffer = rhi::createBuffer(device, sunDesc, sunDesc.debugName);
+        if (target.sunVisibilityBuffer == nullptr)
+        {
+            return false;
+        }
+
+        nvrhi::BufferDesc counterDesc;
+        counterDesc.byteSize = sizeof(uint32_t);
+        counterDesc.structStride = sizeof(uint32_t);
+        counterDesc.canHaveUAVs = true;
+        counterDesc.keepInitialState = true;
+        counterDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        counterDesc.debugName = prefix + " ray counter";
+        target.rayCounterBuffer = rhi::createBuffer(device, counterDesc, counterDesc.debugName);
+        if (target.rayCounterBuffer == nullptr)
+        {
+            return false;
+        }
     }
 
-    nvrhi::BindingSetDesc uavSetDesc;
-    uavSetDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
-        0, target.texture, nvrhi::Format::RGBA16_FLOAT, nvrhi::TextureSubresourceSet(),
-        nvrhi::TextureDimension::Texture3D));
-    target.uavSet = device->createBindingSet(uavSetDesc, volumeLayout);
-    if (target.uavSet == nullptr)
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
-        return false;
+        Target &target = targets[i];
+        const uint32_t previous = (i + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        nvrhi::BindingSetDesc uavSetDesc;
+        uavSetDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
+            0, target.texture, nvrhi::Format::RGBA16_FLOAT, nvrhi::TextureSubresourceSet(),
+            nvrhi::TextureDimension::Texture3D));
+        target.uavSet = device->createBindingSet(uavSetDesc, volumeLayout);
+
+        nvrhi::BindingSetDesc integratedSetDesc;
+        integratedSetDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
+            0, target.integratedTexture, nvrhi::Format::RGBA16_FLOAT, nvrhi::TextureSubresourceSet(),
+            nvrhi::TextureDimension::Texture3D));
+        target.integratedUavSet = device->createBindingSet(integratedSetDesc, volumeLayout);
+
+        nvrhi::BindingSetDesc prefixSetDesc;
+        prefixSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, target.texture));
+        prefixSetDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
+            1, target.integratedTexture, nvrhi::Format::RGBA16_FLOAT, nvrhi::TextureSubresourceSet(),
+            nvrhi::TextureDimension::Texture3D));
+        target.prefixSet = device->createBindingSet(prefixSetDesc, prefixLayout);
+
+        nvrhi::BindingSetDesc paramsSetDesc;
+        paramsSetDesc.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, target.paramsBuffer));
+        paramsSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(1, targets[previous].texture));
+        paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(2, target.lightListBuffer));
+        paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, target.rayCounterBuffer));
+        paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(4, target.sunVisibilityBuffer));
+        target.paramsSet = device->createBindingSet(paramsSetDesc, paramsLayout);
+
+        nvrhi::BindingSetDesc assignSetDesc;
+        assignSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, target.lightListBuffer));
+        assignSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(1, target.sunVisibilityBuffer));
+        target.assignSet = device->createBindingSet(assignSetDesc, assignLayout);
+
+        if (target.uavSet == nullptr || target.integratedUavSet == nullptr ||
+            target.prefixSet == nullptr || target.paramsSet == nullptr || target.assignSet == nullptr)
+        {
+            return false;
+        }
+
+        target.uniformSet = nullptr;
+        target.uniformBuffer = nullptr;
+        target.tlasSet = nullptr;
+        target.topLevel = nullptr;
     }
 
-    nvrhi::BufferDesc bufferDesc;
-    bufferDesc.isConstantBuffer = true;
-    bufferDesc.isVolatile = false;
-    bufferDesc.keepInitialState = true;
-    bufferDesc.debugName = "RhiLightShaftVolumePass params";
-    bufferDesc.byteSize = sizeof(Params);
-    target.paramsBuffer = rhi::createBuffer(device, bufferDesc, bufferDesc.debugName);
-    if (target.paramsBuffer == nullptr)
-    {
-        return false;
-    }
-
-    nvrhi::BindingSetDesc paramsSetDesc;
-    paramsSetDesc.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, target.paramsBuffer));
-    target.paramsSet = device->createBindingSet(paramsSetDesc, paramsLayout);
-
-    return target.paramsSet != nullptr;
+    historyReset = true;
+    return true;
 }
 
 bool RhiLightShaftVolumePass::PrepareUniformSet(Target &target, nvrhi::IBuffer *pUniformBuffer)
@@ -305,12 +459,9 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
         volumeSizeY = requestedY;
         volumeSizeZ = requestedZ;
 
-        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        if (!CreateVolumeTargets())
         {
-            if (!CreateVolumeTarget(targets[i], i))
-            {
-                return false;
-            }
+            return false;
         }
     }
 
@@ -320,7 +471,8 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
     }
 
     Target &target = targets[frameIndex];
-    if (target.texture == nullptr || target.uavSet == nullptr || target.paramsSet == nullptr)
+    if (target.texture == nullptr || target.integratedTexture == nullptr ||
+        target.uavSet == nullptr || target.paramsSet == nullptr || target.assignSet == nullptr)
     {
         return false;
     }
@@ -331,6 +483,21 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
     }
 
     rhi::writeBuffer(pCommandList, target.paramsBuffer, &params, sizeof(params));
+    pCommandList->clearBufferUInt(target.rayCounterBuffer, 0);
+
+    if (params.lightListClusterCount > 0)
+    {
+        nvrhi::ComputeState assignState;
+        assignState.setPipeline(assignPipeline);
+        assignState.addBindingSet(target.paramsSet);
+        assignState.addBindingSet(target.assignSet);
+        assignState.addBindingSet(target.uniformSet);
+        assignState.addBindingSet(target.tlasSet);
+        pCommandList->setComputeState(assignState);
+        pCommandList->dispatch((params.lightListClusterCount + 63) / 64, 1, 1);
+        pCommandList->commitBarriers();
+    }
+
     pCommandList->setTextureState(target.texture, nvrhi::AllSubresources,
                                   nvrhi::ResourceStates::UnorderedAccess);
 
@@ -352,13 +519,15 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
 
     nvrhi::ComputeState prefixState;
     prefixState.setPipeline(prefixPipeline);
-    prefixState.addBindingSet(target.uavSet);
+    prefixState.addBindingSet(target.prefixSet);
     prefixState.addBindingSet(target.uniformSet);
     prefixState.addBindingSet(target.paramsSet);
     pCommandList->setComputeState(prefixState);
     pCommandList->dispatch((volumeSizeX + 7) / 8, (volumeSizeY + 7) / 8, 1);
 
-    pCommandList->setTextureState(target.texture, nvrhi::AllSubresources,
+    pCommandList->commitBarriers();
+
+    pCommandList->setTextureState(target.integratedTexture, nvrhi::AllSubresources,
                                   nvrhi::ResourceStates::NonPixelShaderResource);
 
     return true;
@@ -371,7 +540,14 @@ nvrhi::ITexture *RhiLightShaftVolumePass::GetTexture(uint32_t frameIndex) const
         return nullptr;
     }
 
-    return targets[frameIndex].texture;
+    return targets[frameIndex].integratedTexture;
+}
+
+bool RhiLightShaftVolumePass::ConsumeHistoryReset()
+{
+    const bool reset = historyReset;
+    historyReset = false;
+    return reset;
 }
 
 }

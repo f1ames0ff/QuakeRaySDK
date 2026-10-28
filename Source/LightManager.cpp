@@ -65,6 +65,18 @@ namespace
         return static_cast<float>(0.5 * static_cast<double>(angularDiameterDegrees) * kPi / 180.0);
     }
 
+    float ComputeShaftReach(const float color[3], float power, float scale)
+    {
+        const float maxColor = std::max(std::max(color[0], color[1]), color[2]) * power;
+        if (!(maxColor > 0.0f) || !(scale > 0.0f))
+        {
+            return 0.0f;
+        }
+
+        const float reach = scale * std::sqrt(maxColor / 0.001f);
+        return std::min(std::max(reach, 64.0f), 8192.0f);
+    }
+
     bool IsColorTooDim(const float color[3])
     {
         float sum = 0.0f;
@@ -717,6 +729,32 @@ void qray::LightManager::AddSphericalLight(uint32_t frameIndex, const QrSpherica
     }
 
     AddLight(frameIndex, info.uniqueID, EncodeAsSphereLight(info));
+
+    if (info.lightShafts)
+    {
+        uint32_t lightIndex = 0;
+        if (FindRegisteredLight(frameIndex, info.uniqueID, lightIndex))
+        {
+            const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
+            const float radius = std::max(info.radius, 0.001f);
+            const float reach = ComputeShaftReach(info.color.data, power, radius);
+
+            LightShaft shaft = {};
+            shaft.position[0] = info.position.data[0];
+            shaft.position[1] = info.position.data[1];
+            shaft.position[2] = info.position.data[2];
+            shaft.position[3] = radius;
+            shaft.color[0] = info.color.data[0] * power;
+            shaft.color[1] = info.color.data[1] * power;
+            shaft.color[2] = info.color.data[2] * power;
+            shaft.emission[1] = reach;
+            shaft.source[0] = static_cast<float>(lightIndex + 1);
+            shaft.source[1] = power;
+            shaft.source[2] = reach + radius;
+            shaft.source[3] = radius;
+            AddLightShaft(shaft);
+        }
+    }
 }
 
 void qray::LightManager::AddPolygonalLight(uint32_t frameIndex, const QrPolygonalLightUploadInfo &info)
@@ -755,6 +793,9 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
     }
 
     AddLight(frameIndex, info.uniqueID, EncodeAsTexturedAreaLight(info, textureIndex));
+
+    uint32_t areaLightIndex = 0;
+    const bool areaLightRegistered = FindRegisteredLight(frameIndex, info.uniqueID, areaLightIndex);
 
     if (info.lightShafts && info.numVerts > 0)
     {
@@ -808,6 +849,14 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
             const float lengthB = std::sqrt(info.B.data[0] * info.B.data[0] +
                                             info.B.data[1] * info.B.data[1] +
                                             info.B.data[2] * info.B.data[2]);
+            const float boundsRadius = 0.5f * std::sqrt(lengthA * lengthA + lengthB * lengthB);
+            shaft.source[0] = areaLightRegistered ? static_cast<float>(areaLightIndex + 1) : 0.0f;
+            shaft.source[1] = power;
+            shaft.source[2] = ComputeShaftReach(info.color.data, power, std::sqrt(std::max(info.area, 0.0f))) +
+                              boundsRadius;
+            shaft.source[3] = boundsRadius;
+            shaft.emission[1] = shaft.source[2];
+
             if (lengthA > 0.0001f && lengthB > 0.0001f)
             {
                 for (int k = 0; k < 3; k++)
@@ -898,6 +947,10 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
                 shaft.surface[3] = info.meanEmiss;
                 shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
                 shaft.emission[1] = info.reach;
+                shaft.source[1] = power;
+                shaft.source[2] = info.reach > 0.0f
+                    ? info.reach + std::max(info.boundsRadius, 0.0f) : 0.0f;
+                shaft.source[3] = std::max(info.boundsRadius, 0.0f);
 
                 const QrDtalMemberUpload *pMember = batch.pMembers != nullptr
                     ? &batch.pMembers[info.memberBase] : nullptr;
@@ -996,6 +1049,19 @@ void qray::LightManager::AddSpotlight(uint32_t frameIndex, const QrSpotLightUplo
             shaft.color[2] = info.color.data[2] * power;
             shaft.cone[0] = std::cos(std::max(0.0f, std::min(info.angleInner, info.angleOuter)));
             shaft.cone[1] = std::cos(std::max(0.0f, info.angleOuter));
+
+            uint32_t lightIndex = 0;
+            if (FindRegisteredLight(frameIndex, info.uniqueID, lightIndex))
+            {
+                const float radius = shaft.position[3];
+                const float reach = ComputeShaftReach(info.color.data, power, radius);
+                shaft.emission[1] = reach;
+                shaft.source[0] = static_cast<float>(lightIndex + 1);
+                shaft.source[1] = power;
+                shaft.source[2] = reach + radius;
+                shaft.source[3] = radius;
+            }
+
             AddLightShaft(shaft);
         }
     }

@@ -1401,13 +1401,28 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                            sizeof(godRaysParams.worldHalfSizeInv));
                     memcpy(godRaysParams.shadowMapVP, shadowMapVP, sizeof(godRaysParams.shadowMapVP));
                     godRaysParams.shadowMapDepthScale = shadowMapDepthScale;
-                    godRaysParams.godRaysIntensity = sky.godRays.intensity;
+                    godRaysParams.godRaysIntensity =
+                        sky.godRays.lightShaftSun ? 0.0f : sky.godRays.intensity;
                     godRaysParams.godRaysEccentricity = sky.godRays.eccentricity;
                     godRaysParams.sunStepScale = sky.godRays.sunStepScale;
                     godRaysParams.godRaysEnabled = 1;
-                    godRaysParams.lightShaftCount = sky.godRays.lightShaftCount;
+
+                    const bool lightShaftsActive = sky.godRays.lightShaftCount > 0 ||
+                                                   sky.godRays.lightShaftSun;
+                    godRaysParams.lightShaftCount = lightShaftsActive
+                        ? std::max(1u, sky.godRays.lightShaftCount) : 0u;
                     godRaysParams.lightShaftIntensity = sky.godRays.lightShaftIntensity;
                     godRaysParams.lightShaftSteps = sky.godRays.lightShaftSteps;
+
+                    static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{128u, 72u, 64u},
+                                                                               {160u, 88u, 80u},
+                                                                               {192u, 108u, 96u}};
+                    const uint32_t lightShaftQuality =
+                        std::max(1u, std::min(sky.godRays.lightShaftSamples, 3u)) - 1u;
+                    godRaysParams.accumVolumeSizeX = lightShaftVolumeSizes[lightShaftQuality][0];
+                    godRaysParams.accumVolumeSizeY = lightShaftVolumeSizes[lightShaftQuality][1];
+                    godRaysParams.accumVolumeSizeZ = lightShaftVolumeSizes[lightShaftQuality][2];
+                    godRaysParams.accumDebugMode = sky.godRays.lightShaftDebug;
 
                     for (uint32_t i = 0; i < sky.godRays.lightShaftCount; i++)
                     {
@@ -1427,27 +1442,71 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                sizeof(godRaysParams.lightShafts[i].surface));
                         memcpy(godRaysParams.lightShafts[i].emission, sky.godRays.lightShafts[i].emission,
                                sizeof(godRaysParams.lightShafts[i].emission));
+                        memcpy(godRaysParams.lightShafts[i].source, sky.godRays.lightShafts[i].source,
+                               sizeof(godRaysParams.lightShafts[i].source));
                     }
 
                     if (lightShaftVolumePass != nullptr && lightShaftVolumePass->IsCreated() &&
-                        sky.godRays.lightShaftCount > 0)
+                        lightShaftsActive)
                     {
                         RhiLightShaftVolumePass::Params volumeParams = {};
-                        static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{128u, 72u, 64u},
-                                                                                   {160u, 88u, 80u},
-                                                                                   {192u, 108u, 96u}};
-                        const uint32_t lightShaftQuality =
-                            std::max(1u, std::min(sky.godRays.lightShaftSamples, 3u)) - 1u;
-
                         volumeParams.lightShaftCount = sky.godRays.lightShaftCount;
                         volumeParams.lightShaftSamples = sky.godRays.lightShaftSamples;
                         volumeParams.volumeSizeX = lightShaftVolumeSizes[lightShaftQuality][0];
                         volumeParams.volumeSizeY = lightShaftVolumeSizes[lightShaftQuality][1];
                         volumeParams.volumeSizeZ = lightShaftVolumeSizes[lightShaftQuality][2];
+                        volumeParams.debugMode = sky.godRays.lightShaftDebug;
+                        volumeParams.rayBudget = sky.godRays.lightShaftRayBudget;
+                        volumeParams.lightListCapacity = RhiLightShaftVolumePass::LIGHT_LIST_CAPACITY;
+                        volumeParams.tilesX =
+                            (volumeParams.volumeSizeX + RhiLightShaftVolumePass::LIGHT_LIST_TILE - 1) /
+                            RhiLightShaftVolumePass::LIGHT_LIST_TILE;
+                        volumeParams.tilesY =
+                            (volumeParams.volumeSizeY + RhiLightShaftVolumePass::LIGHT_LIST_TILE - 1) /
+                            RhiLightShaftVolumePass::LIGHT_LIST_TILE;
+                        volumeParams.zBins = RhiLightShaftVolumePass::LIGHT_LIST_Z_BINS;
+                        volumeParams.lightListClusterCount =
+                            volumeParams.tilesX * volumeParams.tilesY * volumeParams.zBins;
+                        volumeParams.mediumSigma = sky.godRays.lightShaftDensity;
+                        volumeParams.mediumAlbedo = sky.godRays.lightShaftAlbedo;
+                        volumeParams.mediumLocalScale = sky.godRays.lightShaftLocalFogScale;
+                        volumeParams.mediumHistoryWeight = sky.godRays.lightShaftHistoryWeight;
+                        volumeParams.sunEnabled = sky.godRays.lightShaftSun ? 1u : 0u;
+                        volumeParams.temporalEnabled = sky.godRays.lightShaftTemporal ? 1u : 0u;
                         memcpy(volumeParams.worldCenter, sky.godRays.worldCenter,
                                sizeof(volumeParams.worldCenter));
                         memcpy(volumeParams.worldHalfSizeInv, sky.godRays.worldHalfSizeInv,
                                sizeof(volumeParams.worldHalfSizeInv));
+                        memcpy(volumeParams.sunDirection, sky.godRays.sunDirection,
+                               sizeof(volumeParams.sunDirection));
+                        memcpy(volumeParams.sunColor, sky.godRays.sunColor,
+                               sizeof(volumeParams.sunColor));
+                        memcpy(volumeParams.mediumEmissive, sky.godRays.lightShaftEmissive,
+                               sizeof(volumeParams.mediumEmissive));
+
+                        bool historyValid = uniform != nullptr && sky.godRays.lightShaftTemporal &&
+                                            lightShaftPrevCameraValid &&
+                                            !lightShaftVolumePass->ConsumeHistoryReset();
+                        if (uniform != nullptr && lightShaftPrevCameraValid)
+                        {
+                            const float dx = uniform->cameraPosition[0] - lightShaftPrevCamera[0];
+                            const float dy = uniform->cameraPosition[1] - lightShaftPrevCamera[1];
+                            const float dz = uniform->cameraPosition[2] - lightShaftPrevCamera[2];
+                            historyValid = historyValid && dx * dx + dy * dy + dz * dz < 256.0f * 256.0f;
+                        }
+
+                        if (uniform != nullptr)
+                        {
+                            const float *previousCamera = lightShaftPrevCameraValid
+                                ? lightShaftPrevCamera : uniform->cameraPosition;
+                            memcpy(volumeParams.prevCameraPosition, previousCamera,
+                                   sizeof(volumeParams.prevCameraPosition));
+                            memcpy(lightShaftPrevCamera, uniform->cameraPosition,
+                                   sizeof(lightShaftPrevCamera));
+                            lightShaftPrevCameraValid = true;
+                        }
+
+                        volumeParams.historyValid = historyValid ? 1u : 0u;
 
                         for (uint32_t i = 0; i < sky.godRays.lightShaftCount; i++)
                         {
@@ -1467,13 +1526,22 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                    sizeof(volumeParams.lightShafts[i].surface));
                             memcpy(volumeParams.lightShafts[i].emission, sky.godRays.lightShafts[i].emission,
                                    sizeof(volumeParams.lightShafts[i].emission));
+                            memcpy(volumeParams.lightShafts[i].source, sky.godRays.lightShafts[i].source,
+                                   sizeof(volumeParams.lightShafts[i].source));
+                        }
+
+                        nvrhi::BindingSetHandle volumeLightSet;
+                        if (rtDirectPass != nullptr && uniform != nullptr &&
+                            rtDirectPass->EnsureLightSet(commandList, frameIndex, uniform->frameId,
+                                                         uniform->q2LightStatsMode))
+                        {
+                            volumeLightSet = rtDirectPass->GetLightSet(frameIndex);
                         }
 
                         if (lightShaftVolumePass->Render(
                                 commandList, frameIndex, worldUniformBuffer.Get(),
                                 accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
-                                rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex) : nullptr,
-                                volumeParams))
+                                volumeLightSet.Get(), volumeParams))
                         {
                             godRaysPass->SetLightShaftVolume(lightShaftVolumePass->GetTexture(frameIndex),
                                                              lightShaftVolumePass->GetSampler());

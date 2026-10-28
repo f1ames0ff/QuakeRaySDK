@@ -31,19 +31,19 @@ struct LightShaftParams_BT
     float lightShaftIntensity;
     uint lightShaftSteps;
     LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
+    uint accumVolumeSizeX;
+    uint accumVolumeSizeY;
+    uint accumVolumeSizeZ;
+    uint accumDebugMode;
 };
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<LightShaftParams_BT> lightShaftParams;
-
-#define LIGHT_SHAFT_VOLUME_SIZE_X 192
-#define LIGHT_SHAFT_VOLUME_SIZE_Y 108
-#define LIGHT_SHAFT_VOLUME_SIZE_Z 96
 
 float3 lightShaftVolumeUVW(float3 world)
 {
     const float4 clip = mul(globalUniform.volumeViewProj, float4(world, 1.0));
     const float2 screen = clip.xy * (0.5 / clip.w) + 0.5;
-    const float nearPlane = globalUniform.volumeCameraNear;
+    const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
     const float radialDistance = length(world - globalUniform.cameraPosition.xyz);
     const float normalizedDepth = (radialDistance - nearPlane) / (farPlane - nearPlane);
@@ -65,37 +65,68 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const int2 cbPix = getCheckerboardPix(pixelPos);
     const float rayDistance = framebufDepthWorld_Sampled.Load(int3(cbPix, 0)).x;
 
-    if (shaftCount == 0 || rayDistance <= 0.0 || rayDistance > globalUniform.rayLength)
+    if (shaftCount == 0)
     {
-        lightShaftHistory[pixelPos] = (float4)0;
+        lightShaftHistory[pixelPos] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    const float4 surface = framebufSurfacePosition_Sampled.Load(int3(cbPix, 0));
-    const float3 surfacePos = surface.xyz;
-    const uint surfaceInstanceFlags = asuint(surface.w);
+    const bool sky = rayDistance <= 0.0 || rayDistance > globalUniform.rayLength;
+    float3 uvw = float3((float2(pixelPos) + 0.5) / float2(renderSize), 1.0);
 
-    if ((surfaceInstanceFlags & (INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON |
-                                 INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON_VIEWER)) != 0)
+    if (!sky)
     {
-        lightShaftHistory[pixelPos] = (float4)0;
-        return;
+        const float4 surface = framebufSurfacePosition_Sampled.Load(int3(cbPix, 0));
+        const float3 surfacePos = surface.xyz;
+        const uint surfaceInstanceFlags = asuint(surface.w);
+
+        if ((surfaceInstanceFlags & (INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON |
+                                     INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON_VIEWER)) != 0)
+        {
+            lightShaftHistory[pixelPos] = float4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
+        uvw = lightShaftVolumeUVW(surfacePos);
+    }
+    const float3 cell = 1.0 / float3((float)lightShaftParams[0].accumVolumeSizeX,
+                                     (float)lightShaftParams[0].accumVolumeSizeY,
+                                     (float)lightShaftParams[0].accumVolumeSizeZ);
+
+    const float4 centerSample = lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw), 0.0);
+    float3 shaft = centerSample.rgb * 2.0;
+    float transmittance = centerSample.a * 2.0;
+
+    const float3 offsets[6] =
+    {
+        float3(cell.x, 0.0, 0.0), float3(-cell.x, 0.0, 0.0),
+        float3(0.0, cell.y, 0.0), float3(0.0, -cell.y, 0.0),
+        float3(0.0, 0.0, cell.z), float3(0.0, 0.0, -cell.z)
+    };
+
+    for (int i = 0; i < 6; i++)
+    {
+        const float4 tap = lightShaftVolume.SampleLevel(
+            lightShaftVolumeSampler, saturate(uvw + offsets[i]), 0.0);
+        shaft += tap.rgb;
+        transmittance += tap.a;
     }
 
-    const float3 uvw = lightShaftVolumeUVW(surfacePos);
-    const float3 cell = float3(1.0 / (float)LIGHT_SHAFT_VOLUME_SIZE_X,
-                               1.0 / (float)LIGHT_SHAFT_VOLUME_SIZE_Y,
-                               1.0 / (float)LIGHT_SHAFT_VOLUME_SIZE_Z);
-
-    float3 shaft = lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw), 0.0).rgb * 2.0;
-    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw + float3(cell.x, 0.0, 0.0)), 0.0).rgb;
-    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw - float3(cell.x, 0.0, 0.0)), 0.0).rgb;
-    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw + float3(0.0, cell.y, 0.0)), 0.0).rgb;
-    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw - float3(0.0, cell.y, 0.0)), 0.0).rgb;
-    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw + float3(0.0, 0.0, cell.z)), 0.0).rgb;
-    shaft += lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw - float3(0.0, 0.0, cell.z)), 0.0).rgb;
     shaft *= 0.125;
+    transmittance = saturate(transmittance * 0.125);
+
+    const uint debugMode = lightShaftParams[0].accumDebugMode;
+    if (debugMode != 0u)
+    {
+        float3 debugColor = shaft;
+        if (debugMode == 3u)
+        {
+            debugColor = transmittance * (float3)1.0;
+        }
+        lightShaftHistory[pixelPos] = float4(debugColor, 1.0);
+        return;
+    }
 
     lightShaftHistory[pixelPos] = float4(
-        shaft * 0.01 * lightShaftParams[0].lightShaftIntensity, 1.0);
+        shaft * lightShaftParams[0].lightShaftIntensity, transmittance);
 }
