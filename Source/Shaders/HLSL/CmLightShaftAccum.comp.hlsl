@@ -89,30 +89,29 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         uvw = lightShaftVolumeUVW(surfacePos);
     }
-    const float3 cell = 1.0 / float3((float)lightShaftParams[0].accumVolumeSizeX,
-                                     (float)lightShaftParams[0].accumVolumeSizeY,
-                                     (float)lightShaftParams[0].accumVolumeSizeZ);
+    const float3 clampedUvw = saturate(uvw);
+    const int3 volumeSize = int3((int)lightShaftParams[0].accumVolumeSizeX,
+                                 (int)lightShaftParams[0].accumVolumeSizeY,
+                                 (int)lightShaftParams[0].accumVolumeSizeZ);
 
-    const float4 centerSample = lightShaftVolume.SampleLevel(lightShaftVolumeSampler, saturate(uvw), 0.0);
-    float3 shaft = centerSample.rgb * 2.0;
-    float transmittance = centerSample.a * 2.0;
+    const float2 coordinate = clampedUvw.xy * float2(volumeSize.xy) - 0.5;
+    const int x0 = clamp((int)floor(coordinate.x), 0, volumeSize.x - 1);
+    const int y0 = clamp((int)floor(coordinate.y), 0, volumeSize.y - 1);
+    const int x1 = min(x0 + 1, volumeSize.x - 1);
+    const int y1 = min(y0 + 1, volumeSize.y - 1);
+    const int z = clamp((int)floor(clampedUvw.z * (float)volumeSize.z - 0.5), 0, volumeSize.z - 1);
 
-    const float3 offsets[4] =
-    {
-        float3(cell.x, 0.0, 0.0), float3(-cell.x, 0.0, 0.0),
-        float3(0.0, cell.y, 0.0), float3(0.0, -cell.y, 0.0)
-    };
+    const float fx = saturate(coordinate.x - floor(coordinate.x));
+    const float fy = saturate(coordinate.y - floor(coordinate.y));
 
-    for (int i = 0; i < 4; i++)
-    {
-        const float4 tap = lightShaftVolume.SampleLevel(
-            lightShaftVolumeSampler, saturate(uvw + offsets[i]), 0.0);
-        shaft += tap.rgb;
-        transmittance += tap.a;
-    }
+    const float4 s00 = lightShaftVolume.Load(int4(x0, y0, z, 0));
+    const float4 s10 = lightShaftVolume.Load(int4(x1, y0, z, 0));
+    const float4 s01 = lightShaftVolume.Load(int4(x0, y1, z, 0));
+    const float4 s11 = lightShaftVolume.Load(int4(x1, y1, z, 0));
+    const float4 sample = lerp(lerp(s00, s10, fx), lerp(s01, s11, fx), fy);
 
-    shaft /= 6.0;
-    transmittance = saturate(transmittance / 6.0);
+    float3 shaft = sample.rgb;
+    float transmittance = saturate(sample.a);
 
     const uint debugMode = lightShaftParams[0].accumDebugMode;
     if (debugMode != 0u)
