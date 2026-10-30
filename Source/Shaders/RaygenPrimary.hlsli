@@ -681,6 +681,7 @@ void main()
     imageStoreNormalGeometry(               pix, h.normalGeom);
     framebufMetallicRoughness[pix]          = float4(h.metallic, h.roughness, 0, 0);
     framebufDepthWorld[pix]                 = (float4)fullPathLength;
+    framebufQ2GodRaysThroughputDist[pix]    = float4(rayOrigin, q2LastSegmentLen);
     framebufMotion[pix]                     = float4(motionCurToPrev, motionDepthLinearCurToPrev, 0.0);
     framebufSurfacePosition[pix]            = float4(h.hitPosition, asfloat(h.instCustomIndex));
     framebufVisibilityBuffer[pix]           = packVisibilityBuffer(currentPayload);

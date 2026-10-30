@@ -72,6 +72,7 @@ class RhiRasterOverlayPass;
 class RhiRasterSkyPass;
 class RhiRtComposePass;
 class RhiRtDirectPass;
+class RhiLightShaftVolumePass;
 class RhiRtGodRaysPass;
 class RhiRtIndirectPass;
 class RhiRtPrimaryPass;
@@ -342,6 +343,7 @@ private:
     std::shared_ptr<RhiBloomPass>           rhiBloomPass;
     std::shared_ptr<RhiShadowMapPass>       rhiShadowMapPass;
     std::shared_ptr<RhiRtGodRaysPass>       rhiRtGodRaysPass;
+    std::shared_ptr<RhiLightShaftVolumePass> rhiLightShaftVolumePass;
 
     std::shared_ptr<RhiRtReflRefrPass>      rhiRtReflRefrPass;
 

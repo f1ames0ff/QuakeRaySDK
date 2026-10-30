@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -24,6 +24,7 @@
 #include "RhiPostEffectPass.h"
 #include "RhiRtComposePass.h"
 #include "RhiRtDirectPass.h"
+#include "RhiLightShaftVolumePass.h"
 #include "RhiRtGodRaysPass.h"
 #include "RhiRtIndirectPass.h"
 #include "RhiRtPrimaryPass.h"
@@ -109,6 +110,7 @@ NvrhiFrameSkeleton::NvrhiFrameSkeleton(nvrhi::IDevice *pDevice,
                                        RhiBloomPass *pBloomPass,
                                        RhiShadowMapPass *pShadowMapPass,
                                        RhiRtGodRaysPass *pGodRaysPass,
+                                       RhiLightShaftVolumePass *pLightShaftVolumePass,
                                        RhiUiPass *pUiPass,
                                        FrameMode mode,
                                        PrintFunction pfnPrint)
@@ -131,6 +133,7 @@ NvrhiFrameSkeleton::NvrhiFrameSkeleton(nvrhi::IDevice *pDevice,
     , bloomPass(pBloomPass)
     , shadowMapPass(pShadowMapPass)
     , godRaysPass(pGodRaysPass)
+    , lightShaftVolumePass(pLightShaftVolumePass)
     , uiPass(pUiPass)
     , frameMode(mode)
     , textureTable(pTextureTable)
@@ -1381,10 +1384,13 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                 float shadowMapVP[16];
                 float shadowMapDepthScale = 0.0f;
 
-                if (shadowMapPass->Render(commandList, sky.godRays.shadowLightDirection,
-                                          sky.godRays.aabbMin, sky.godRays.aabbMax,
-                                          sky.godRays.staticCollector, sky.godRays.dynamicCollector,
-                                          geometry, shadowMapVP, &shadowMapDepthScale))
+                const bool shadowRendered = shadowMapPass->Render(
+                    commandList, sky.godRays.shadowLightDirection,
+                    sky.godRays.aabbMin, sky.godRays.aabbMax,
+                    sky.godRays.staticCollector, sky.godRays.dynamicCollector,
+                    geometry, shadowMapVP, &shadowMapDepthScale);
+
+                if (shadowRendered)
                 {
                     memcpy(godRaysParams.sunDirection, sky.godRays.sunDirection,
                            sizeof(godRaysParams.sunDirection));
@@ -1395,9 +1401,158 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                            sizeof(godRaysParams.worldHalfSizeInv));
                     memcpy(godRaysParams.shadowMapVP, shadowMapVP, sizeof(godRaysParams.shadowMapVP));
                     godRaysParams.shadowMapDepthScale = shadowMapDepthScale;
-                    godRaysParams.godRaysIntensity = sky.godRays.intensity;
+                    godRaysParams.godRaysIntensity =
+                        sky.godRays.lightShaftSun ? 0.0f : sky.godRays.intensity;
                     godRaysParams.godRaysEccentricity = sky.godRays.eccentricity;
+                    godRaysParams.sunStepScale = sky.godRays.sunStepScale;
                     godRaysParams.godRaysEnabled = 1;
+
+                    const bool lightShaftsActive = sky.godRays.lightShaftCount > 0 ||
+                                                   sky.godRays.lightShaftSun;
+                    godRaysParams.lightShaftCount = lightShaftsActive
+                        ? std::max(1u, sky.godRays.lightShaftCount) : 0u;
+                    godRaysParams.lightShaftIntensity = sky.godRays.lightShaftIntensity;
+                    godRaysParams.lightShaftSteps = sky.godRays.lightShaftSteps;
+
+                    static constexpr uint32_t lightShaftVolumeSizes[3][3] = {{256u, 144u, 64u},
+                                                                               {320u, 176u, 80u},
+                                                                               {384u, 216u, 96u}};
+                    const uint32_t lightShaftQuality =
+                        std::max(1u, std::min(sky.godRays.lightShaftSamples, 3u)) - 1u;
+                    godRaysParams.accumVolumeSizeX = lightShaftVolumeSizes[lightShaftQuality][0];
+                    godRaysParams.accumVolumeSizeY = lightShaftVolumeSizes[lightShaftQuality][1];
+                    godRaysParams.accumVolumeSizeZ = lightShaftVolumeSizes[lightShaftQuality][2];
+                    godRaysParams.accumDebugMode = sky.godRays.lightShaftDebug;
+
+                    for (uint32_t i = 0; i < sky.godRays.lightShaftCount; i++)
+                    {
+                        memcpy(godRaysParams.lightShafts[i].position, sky.godRays.lightShafts[i].position,
+                               sizeof(godRaysParams.lightShafts[i].position));
+                        memcpy(godRaysParams.lightShafts[i].direction, sky.godRays.lightShafts[i].direction,
+                               sizeof(godRaysParams.lightShafts[i].direction));
+                        memcpy(godRaysParams.lightShafts[i].color, sky.godRays.lightShafts[i].color,
+                               sizeof(godRaysParams.lightShafts[i].color));
+                        memcpy(godRaysParams.lightShafts[i].cone, sky.godRays.lightShafts[i].cone,
+                               sizeof(godRaysParams.lightShafts[i].cone));
+                        memcpy(godRaysParams.lightShafts[i].tangentU, sky.godRays.lightShafts[i].tangentU,
+                               sizeof(godRaysParams.lightShafts[i].tangentU));
+                        memcpy(godRaysParams.lightShafts[i].tangentV, sky.godRays.lightShafts[i].tangentV,
+                               sizeof(godRaysParams.lightShafts[i].tangentV));
+                        memcpy(godRaysParams.lightShafts[i].surface, sky.godRays.lightShafts[i].surface,
+                               sizeof(godRaysParams.lightShafts[i].surface));
+                        memcpy(godRaysParams.lightShafts[i].emission, sky.godRays.lightShafts[i].emission,
+                               sizeof(godRaysParams.lightShafts[i].emission));
+                        memcpy(godRaysParams.lightShafts[i].source, sky.godRays.lightShafts[i].source,
+                               sizeof(godRaysParams.lightShafts[i].source));
+                    }
+
+                    if (lightShaftVolumePass != nullptr && lightShaftVolumePass->IsCreated() &&
+                        lightShaftsActive)
+                    {
+                        RhiLightShaftVolumePass::Params volumeParams = {};
+                        volumeParams.lightShaftCount = sky.godRays.lightShaftCount;
+                        volumeParams.lightShaftSamples = sky.godRays.lightShaftSamples;
+                        volumeParams.volumeSizeX = lightShaftVolumeSizes[lightShaftQuality][0];
+                        volumeParams.volumeSizeY = lightShaftVolumeSizes[lightShaftQuality][1];
+                        volumeParams.volumeSizeZ = lightShaftVolumeSizes[lightShaftQuality][2];
+                        volumeParams.debugMode = sky.godRays.lightShaftDebug;
+                        volumeParams.rayBudget = sky.godRays.lightShaftRayBudget;
+                        volumeParams.lightListCapacity = RhiLightShaftVolumePass::LIGHT_LIST_CAPACITY;
+                        volumeParams.tilesX =
+                            (volumeParams.volumeSizeX + RhiLightShaftVolumePass::LIGHT_LIST_TILE - 1) /
+                            RhiLightShaftVolumePass::LIGHT_LIST_TILE;
+                        volumeParams.tilesY =
+                            (volumeParams.volumeSizeY + RhiLightShaftVolumePass::LIGHT_LIST_TILE - 1) /
+                            RhiLightShaftVolumePass::LIGHT_LIST_TILE;
+                        volumeParams.zBins = RhiLightShaftVolumePass::LIGHT_LIST_Z_BINS;
+                        volumeParams.lightListClusterCount =
+                            volumeParams.tilesX * volumeParams.tilesY * volumeParams.zBins;
+                        volumeParams.mediumSigma = sky.godRays.lightShaftDensity;
+                        volumeParams.mediumAlbedo = sky.godRays.lightShaftAlbedo;
+                        volumeParams.mediumLocalScale = sky.godRays.lightShaftLocalFogScale;
+                        volumeParams.mediumHistoryWeight = sky.godRays.lightShaftHistoryWeight;
+                        volumeParams.sunEnabled = sky.godRays.lightShaftSun ? 1u : 0u;
+                        volumeParams.temporalEnabled = sky.godRays.lightShaftTemporal ? 1u : 0u;
+                        memcpy(volumeParams.worldCenter, sky.godRays.worldCenter,
+                               sizeof(volumeParams.worldCenter));
+                        memcpy(volumeParams.worldHalfSizeInv, sky.godRays.worldHalfSizeInv,
+                               sizeof(volumeParams.worldHalfSizeInv));
+                        memcpy(volumeParams.sunDirection, sky.godRays.sunDirection,
+                               sizeof(volumeParams.sunDirection));
+                        memcpy(volumeParams.sunColor, sky.godRays.sunColor,
+                               sizeof(volumeParams.sunColor));
+                        memcpy(volumeParams.mediumEmissive, sky.godRays.lightShaftEmissive,
+                               sizeof(volumeParams.mediumEmissive));
+
+                        bool historyValid = uniform != nullptr && sky.godRays.lightShaftTemporal &&
+                                            lightShaftPrevCameraValid &&
+                                            !lightShaftVolumePass->ConsumeHistoryReset();
+                        if (uniform != nullptr && lightShaftPrevCameraValid)
+                        {
+                            const float dx = uniform->cameraPosition[0] - lightShaftPrevCamera[0];
+                            const float dy = uniform->cameraPosition[1] - lightShaftPrevCamera[1];
+                            const float dz = uniform->cameraPosition[2] - lightShaftPrevCamera[2];
+                            historyValid = historyValid && dx * dx + dy * dy + dz * dz < 256.0f * 256.0f;
+                        }
+
+                        if (uniform != nullptr)
+                        {
+                            const float *previousCamera = lightShaftPrevCameraValid
+                                ? lightShaftPrevCamera : uniform->cameraPosition;
+                            memcpy(volumeParams.prevCameraPosition, previousCamera,
+                                   sizeof(volumeParams.prevCameraPosition));
+                            memcpy(lightShaftPrevCamera, uniform->cameraPosition,
+                                   sizeof(lightShaftPrevCamera));
+                            lightShaftPrevCameraValid = true;
+                        }
+
+                        volumeParams.historyValid = historyValid ? 1u : 0u;
+
+                        for (uint32_t i = 0; i < sky.godRays.lightShaftCount; i++)
+                        {
+                            memcpy(volumeParams.lightShafts[i].position, sky.godRays.lightShafts[i].position,
+                                   sizeof(volumeParams.lightShafts[i].position));
+                            memcpy(volumeParams.lightShafts[i].direction, sky.godRays.lightShafts[i].direction,
+                                   sizeof(volumeParams.lightShafts[i].direction));
+                            memcpy(volumeParams.lightShafts[i].color, sky.godRays.lightShafts[i].color,
+                                   sizeof(volumeParams.lightShafts[i].color));
+                            memcpy(volumeParams.lightShafts[i].cone, sky.godRays.lightShafts[i].cone,
+                                   sizeof(volumeParams.lightShafts[i].cone));
+                            memcpy(volumeParams.lightShafts[i].tangentU, sky.godRays.lightShafts[i].tangentU,
+                                   sizeof(volumeParams.lightShafts[i].tangentU));
+                            memcpy(volumeParams.lightShafts[i].tangentV, sky.godRays.lightShafts[i].tangentV,
+                                   sizeof(volumeParams.lightShafts[i].tangentV));
+                            memcpy(volumeParams.lightShafts[i].surface, sky.godRays.lightShafts[i].surface,
+                                   sizeof(volumeParams.lightShafts[i].surface));
+                            memcpy(volumeParams.lightShafts[i].emission, sky.godRays.lightShafts[i].emission,
+                                   sizeof(volumeParams.lightShafts[i].emission));
+                            memcpy(volumeParams.lightShafts[i].source, sky.godRays.lightShafts[i].source,
+                                   sizeof(volumeParams.lightShafts[i].source));
+                        }
+
+                        nvrhi::BindingSetHandle volumeLightSet;
+                        if (rtDirectPass != nullptr && uniform != nullptr &&
+                            rtDirectPass->EnsureLightSet(commandList, frameIndex, uniform->frameId,
+                                                         uniform->q2LightStatsMode))
+                        {
+                            volumeLightSet = rtDirectPass->GetLightSet(frameIndex);
+                        }
+
+                        if (lightShaftVolumePass->Render(
+                                commandList, frameIndex, worldUniformBuffer.Get(),
+                                accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
+                                volumeLightSet.Get(), volumeParams))
+                        {
+                            godRaysPass->SetLightShaftVolume(lightShaftVolumePass->GetTexture(frameIndex),
+                                                             lightShaftVolumePass->GetInjectionTexture(frameIndex),
+                                                             lightShaftVolumePass->GetSampler());
+                        }
+                        else
+                        {
+                            godRaysPass->SetLightShaftVolume(nullptr, nullptr, nullptr);
+                            godRaysParams.lightShaftCount = 0;
+                        }
+                    }
 
                     godRaysReflectionsPending = godRaysPass->RenderInput(
                         commandList, frameIndex, sky.framebuffers, sky.width, sky.height,
