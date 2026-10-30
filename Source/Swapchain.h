@@ -30,6 +30,11 @@
 #include "ISwapchainDependency.h"
 #include "SwapchainPolicy.h"
 
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+typedef VkResult(VKAPI_PTR *PFN_vkAcquireFullScreenExclusiveModeEXT)(VkDevice device, VkSwapchainKHR swapchain);
+typedef VkResult(VKAPI_PTR *PFN_vkReleaseFullScreenExclusiveModeEXT)(VkDevice device, VkSwapchainKHR swapchain);
+#endif
+
 namespace qray
 {
 

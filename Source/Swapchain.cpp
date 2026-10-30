@@ -24,7 +24,9 @@
 #include "QrException.h"
 #include "Utils.h"
 
+#ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
+#endif
 
 using namespace qray;
 
@@ -654,6 +656,8 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
     swapchainInfo.oldSwapchain = oldSwapchain;
 
     const bool useExclusive = WantFullscreenExclusive();
+
+#ifdef _WIN32
     VkSurfaceFullScreenExclusiveInfoEXT fullScreenExclusiveInfo = {};
     VkSurfaceFullScreenExclusiveWin32InfoEXT fullScreenExclusiveWin32Info = {};
 
@@ -667,6 +671,7 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
         fullScreenExclusiveInfo.fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT;
         swapchainInfo.pNext = &fullScreenExclusiveInfo;
     }
+#endif
 
     createdExclusive = false;
     r = vkCreateSwapchainKHR(device, &swapchainInfo, nullptr, &swapchain);

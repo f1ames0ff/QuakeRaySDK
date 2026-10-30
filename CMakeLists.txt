@@ -142,19 +142,27 @@ set(renderer_KTX_SOURCES
     "${renderer_KTX_FOLDER}/dfdutils/vk2dfd.c"
 )
 
-# Win32 Vulkan surface is required by the host (SDL window).
+# Static build: the QR_* functions are plain internal calls, not exports.
+# qray.h turns QRAPI into an empty macro when QR_STATIC is defined.
 add_compile_definitions(
-    QR_USE_SURFACE_WIN32
-    VK_USE_PLATFORM_WIN32_KHR
-    NOMINMAX
-    # Static build: the QR_* functions are plain internal calls, not exports.
-    # qray.h turns QRAPI into an empty macro when QR_STATIC is defined.
     QR_STATIC
     # KTX-Software
     KHRONOS_STATIC
     LIBKTX
-    QR_USE_FSR3
 )
+
+if(WIN32)
+    add_compile_definitions(
+        QR_USE_SURFACE_WIN32
+        VK_USE_PLATFORM_WIN32_KHR
+        NOMINMAX
+        QR_USE_FSR3
+    )
+else()
+    add_compile_definitions(QR_USE_SURFACE_XLIB)
+    set_source_files_properties(Source/VulkanDevice_Init.cpp
+        PROPERTIES COMPILE_DEFINITIONS "VK_USE_PLATFORM_XLIB_KHR")
+endif()
 
 if(WIN32)
     # DLSS stays optional (off by default, matching the current qray build)
@@ -438,20 +446,23 @@ target_include_directories(renderer PUBLIC
 # qray.h selects the surface declarations and the static-library calling
 # convention from these definitions. They must travel with the exported target;
 # directory-scope definitions do not reach a host in another CMake directory.
-target_compile_definitions(renderer
-    INTERFACE
-        QR_STATIC
+target_compile_definitions(renderer INTERFACE QR_STATIC)
+if(WIN32)
+    target_compile_definitions(renderer INTERFACE
         QR_USE_SURFACE_WIN32
         $<$<COMPILE_LANGUAGE:CXX>:NOMINMAX>
-)
+    )
+else()
+    target_compile_definitions(renderer INTERFACE QR_USE_SURFACE_XLIB)
+endif()
 
 # Vulkan (found in the parent scope or by the standalone package setup)
 target_link_libraries(renderer PUBLIC Vulkan::Vulkan)
 
 # RHI layer: NVRHI built by the root CMakeLists (target nvrhi_vk is the static
 # Vulkan backend, nvrhi holds the shared interface and the validation layer).
-target_link_libraries(renderer PUBLIC $<BUILD_INTERFACE:nvrhi>)
 target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:nvrhi_vk>)
+target_link_libraries(renderer PUBLIC $<BUILD_INTERFACE:nvrhi>)
 
 if(WIN32)
     set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include")
@@ -477,6 +488,8 @@ if(WIN32)
 
     target_sources(renderer PRIVATE "Source/FSR.cpp")
     target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:qray_ffx>)
+else()
+    target_sources(renderer PRIVATE "Source/FSRStub.cpp")
 endif()
 
 include(CMakePackageConfigHelpers)
