@@ -24,17 +24,31 @@
 #include "RenderResolutionHelper.h"
 #include "QrException.h"
 
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 #include <cstdio>
 #include <vector>
+
+#ifndef _WIN32
+static void OutputDebugStringA(const char *text)
+{
+    fputs(text, stderr);
+}
+#endif
 
 namespace
 {
     void FsrMessageCallback(uint32_t type, const wchar_t* msg)
     {
         char buf[512];
+#ifdef _WIN32
         snprintf(buf, sizeof(buf), "[FSR] type=%u: %S\n", type, msg);
         OutputDebugStringA(buf);
+#else
+        snprintf(buf, sizeof(buf), "[FSR] type=%u: %ls\n", type, msg);
+        fputs(buf, stderr);
+#endif
     }
 
     FfxApiSurfaceFormat MapVkFormat(VkFormat fmt)
@@ -156,6 +170,7 @@ qray::FidelityFX::FSR::FSR(VkDevice _device, VkPhysicalDevice _physDevice, UserP
     , m_displayWidth(0)
     , m_displayHeight(0)
     , m_hasSize(false)
+    , m_loggedFirstDispatch(false)
 {
 }
 
@@ -307,6 +322,7 @@ void qray::FidelityFX::FSR::RecreateContext()
     }
 
     s_contextForJitter = m_context;
+    m_loggedFirstDispatch = false;
 
     ffxQueryGetProviderVersion pv = {};
     pv.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
@@ -406,6 +422,24 @@ qray::FramebufferImageIndex qray::FidelityFX::FSR::Apply(
     }
 
     InsertBarriers(cmd, frameIndex, *framebuffers, rs, true);
+
+    if (!m_loggedFirstDispatch)
+    {
+        m_loggedFirstDispatch = true;
+
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "FSR: upscale dispatch %ux%u -> %ux%u (jitter %.3f, %.3f, reset=%d)",
+            resolutionState.renderWidth, resolutionState.renderHeight,
+            m_displayWidth, m_displayHeight,
+            (double)jitterOffset.data[0], (double)jitterOffset.data[1],
+            resetAccumulation ? 1 : 0);
+        OutputDebugStringA(buf);
+        if (m_pUserPrint)
+        {
+            m_pUserPrint->Print(buf);
+        }
+    }
 
     return OUTPUT_IMAGE_INDEX;
 }

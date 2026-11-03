@@ -14,18 +14,28 @@ endif()
 
 include(GNUInstallDirs)
 
-# Resolved this early on purpose: the GPU test targets below copy the FidelityFX
-# runtime DLL next to their executables, and a variable that is still unset there
-# expands to an empty prefix silently - the copy is then baked as
-# "/PrebuiltSignedDLL/amd_fidelityfx_vk.dll" and only fails at link time, on the
-# first configure of a fresh build tree. The value is validated further down,
-# next to the rest of the FidelityFX wiring.
+# FidelityFX 1.1.4 is built from source on both platforms. The SDK sources are
+# vendored under Source/FidelityFX_SDK_1.1.4/src; set QR_FFX_SDK_ROOT to use an
+# external checkout instead. The provider itself is produced by
+# Source/FidelityFX_SDK_1.1.4/{linux,windows}/build_provider.* and the engine
+# consumes that output, never a checked-in binary.
+if(NOT DEFINED QR_FFX_SDK_ROOT OR QR_FFX_SDK_ROOT STREQUAL "")
+    set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
+        CACHE PATH "FidelityFX SDK 1.1.4 source root (contains sdk/ and ffx-api/)")
+endif()
+file(TO_CMAKE_PATH "${QR_FFX_SDK_ROOT}" QR_FFX_SDK_ROOT)
+
+set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include"
+    CACHE PATH "FidelityFX ffx-api include directory")
+
 if(WIN32)
-    if(NOT DEFINED QR_FFX_SDK_ROOT OR QR_FFX_SDK_ROOT STREQUAL "")
-        set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
-            CACHE PATH "FidelityFX SDK root (contains ffx-api/include and PrebuiltSignedDLL)")
-    endif()
-    file(TO_CMAKE_PATH "${QR_FFX_SDK_ROOT}" QR_FFX_SDK_ROOT)
+    set(QR_FFX_VK_LIBRARY "${CMAKE_BINARY_DIR}/ffx/amd_fidelityfx_vk.lib"
+        CACHE FILEPATH "Source-built amd_fidelityfx_vk import library")
+    set(QR_FFX_VK_RUNTIME_DLL "${CMAKE_BINARY_DIR}/ffx/amd_fidelityfx_vk.dll"
+        CACHE FILEPATH "Source-built amd_fidelityfx_vk runtime DLL")
+else()
+    set(QR_FFX_VK_SO "${CMAKE_BINARY_DIR}/ffx/libamd_fidelityfx_vk.so"
+        CACHE FILEPATH "Source-built libamd_fidelityfx_vk.so")
 endif()
 
 set(renderer_CXX_STANDARD 20)
@@ -281,7 +291,7 @@ if(QR_BUILD_TESTS)
     target_link_libraries(qray_spatial_twin_gpu PRIVATE renderer nvrhi nvrhi_vk user32)
     add_custom_command(TARGET qray_spatial_twin_gpu POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+            "${QR_FFX_VK_RUNTIME_DLL}"
             "$<TARGET_FILE_DIR:qray_spatial_twin_gpu>/amd_fidelityfx_vk.dll"
         VERBATIM)
     add_test(NAME qray_spatial_twin_gpu COMMAND qray_spatial_twin_gpu
@@ -464,16 +474,23 @@ target_link_libraries(renderer PUBLIC Vulkan::Vulkan)
 target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:nvrhi_vk>)
 target_link_libraries(renderer PUBLIC $<BUILD_INTERFACE:nvrhi>)
 
-if(WIN32)
-    set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include")
-    set(QR_FFX_VK_LIBRARY "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib")
+if(NOT EXISTS "${QR_FFX_INCLUDE_DIR}/ffx_api/ffx_api.h")
+    message(FATAL_ERROR "FidelityFX headers were not found at ${QR_FFX_INCLUDE_DIR}")
+endif()
 
-    if(NOT EXISTS "${QR_FFX_INCLUDE_DIR}/ffx_api/ffx_api.h" OR
-       NOT EXISTS "${QR_FFX_VK_LIBRARY}")
+if(WIN32)
+    if(NOT EXISTS "${QR_FFX_VK_LIBRARY}")
         message(FATAL_ERROR
-            "FidelityFX SDK was not found at QR_FFX_SDK_ROOT=${QR_FFX_SDK_ROOT}. "
-            "Install the AMD FidelityFX SDK and set QR_FFX_SDK_ROOT, or provide "
-            "the ffx-api headers and amd_fidelityfx_vk.lib.")
+            "The source-built FidelityFX Vulkan provider was not found at "
+            "${QR_FFX_VK_LIBRARY}. Run build_win.ps1, or run "
+            "renderer/Source/FidelityFX_SDK_1.1.4/windows/build_provider.ps1 "
+            "and pass -DQR_FFX_VK_LIBRARY=<path>.")
+    endif()
+    if(NOT EXISTS "${QR_FFX_VK_RUNTIME_DLL}")
+        message(FATAL_ERROR
+            "The source-built FidelityFX Vulkan runtime DLL was not found at "
+            "${QR_FFX_VK_RUNTIME_DLL}. Set QR_FFX_VK_RUNTIME_DLL to the DLL "
+            "produced by build_provider.ps1.")
     endif()
 
     add_library(qray_ffx INTERFACE)
@@ -489,7 +506,22 @@ if(WIN32)
     target_sources(renderer PRIVATE "Source/FSR.cpp")
     target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:qray_ffx>)
 else()
-    target_sources(renderer PRIVATE "Source/FSRStub.cpp")
+    if(NOT EXISTS "${QR_FFX_VK_SO}")
+        message(FATAL_ERROR
+            "The source-built FidelityFX Vulkan provider was not found at "
+            "${QR_FFX_VK_SO}. Build it with "
+            "renderer/Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh, or pass "
+            "-DQR_FFX_VK_SO=<path to libamd_fidelityfx_vk.so>.")
+    endif()
+
+    add_library(qray_ffx SHARED IMPORTED)
+    set_target_properties(qray_ffx PROPERTIES
+        IMPORTED_LOCATION "${QR_FFX_VK_SO}"
+        INTERFACE_INCLUDE_DIRECTORIES "${QR_FFX_INCLUDE_DIR}"
+    )
+
+    target_sources(renderer PRIVATE "Source/FSR.cpp")
+    target_link_libraries(renderer PRIVATE qray_ffx)
 endif()
 
 include(CMakePackageConfigHelpers)
@@ -508,9 +540,9 @@ if(WIN32)
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
     install(DIRECTORY "${QR_FFX_SDK_ROOT}/ffx-api/include/ffx_api"
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffx)
-    install(FILES "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib"
+    install(FILES "${QR_FFX_VK_LIBRARY}"
         DESTINATION ${CMAKE_INSTALL_LIBDIR})
-    install(FILES "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+    install(FILES "${QR_FFX_VK_RUNTIME_DLL}"
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 else()
     install(TARGETS renderer

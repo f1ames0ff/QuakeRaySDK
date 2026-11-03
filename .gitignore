@@ -36,6 +36,7 @@
 
 # Executables
 *.exe
+!Source/FidelityFX_SDK_1.1.4/src/sdk/tools/binary_store/*.exe
 *.out
 *.app
 

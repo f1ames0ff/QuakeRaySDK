@@ -1,0 +1,68 @@
+diff --git a/sdk/src/backends/vk/ffx_vk.cpp b/sdk/src/backends/vk/ffx_vk.cpp
+index d914479..b69afbc 100644
+--- a/sdk/src/backends/vk/ffx_vk.cpp
++++ b/sdk/src/backends/vk/ffx_vk.cpp
+@@ -26,6 +26,7 @@
+ #include <FidelityFX/host/backends/vk/ffx_vk.h>
+ #include <ffx_shader_blobs.h>
+ #include <ffx_breadcrumbs_list.h>
++#include <cstdint>
+ 
+ #ifdef _WIN32
+ #include <windows.h>
+@@ -279,17 +280,21 @@ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t
+     if (physicalDevice)
+         vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &numExtensions, nullptr);
+ 
+-    uint32_t extensionPropArraySize = sizeof(VkExtensionProperties) * numExtensions;
+-    uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
+-    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+-    uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
+-    uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
+-    uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
+-    uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
+-    
+-    return FFX_ALIGN_UP(sizeof(BackendContext_VK) + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
++    // The scratch buffer holds arrays of host structs. Keep every array start 16-byte aligned:
++    // GCC is allowed to lower aggregate stores to aligned SSE moves (movaps), and an 8-byte
++    // aligned scratch offset faults at runtime even though the struct itself only needs 8.
++    constexpr uint32_t scratchAlignment = 16;
++    uint32_t extensionPropArraySize = FFX_ALIGN_UP(sizeof(VkExtensionProperties) * numExtensions, scratchAlignment);
++    uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), scratchAlignment);
++    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), scratchAlignment);
++    uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, scratchAlignment);
++    uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), scratchAlignment);
++    uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), scratchAlignment);
++    uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), scratchAlignment);
++
++    return FFX_ALIGN_UP(FFX_ALIGN_UP(sizeof(BackendContext_VK), scratchAlignment) + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
+                             pipelineArraySize + resourceArraySize + contextArraySize,
+-                        sizeof(uint64_t));
++                        scratchAlignment);
+ }
+ 
+ // Create a FfxDevice from a VkDevice
+@@ -1402,13 +1407,16 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
+         new (&backendContext->uniformBufferMutex) std::mutex();
+ 
+         // Map all of our pointers
+-        uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
+-        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+-        uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
+-        uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
+-        uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
+-        uint32_t contextArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
+-        uint8_t* pMem = (uint8_t*)((BackendContext_VK*)(backendContext + 1));
++        constexpr uint32_t scratchAlignment = 16;
++        uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), scratchAlignment);
++        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), scratchAlignment);
++        uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, scratchAlignment);
++        uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), scratchAlignment);
++        uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), scratchAlignment);
++        uint32_t contextArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * sizeof(BackendContext_VK::EffectContext), scratchAlignment);
++        uint8_t* pMem = reinterpret_cast<uint8_t*>(
++            (reinterpret_cast<uintptr_t>(backendContext + 1) + (scratchAlignment - 1)) &
++            ~static_cast<uintptr_t>(scratchAlignment - 1));
+ 
+         // Map gpu job array
+         backendContext->pGpuJobs = (FfxGpuJobDescription*)pMem;

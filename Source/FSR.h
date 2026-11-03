@@ -71,6 +71,7 @@ namespace qray
             uint32_t m_displayWidth;
             uint32_t m_displayHeight;
             bool m_hasSize;
+            bool m_loggedFirstDispatch;
             static inline ffxContext s_contextForJitter = nullptr;
         };
     }

@@ -42,13 +42,17 @@ Its meter conversion and generic authoring core remain future editor work.
 
 ## Requirements
 
-- Windows with Visual Studio 2022 and CMake 3.20 or newer.
+- Windows with Visual Studio 2022 and CMake 3.23 or newer (the FidelityFX SDK
+  source build requires 3.23). The renderer's own minimum is 3.20.
 - Vulkan SDK with headers new enough for NVRHI (Vulkan 1.4.318 or newer).
 - NVRHI source compatible with pin `d0c8e30d5f8d58c3b838b06aa1d8d0a912bea076`,
   with `c_MaxBindingLayouts` raised to at least 13 (the patch sets it to 16),
   or an existing compatible `nvrhi`/`nvrhi_vk` target with the same limit.
-- FidelityFX SDK API headers and `amd_fidelityfx_vk` provider. The in-tree
-  provider is used by default; `QR_FFX_SDK_ROOT` selects an installed SDK.
+- FidelityFX SDK 1.1.4 sources, vendored under
+  `Source/FidelityFX_SDK_1.1.4/src`. The Vulkan provider is built from those
+  sources with `Source/FidelityFX_SDK_1.1.4/windows/build_provider.ps1` on
+  Windows or `Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh` on Linux.
+  No checked-in `amd_fidelityfx_vk` binary is linked.
 
 ## Standalone build
 
@@ -66,6 +70,25 @@ patch beside the installed SDK documentation.
 
 NVRHI supplies the `nvrhi` and `nvrhi_vk` targets. If they are already present
 in the parent build, `QR_NVRHI_SOURCE_DIR` can be omitted.
+
+## Linux build
+
+The provider is built from source first, then the renderer is configured
+against it:
+
+```bash
+GLSLANG_VALIDATOR=/path/to/glslangValidator \
+VULKAN_HEADERS_DIR=/path/to/vulkan/headers \
+Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh
+
+cmake -S . -B build/linux-debug -DCMAKE_BUILD_TYPE=Debug \
+    -DQR_FFX_VK_SO="$PWD/build/ffx/libamd_fidelityfx_vk.so"
+cmake --build build/linux-debug --parallel
+```
+
+The host repository's `build_linux.sh` performs both steps. The provider is
+loaded through the executable's `RUNPATH`; the `.so` carries the
+`libamd_fidelityfx_vk.so` SONAME.
 
 ## Optional editor build
 
