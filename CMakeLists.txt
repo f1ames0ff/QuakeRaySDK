@@ -299,8 +299,18 @@ if(QR_BUILD_TESTS)
     set_tests_properties(qray_spatial_twin_gpu PROPERTIES TIMEOUT 180
         ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
-    get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
-    find_program(QR_DXC NAMES dxc HINTS "${QR_VULKAN_BIN}" REQUIRED)
+    # Prefer the Vulkan SDK's dxc. The Windows SDK also ships a dxc.exe on
+    # PATH, but it is built without SPIR-V code generation and fails the
+    # renderer probes with "SPIR-V CodeGen not available".
+    set(QR_DXC_HINTS)
+    if(DEFINED ENV{VULKAN_SDK})
+        list(APPEND QR_DXC_HINTS "$ENV{VULKAN_SDK}/Bin")
+    endif()
+    if(Vulkan_GLSLC_EXECUTABLE)
+        get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
+        list(APPEND QR_DXC_HINTS "${QR_VULKAN_BIN}")
+    endif()
+    find_program(QR_DXC NAMES dxc HINTS ${QR_DXC_HINTS} REQUIRED)
     set(QR_PROBE_DIR "${CMAKE_CURRENT_BINARY_DIR}/Tests")
 
     set(QR_VERTEX_TRANSFORM_PROBE "${QR_PROBE_DIR}/VertexTransformProbe.comp.spv")
