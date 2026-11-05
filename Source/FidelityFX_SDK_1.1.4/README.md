@@ -52,6 +52,11 @@ and the engine configure step.
    compilers instead of `__declspec(dllexport)`.
 5. `0005-ffx-provider-msvc-literal.patch` — replaces the MSVC-only
    `0xF5A5'CA1Eui64` literal with `0xF5A5CA1Eull`.
+6. `0006-ffx-api-include-case.patch` — fixes the two `ffx-api` headers that
+   include `<FidelityFx/...>` with the wrong case. Windows and macOS hide the
+   typo, but Linux is case-sensitive; the old workaround was a tracked
+   `FidelityFx -> FidelityFX` symlink, which does not survive a Windows
+   checkout. The headers now use the real `FidelityFX` spelling.
 
 ## Linux build
 

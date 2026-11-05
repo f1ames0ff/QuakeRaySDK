@@ -77,7 +77,10 @@ $patchChecks = @(
        Patch = "0004-ffx-api-entry-linux.patch" },
     @{ File = "ffx-api\src\ffx_provider_fsr3upscale.cpp";
        Pattern = "0xF5A5CA1Eull";
-       Patch = "0005-ffx-provider-msvc-literal.patch" }
+       Patch = "0005-ffx-provider-msvc-literal.patch" },
+    @{ File = "ffx-api\src\ffx_provider.h";
+       Pattern = "<FidelityFX/host/ffx_types.h>";
+       Patch = "0006-ffx-api-include-case.patch" }
 )
 
 foreach ($check in $patchChecks) {
