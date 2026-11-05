@@ -1,0 +1,26 @@
+diff --git a/ffx-api/src/backends.h b/ffx-api/src/backends.h
+index 4ac2a54..7c8c1b3 100644
+--- a/ffx-api/src/backends.h
++++ b/ffx-api/src/backends.h
+@@ -23,7 +23,7 @@
+ #pragma once
+ #include "ffx_provider.h"
+ #include <ffx_api/ffx_api.hpp>
+-#include <FidelityFx/host/ffx_interface.h>
++#include <FidelityFX/host/ffx_interface.h>
+ 
+ ffxReturnCode_t CreateBackend(const ffxCreateContextDescHeader* desc, bool& backendFound, FfxInterface* iface, size_t contexts, Allocator& alloc);
+ 
+diff --git a/ffx-api/src/ffx_provider.h b/ffx-api/src/ffx_provider.h
+index d501887..4e7d869 100644
+--- a/ffx-api/src/ffx_provider.h
++++ b/ffx-api/src/ffx_provider.h
+@@ -23,7 +23,7 @@
+ #pragma once
+ #include <ffx_api/ffx_api.hpp>
+ #include <ffx_api/ffx_api_types.h>
+-#include <FidelityFx/host/ffx_types.h>
++#include <FidelityFX/host/ffx_types.h>
+ 
+ #define VERIFY(_cond, _retcode) \
+     if (!(_cond)) return _retcode
