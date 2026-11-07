@@ -419,6 +419,16 @@ if(QR_BUILD_TESTS)
     )
     add_test(NAME qray_light_grid_tests COMMAND qray_light_grid_tests)
     set_tests_properties(qray_light_grid_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+
+    add_executable(qray_restir_reservoir_tests
+        Tests/RestirReservoirTests.cpp
+    )
+    target_compile_features(qray_restir_reservoir_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_restir_reservoir_tests PRIVATE
+        Source
+    )
+    add_test(NAME qray_restir_reservoir_tests COMMAND qray_restir_reservoir_tests)
+    set_tests_properties(qray_restir_reservoir_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
 endif()
 
 add_library(qray_alias OBJECT Source/rt_alias.c)
