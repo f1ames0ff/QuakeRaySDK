@@ -1470,6 +1470,14 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         std::memcpy(target.lightHandles, rawBuffers, sizeof(target.lightHandles));
     }
 
+    // NVRHI's per-list buffer tracker starts at Unknown unless the buffer is permanent. The
+    // reservoir ends every list in UnorderedAccess, so announce that state before the first use;
+    // a pending clear then transitions to CopyDest and back.
+    if (restirReservoir != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(restirReservoir, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
     if (target.lightSet == nullptr)
     {
         nvrhi::BindingSetDesc setDesc;
