@@ -35,8 +35,9 @@
 
 #include "Restir.hlsli"
 
-#define Q2_RNG_RESTIR_TEMPORAL 448
-#define Q2_RNG_RESTIR_SPATIAL_BASE 452
+#define Q2_RNG_RESTIR_FALLBACK_BASE 700
+#define Q2_RNG_RESTIR_TEMPORAL 600
+#define Q2_RNG_RESTIR_SPATIAL_BASE 608
 #define Q2_RESTIR_SPATIAL_TAPS 4u
 #define Q2_RESTIR_SPATIAL_STEP 2
 
@@ -224,7 +225,7 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
 
         for (uint j = 0u; j < fallbackCandidates; j++)
         {
-            const uint salt = (uint)Q2_RNG_RESTIR_BASE + j * 4u;
+            const uint salt = (uint)Q2_RNG_RESTIR_FALLBACK_BASE + j * 4u;
             const uint lightIndex = (uint)LIGHT_ARRAY_REGULAR_LIGHTS_OFFSET +
                 min((uint)(rnd16(seed, salt + 2u) * float(count)), count - 1u);
             const float target = globalLightTarget(lightSources[lightIndex], surf.position,
