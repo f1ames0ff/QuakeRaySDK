@@ -119,7 +119,7 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     // normals and roughness (Surface.hlsli fetchGbufferSurface_NoAlbedoViewDir_Prev).
     { FB_IMAGE_INDEX_NORMAL_PREV,            false }, // 136  framebufNormal_Prev_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,   false }, // 138  framebufNormalGeometry_Prev_Sampled
-    { FB_IMAGE_INDEX_METALLIC_ROUGHNESS_PREV,false }, // 140  framebufMetallicRoughness_Prev_Sampled
+    { FB_IMAGE_INDEX_METALLIC_ROUGHNESS_PREV, false }, // 140  framebufMetallicRoughness_Prev_Sampled
     { FB_IMAGE_INDEX_SURFACE_POSITION_PREV,  false }, // 152  framebufSurfacePosition_Prev_Sampled
 };
 
@@ -1500,6 +1500,9 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
     if (restirReservoirClearPending && restirReservoir != nullptr)
     {
         pCommandList->clearBufferUInt(restirReservoir, 0u);
+        // Back to the state the set-6 UAV binding requires; the pending barrier is committed by
+        // the setRayTracingState of this list, like the statistics fill's transition.
+        pCommandList->setBufferState(restirReservoir, nvrhi::ResourceStates::UnorderedAccess);
         restirReservoirClearPending = false;
     }
 

@@ -117,12 +117,11 @@ bool q2RestirSurfaceMatches(const Surface previous, const Surface current)
 }
 
 void q2RestirMergeHistory(inout ShRestirReservoir reservoir, const uint historyBase,
-                          const uint2 resolution, const int2 historyRegular,
+                          const uint2 resolution, const int2 historyPacked,
                           const Surface surf, const float phongExp, const float phongScale,
                           const float phongWeight, const uint seed, const uint salt)
 {
-    const uint historyIndex = historyBase +
-        q2RestirPixelIndex(getCheckerboardPix(historyRegular), resolution);
+    const uint historyIndex = historyBase + q2RestirPixelIndex(historyPacked, resolution);
     const ShRestirReservoir history = restirReservoirs[historyIndex];
 
     if (!q2RestirHistoryUsable(history))
@@ -261,11 +260,12 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
 
         if (reprojectionValid)
         {
-            const Surface previousSurface = fetchGbufferSurface_NoAlbedoViewDir_Prev(historyRegular);
+            const int2 historyPacked = getCheckerboardPix(historyRegular);
+            const Surface previousSurface = fetchGbufferSurface_NoAlbedoViewDir_Prev(historyPacked);
 
             if (q2RestirSurfaceMatches(previousSurface, surf))
             {
-                q2RestirMergeHistory(outReservoir, historyBase, resolution, historyRegular, surf,
+                q2RestirMergeHistory(outReservoir, historyBase, resolution, historyPacked, surf,
                                      phongExp, phongScale, phongWeight, seed,
                                      Q2_RNG_RESTIR_TEMPORAL);
             }
@@ -275,14 +275,15 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
         {
             const int2 tapPixel = clamp(historyRegular + q2RestirSpatialOffset(tap),
                                         int2(0, 0), maxPixel);
-            const Surface tapSurface = fetchGbufferSurface_NoAlbedoViewDir_Prev(tapPixel);
+            const int2 tapPacked = getCheckerboardPix(tapPixel);
+            const Surface tapSurface = fetchGbufferSurface_NoAlbedoViewDir_Prev(tapPacked);
 
             if (!q2RestirSurfaceMatches(tapSurface, surf))
             {
                 continue;
             }
 
-            q2RestirMergeHistory(outReservoir, historyBase, resolution, tapPixel, surf,
+            q2RestirMergeHistory(outReservoir, historyBase, resolution, tapPacked, surf,
                                  phongExp, phongScale, phongWeight, seed,
                                  Q2_RNG_RESTIR_SPATIAL_BASE + tap);
         }

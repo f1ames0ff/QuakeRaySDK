@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 
 namespace
 {
@@ -126,14 +127,14 @@ void TestMergeRejectsUnusableSources()
     qray::RestirReservoir current = MakeReservoir(1u, 2u, 100.0f, 4.0f);
     const qray::RestirReservoir zeroCount = MakeReservoir(7u, 0u, 30.0f, 5.0f);
     const qray::RestirReservoir zeroTarget = MakeReservoir(7u, 2u, 30.0f, 0.0f);
-    const qray::RestirReservoir nanWeight = MakeReservoir(7u, 2u, NAN, 5.0f);
+    const qray::RestirReservoir nanWeight = MakeReservoir(7u, 2u, std::numeric_limits<float>::quiet_NaN(), 5.0f);
     const qray::RestirReservoir tooMany = MakeReservoir(7u, qray::kRestirMaxSamples + 1u, 30.0f, 5.0f);
 
     qray::RestirMerge(current, zeroCount, 5.0f, 0.0f);
     qray::RestirMerge(current, zeroTarget, 5.0f, 0.0f);
     qray::RestirMerge(current, nanWeight, 5.0f, 0.0f);
     qray::RestirMerge(current, tooMany, 5.0f, 0.0f);
-    qray::RestirMerge(current, MakeReservoir(7u, 2u, 30.0f, 5.0f), NAN, 0.0f);
+    qray::RestirMerge(current, MakeReservoir(7u, 2u, 30.0f, 5.0f), std::numeric_limits<float>::quiet_NaN(), 0.0f);
 
     CHECK(current.sampleCount == 2u, "invalid merges must not add samples");
     CHECK(NearlyEqual(current.weightSum, 100.0f), "invalid merges must not add weight");
