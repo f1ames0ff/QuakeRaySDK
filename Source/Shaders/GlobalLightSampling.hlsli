@@ -14,12 +14,11 @@
 // along with this program; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //
-// HLSL counterpart of GlobalLightSampling.h, kept beside it as the legacy golden: the global-light
-// RIS path the direct pass can select instead of the per-cluster light lists. For every NEE light
-// sample it draws up to Q2_RESTIR_MAX_CANDIDATES uniform candidates from the whole light array,
-// weights each by a target - the existing selection mass, floored by a solid-angle proxy so a
-// light the mass cannot see is still samplable - and picks one by a reservoir draw, so the pdf of
-// the pick is selectedWeight / (lightCount * mean target).
+// HLSL counterpart of GlobalLightSampling.h, kept beside it as the legacy golden: the per-sample
+// global-light RIS the direct pass used before ReSTIR. The direct pass now builds its reservoir
+// from the same globalLightTarget and uniform source pdf, and RestirSampling.hlsli reuses
+// q2SampleGlobalLightsRIS's math in reservoir form; this function stays as the readable reference
+// for the target/proxy/pdf formulas.
 //
 // Spellings that had to change:
 //   * vec3 -> float3 and the C-style scalar casts become the HLSL truncating casts (uint(x) ->

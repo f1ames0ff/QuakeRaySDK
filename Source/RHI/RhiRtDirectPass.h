@@ -229,6 +229,15 @@ public:
     bool EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t frameIndex, uint32_t frameId,
                         uint32_t lightStatsMode);
 
+    // ReSTIR reservoir configuration (host cvar rt_restir). The host calls it once per traced frame
+    // before any pass that borrows the set 6: a size or enable change re-creates the two-slot
+    // reservoir ring, retires the replaced buffer, marks it for a zero fill and drops every slot's
+    // stale light set so the next EnsureLightSet binds the new buffer. Disabled frames keep a
+    // two-element stand-in bound, so the descriptor is always valid and an unused feature costs no
+    // render-sized allocation. Returns false when the new buffer could not be created; the current
+    // binding stays usable and the shader still sees restirParams.x == 0 on disabled frames.
+    bool ConfigureRestir(uint32_t width, uint32_t height, bool enabled);
+
     // One call per frame, on the frame context's open command list of 'frameIndex', after
     // RhiRtPrimaryPass::Render of the same slot. 'frameId' is the engine counter
     // (`ShGlobalUniform::frameId`, i.e. sky.uniform->GetData()->frameId) and 'lightStatsMode' the
@@ -360,6 +369,14 @@ private:
     bool PrepareGridBuildSet(Target &target);
     void BuildLightGrid(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
 
+    // The reservoir ring: one structured buffer, two render-sized slots written alternately by
+    // frameId parity. Disabled frames bind a two-element stand-in. A replaced buffer is retired
+    // through the frame context and the next PrepareLightSet zeroes the new one before the pass
+    // reads any of it.
+    bool CreateRestirReservoir(uint64_t elementCount);
+    void ReleaseRestirReservoir();
+    void InvalidateLightSets();
+
     // The ranged statistics fill of the frame: it is recorded on the set-6 wrap of the engine's
     // statistics buffer inside 'target' (the same wrap the binding set binds, which is what makes
     // the automatic barriers cover the native fill) and on that buffer's raw handle 'statsBuffer'.
@@ -396,6 +413,17 @@ private:
     nvrhi::BindingLayoutHandle lightLayout;
     nvrhi::BindingLayoutHandle gridBuildLayout;
     nvrhi::ComputePipelineHandle gridBuildPipeline;
+
+    // The direct-light ReSTIR reservoir ring (Source/Shaders/Restir.hlsli): two render-sized
+    // slots in one structured buffer. The two-element stand-in is bound while rt_restir is off so
+    // set 6 always has a valid descriptor and no render-sized allocation is ever made for the
+    // default configuration.
+    nvrhi::BufferHandle restirReservoir;
+    uint64_t restirReservoirElements = 0;
+    uint32_t restirWidth = 0;
+    uint32_t restirHeight = 0;
+    bool     restirEnabled = false;
+    bool     restirReservoirClearPending = false;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
     // EnsureLightSet (the reflect/refract sibling asking early) or Render made it.

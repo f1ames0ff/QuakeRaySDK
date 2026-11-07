@@ -1464,12 +1464,14 @@ typedef struct QrDrawFrameIlluminationParams
 
     uint32_t    neeLightSamples;
 
-    // 1: the direct pass samples the global light array with RIS instead of the
-    // per-cluster light lists (host cvar rt_restir; 0 keeps the cluster path).
+    // 1: the direct pass uses the temporal/spatial ReSTIR reservoir instead of
+    // the per-frame grid/cluster selection (host cvar rt_restir; 0 keeps the
+    // grid/cluster path).
     // Default: 0
     uint32_t    restirEnabled;
-    // Candidates drawn per NEE light sample in the global light RIS (host cvar
-    // rt_restir_candidates), clamped to 1..64.
+    // Initial candidates drawn per pixel for the ReSTIR reservoir (host cvar
+    // rt_restir_candidates), clamped to 1..64. Temporal and spatial reuse add
+    // up to Q2_RESTIR_MAX_SAMPLES source samples on top.
     // Default: 8
     uint32_t    restirCandidates;
 

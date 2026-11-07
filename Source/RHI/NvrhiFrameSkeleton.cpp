@@ -1092,6 +1092,14 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         // from the same CPU copy the write above uploaded.
         const ShGlobalUniform *uniform = sky.uniform != nullptr ? sky.uniform->GetData() : nullptr;
 
+        // The direct-light ReSTIR ring follows the frame's rt_restir switch and the render extent.
+        // It has to be configured before the reflect/refract pass borrows set 6, because a resize
+        // or an enable change re-creates the reservoir and drops the slot's stale light set.
+        if (rtDirectPass != nullptr && uniform != nullptr)
+        {
+            rtDirectPass->ConfigureRestir(sky.width, sky.height, uniform->restirParams[0] != 0u);
+        }
+
         // The procedural sky (A5.4): the default frame's cube content, the same RenderCubemap ->
         // DrawProcedural call the legacy frame records before the trace (VulkanDevice.cpp:862), so
         // the primary, indirect and reflect/refract passes sample a written cube on the same list.

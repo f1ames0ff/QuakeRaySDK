@@ -31,6 +31,7 @@
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
 #include "GlobalLightSampling.hlsli"
+#include "RestirSampling.hlsli"
 
 #define Q2_RNG_CELL_SELECT 200
 #define Q2_RNG_LIGHT_POINT 208
@@ -46,19 +47,25 @@ void main()
 
     const uint seed = framebufQ2RngSeed_Sampled.Load(int3(pix, 0)).r;
 
+    const bool useRestir = globalUniform.restirParams.x != 0u;
+
     const Surface surf = fetchGbufferSurface(pix);
 
     if (surf.isSky)
     {
+        if (useRestir)
+        {
+            q2RestirStoreEmpty(pix);
+        }
+
         framebufUnfilteredDirect[pix] = (uint4)0;
         framebufUnfilteredSpecular[pix] = (uint4)0;
         return;
     }
 
-    const bool useGlobalRestir = globalUniform.restirParams.x != 0u;
-    const bool isGradient = useGlobalRestir ? false : q2GetIsGradient(pix);
+    const bool isGradient = useRestir ? false : q2GetIsGradient(pix);
     const uint cluster = framebufQ2Cluster_Sampled.Load(int3(pix, 0)).r;
-    const int  gridCell = useGlobalRestir ? -1 : q2GetLightGridCell(surf.position);
+    const int  gridCell = q2GetLightGridCell(surf.position);
 
     const float alpha = square(surf.roughness);
     const float phongExp = q2RoughnessSquareToSpecPower(alpha);
@@ -70,7 +77,7 @@ void main()
     float3 directDiffuse = (float3)0.0;
     float3 directSpecular = (float3)0.0;
 
-    const int numNeeSamples = clamp((int)globalUniform.neeLightSamples, 1, 2);
+    const int numNeeSamples = useRestir ? 1 : clamp((int)globalUniform.neeLightSamples, 1, 2);
 
     for (int s = 0; s < numNeeSamples; s++)
     {
@@ -79,10 +86,22 @@ void main()
         float lightPdf = 0.0;
         bool sampledFromGrid = false;
 
-        if (useGlobalRestir)
+        if (useRestir)
         {
-            q2SampleGlobalLightsRIS(seed, (uint)s, surf.position, surf.normal, surf.toViewerDir,
-                                    phongExp, phongScale, phongWeight, lightIndex, lightPdf);
+            ShRestirReservoir reservoir;
+            float              reservoirWeight = 0.0;
+            const int2         regularPix = getRegularPixFromCheckerboardPix(pix);
+
+            q2SampleRestirLights(seed, pix, regularPix, surf, gridCell,
+                                 phongExp, phongScale, phongWeight,
+                                 reservoir, reservoirWeight);
+
+            if (reservoir.lightIndex != uint(LIGHT_INDEX_NONE) && reservoirWeight > 0.0)
+            {
+                lightIndex = reservoir.lightIndex;
+                lightPdf = 1.0 / reservoirWeight;
+                sampledFromGrid = true;
+            }
         }
         else
         {
@@ -133,7 +152,7 @@ void main()
                     rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
                 }
 
-                if (!useGlobalRestir && !sampledFromGrid &&
+                if (!useRestir && !sampledFromGrid &&
                     (lightSources[lightIndex].lightType == LIGHT_TYPE_TRIANGLE ||
                      lightSources[lightIndex].lightType == LIGHT_TYPE_TEXTURED_AREA ||
                      lightSources[lightIndex].lightType == LIGHT_TYPE_DTAL_GROUP))

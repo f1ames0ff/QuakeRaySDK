@@ -2,12 +2,14 @@
 
 #include "RhiFrameContext.h"
 #include "RhiPipeline.h"
+#include "RhiResources.h"
 #include "RhiTextureSource.h"
 #include "RhiTextureTable.h"
 
 #include "../Framebuffers.h"
 #include "../Generated/ShaderCommonC.h"
 #include "../LightManager.h"
+#include "../RestirReservoir.h"
 
 #include <algorithm>
 #include <cstring>
@@ -270,6 +272,9 @@ static_assert(LIGHT_BUFFER_BINDINGS[LIGHT_STATS_BUFFER_INDEX].binding ==
 static_assert(sizeof(ShLightEncoded) == 160,
               "the shader's StructuredBuffer<ShLightEncoded> strides by 160 B (Generated/ShaderCommonC.h:389-401)");
 
+static_assert(sizeof(RestirReservoir) == 16,
+              "the shader's ShRestirReservoir is four 4-byte fields (Shaders/Restir.hlsli)");
+
 // The seven items `LightManager::GetFrameCopies` reports, mapped to the set-6 buffer each one
 // copies into: the light-array prefix (binding 0), the list offsets (4), the list words (5), the
 // sky visibility (8), the DTAL group members (9) and the two overflow tail buffers (10, 11). The
@@ -419,6 +424,8 @@ RhiRtDirectPass::~RhiRtDirectPass()
 
     lightLayout = nullptr;
     framebufferLayout = nullptr;
+    restirReservoir = nullptr;
+    restirReservoirElements = 0;
     anyHitShader = nullptr;
     closestHitShader = nullptr;
     shadowMissShader = nullptr;
@@ -538,9 +545,10 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         framebufferLayout = device->createBindingLayout(desc);
     }
     {
-        // Set 6: the five light buffers at their raw bindings, the same offsets as set 1. The
-        // statistics buffer is the only UAV item; the other four are structured SRVs. The partial
-        // shape is right here too: the engine's layout has nine items, the raygen declares five.
+        // Set 6: the engine's light buffers at their raw bindings, the same offsets as set 1, plus
+        // the direct-light ReSTIR reservoir the direct pass owns. The statistics buffer and the
+        // reservoir are the UAV items; the light buffers are structured SRVs. The partial shape is
+        // right here too: the engine's layout has more items than the raygen declares.
         // The vertex and compute stages are added to the ray-tracing visibility because the raster
         // overlay's smoke shaders read the light list from their vertex stage, exactly as the
         // engine's own set-6 layout spans VK_SHADER_STAGE_RAYGEN|COMPUTE|VERTEX
@@ -559,6 +567,12 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
                              ? nvrhi::BindingLayoutItem::StructuredBuffer_UAV(LIGHT_BUFFER_BINDINGS[i].binding)
                              : nvrhi::BindingLayoutItem::StructuredBuffer_SRV(LIGHT_BUFFER_BINDINGS[i].binding));
         }
+
+        // The direct-light ReSTIR reservoir is the only item of set 6 the pass owns instead of the
+        // engine's light registry; it is a UAV because the raygen writes the current frame's slot
+        // and reads the previous one through the same descriptor.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS));
 
         lightLayout = device->createBindingLayout(desc);
     }
@@ -581,6 +595,13 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     if (framebufferLayout == nullptr || lightLayout == nullptr || gridBuildLayout == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a direct RT pass binding layout");
+        return false;
+    }
+
+    // Set 6 always binds the reservoir descriptor. Two elements are enough until ConfigureRestir
+    // asks for a render-sized ring on the first rt_restir frame.
+    if (!CreateRestirReservoir(2u))
+    {
         return false;
     }
 
@@ -1234,6 +1255,122 @@ bool RhiRtDirectPass::EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t
     return true;
 }
 
+bool RhiRtDirectPass::ConfigureRestir(uint32_t width, uint32_t height, bool enabled)
+{
+    if (!created || device == nullptr)
+    {
+        return false;
+    }
+
+    const bool wantsReservoir = enabled && width > 0 && height > 0;
+
+    if (wantsReservoir)
+    {
+        const uint64_t elements = uint64_t(width) * uint64_t(height) * 2u;
+
+        if (!restirEnabled || restirWidth != width || restirHeight != height ||
+            restirReservoirElements != elements || restirReservoir == nullptr)
+        {
+            if (!CreateRestirReservoir(elements))
+            {
+                restirEnabled = false;
+                restirWidth = 0;
+                restirHeight = 0;
+                InvalidateLightSets();
+                return false;
+            }
+
+            restirEnabled = true;
+            restirWidth = width;
+            restirHeight = height;
+            InvalidateLightSets();
+        }
+
+        return true;
+    }
+
+    // The disabled frame still binds a valid descriptor; the two-element stand-in keeps the set 6
+    // contract without a render-sized allocation.
+    if (restirEnabled || restirReservoir == nullptr || restirReservoirElements != 2u)
+    {
+        if (!CreateRestirReservoir(2u))
+        {
+            InvalidateLightSets();
+            return false;
+        }
+
+        restirEnabled = false;
+        restirWidth = 0;
+        restirHeight = 0;
+        InvalidateLightSets();
+    }
+
+    return true;
+}
+
+bool RhiRtDirectPass::CreateRestirReservoir(uint64_t elementCount)
+{
+    if (elementCount == 0u)
+    {
+        return false;
+    }
+
+    nvrhi::BufferDesc desc;
+    desc.byteSize = elementCount * sizeof(RestirReservoir);
+    desc.structStride = static_cast<uint32_t>(sizeof(RestirReservoir));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    // Not keepInitialState: the one-time clearBufferUInt moves the ring to CopyDest before the
+    // raygen's UAV reads, so the automatic barrier pass has to be able to transition it.
+    desc.debugName = "RhiRtDirectPass restir reservoirs";
+
+    nvrhi::BufferHandle created = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (created == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the direct-light ReSTIR reservoir buffer");
+        return false;
+    }
+
+    ReleaseRestirReservoir();
+
+    restirReservoir = created;
+    restirReservoirElements = elementCount;
+    restirReservoirClearPending = true;
+    return true;
+}
+
+void RhiRtDirectPass::ReleaseRestirReservoir()
+{
+    if (restirReservoir != nullptr && frameContext != nullptr)
+    {
+        frameContext->Retire(restirReservoir);
+    }
+
+    restirReservoir = nullptr;
+    restirReservoirElements = 0;
+    restirReservoirClearPending = false;
+}
+
+void RhiRtDirectPass::InvalidateLightSets()
+{
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (targets[i].lightSet != nullptr)
+        {
+            if (frameContext != nullptr)
+            {
+                frameContext->Retire(targets[i].lightSet);
+            }
+
+            targets[i].lightSet = nullptr;
+        }
+
+        lightSetPrepared[i] = false;
+        lightSetPreparedFrame[i] = 0;
+    }
+}
+
 bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target &target,
                                       uint32_t frameIndex, uint32_t frameId, uint32_t lightStatsMode)
 {
@@ -1324,6 +1461,9 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
                                                                                target.lightWraps[i]));
         }
 
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS, restirReservoir));
+
         target.lightSet = device->createBindingSet(setDesc, lightLayout);
 
         if (target.lightSet == nullptr)
@@ -1331,6 +1471,14 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
             LogMessage(print, "Warning: RHI: failed to create the direct RT pass light-source binding set");
             return false;
         }
+    }
+
+    // A re-created reservoir ring starts zeroed: sampleCount == 0 is the shader's "no history"
+    // marker, so the first frame after an allocation or a resize cannot merge stale bytes.
+    if (restirReservoirClearPending && restirReservoir != nullptr)
+    {
+        pCommandList->clearBufferUInt(restirReservoir, 0u);
+        restirReservoirClearPending = false;
     }
 
     // The frame's light copies, the RHI replacement for the `LightManager::CopyFromStaging` calls
