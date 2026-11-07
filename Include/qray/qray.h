@@ -754,6 +754,13 @@ QRAPI QrResult QRCONV qrUploadDtalGroups(
 
 #define QR_CLUSTER_LIGHT_MAX_SOURCES_CLUSTERS 128
 
+#define QR_LIGHT_GRID_ID_INDEX_MASK 0xFFFFu
+#define QR_LIGHT_GRID_ID_TYPE_SHIFT 30
+#define QR_LIGHT_GRID_ID_TYPE_MASK 3u
+#define QR_LIGHT_GRID_ID_TYPE_LIGHT 0u
+#define QR_LIGHT_GRID_ID_TYPE_REFLECTION_PROBE 1u
+#define QR_LIGHT_GRID_ID_TYPE_DECAL 2u
+
 typedef struct QrClusterLightSource
 {
     uint64_t  uniqueID;
@@ -782,6 +789,10 @@ typedef struct QrClusterLightSourcesUploadInfo
     int32_t                     allowOverflow;
 
     int32_t                     validate;
+
+    QrFloat3D                   viewOrigin;
+
+    int32_t                     allowGrid;
 } QrClusterLightSourcesUploadInfo;
 
 QRAPI QrResult QRCONV qrUploadClusterLightSources(
@@ -891,6 +902,50 @@ QRAPI QrResult QRCONV qrGetClusterLightList(
 QRAPI QrResult QRCONV qrGetClusterLightTail(
     QrInstance  qrInstance,
     uint32_t    cluster,
+    uint64_t   *pLightUniqueIds,
+    float      *pProb,
+    float      *pMarginal,
+    uint32_t   *pAlias,
+    float      *pBeta,
+    uint32_t    maxCount,
+    uint32_t   *pCount);
+
+typedef struct QrLightGridStats
+{
+    uint32_t   enabled;
+    uint32_t   cells;
+    uint32_t   cascades;
+    uint32_t   sources;
+
+    uint32_t   occupiedCells;
+    uint32_t   fastEntries;
+    uint32_t   tailEntries;
+    uint32_t   tailDropped;
+    uint32_t   cellsWithTail;
+
+    uint32_t   candidateMax;
+    uint32_t   candidateMedian;
+    uint32_t   candidateP95;
+
+    float      buildMs;
+    float      cellSize[8];
+    QrFloat3D  origin[8];
+} QrLightGridStats;
+
+QRAPI QrResult QRCONV qrGetLightGridStats(
+    QrInstance       qrInstance,
+    QrLightGridStats *pStats);
+
+QRAPI QrResult QRCONV qrGetLightGridList(
+    QrInstance  qrInstance,
+    uint32_t    cell,
+    uint64_t   *pLightUniqueIds,
+    uint32_t    maxCount,
+    uint32_t   *pCount);
+
+QRAPI QrResult QRCONV qrGetLightGridTail(
+    QrInstance  qrInstance,
+    uint32_t    cell,
     uint64_t   *pLightUniqueIds,
     float      *pProb,
     float      *pMarginal,

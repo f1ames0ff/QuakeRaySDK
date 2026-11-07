@@ -175,7 +175,7 @@ struct LightBufferBinding
     uint32_t structStride;
 };
 
-constexpr uint32_t LIGHT_BUFFER_COUNT = 8;
+constexpr uint32_t LIGHT_BUFFER_COUNT = 13;
 constexpr LightBufferBinding LIGHT_BUFFER_BINDINGS[LIGHT_BUFFER_COUNT] =
 {
     {
@@ -227,6 +227,36 @@ constexpr LightBufferBinding LIGHT_BUFFER_BINDINGS[LIGHT_BUFFER_COUNT] =
         uint64_t(sizeof(ShQ2LightTail)) * Q2_LIGHT_LIST_TAIL_CAPACITY,
         static_cast<uint32_t>(sizeof(ShQ2LightTail)),
     },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_OFFSETS,
+        false,
+        uint64_t(sizeof(uint32_t)) * (Q2_LIGHT_GRID_HEADER_WORDS + Q2_LIGHT_GRID_CELLS + 1),
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_IDS,
+        false,
+        uint64_t(sizeof(uint32_t)) * Q2_LIGHT_GRID_CELLS * Q2_LIGHT_GRID_MAX_IDS_PER_CELL,
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_HEADER,
+        false,
+        uint64_t(sizeof(uint32_t)) * Q2_LIGHT_GRID_HEADER_WORDS,
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_SOURCES,
+        false,
+        uint64_t(sizeof(ShLightGridSource)) * Q2_LIGHT_GRID_SOURCE_CAPACITY,
+        static_cast<uint32_t>(sizeof(ShLightGridSource)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS,
+        false,
+        uint64_t(sizeof(uint32_t)) * Q2_LIGHT_GRID_CELLS,
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
 };
 
 // The statistics buffer of the table above: the only item the light-statistics fill touches, and
@@ -244,7 +274,7 @@ static_assert(sizeof(ShLightEncoded) == 160,
 // copies into: the light-array prefix (binding 0), the list offsets (4), the list words (5), the
 // sky visibility (8), the DTAL group members (9) and the two overflow tail buffers (10, 11). The
 // statistics buffer (6) has no copy. The order is `FrameCopies`'s.
-constexpr uint32_t LIGHT_COPY_COUNT = 7;
+constexpr uint32_t LIGHT_COPY_COUNT = 11;
 constexpr uint32_t LIGHT_COPY_BUFFER_INDICES[LIGHT_COPY_COUNT] =
 {
     0, // lights
@@ -254,6 +284,10 @@ constexpr uint32_t LIGHT_COPY_BUFFER_INDICES[LIGHT_COPY_COUNT] =
     5, // dtalMembers
     6, // tailOffsets
     7, // tailEntries
+    8, // gridOffsets
+    9, // gridIds
+    10, // gridHeader
+    11, // gridSources
 };
 
 const char *const LIGHT_BUFFER_DEBUG_NAMES[LIGHT_BUFFER_COUNT] =
@@ -266,6 +300,11 @@ const char *const LIGHT_BUFFER_DEBUG_NAMES[LIGHT_BUFFER_COUNT] =
     "dtal group members",
     "q2 light list tail offsets",
     "q2 light list tail entries",
+    "q2 light grid offsets",
+    "q2 light grid ids",
+    "q2 light grid header",
+    "q2 light grid sources",
+    "q2 light grid counts",
 };
 
 // The descriptor of a native wrap of an engine device-local buffer that a shader reads as a
@@ -290,7 +329,10 @@ nvrhi::BufferDesc MakeLightBufferDesc(const LightBufferBinding &binding, std::st
     nvrhi::BufferDesc desc;
     desc.byteSize = binding.byteSize;
     desc.structStride = binding.structStride;
-    desc.canHaveUAVs = binding.isUAV;
+    desc.canHaveUAVs = binding.isUAV ||
+                       binding.binding == BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_OFFSETS ||
+                       binding.binding == BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_IDS ||
+                       binding.binding == BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS;
     desc.initialState = binding.isUAV ? nvrhi::ResourceStates::UnorderedAccess
                                       : nvrhi::ResourceStates::CopyDest;
     desc.keepInitialState = true;
@@ -521,10 +563,42 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         lightLayout = device->createBindingLayout(desc);
     }
 
-    if (framebufferLayout == nullptr || lightLayout == nullptr)
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(1));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(2));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(3));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(4));
+
+        gridBuildLayout = device->createBindingLayout(desc);
+    }
+
+    if (framebufferLayout == nullptr || lightLayout == nullptr || gridBuildLayout == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a direct RT pass binding layout");
         return false;
+    }
+
+    {
+        nvrhi::ShaderHandle gridBuildShader;
+
+        if (LoadShader("CmBuildLightGrid.comp.spv", nvrhi::ShaderType::Compute, gridBuildShader))
+        {
+            nvrhi::ComputePipelineDesc desc;
+            desc.CS = gridBuildShader;
+            desc.bindingLayouts.push_back(gridBuildLayout);
+            gridBuildPipeline = rhi::createComputePipeline(device, desc, "RhiRtDirectPass grid build");
+        }
+
+        if (gridBuildPipeline == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: the GPU light-grid builder is unavailable; the CPU grid publication stays active");
+        }
     }
 
     // The pipeline: one raygen (RGenDirect, no specialization), the engine's two miss shaders as
@@ -796,6 +870,11 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
+    if (gridBuildPipeline != nullptr && PrepareGridBuildSet(target))
+    {
+        BuildLightGrid(pCommandList, frameIndex);
+    }
+
     // The image state contract, spelled out on Render in the header: the engine leaves every
     // framebuffer image in VK_IMAGE_LAYOUT_GENERAL - NVRHI's UnorderedAccess - and this native
     // wrap keeps no state between command lists (RhiTextureSource.h), so every list announces that
@@ -949,6 +1028,12 @@ void RhiRtDirectPass::ReleaseLightTarget(Target &target)
             frameContext->Retire(target.lightSet);
         }
 
+        if (target.gridBuildSet != nullptr)
+        {
+            frameContext->Retire(target.gridBuildSet);
+        }
+
+
         for (nvrhi::BufferHandle &wrap : target.lightWraps)
         {
             if (wrap != nullptr)
@@ -980,6 +1065,9 @@ void RhiRtDirectPass::ReleaseLightTarget(Target &target)
 
     std::memset(target.lightHandles, 0, sizeof(target.lightHandles));
     std::memset(target.lightStagingHandles, 0, sizeof(target.lightStagingHandles));
+
+    target.gridBuildSet = nullptr;
+    std::memset(target.gridBuildHandles, 0, sizeof(target.gridBuildHandles));
 }
 
 bool RhiRtDirectPass::PrepareTlasSet(Target &target, nvrhi::rt::IAccelStruct *pTopLevel)
@@ -1160,6 +1248,11 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         buffers.dtalMembers,
         buffers.tailOffsets,
         buffers.tailEntries,
+        buffers.gridOffsets,
+        buffers.gridIds,
+        buffers.gridHeader,
+        buffers.gridSources,
+        buffers.gridCounts,
     };
 
     for (uint32_t i = 0; i < LIGHT_BUFFER_COUNT; i++)
@@ -1258,6 +1351,10 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         copies.dtalMembers,
         copies.tailOffsets,
         copies.tailEntries,
+        copies.gridOffsets,
+        copies.gridIds,
+        copies.gridHeader,
+        copies.gridSources,
     };
 
     for (uint32_t i = 0; i < LIGHT_COPY_COUNT; i++)
@@ -1332,6 +1429,88 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
     RecordLightStatsFill(pCommandList, target, buffers.lightStats, frameIndex, frameId, lightStatsMode);
 
     return true;
+}
+
+bool RhiRtDirectPass::PrepareGridBuildSet(Target &target)
+{
+    const LightManager::Buffers buffers = lightManager->GetBuffers();
+    const VkBuffer rawHandles[5] =
+    {
+        buffers.gridHeader,
+        buffers.gridSources,
+        buffers.gridOffsets,
+        buffers.gridIds,
+        buffers.gridCounts,
+    };
+
+    for (uint32_t i = 0; i < 5; i++)
+    {
+        if (rawHandles[i] == VK_NULL_HANDLE)
+        {
+            return false;
+        }
+    }
+
+    bool changed = false;
+
+    for (uint32_t i = 0; i < 5; i++)
+    {
+        changed = changed || target.gridBuildHandles[i] != rawHandles[i];
+    }
+
+    if (changed)
+    {
+        target.gridBuildSet = nullptr;
+        std::memcpy(target.gridBuildHandles, rawHandles, sizeof(target.gridBuildHandles));
+    }
+
+    if (target.gridBuildSet == nullptr)
+    {
+        nvrhi::BindingSetDesc desc;
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, target.lightWraps[10]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(1, target.lightWraps[11]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(2, target.lightWraps[8]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, target.lightWraps[9]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(4, target.lightWraps[12]));
+
+        target.gridBuildSet = device->createBindingSet(desc, gridBuildLayout);
+
+        if (target.gridBuildSet == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: failed to create the GPU light-grid binding set");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void RhiRtDirectPass::BuildLightGrid(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)
+{
+    Target &target = targets[frameIndex];
+
+    if (gridBuildPipeline == nullptr || target.gridBuildSet == nullptr)
+    {
+        return;
+    }
+
+    nvrhi::ComputeState state;
+    state.pipeline = gridBuildPipeline;
+    state.addBindingSet(target.gridBuildSet);
+    pCommandList->setComputeState(state);
+
+    const uint32_t groups = (uint32_t(Q2_LIGHT_GRID_CELLS) + 63u) / 64u;
+
+    static bool reportedGridDispatch = false;
+
+    if (!reportedGridDispatch)
+    {
+        reportedGridDispatch = true;
+        LogMessage(print, "RHI: GPU light-grid builder dispatched " + std::to_string(groups) + " groups");
+    }
+
+    pCommandList->dispatch(groups, 1, 1);
+    pCommandList->commitBarriers();
 }
 
 void RhiRtDirectPass::RecordLightStatsFill(nvrhi::ICommandList *pCommandList, const Target &target,
