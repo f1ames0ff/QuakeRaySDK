@@ -189,7 +189,7 @@ void resetPayload(inout ShPayload g_payload)
     g_payload.instIdAndIndex = UINT32_MAX;
     g_payload.geomAndPrimIndex = UINT32_MAX;
     g_payload.glassTint = (float3)1.0;
-    g_payload.glassDistance = MAX_RAY_LENGTH * 2.0;
+    g_payload.glassDistance = globalUniform.rayLength * 2.0;
     g_payload.glassFilter = (float4)0.0;
 }
 
@@ -228,7 +228,7 @@ ShPayload traceReflectionRefractionRay(float3 origin, float3 direction, uint sur
 
     RayDesc rayDesc;
     rayDesc.Origin = origin;
-    rayDesc.TMin = 0.001;
+    rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
     rayDesc.Direction = direction;
     rayDesc.TMax = globalUniform.rayLength;
 
@@ -253,7 +253,7 @@ ShPayload traceIndirectRay(uint surfInstCustomIndex, float3 surfPosition, float3
 
     RayDesc rayDesc;
     rayDesc.Origin = surfPosition;
-    rayDesc.TMin = 0.001;
+    rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
     rayDesc.Direction = bounceDirection;
     rayDesc.TMax = globalUniform.rayLength;
 
@@ -378,8 +378,8 @@ float evalSkyNeePdf(const float3 n, const float3 direction)
 
 #if LIGHT_SAMPLE_METHOD != LIGHT_SAMPLE_METHOD_NONE
 
-#define SHADOW_RAY_EPS       0.01
-#define RAY_ORIGIN_LEAK_BIAS 0.01
+#define SHADOW_RAY_EPS       (0.01 * globalUniform.sceneUnitsPerHostUnit)
+#define RAY_ORIGIN_LEAK_BIAS 2.5e-4
 
 /* One segment per pane the light may cross, plus the segment that reaches it. */
 #define GLASS_SHADOW_MAX_SEGMENTS 3
@@ -429,7 +429,7 @@ float3 traceShadowRay(uint surfInstCustomIndex, float3 start, float3 end, bool i
 
         RayDesc rayDesc;
         rayDesc.Origin = origin;
-        rayDesc.TMin = 0.001;
+        rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
         rayDesc.Direction = l;
         rayDesc.TMax = maxDistance - SHADOW_RAY_EPS;
 
@@ -549,7 +549,7 @@ float3 traceSunVisibility(const Surface surf, const LightSample sunLight, out bo
 
 float3 traceSkyVisibility(const Surface surf, const float3 skyDirection)
 {
-    const float3 start = surf.position + surf.normalGeom * 0.01;
+    const float3 start = surf.position + surf.normalGeom * 2.5e-4;
     const float3 end   = start + skyDirection * globalUniform.rayLength;
 
     return traceShadowRay(surf.instCustomIndex, start, end, false);

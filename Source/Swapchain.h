@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <list>
 #include <vector>
@@ -31,6 +32,17 @@
 
 namespace qray
 {
+
+struct SwapchainAcquireTimings
+{
+    float presentWaitMs = 0.0f;
+    float imageAcquireMs = 0.0f;
+};
+
+struct SwapchainPresentTimings
+{
+    float fenceWaitMs = 0.0f;
+};
 
 class Swapchain
 {
@@ -60,9 +72,10 @@ public:
     void SetFullscreenExclusive(bool want, bool focus);
     void SetPrintFunction(PrintFunction pfnPrint);
     bool IsPresentWaitActive() const;
+    bool GetPresentFpsX10(uint32_t *pFpsX10) const;
 
-    void AcquireImage(VkSemaphore imageAvailableSemaphore);
-    void Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
+    SwapchainAcquireTimings AcquireImage(VkSemaphore imageAvailableSemaphore);
+    SwapchainPresentTimings Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
 
     void Subscribe(std::shared_ptr<ISwapchainDependency> subscriber);
     void Unsubscribe(const ISwapchainDependency *subscriber);
@@ -102,6 +115,8 @@ private:
     VkSwapchainKHR DestroyWithoutSwapchain();
 
     void WaitPresentFences();
+    void PollPresentFences();
+    void ObservePresentCompletion();
 
     void CallCreateSubscribers();
     void CallDestroySubscribers();
@@ -113,10 +128,7 @@ private:
     std::shared_ptr<CommandBufferManager> cmdManager;
 
     VkSurfaceFormatKHR surfaceFormat;
-    VkPresentModeKHR presentModeVsync;
-    VkPresentModeKHR presentModeAdaptive;
-    VkPresentModeKHR presentModeMailbox;
-    VkPresentModeKHR presentModeImmediate;
+    std::vector<VkPresentModeKHR> supportedPresentModes;
 
     bool fullScreenExclusiveSupported = false;
     void *exclusiveWin32Hwnd = nullptr;
@@ -149,6 +161,9 @@ private:
     uint64_t currentPresentId;
     uint64_t waitablePresentId;
     uint64_t maxFrameLatency;
+    uint64_t presentSampleStartUs;
+    uint32_t presentSampleFrames;
+    std::atomic<uint32_t> presentFpsX10;
 
     SwapchainRecreateState recreateState;
 

@@ -18,7 +18,7 @@
 #ifndef RAY_CLEARANCE_HLSLI_
 #define RAY_CLEARANCE_HLSLI_
 
-#define RAY_CLEARANCE_BIAS 0.01
+#define RAY_CLEARANCE_BIAS 2.5e-4
 
 /* How far the ray runs before it meets the first surface it would otherwise
    hide behind, no farther than maxDistance: the virtual point past that
@@ -30,7 +30,7 @@ float traceClearance(float3 origin, float3 direction, float maxDistance, uint cu
     RayDesc rayDesc;
     rayDesc.Origin = origin;
     rayDesc.Direction = direction;
-    rayDesc.TMin = 0.001;
+    rayDesc.TMin = 2.5e-5;
     rayDesc.TMax = maxDistance;
 
     query.TraceRayInline(topLevelAS, getAdditionalRayFlags(), cullMask, rayDesc);

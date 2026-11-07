@@ -28,7 +28,7 @@ inline void AccumulateGeometryBoundsScalar(const QrGeometryUploadInfo &info, boo
                           info.transform.matrix[axis][3];
         }
         if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2]) ||
-            std::abs(point[0]) > 1.0e7f || std::abs(point[1]) > 1.0e7f || std::abs(point[2]) > 1.0e7f)
+            std::abs(point[0]) > 2.5e5f || std::abs(point[1]) > 2.5e5f || std::abs(point[2]) > 2.5e5f)
         {
             continue;
         }
@@ -63,7 +63,7 @@ inline void AccumulateGeometryBounds(const QrGeometryUploadInfo &info, bool &ini
     const __m128 column1 = _mm_setr_ps(matrix[0][1], matrix[1][1], matrix[2][1], matrix[0][1]);
     const __m128 column2 = _mm_setr_ps(matrix[0][2], matrix[1][2], matrix[2][2], matrix[0][2]);
     const __m128 translation = _mm_setr_ps(matrix[0][3], matrix[1][3], matrix[2][3], matrix[0][3]);
-    const __m128 limit = _mm_set1_ps(1.0e7f);
+    const __m128 limit = _mm_set1_ps(2.5e5f);
     const __m128 sign = _mm_set1_ps(-0.0f);
     const __m128i exponentMask = _mm_set1_epi32(0x7f800000);
     __m128 lower = initialized ? _mm_setr_ps(minimum[0], minimum[1], minimum[2], 0.0f) : _mm_setzero_ps();

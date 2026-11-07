@@ -467,7 +467,7 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
                                              leg[0][2] * leg[0][2]);
             const float legUp = std::sqrt(leg[1][0] * leg[1][0] + leg[1][1] * leg[1][1] +
                                           leg[1][2] * leg[1][2]);
-            if (!(legRight > 1e-4f) || !(legUp > 1e-4f))
+            if (!(legRight > 2.5e-6f) || !(legUp > 2.5e-6f))
             {
                 continue;
             }
@@ -476,6 +476,7 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
             proxy = ParticleProxy{};
             proxy.kind = PARTICLE_PROXY_KIND_BILLBOARD;
             proxy.blendOp = blendOp;
+            proxy.materialAlpha = info.color.data[3];
 
             for (int c = 0; c < 3; c++)
             {
@@ -551,16 +552,17 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
 
         ParticleProxy &proxy = particleProxies.emplace_back();
         proxy = ParticleProxy{};
-        proxy.kind         = PARTICLE_PROXY_KIND_TRIANGLE;
-        proxy.blendOp      = blendOp;
-        proxy.textureIndex = textureIndex;
-        proxy.cluster      = a.cluster;
-        proxy.packedColor  = a.packedColor;
-        proxy.unused2      = b.packedColor;
-        proxy.unused3      = c.packedColor;
-        proxy.direct       = lit ? info.smokeLook.data[1] : 0.0f;
-        proxy.gain         = lit ? info.smokeLook.data[2] : -1.0f;
-        proxy.lightFloor   = lit ? info.smokeLook.data[3] : 0.0f;
+            proxy.kind          = PARTICLE_PROXY_KIND_TRIANGLE;
+            proxy.blendOp       = blendOp;
+            proxy.materialAlpha = info.color.data[3];
+            proxy.textureIndex  = textureIndex;
+            proxy.cluster       = a.cluster;
+            proxy.packedColor   = a.packedColor;
+            proxy.unused2       = b.packedColor;
+            proxy.unused3       = c.packedColor;
+            proxy.direct        = lit ? info.smokeLook.data[1] : 0.0f;
+            proxy.gain          = lit ? info.smokeLook.data[2] : -1.0f;
+            proxy.lightFloor    = lit ? info.smokeLook.data[3] : 0.0f;
 
         float minimum[3];
         float maximum[3];
@@ -577,7 +579,7 @@ bool RasterizedDataCollector::CaptureParticleProxies(const QrRasterizedGeometryU
             halfExtent[k]   = 0.5f * (maximum[k] - minimum[k]);
         }
         proxy.radius = std::sqrt(halfExtent[0] * halfExtent[0] + halfExtent[1] * halfExtent[1] +
-                                 halfExtent[2] * halfExtent[2]) + 1e-3f;
+                                 halfExtent[2] * halfExtent[2]) + 2.5e-5f;
 
         proxy.uv0[0] = a.texCoord[0];
         proxy.uv0[1] = a.texCoord[1];
@@ -624,7 +626,7 @@ bool RasterizedDataCollector::CaptureParticlePointProxies(const QrParticleUpload
     {
         const QrParticlePoint &point = info.pPoints[i];
         const float leg = PARTICLE_POINT_LEG_SCALE * point.size;
-        if (!(leg > 1e-4f))
+        if (!(leg > 2.5e-6f))
         {
             continue;
         }
@@ -633,6 +635,7 @@ bool RasterizedDataCollector::CaptureParticlePointProxies(const QrParticleUpload
         proxy = ParticleProxy{};
         proxy.kind = PARTICLE_PROXY_KIND_BILLBOARD;
         proxy.blendOp = PARTICLE_BLEND_ALPHA_OVER;
+        proxy.materialAlpha = 1.0f;
 
         for (int c = 0; c < 3; c++)
         {

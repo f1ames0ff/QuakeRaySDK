@@ -29,6 +29,11 @@ namespace qray
 
 class UserPrint;
 
+// Reverses the authored vertex order of every face range for a mirrored host.
+// Returns false without modifying the tables when a range is outside the vertex array.
+bool ReverseWorldLightFaceOrder(std::vector<QrWorldLightFace> &faces,
+                                std::vector<QrVertex> &vertices);
+
 // Owns the world tables of a map: the clusters (BSP leafs), the compressed PVS and the
 // emissive faces with their corners. The host builds them once per map load and stops
 // touching them; the light polygons are collected from these tables by this module
@@ -51,6 +56,7 @@ public:
     uint32_t GetFaceVertexCount() const { return uint32_t(faceVertices.size()); }
     uint32_t GetVisDataSize() const { return uint32_t(visData.size()); }
     uint32_t GetPvsRowBytes() const { return pvsRowBytes; }
+    bool IsVisUncompressed() const { return visUncompressed; }
     uint32_t GetGeneration() const { return generation; }
 
     const QrFloat3D        &GetClusterMin(uint32_t index) const { return clusterMins[index]; }
@@ -88,6 +94,7 @@ private:
     std::vector<int32_t>          visOffsets;
     std::vector<uint8_t>          clusterSkyVisibility;
     uint32_t                      pvsRowBytes = 0;
+    bool                          visUncompressed = false;
     uint32_t                      generation = 0;
 };
 

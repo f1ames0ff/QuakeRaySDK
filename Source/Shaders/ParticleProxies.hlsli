@@ -59,7 +59,7 @@ struct ShParticleProxy
     float2 uv1;
     float2 uv2;
     uint   colorC;
-    uint   unused;
+    float  materialAlpha;
 };
 
 [[vk::binding(0, DESC_SET_PARTICLE_PROXIES)]] StructuredBuffer<ShParticleProxy> particleProxies;
@@ -74,10 +74,11 @@ struct ShParticleHit
     bool   valid;
 };
 
-float3 unpackParticleColor(const uint packed)
+float4 unpackParticleColor(const uint packed)
 {
-    const uint3 bytes = uint3(packed & 0xFFu, (packed >> 8u) & 0xFFu, (packed >> 16u) & 0xFFu);
-    return float3(bytes) / 255.0;
+    const uint4 bytes = uint4(packed & 0xFFu, (packed >> 8u) & 0xFFu,
+                              (packed >> 16u) & 0xFFu, (packed >> 24u) & 0xFFu);
+    return float4(bytes) / 255.0;
 }
 
 // The sprite the record describes is the raster triangle r_part.c emits: its centroid, a right
@@ -110,8 +111,8 @@ bool intersectParticleBillboard(const ShParticleProxy proxy, const float3 origin
     const float3 legBasisU = cross(legBasisR, d);
 
     const float3 rel = origin + planeT * d - proxy.center;
-    const float2 local = float2(dot(rel, legBasisR) / max(proxy.legRight, 1e-4),
-                                dot(rel, legBasisU) / max(proxy.legUp, 1e-4));
+    const float2 local = float2(dot(rel, legBasisR) / max(proxy.legRight, 2.5e-6),
+                                dot(rel, legBasisU) / max(proxy.legUp, 2.5e-6));
 
     // The centroid sits a third of each leg from the right-angle corner: the triangle is the
     // (0,0)-(1,0)-(0,1) affine image of the local basis, so the UVs are the affine coordinates.
@@ -250,7 +251,7 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
     const float t = query.CommittedRayT();
 
     float2 uv;
-    float3 vertexColor;
+    float4 vertexColor;
 
     if (proxy.kind == PARTICLE_PROXY_KIND_TRIANGLE)
     {
@@ -285,7 +286,7 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
     float3 rgb;
     if (proxy.gain < 0.0)
     {
-        const float3 gamma = pow(vertexColor, (float3)2.2);
+        const float3 gamma = pow(vertexColor.rgb, (float3)2.2);
         const float lumAverage = max(0.0, particleTonemapping[0].avgLuminance);
         const float exposure = lumAverage > 0.0 ? 1.0 / (9.6 * lumAverage) : 0.0;
         rgb = gamma * texel.rgb * exposure;
@@ -295,11 +296,11 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
         const float3 lighting = smokeLightAt(origin + t * normalize(dir), proxy.cluster, 0.0,
                                              proxy.direct, 0.0);
         const float3 factor = proxy.gain * max(lighting + particleProxyAmbient(cbPix), (float3)proxy.lightFloor);
-        rgb = texel.rgb * vertexColor * factor;
+        rgb = texel.rgb * vertexColor.rgb * factor;
     }
 
     result.color = rgb;
-    result.opacity = texel.a;
+    result.opacity = texel.a * vertexColor.a * proxy.materialAlpha;
     result.blendOp = proxy.blendOp;
     result.valid = true;
     return result;
@@ -316,7 +317,7 @@ void q2BlendParticleProxies(const float3 origin, const float3 dir, const float t
         return;
     }
 
-    const ShParticleHit hit = traceParticleProxy(origin, dir, 0.01, tMax, cbPix);
+    const ShParticleHit hit = traceParticleProxy(origin, dir, 2.5e-4, tMax, cbPix);
 
     if (!hit.valid)
     {

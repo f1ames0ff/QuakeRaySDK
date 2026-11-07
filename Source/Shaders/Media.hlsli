@@ -64,7 +64,7 @@ float3 getGlowingMediaFog( uint media, float distance )
         return (float3)0.0;
     }
 
-    float density = 0.00005 * globalUniform.acidColorAndDensity.a;
+    float density = 0.00005 * globalUniform.acidColorAndDensity.a / max( globalUniform.sceneUnitsPerHostUnit, 1.0e-3 );
 
     float fog = exp( -distance * density );
     fog       = clamp( 1.0 - fog, 0.0, 1.0 );

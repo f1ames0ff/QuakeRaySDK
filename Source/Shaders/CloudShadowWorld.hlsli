@@ -32,7 +32,7 @@ float getCloudSunTransmittance(float3 worldPos, float3 sunDir, bool extendShadow
         return 1.0;
     }
     const float4 layer = globalUniform.cloudLayerMotion;
-    float height = (worldPos.z - globalUniform.cameraPosition.z - layer.y) / max(layer.z, 1.0);
+    float height = (worldPos.z - globalUniform.cameraPosition.z - layer.y) / max(layer.z, 0.025);
     float visibility = extendShadow
         ? exp(-cloudShadowTauNear(cloudShadowVolume, cloudShadowVolume_Sampler, worldPos, sunDir, placement, height))
         : cloudShadowTransmittance(cloudShadowVolume, cloudShadowVolume_Sampler, worldPos, sunDir, placement, height);

@@ -28,7 +28,7 @@ bool cloudShadowUV(float3 worldPos, float3 sunDir, float4 mapPlacement, out floa
     }
 
     float2 flatPos = worldPos.xy - sunDir.xy * (worldPos.z / sunDir.z);
-    float2 mapped = (flatPos - mapPlacement.yz) / max(mapPlacement.w, 1.0);
+    float2 mapped = (flatPos - mapPlacement.yz) / max(mapPlacement.w, 0.025);
 
     float2 fade = smoothstep(float2(0.0, 0.0), float2(CLOUD_SHADOW_FADE, CLOUD_SHADOW_FADE), mapped) *
                   (float2(1.0, 1.0) - smoothstep(float2(1.0 - CLOUD_SHADOW_FADE, 1.0 - CLOUD_SHADOW_FADE), float2(1.0, 1.0), mapped));
@@ -75,7 +75,7 @@ float cloudShadowTauNear(Texture3D<float> shadowVolume, SamplerState shadowVolum
     }
 
     float2 flatPos = worldPos.xy - sunDir.xy * (worldPos.z / sunDir.z);
-    float2 mapped = (flatPos - mapPlacement.yz) / max(mapPlacement.w, 1.0);
+    float2 mapped = (flatPos - mapPlacement.yz) / max(mapPlacement.w, 0.025);
 
     return cloudShadowTauFromUV(shadowVolume, shadowVolume_Sampler, clamp(mapped, float2(0.0, 0.0), float2(1.0, 1.0)), height);
 }

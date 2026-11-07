@@ -47,7 +47,7 @@ public:
         uint32_t frameIndex,
         const std::shared_ptr<const GlobalUniform> &uniform,
         float exposureBias, float tonemapPower, uint32_t tonemapType,
-        const QrDrawFrameTonemappingParams &params);
+        const QrDrawFrameTonemappingParams &params, bool disableEyeAdaptation);
 
     VkBuffer GetBuffer(uint32_t frameIndex) const;
 

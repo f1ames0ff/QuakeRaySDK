@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); dxil.dll: 1.6(101.6.2112.13); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
 === block pushconstant
 
 [0] offset 64 v4(float32)
@@ -54,9 +54,9 @@
 [43] offset 808 float32
 [44] offset 812 uint32
 [45] offset 816 uint32
-[46] offset 820 uint32
-[47] offset 824 uint32
-[48] offset 828 uint32
+[46] offset 820 float32
+[47] offset 824 float32
+[48] offset 828 float32
 [49] offset 832 float32
 [50] offset 836 float32
 [51] offset 840 float32
@@ -130,6 +130,10 @@
 [119] offset 3360 uint32
 [120] offset 3364 uint32
 [121] offset 3368 uint32
+[122] offset 3372 float32
+[123] offset 3376 uint32
+[124] offset 3380 uint32
+[125] offset 3384 uint32
 === block set 2 binding 0
 
 [0] offset 0 float32
@@ -157,6 +161,8 @@
 [22] offset 1612 float32
 [23] offset 1616 float32
 [24] offset 1620 uint32
+[25] offset 1624 float32
+[26] offset 1628 float32
 === builtin FragCoord
 v4(float32)
 === capability RuntimeDescriptorArray
@@ -189,9 +195,9 @@ struct nonwritable
 StorageBuffer
 === descriptor set 4 binding 25
 image:2D:0:0:0:2:Rgba32ui
-=== descriptor set 4 binding 255
+=== descriptor set 4 binding 257
 image:2D:0:0:0:1:Unknown
-=== descriptor set 4 binding 255: storage class
+=== descriptor set 4 binding 257: storage class
 UniformConstant
 === descriptor set 4 binding 25: storage class
 UniformConstant

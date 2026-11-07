@@ -689,7 +689,27 @@ void VertexCollector::UpdateTexCoords( uint32_t                     simpleIndex,
         return;
     }
 
-    assert( 0 );
+    ShVertex* const pDst = &mappedVertexData[ dstVertIndex ];
+
+    for( uint32_t layer = 0; layer < 3; layer++ )
+    {
+        const float* const pSrc = static_cast< const float* >( texCoordsInfo.pTexCoordLayerData[ layer ] );
+
+        if( pSrc == nullptr )
+        {
+            continue;
+        }
+
+        for( uint32_t i = 0; i < texCoordsInfo.vertexCount; i++ )
+        {
+            float* const pUv = layer == 0 ? pDst[ i ].texCoord
+                             : layer == 1 ? pDst[ i ].texCoordLayer1
+                                          : pDst[ i ].texCoordLayer2;
+
+            pUv[ 0 ] = pSrc[ i * 2 + 0 ];
+            pUv[ 1 ] = pSrc[ i * 2 + 1 ];
+        }
+    }
 }
 
 void VertexCollector::AddMaterialDependency( uint32_t simpleIndex,

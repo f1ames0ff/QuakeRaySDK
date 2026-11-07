@@ -4,12 +4,32 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
+#include <qray/qray.h>
+
 namespace qray
 {
+inline std::optional<VkPresentModeKHR> TryMapPresentMode(QrPresentMode mode) noexcept
+{
+    switch (mode)
+    {
+    case QR_PRESENT_MODE_MAILBOX:   return VK_PRESENT_MODE_MAILBOX_KHR;
+    case QR_PRESENT_MODE_VSYNC:     return VK_PRESENT_MODE_FIFO_KHR;
+    case QR_PRESENT_MODE_ADAPTIVE:  return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    case QR_PRESENT_MODE_IMMEDIATE: return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    default:                         return std::nullopt;
+    }
+}
+
+inline bool UsesPresentWait2(QrPresentMode mode) noexcept
+{
+    return mode == QR_PRESENT_MODE_VSYNC || mode == QR_PRESENT_MODE_ADAPTIVE;
+}
+
 class SwapchainRecreateState
 {
 public:

@@ -17,6 +17,12 @@
 
 #include "Queues.h"
 
+#include <qray/gpu_context.h>
+
+#include <algorithm>
+
+#include "QrException.h"
+
 using namespace qray;
 
 namespace
@@ -28,31 +34,48 @@ namespace
                (flags & VK_QUEUE_TRANSFER_BIT) != 0;
     }
 
-    bool IsComputeOnlyQueue(VkQueueFlags flags)
+    bool IsComputeQueue(VkQueueFlags flags)
     {
-        return (flags & VK_QUEUE_GRAPHICS_BIT) == 0 &&
-               (flags & VK_QUEUE_COMPUTE_BIT) != 0 &&
-               (flags & VK_QUEUE_TRANSFER_BIT) == 0;
+        return (flags & VK_QUEUE_COMPUTE_BIT) != 0;
     }
 
-    bool IsTransferOnlyQueue(VkQueueFlags flags)
+    bool IsDedicatedComputeQueue(VkQueueFlags flags)
     {
         return (flags & VK_QUEUE_GRAPHICS_BIT) == 0 &&
-               (flags & VK_QUEUE_COMPUTE_BIT) == 0 &&
+               (flags & VK_QUEUE_COMPUTE_BIT) != 0;
+    }
+
+    bool IsTransferQueue(VkQueueFlags flags)
+    {
+        return (flags & VK_QUEUE_TRANSFER_BIT) != 0;
+    }
+
+    bool IsDedicatedTransferQueue(VkQueueFlags flags)
+    {
+        return (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0 &&
                (flags & VK_QUEUE_TRANSFER_BIT) != 0;
     }
 }
 
-Queues::Queues(VkPhysicalDevice physDevice, VkSurfaceKHR surface)
+Queues::Queues(VkPhysicalDevice physDevice, VkSurfaceKHR surface,
+               const QrayGpuRequirements *pRequirements)
     : queueFamilyProperties{}
-    , defaultQueuePriority(0.0f)
+    , queueFamilyRequests{}
+    , queuePriorities{}
     , indexGraphics(UINT32_MAX)
     , indexCompute(UINT32_MAX)
     , indexTransfer(UINT32_MAX)
+    , graphicsQueueCount(1)
+    , computeQueueCount(1)
+    , transferQueueCount(1)
     , graphics(VK_NULL_HANDLE)
     , compute(VK_NULL_HANDLE)
     , transfer(VK_NULL_HANDLE)
 {
+    const QrayGpuRequirements defaultRequirements = {};
+    const QrayGpuRequirements &requirements =
+        pRequirements != nullptr ? *pRequirements : defaultRequirements;
+
     uint32_t familyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physDevice, &familyCount, nullptr);
     assert(familyCount > 0);
@@ -60,40 +83,82 @@ Queues::Queues(VkPhysicalDevice physDevice, VkSurfaceKHR surface)
     queueFamilyProperties.resize(familyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(physDevice, &familyCount, queueFamilyProperties.data());
 
+    uint32_t graphicsSelectionScore = 0;
     for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProperties.size()); i++)
     {
         VkBool32 presentSupported = VK_FALSE;
         VK_CHECKERROR(vkGetPhysicalDeviceSurfaceSupportKHR(physDevice, i, surface, &presentSupported));
 
         const VkQueueFlags flags = queueFamilyProperties[i].queueFlags;
+        const uint32_t queueCount = queueFamilyProperties[i].queueCount;
 
-        if (presentSupported && IsFullQueue(flags))
+        if (presentSupported && IsFullQueue(flags) &&
+            queueCount >= requirements.queues.graphicsQueueCount)
         {
-            indexGraphics = i;
+            const uint32_t score = 1u +
+                ((flags & VK_QUEUE_COMPUTE_BIT) != 0 ? 1u : 0u) +
+                ((flags & VK_QUEUE_TRANSFER_BIT) != 0 ? 1u : 0u);
+            if (indexGraphics == UINT32_MAX || score > graphicsSelectionScore)
+            {
+                indexGraphics = i;
+                graphicsSelectionScore = score;
+            }
         }
 
-        if (IsComputeOnlyQueue(flags))
+        if (IsComputeQueue(flags) && queueCount >= requirements.queues.computeQueueCount)
         {
-            indexCompute = i;
+            const bool dedicated = IsDedicatedComputeQueue(flags);
+            const bool requireDedicated =
+                (requirements.queues.flags & QRAY_GPU_QUEUE_REQUIRE_DEDICATED_COMPUTE) != 0;
+
+            if ((!requireDedicated || dedicated) &&
+                (indexCompute == UINT32_MAX || dedicated))
+                indexCompute = i;
         }
 
-        if (IsTransferOnlyQueue(flags))
+        if (IsTransferQueue(flags) && queueCount >= requirements.queues.transferQueueCount)
         {
-            indexTransfer = i;
+            const bool dedicated = IsDedicatedTransferQueue(flags);
+            const bool requireDedicated =
+                (requirements.queues.flags & QRAY_GPU_QUEUE_REQUIRE_DEDICATED_TRANSFER) != 0;
+
+            if ((!requireDedicated || dedicated) &&
+                (indexTransfer == UINT32_MAX || dedicated))
+                indexTransfer = i;
         }
     }
 
-    assert(indexGraphics != UINT32_MAX);
+    if (indexGraphics == UINT32_MAX)
+        throw QrException(QR_CANT_FIND_PHYSICAL_DEVICE, "No graphics/present queue satisfies the GPU requirements");
 
     if (indexCompute == UINT32_MAX)
-    {
-        indexCompute = indexGraphics;
-    }
+        throw QrException(QR_CANT_FIND_PHYSICAL_DEVICE, "No compute queue satisfies the GPU requirements");
 
     if (indexTransfer == UINT32_MAX)
+        throw QrException(QR_CANT_FIND_PHYSICAL_DEVICE, "No transfer queue satisfies the GPU requirements");
+
+    graphicsQueueCount = requirements.queues.graphicsQueueCount;
+    computeQueueCount = requirements.queues.computeQueueCount;
+    transferQueueCount = requirements.queues.transferQueueCount;
+
+    const auto appendFamily = [this](uint32_t index, uint32_t count)
     {
-        indexTransfer = indexGraphics;
-    }
+        const auto existing = std::find_if(queueFamilyRequests.begin(), queueFamilyRequests.end(),
+            [index](const QueueFamilyRequest &request) { return request.index == index; });
+        if (existing == queueFamilyRequests.end())
+            queueFamilyRequests.push_back({ index, count });
+        else
+            existing->count = std::max(existing->count, count);
+    };
+
+    appendFamily(indexGraphics, graphicsQueueCount);
+    appendFamily(indexCompute, computeQueueCount);
+    appendFamily(indexTransfer, transferQueueCount);
+
+    uint32_t maximumQueueCount = 1;
+    for (const QueueFamilyRequest &request : queueFamilyRequests)
+        maximumQueueCount = std::max(maximumQueueCount, request.count);
+    queuePriorities.assign(maximumQueueCount, 1.0f);
 }
 
 Queues::~Queues()
@@ -108,26 +173,14 @@ void Queues::SetDevice(VkDevice device)
 
 void Queues::GetDeviceQueueCreateInfos(std::vector<VkDeviceQueueCreateInfo> &outInfos) const
 {
-    const auto appendQueueInfo = [this, &outInfos](uint32_t familyIndex)
+    for (const QueueFamilyRequest &request : queueFamilyRequests)
     {
         VkDeviceQueueCreateInfo queueInfo{};
         queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueInfo.queueFamilyIndex = familyIndex;
-        queueInfo.queueCount = 1;
-        queueInfo.pQueuePriorities = &defaultQueuePriority;
+        queueInfo.queueFamilyIndex = request.index;
+        queueInfo.queueCount = request.count;
+        queueInfo.pQueuePriorities = queuePriorities.data();
         outInfos.push_back(queueInfo);
-    };
-
-    appendQueueInfo(indexGraphics);
-
-    if (indexCompute != indexGraphics)
-    {
-        appendQueueInfo(indexCompute);
-    }
-
-    if (indexTransfer != indexGraphics && indexTransfer != indexCompute)
-    {
-        appendQueueInfo(indexTransfer);
     }
 }
 
@@ -144,6 +197,21 @@ uint32_t Queues::GetIndexCompute() const
 uint32_t Queues::GetIndexTransfer() const
 {
     return indexTransfer;
+}
+
+uint32_t Queues::GetGraphicsQueueCount() const
+{
+    return graphicsQueueCount;
+}
+
+uint32_t Queues::GetComputeQueueCount() const
+{
+    return computeQueueCount;
+}
+
+uint32_t Queues::GetTransferQueueCount() const
+{
+    return transferQueueCount;
 }
 
 VkQueue Queues::GetGraphics() const

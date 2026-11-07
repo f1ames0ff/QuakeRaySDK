@@ -178,7 +178,7 @@ float q2SunBounceAttenuation(float hitDistance, float sunBounceRange)
 {
     // A zero range means "no indirect sun". The floor keeps the division finite so that a
     // hit at distance zero cannot turn the whole term into a NaN.
-    sunBounceRange = max( sunBounceRange, 1e-4 );
+    sunBounceRange = max( sunBounceRange, 2.5e-6 );
     return square( clamp( 1.0 - square( square( hitDistance / sunBounceRange ) ), 0.0, 1.0 ) );
 }
 
@@ -208,7 +208,7 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
                                   float oneOverPdf)
 {
     const Surface hitSurf = traceBounce(
-        surf.position + surf.normalGeom * 0.01,
+        surf.position + surf.normalGeom * 2.5e-4,
         surf.roughness, surf.instCustomIndex, bounceDir, SECOND_BOUNCE_MIP_BIAS );
 
     if ( hitSurf.isSky )
@@ -398,7 +398,7 @@ void main()
         oneOverSourcePdf );
 
     const Surface hitSurf = traceBounce(
-        surf.position + surf.normalGeom * 0.01,
+        surf.position + surf.normalGeom * 2.5e-4,
         surf.roughness, surf.instCustomIndex, bounceDir, FIRST_BOUNCE_MIP_BIAS );
 
     float3 hitPos;
@@ -407,7 +407,7 @@ void main()
     if ( hitSurf.isSky )
     {
         skyBsdfWeight = q2SkyNeeBsdfWeight( surf, bounceDir );
-        hitPos      = surf.position + bounceDir * MAX_RAY_LENGTH;
+        hitPos      = surf.position + bounceDir * globalUniform.rayLength;
         hitRadiance = getSkyAmbientMultiplied( bounceDir, surf.roughness * ( SKY_MIP_COUNT - 1.0 ) );
     }
     else
