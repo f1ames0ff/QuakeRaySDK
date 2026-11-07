@@ -53,7 +53,7 @@ class RhiTextureTable;
 // the A4.2a shader-side fix that drops the sampled view-direction binding 147 is in the source
 // state and in that blob):
 //   set 0  TLAS                - RhiAccelStructs::GetTopLevel, raw binding 0;
-//   set 1  framebuffers        - 12 items, exactly: the UAVs at raw bindings 14
+//   set 1  framebuffers        - 17 items, exactly: the UAVs at raw bindings 14
 //                                (framebufUnfilteredDirect), 15 (framebufUnfilteredSpecular) and
 //                                23 (framebufViewDirection), and the SRVs at raw bindings 124
 //                                (framebufAlbedo_Sampled), 126 (IsSky), 127 (Normal), 129
@@ -93,7 +93,7 @@ class RhiTextureTable;
 //
 // The twelve sets, in the engine's RT set order (RayTracingPipeline.cpp:62-86):
 //   set 0  TLAS                - own per-slot set over the primary's tlasLayout;
-//   set 1  framebuffers        - own per-slot set over the module's exact 12-item layout;
+//   set 1  framebuffers        - own per-slot set over the module's exact 17-item layout;
 //   set 2  global uniform      - own per-slot set over the primary's uniformLayout;
 //   set 3  vertex data         - own per-slot set over the primary's 7-item vertexDataLayout (the
 //                                direct raygen itself fetches no geometry, but `RtAlphaTest.rahit`,
@@ -253,7 +253,7 @@ public:
     // image extent through Framebuffers::GetImageHandles' 4-tuple form, so the one set-1 image that
     // is not render-sized (Q2_GRAD_SMPL_POS, 1/3) is wrapped at its own extent.
     //
-    // What is recorded: the wraps of the 12 set-1 images (created on first use, re-created when the
+    // What is recorded: the wraps of the 17 set-1 images (created on first use, re-created when the
     // engine re-created an image or the size changed; the replaced wraps and the sets over them go
     // through the frame context's retire queue), the per-slot sets 0-3 and 6, the four light copies
     // and the light-statistics fill of the slots the frame needs while the mode is not disabled
@@ -266,7 +266,7 @@ public:
     //
     // The image-state contract: the engine leaves every framebuffer image in VK_IMAGE_LAYOUT_GENERAL
     // (= NVRHI's UnorderedAccess), and a native wrap keeps no state between command lists, so the
-    // pass announces that state for all 12 images before its first use on every list
+    // pass announces that state for all 17 images before its first use on every list
     // (beginTrackingTextureState, exactly RhiRtPrimaryPass's contract). After the dispatch the 9
     // images that are bound as SRVs and by no UAV are moved back to UnorderedAccess: their
     // Texture_SRV requirement left them in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -305,15 +305,15 @@ private:
     // same handle-change rule.
     struct Target
     {
-        // Set 1: the 12 engine images (the .cpp's FRAMEBUFFER_BINDINGS table) the slot currently
+        // Set 1: the 17 engine images (the .cpp's FRAMEBUFFER_BINDINGS table) the slot currently
         // wraps and the set over them. The handles are kept in the form Render received them, not
         // as VkImages, because they are what the change detection compares; a change in any of them
         // or in the size means the engine re-created the framebuffers and the wraps and the set
         // have to follow.
-        uint64_t imageHandles[12] = {};
+        uint64_t imageHandles[17] = {};
         uint32_t width = 0;
         uint32_t height = 0;
-        nvrhi::TextureHandle framebufferTextures[12];
+        nvrhi::TextureHandle framebufferTextures[17];
         nvrhi::BindingSetHandle framebufferSet;
 
         // Set 0: the pointer is only the cache key that tells whether the set still addresses the
@@ -407,7 +407,7 @@ private:
     nvrhi::ShaderHandle closestHitShader;
     nvrhi::ShaderHandle anyHitShader;
 
-    // The two layouts this module owns: set 1 (the exact 12 items above) and set 6 (the exact 5
+    // The two layouts this module owns: set 1 (the exact 17 items above) and set 6 (the exact 5
     // items). Every other layout is the primary's.
     nvrhi::BindingLayoutHandle framebufferLayout;
     nvrhi::BindingLayoutHandle lightLayout;

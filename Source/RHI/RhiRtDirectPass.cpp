@@ -99,7 +99,7 @@ struct FramebufferBinding
     bool isUAV;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 12;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 17;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_UNFILTERED_DIRECT,      true  }, //  14  framebufUnfilteredDirect
@@ -114,6 +114,13 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,       false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,            false }, // 245  framebufQ2RngSeed_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER,             false }, // 247  framebufQ2Cluster_Sampled
+    { FB_IMAGE_INDEX_MOTION_DLSS,            false }, // 163  framebufMotionDlss_Sampled
+    // The history read of ReSTIR's reprojection/validation: the other frame slot's position,
+    // normals and roughness (Surface.hlsli fetchGbufferSurface_NoAlbedoViewDir_Prev).
+    { FB_IMAGE_INDEX_NORMAL_PREV,            false }, // 136  framebufNormal_Prev_Sampled
+    { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,   false }, // 138  framebufNormalGeometry_Prev_Sampled
+    { FB_IMAGE_INDEX_METALLIC_ROUGHNESS_PREV,false }, // 140  framebufMetallicRoughness_Prev_Sampled
+    { FB_IMAGE_INDEX_SURFACE_POSITION_PREV,  false }, // 152  framebufSurfacePosition_Prev_Sampled
 };
 
 // The engine raw binding of one entry: the UAV array for the storage images, the sampled array for
