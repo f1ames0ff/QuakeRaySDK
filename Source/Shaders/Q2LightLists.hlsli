@@ -308,8 +308,18 @@ void q2SampleGridLights(
     }
 
     const uint cell = uint(gridCell);
+    const uint cellCount = q2LightGridCounts[cell];
+
+    // The GPU builder keeps at most Q2_LIGHT_GRID_MAX_IDS_PER_CELL entries and stores the compacted
+    // count. A full cell may have dropped candidates; return none so the caller falls back to the
+    // cluster lists (direct/indirect) or the global array (ReSTIR) instead of losing the tail.
+    if (cellCount >= uint(Q2_LIGHT_GRID_MAX_IDS_PER_CELL))
+    {
+        return;
+    }
+
     const uint base = q2LightGridOffsets[uint(Q2_LIGHT_GRID_HEADER_WORDS) + cell];
-    const int lightCount = int(min(q2LightGridCounts[cell], uint(Q2_LIGHT_GRID_MAX_IDS_PER_CELL)));
+    const int lightCount = int(cellCount);
     const int listEnd = int(base) + lightCount;
 
     if (lightCount <= 0)
