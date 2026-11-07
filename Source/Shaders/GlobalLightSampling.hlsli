@@ -90,6 +90,26 @@ float globalLightTarget(const ShLightEncoded encoded, const float3 p, const floa
     return max(mass, proxy * kGlobalLightTargetFloor) * max(getLuminance(encoded.color), 0.0) * scale;
 }
 
+// The ReSTIR target: the same mass as the grid's sampler, without the global RIS proxy floor.
+// The floor exists to keep lights the selection mass cannot see samplable from the uniform
+// global array; reusing it with the grid source pdf inflated the estimator's weight (target/p
+// no longer equals 1/p for a single candidate) and over-brightened the image.
+float globalLightTargetUnfloored(const ShLightEncoded encoded, const float3 p, const float3 n,
+                                 const float3 V, const float phongExp, const float phongScale,
+                                 const float phongWeight)
+{
+    if (encoded.lightType == LIGHT_TYPE_DIRECTIONAL)
+    {
+        return 0.0;
+    }
+
+    const float mass  = q2LightSelectionMass(encoded, p, n, V, phongExp, phongScale, phongWeight);
+    const float scale = (encoded.lightType == LIGHT_TYPE_TEXTURED_AREA)
+        ? max(decodeAsTexturedAreaLight(encoded).meanEmiss, 0.0) : 1.0;
+
+    return mass * max(getLuminance(encoded.color), 0.0) * scale;
+}
+
 void q2SampleGlobalLightsRIS(const uint seed, const uint sampleIndex,
                              const float3 p, const float3 n, const float3 V,
                              const float phongExp, const float phongScale, const float phongWeight,
