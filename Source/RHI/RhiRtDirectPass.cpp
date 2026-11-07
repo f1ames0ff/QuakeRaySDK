@@ -733,6 +733,19 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
+    // The uniform still asks for ReSTIR, but the ring could not be sized: without render-sized
+    // storage the shader would index past the two-element stand-in, so the whole trace is skipped
+    // for that frame instead. This only happens on an allocation failure.
+    if (restirRequested && !restirEnabled)
+    {
+        if (!warnedRestirUnavailable)
+        {
+            warnedRestirUnavailable = true;
+            LogMessage(print, "Warning: RHI: the ReSTIR reservoir is unavailable, the direct trace is skipped");
+        }
+        return;
+    }
+
     if (pTopLevel == nullptr)
     {
         if (!warnedMissingTopLevel)
@@ -1261,6 +1274,8 @@ bool RhiRtDirectPass::ConfigureRestir(uint32_t width, uint32_t height, bool enab
     {
         return false;
     }
+
+    restirRequested = enabled;
 
     const bool wantsReservoir = enabled && width > 0 && height > 0;
 

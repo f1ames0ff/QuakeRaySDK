@@ -423,6 +423,7 @@ private:
     uint32_t restirWidth = 0;
     uint32_t restirHeight = 0;
     bool     restirEnabled = false;
+    bool     restirRequested = false;
     bool     restirReservoirClearPending = false;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
@@ -459,6 +460,7 @@ private:
     bool warnedBadVertexData = false;
     bool warnedMissingLights = false;
     bool warnedMissingLightStaging = false;
+    bool warnedRestirUnavailable = false;
 
     bool created = false;
 };
