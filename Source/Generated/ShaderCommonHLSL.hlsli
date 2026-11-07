@@ -50,6 +50,7 @@
 #define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_SOURCES (15)
 #define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS (16)
 #define BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS (17)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES (18)
 #define BINDING_DECAL_INSTANCES (0)
 #define BINDING_PORTAL_INSTANCES (0)
 #define BINDING_LPM_PARAMS (0)
@@ -345,6 +346,7 @@ struct ShGlobalUniform
     float4 levelFogColorDensity;
     float4 levelFogSkyBlend;
     uint4 restirParams;
+    float4 lightVolumeParams;
     float4 cloudShadowPlacement;
     float4 cloudLayerMotion;
     uint glassBlur;

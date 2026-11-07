@@ -9,9 +9,11 @@
 #include "../Framebuffers.h"
 #include "../Generated/ShaderCommonC.h"
 #include "../LightManager.h"
+#include "../LightVolume.h"
 #include "../RestirReservoir.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -45,6 +47,7 @@ const char *const ANY_HIT_SHADER_FILE_NAME = "RtAlphaTest.rahit.spv";
 // (instanceShaderBindingTableRecordOffset 0/1, ASManager.cpp:976-991). The names carry this
 // module's prefix so a message or a capture can tell the two pipelines' groups apart.
 const char *const RAYGEN_EXPORT_NAME = "RhiRtDirectRGen";
+const char *const VOLUME_RAYGEN_EXPORT_NAME = "RhiRtVolumeRGen";
 const char *const MISS_EXPORT_NAME = "RhiRtDirectRMiss";
 const char *const SHADOW_MISS_EXPORT_NAME = "RhiRtDirectRMissShadow";
 const char *const HIT_GROUP_OPAQUE_EXPORT_NAME = "RhiRtDirectRClsOpaque";
@@ -279,6 +282,8 @@ static_assert(LIGHT_BUFFER_BINDINGS[LIGHT_STATS_BUFFER_INDEX].binding ==
 static_assert(sizeof(ShLightEncoded) == 160,
               "the shader's StructuredBuffer<ShLightEncoded> strides by 160 B (Generated/ShaderCommonC.h:389-401)");
 
+constexpr uint32_t LIGHT_VOLUME_PROBE_COUNT = LightVolume::kProbeCount;
+
 static_assert(sizeof(RestirReservoir) == 16,
               "the shader's ShRestirReservoir is four 4-byte fields (Shaders/Restir.hlsli)");
 
@@ -433,6 +438,10 @@ RhiRtDirectPass::~RhiRtDirectPass()
     framebufferLayout = nullptr;
     restirReservoir = nullptr;
     restirReservoirElements = 0;
+    lightVolumeProbes = nullptr;
+    volumeShaderTable = nullptr;
+    volumePipeline = nullptr;
+    volumeRaygenShader = nullptr;
     anyHitShader = nullptr;
     closestHitShader = nullptr;
     shadowMissShader = nullptr;
@@ -523,6 +532,13 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
+    // The volume raygen is optional: without it the direct/indirect path stays valid and the
+    // volume buffer simply stays zero.
+    if (!LoadShader("RtLightVolume.rgen.spv", nvrhi::ShaderType::RayGeneration, volumeRaygenShader))
+    {
+        LogMessage(print, "Warning: RHI: the light-volume update shader is unavailable");
+    }
+
     // The two layouts this module owns. Both carry the ray-tracing visibility, for the reason
     // RhiDebugTracePass documents: the acceleration-structure-read barrier names the compute stage
     // too (vulkan-constants.cpp:282-285) and this device has no rayQuery feature to make that
@@ -581,6 +597,11 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS));
 
+        // The cascaded irradiance-volume probe atlas: written by the volume raygen and read by the
+        // indirect raygen, both through this UAV slot.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES));
+
         lightLayout = device->createBindingLayout(desc);
     }
 
@@ -608,6 +629,13 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     // Set 6 always binds the reservoir descriptor. Two elements are enough until ConfigureRestir
     // asks for a render-sized ring on the first rt_restir frame.
     if (!CreateRestirReservoir(2u))
+    {
+        return false;
+    }
+
+    // The cascade atlas is small and lives with the pass; allocating it eagerly keeps the set-6
+    // descriptor valid even while rt_light_volume is off.
+    if (!CreateLightVolumeBuffer(LIGHT_VOLUME_PROBE_COUNT))
     {
         return false;
     }
@@ -713,6 +741,80 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         LogMessage(print, "Warning: RHI: the direct RT pass shader table does not match the engine's SBT indices");
         shaderTable = nullptr;
         return false;
+    }
+
+    // The volume update pipeline: the same misses and hit groups (the probe rays shade hits and
+    // trace sun shadows), a different raygen and its own table. A failure here only disables the
+    // volume update; the direct and indirect passes stay usable.
+    if (volumeRaygenShader != nullptr)
+    {
+        nvrhi::rt::PipelineDesc volumeDesc;
+
+        volumeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                 .setExportName(VOLUME_RAYGEN_EXPORT_NAME)
+                                 .setShader(volumeRaygenShader));
+        volumeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                 .setExportName(MISS_EXPORT_NAME)
+                                 .setShader(missShader));
+        volumeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                 .setExportName(SHADOW_MISS_EXPORT_NAME)
+                                 .setShader(shadowMissShader));
+        volumeDesc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                                   .setExportName(HIT_GROUP_OPAQUE_EXPORT_NAME)
+                                   .setClosestHitShader(closestHitShader));
+        volumeDesc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                                   .setExportName(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME)
+                                   .setClosestHitShader(closestHitShader)
+                                   .setAnyHitShader(anyHitShader));
+
+        volumeDesc.addBindingLayout(primaryPass->GetTlasLayout());
+        volumeDesc.addBindingLayout(framebufferLayout);
+        volumeDesc.addBindingLayout(primaryPass->GetUniformLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetVertexDataLayout());
+        volumeDesc.addBindingLayout(textureTable->GetLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(lightLayout);
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetRayStatsLayout());
+        volumeDesc.addBindingLayout(cloudShadowBinding.GetLayout());
+
+        volumeDesc.setMaxPayloadSize(MAX_PAYLOAD_SIZE);
+        volumeDesc.setMaxAttributeSize(MAX_ATTRIBUTE_SIZE);
+        volumeDesc.setMaxRecursionDepth(MAX_RECURSION_DEPTH);
+
+        volumePipeline = device->createRayTracingPipeline(volumeDesc);
+    }
+
+    if (volumePipeline != nullptr)
+    {
+        volumeShaderTable = volumePipeline->createShaderTable(nvrhi::rt::ShaderTableDesc());
+
+        if (volumeShaderTable != nullptr)
+        {
+            volumeShaderTable->setRayGenerationShader(VOLUME_RAYGEN_EXPORT_NAME);
+
+            if (volumeShaderTable->addMissShader(MISS_EXPORT_NAME) != SBT_INDEX_MISS_DEFAULT ||
+                volumeShaderTable->addMissShader(SHADOW_MISS_EXPORT_NAME) != SBT_INDEX_MISS_SHADOW ||
+                volumeShaderTable->addHitGroup(HIT_GROUP_OPAQUE_EXPORT_NAME) != SBT_INDEX_HITGROUP_FULLY_OPAQUE ||
+                volumeShaderTable->addHitGroup(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME) != SBT_INDEX_HITGROUP_ALPHA_TESTED)
+            {
+                LogMessage(print, "Warning: RHI: the light-volume shader table does not match the engine's SBT indices");
+                volumeShaderTable = nullptr;
+                volumePipeline = nullptr;
+            }
+        }
+        else
+        {
+            volumePipeline = nullptr;
+        }
+    }
+
+    if (volumePipeline == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the light-volume update pipeline is unavailable");
     }
 
     created = true;
@@ -933,6 +1035,10 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
     // the list that samples them (RhiTextureTable.h); the primary pass does this too, and a
     // repeated call is a no-op.
     textureTable->TrackPendingTextures(pCommandList);
+
+    // The light-volume update runs before the direct/indirect dispatches of this list: it writes
+    // one cascade of the probe atlas, and the indirect raygen reads the atlas later in the frame.
+    DispatchLightVolume(pCommandList, frameIndex);
 
     // The twelve sets, in the layout order the pipeline was built with; the pinned backend's legacy
     // binding mode binds the list positionally (vulkan-resource-bindings.cpp:940-958). Sets 5, 7, 8,
@@ -1330,6 +1436,111 @@ bool RhiRtDirectPass::ConfigureRestir(uint32_t width, uint32_t height, bool enab
     return true;
 }
 
+bool RhiRtDirectPass::ConfigureLightVolume(bool enabled, const float cameraPosition[3])
+{
+    if (!created || device == nullptr)
+    {
+        return false;
+    }
+
+    if (!enabled)
+    {
+        lightVolumeEnabled = false;
+        return true;
+    }
+
+    float snapped[3];
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        snapped[axis] = std::floor(cameraPosition[axis] / LightVolume::kSnap + 0.5f) * LightVolume::kSnap;
+    }
+
+    if (std::memcmp(snapped, lightVolumeOrigin, sizeof(snapped)) != 0)
+    {
+        std::memcpy(lightVolumeOrigin, snapped, sizeof(snapped));
+        // A new snap origin invalidates every cascade: the next list zeroes the atlas and the
+        // six following frames refill one cascade each.
+        lightVolumeClearPending = true;
+    }
+
+    lightVolumeEnabled = true;
+    return true;
+}
+
+bool RhiRtDirectPass::CreateLightVolumeBuffer(uint32_t elementCount)
+{
+    if (elementCount == 0u)
+    {
+        return false;
+    }
+
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(elementCount) * sizeof(LightVolumeProbe);
+    desc.structStride = static_cast<uint32_t>(sizeof(LightVolumeProbe));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass light-volume probes";
+
+    nvrhi::BufferHandle created = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (created == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the light-volume probe buffer");
+        return false;
+    }
+
+    if (lightVolumeProbes != nullptr && frameContext != nullptr)
+    {
+        frameContext->Retire(lightVolumeProbes);
+    }
+
+    lightVolumeProbes = created;
+    lightVolumeClearPending = true;
+    return true;
+}
+
+void RhiRtDirectPass::DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)
+{
+    if (!lightVolumeEnabled || volumePipeline == nullptr || volumeShaderTable == nullptr ||
+        frameIndex >= MAX_FRAMES_IN_FLIGHT)
+    {
+        return;
+    }
+
+    Target &target = targets[frameIndex];
+
+    if (target.tlasSet == nullptr || target.framebufferSet == nullptr ||
+        target.uniformSet == nullptr || target.vertexDataSet == nullptr ||
+        target.lightSet == nullptr)
+    {
+        return;
+    }
+
+    nvrhi::rt::State state;
+    state.setShaderTable(volumeShaderTable);
+    state.addBindingSet(target.tlasSet);                  // 0
+    state.addBindingSet(target.framebufferSet);           // 1
+    state.addBindingSet(target.uniformSet);               // 2
+    state.addBindingSet(target.vertexDataSet);            // 3
+    state.addBindingSet(textureTable->GetTable());        // 4
+    state.addBindingSet(primaryPass->GetHoleSet());       // 5
+    state.addBindingSet(target.lightSet);                 // 6
+    state.addBindingSet(primaryPass->GetHoleSet());       // 7
+    state.addBindingSet(primaryPass->GetHoleSet());       // 8
+    state.addBindingSet(primaryPass->GetHoleSet());       // 9
+    state.addBindingSet(primaryPass->GetHoleSet());       // 10
+    state.addBindingSet(primaryPass->GetRayStatsSet(frameIndex)); // 11
+    state.addBindingSet(cloudShadowBinding.GetSet());
+
+    pCommandList->setRayTracingState(state);
+
+    // One invocation per probe of the cascade selected by frameId % 6 in the shader.
+    nvrhi::rt::DispatchRaysArguments args;
+    args.setDimensions(LightVolume::kProbesPerCascade, 1, 1);
+    pCommandList->dispatchRays(args);
+}
+
 bool RhiRtDirectPass::CreateRestirReservoir(uint64_t elementCount)
 {
     if (elementCount == 0u)
@@ -1486,6 +1697,9 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS, restirReservoir));
 
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES, lightVolumeProbes));
+
         target.lightSet = device->createBindingSet(setDesc, lightLayout);
 
         if (target.lightSet == nullptr)
@@ -1504,6 +1718,13 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         // the setRayTracingState of this list, like the statistics fill's transition.
         pCommandList->setBufferState(restirReservoir, nvrhi::ResourceStates::UnorderedAccess);
         restirReservoirClearPending = false;
+    }
+
+    if (lightVolumeClearPending && lightVolumeProbes != nullptr)
+    {
+        pCommandList->clearBufferUInt(lightVolumeProbes, 0u);
+        pCommandList->setBufferState(lightVolumeProbes, nvrhi::ResourceStates::UnorderedAccess);
+        lightVolumeClearPending = false;
     }
 
     // The frame's light copies, the RHI replacement for the `LightManager::CopyFromStaging` calls

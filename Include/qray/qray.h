@@ -1475,6 +1475,15 @@ typedef struct QrDrawFrameIlluminationParams
     // Default: 8
     uint32_t    restirCandidates;
 
+    // 1: the indirect pass adds the cascaded irradiance-volume term to its SH
+    // (host cvar rt_light_volume; 0 keeps the screen-space GI only).
+    // Default: 0
+    uint32_t    lightVolumeEnabled;
+    // Blend weight of the volume SH added by the indirect pass (host cvar
+    // rt_light_volume_weight).
+    // Default: 1.0
+    float       lightVolumeWeight;
+
     float       giBounceRays;
 
     QrBool32    denoiserEnabled;

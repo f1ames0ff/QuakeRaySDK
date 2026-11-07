@@ -238,6 +238,12 @@ public:
     // binding stays usable and the shader still sees restirParams.x == 0 on disabled frames.
     bool ConfigureRestir(uint32_t width, uint32_t height, bool enabled);
 
+    // Cascaded irradiance volume (host cvar rt_light_volume). The probe buffer is allocated once
+    // with the pass; this call only follows the enable flag and the 640 u camera snap, and clears
+    // every cascade when the snap moves so no probe from the previous origin is sampled. A failed
+    // configure leaves the volume disabled; the shader's lightVolumeParams.x gate is the host's.
+    bool ConfigureLightVolume(bool enabled, const float cameraPosition[3]);
+
     // One call per frame, on the frame context's open command list of 'frameIndex', after
     // RhiRtPrimaryPass::Render of the same slot. 'frameId' is the engine counter
     // (`ShGlobalUniform::frameId`, i.e. sky.uniform->GetData()->frameId) and 'lightStatsMode' the
@@ -377,6 +383,9 @@ private:
     void ReleaseRestirReservoir();
     void InvalidateLightSets();
 
+    bool CreateLightVolumeBuffer(uint32_t elementCount);
+    void DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
+
     // The ranged statistics fill of the frame: it is recorded on the set-6 wrap of the engine's
     // statistics buffer inside 'target' (the same wrap the binding set binds, which is what makes
     // the automatic barriers cover the native fill) and on that buffer's raw handle 'statsBuffer'.
@@ -425,6 +434,17 @@ private:
     bool     restirEnabled = false;
     bool     restirRequested = false;
     bool     restirReservoirClearPending = false;
+
+    // The cascade probe atlas: six 16^3 SH4 RGB records, allocated once with the pass. The
+    // pipeline that updates one cascade per frame and its table are optional; without them the
+    // buffer stays zero and the indirect pass adds nothing.
+    nvrhi::BufferHandle lightVolumeProbes;
+    nvrhi::rt::PipelineHandle volumePipeline;
+    nvrhi::rt::ShaderTableHandle volumeShaderTable;
+    nvrhi::ShaderHandle volumeRaygenShader;
+    float    lightVolumeOrigin[3] = {};
+    bool     lightVolumeEnabled = false;
+    bool     lightVolumeClearPending = false;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
     // EnsureLightSet (the reflect/refract sibling asking early) or Render made it.

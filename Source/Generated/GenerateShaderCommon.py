@@ -259,6 +259,7 @@ CONST = {
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_SOURCES"      : 15,
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS"       : 16,
     "BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS"       : 17,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES"     : 18,
     "BINDING_DECAL_INSTANCES"                   : 0,
     "BINDING_PORTAL_INSTANCES"                  : 0,
     "BINDING_LPM_PARAMS"                        : 0,
@@ -649,6 +650,7 @@ GLOBAL_UNIFORM_MEMBERS = [
     # .x = 1 samples the direct lights from the global light array instead of
     # the per-cluster lists, .y = candidates drawn per NEE light sample.
     (UINT32,  4, "restirParams",             1),
+    (FLOAT32, 4, "lightVolumeParams",        1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 

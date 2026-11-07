@@ -88,6 +88,7 @@
 #include "RaygenCommon.hlsli"
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
+#include "LightVolumeGpu.hlsli"
 
 #define Q2_RNG_INDIR_CELL_SELECT 220
 #define Q2_RNG_INDIR_LIGHT_POINT 223
@@ -571,6 +572,12 @@ void main()
     {
         SH sh = irradianceToSH( diffuse * skyBsdfWeight, safeNormalize( hitPos - surf.position ) );
         accumulateSH( sh, irradianceToSH( q2SkyNee( surf, seed ) * halfResScale, surf.normal ), 1.0 );
+
+        SH volumeSh;
+        if ( q2SampleLightVolumeSH( surf.position, globalUniform.lightVolumeParams.y, volumeSh ) )
+        {
+            accumulateSH( sh, volumeSh, 1.0 );
+        }
 
         if ( indirDbg( INDIR_DBG_SANITY ) )
         {
