@@ -1479,9 +1479,10 @@ typedef struct QrDrawFrameIlluminationParams
     // (host cvar rt_light_volume; 0 keeps the screen-space GI only).
     // Default: 0
     uint32_t    lightVolumeEnabled;
-    // Blend weight of the volume SH added by the indirect pass (host cvar
-    // rt_light_volume_weight).
-    // Default: 1.0
+    // Additive weight of the volume SH added by the indirect pass (host cvar
+    // rt_light_volume_weight), clamped to 0..1. 0.25 is the tested first-slice
+    // blend; the volume path is opt-in.
+    // Default: 0.25
     float       lightVolumeWeight;
 
     float       giBounceRays;
