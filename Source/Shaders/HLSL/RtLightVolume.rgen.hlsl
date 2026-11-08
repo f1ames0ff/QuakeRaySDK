@@ -41,6 +41,7 @@
 
 #define Q2_LIGHT_VOLUME_RAYS 16u
 #define Q2_RNG_VOLUME_BASE 800u
+#define Q2_RNG_VOLUME_STRIDE 8u
 
 Surface traceVolumeBounce(const float3 origin, const float3 direction)
 {
@@ -62,6 +63,70 @@ Surface traceVolumeBounce(const float3 origin, const float3 direction)
 float3 volumeSkyRadiance()
 {
     return globalUniform.skyColorDefault.xyz * max(globalUniform.skyColorMultiplier, 0.0);
+}
+
+float3 volumeHitLocalLights(const Surface hit, const uint seed, const uint salt)
+{
+    const int gridCell = q2GetLightGridCell(hit.position);
+    const float3 rng = float3(
+        rnd24(seed, salt),
+        rnd24(seed, salt + 1u),
+        rnd24(seed, salt + 2u));
+
+    const float alpha = square(hit.roughness);
+    const float phongExp = q2RoughnessSquareToSpecPower(alpha);
+    const float phongScale = min(100.0, 1.0 / (M_PI * max(alpha * alpha, 1e-4)));
+    const float phongWeight = clamp(
+        getLuminance(hit.specularColor) /
+            (getLuminance(hit.specularColor) + getLuminance(hit.albedo)),
+        0.0, 0.9);
+
+    uint lightIndex = LIGHT_INDEX_NONE;
+    uint lightSlot = 0u;
+    float lightPdf = 0.0;
+    bool sampledFromGrid = false;
+
+    if (gridCell >= 0)
+    {
+        q2SampleGridLights(gridCell, hit.position, hit.normal, hit.toViewerDir,
+                           phongExp, phongScale, phongWeight, rng,
+                           lightIndex, lightSlot, lightPdf);
+        sampledFromGrid = lightIndex != LIGHT_INDEX_NONE;
+    }
+
+    if (!sampledFromGrid)
+    {
+        q2SampleClusterLights(hit.cluster, hit.position, hit.normal, hit.toViewerDir,
+                              phongExp, phongScale, phongWeight, false, rng,
+                              lightIndex, lightSlot, lightPdf);
+    }
+
+    if (lightIndex == LIGHT_INDEX_NONE || lightPdf <= 0.0)
+    {
+        return (float3)0.0;
+    }
+
+    const float2 pointRnd = rnd16_2(seed, salt + 3u);
+    const float2 memberRnd = float2(rnd24(seed, salt + 4u), rnd24(seed, salt + 5u));
+    float memberPdf = 1.0;
+    LightSample light = sampleLightNee(lightSources[lightIndex], hit.position, pointRnd, memberRnd, memberPdf);
+
+    if (getLuminance(light.color) <= 0.0)
+    {
+        return (float3)0.0;
+    }
+
+    bool lightTraced = false;
+    const float3 visibility = traceLightVisibility(hit, light, lightIndex, lightTraced);
+
+    if (lightTraced)
+    {
+        rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
+    }
+
+    float3 diffuse;
+    shadeDiffuse(hit, light, 1.0 / max(lightPdf * memberPdf, 1e-9), diffuse);
+    return diffuse * visibility;
 }
 
 float3 volumeHitRadiance(const Surface hit, const uint seed, const uint salt)
@@ -90,6 +155,8 @@ float3 volumeHitRadiance(const Surface hit, const uint seed, const uint salt)
             direct += diffuse * visibility;
         }
     }
+
+    direct += volumeHitLocalLights(hit, seed, salt + 2u);
 
     float3 radiance = direct * hit.albedo;
 
@@ -136,7 +203,7 @@ void main()
 
     for (uint ray = 0u; ray < Q2_LIGHT_VOLUME_RAYS; ray++)
     {
-        const uint salt = Q2_RNG_VOLUME_BASE + ray * 2u;
+        const uint salt = Q2_RNG_VOLUME_BASE + ray * Q2_RNG_VOLUME_STRIDE;
         const float2 u = rnd16_2(seed, salt);
         const float3 direction = sampleSphere(u.x, u.y);
         const float3 rayOrigin = probePosition + direction * (0.01 * globalUniform.sceneUnitsPerHostUnit);
