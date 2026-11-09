@@ -581,7 +581,10 @@ void main()
         {
             const float4 previousView = mul(globalUniform.viewPrev, float4(surf.position, 1.0));
             const float4 previousClip = mul(globalUniform.projectionPrev, previousView);
-            previousUV = previousClip.w > 1e-6
+            // MakeProjectionMatrix writes w = -z_view, so a point in front of the camera has a
+            // negative w. The old `w > 1e-6` guard rejected every pixel and the camera path was
+            // effectively a no-history path.
+            previousUV = abs(previousClip.w) > 1e-6
                 ? previousClip.xy / previousClip.w * 0.5 + 0.5
                 : (float2)2.0;
         }
