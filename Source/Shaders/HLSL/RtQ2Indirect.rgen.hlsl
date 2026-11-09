@@ -567,7 +567,9 @@ void main()
         // volumetric fog projection was not a valid screen-space reprojection.
         const float4 previousView = mul(globalUniform.viewPrev, float4(surf.position, 1.0));
         const float4 previousClip = mul(globalUniform.projectionPrev, previousView);
-        const float2 previousUV = previousClip.w > 1e-6
+        // MakeProjectionMatrix writes w = -z_view, so a point in front of the camera has a
+        // negative w; the old `w > 1e-6` guard rejected every pixel.
+        const float2 previousUV = abs(previousClip.w) > 1e-6
             ? previousClip.xy / previousClip.w * 0.5 + 0.5
             : (float2)2.0;
 
