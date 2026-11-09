@@ -243,7 +243,8 @@ public:
     // every cascade when the snap moves so no probe from the previous origin is sampled. A failed
     // configure leaves the volume disabled; the shader's lightVolumeParams.x gate is the host's.
     bool ConfigureLightVolume(bool enabled, const float cameraPosition[3],
-                              uint32_t localVolumeCount, const float *localVolumeParams);
+                              uint32_t localVolumeCount, const float *localVolumeParams,
+                              bool split);
 
     // One call per frame, on the frame context's open command list of 'frameIndex', after
     // RhiRtPrimaryPass::Render of the same slot. 'frameId' is the engine counter
@@ -385,6 +386,7 @@ private:
     void InvalidateLightSets();
 
     bool CreateLightVolumeBuffer(uint32_t elementCount);
+    bool CreateLightVolumeHits();
     bool CreateRadianceCache();
     bool CreateTransparencyFroxels();
     void DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
@@ -443,14 +445,20 @@ private:
     // pipeline that updates one cascade per frame and its table are optional; without them the
     // buffer stays zero and the indirect pass adds nothing.
     nvrhi::BufferHandle lightVolumeProbes;
+    nvrhi::BufferHandle lightVolumeHits;
     nvrhi::rt::PipelineHandle volumePipeline;
     nvrhi::rt::ShaderTableHandle volumeShaderTable;
+    nvrhi::rt::PipelineHandle volumeShadePipeline;
+    nvrhi::rt::ShaderTableHandle volumeShadeShaderTable;
+    nvrhi::ShaderHandle volumeShadeShader;
     nvrhi::ShaderHandle volumeRaygenShader;
     float    lightVolumeOrigin[3] = {};
     uint32_t lightVolumeLocalCount = 0;
     float    lightVolumeLocalPrev[8][4] = {};
     bool     lightVolumeEnabled = false;
+    bool     lightVolumeSplitEnabled = false;
     bool     lightVolumeClearPending = false;
+    bool     lightVolumeHitsClearPending = false;
 
     // The world radiance cache: a 2^18-entry spatial hash of shaded probe-hit radiance, reused
     // for a few frames. Allocated eagerly so set 6 always has a valid descriptor.

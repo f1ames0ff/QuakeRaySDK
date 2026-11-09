@@ -1516,6 +1516,12 @@ typedef struct QrDrawFrameIlluminationParams
     float       radianceCacheLodDistance;
     float       radianceCacheAge;
 
+    // 1: split the volume probe update into a visibility pass that writes
+    // packed hit records and a separate cache-shading pass (host cvar
+    // rt_radiance_cache_split).
+    // Default: 0
+    uint32_t    radianceCacheSplitEnabled;
+
     // ReSTIR GI: reuse the previous frame's indirect bounce sample at the
     // reprojected pixel (host cvar rt_restir_gi).
     // Default: 0

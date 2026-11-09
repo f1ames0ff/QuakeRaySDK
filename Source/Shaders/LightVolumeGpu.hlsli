@@ -40,9 +40,25 @@ struct ShLightVolumeProbe
     float sh[4][3];
 };
 
+#define Q2_LIGHT_VOLUME_MAX_RAYS 64u
+
+// One packed visibility record per probe ray for the split update: the raygen writes it, the
+// cache-shading raygen reconstructs the hit from it.
+struct ShLightVolumeHit
+{
+    ShPayload payload;
+    uint     valid;
+    uint     pad0;
+    uint     pad1;
+    uint     pad2;
+};
+
 #if defined(DESC_SET_LIGHT_SOURCES)
 [[vk::binding(BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES, DESC_SET_LIGHT_SOURCES)]]
 RWStructuredBuffer<ShLightVolumeProbe> lightVolumeProbes;
+
+[[vk::binding(BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS, DESC_SET_LIGHT_SOURCES)]]
+RWStructuredBuffer<ShLightVolumeHit> lightVolumeHits;
 #endif
 
 float3 q2LightVolumeOrigin()

@@ -262,6 +262,7 @@ CONST = {
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES"     : 18,
     "BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE"          : 19,
     "BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS"    : 20,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS"       : 21,
     "BINDING_DECAL_INSTANCES"                   : 0,
     "BINDING_PORTAL_INSTANCES"                  : 0,
     "BINDING_LPM_PARAMS"                        : 0,
@@ -659,6 +660,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 4, "radianceCacheParams",      1),
     # ReSTIR GI: .x = enabled.
     (UINT32,  4, "giReservoirParams",        1),
+    # Radiance-cache split: .x = enabled.
+    (UINT32,  4, "radianceSplitParams",      1),
     # Transparency froxels: .x = enabled.
     (UINT32,  4, "transparencyFroxelParams", 1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),

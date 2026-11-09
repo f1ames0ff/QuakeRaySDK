@@ -53,6 +53,7 @@
 #define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES (18)
 #define BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE (19)
 #define BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS (20)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS (21)
 #define BINDING_DECAL_INSTANCES (0)
 #define BINDING_PORTAL_INSTANCES (0)
 #define BINDING_LPM_PARAMS (0)
@@ -352,6 +353,7 @@ struct ShGlobalUniform
     float4 lightVolumeLocalParams[8];
     float4 radianceCacheParams;
     uint4 giReservoirParams;
+    uint4 radianceSplitParams;
     uint4 transparencyFroxelParams;
     float4 cloudShadowPlacement;
     float4 cloudLayerMotion;

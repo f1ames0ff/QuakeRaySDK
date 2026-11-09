@@ -58,6 +58,7 @@ namespace qray
 #define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES (18)
 #define BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE (19)
 #define BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS (20)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS (21)
 #define BINDING_DECAL_INSTANCES (0)
 #define BINDING_PORTAL_INSTANCES (0)
 #define BINDING_LPM_PARAMS (0)
@@ -355,6 +356,7 @@ struct ShGlobalUniform
     float lightVolumeLocalParams[32];
     float radianceCacheParams[4];
     uint32_t giReservoirParams[4];
+    uint32_t radianceSplitParams[4];
     uint32_t transparencyFroxelParams[4];
     float cloudShadowPlacement[4];
     float cloudLayerMotion[4];

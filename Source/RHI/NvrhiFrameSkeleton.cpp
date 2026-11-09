@@ -1119,7 +1119,8 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
             rtDirectPass->ConfigureLightVolume(uniform->lightVolumeParams[0] != 0.0f,
                                                uniform->cameraPosition,
                                                localVolumeCount,
-                                               uniform->lightVolumeLocalParams);
+                                               uniform->lightVolumeLocalParams,
+                                               uniform->radianceSplitParams[0] != 0u);
         }
 
         // The procedural sky (A5.4): the default frame's cube content, the same RenderCubemap ->
