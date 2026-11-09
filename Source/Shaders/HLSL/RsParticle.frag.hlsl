@@ -87,7 +87,7 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
             }
             else
             {
-                ambient += froxel / 3.14159265;
+                ambient += froxel / 3.14159265 * globalUniform.transparencyFroxelBlendParams.x;
             }
         }
     }
