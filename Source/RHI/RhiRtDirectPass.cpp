@@ -679,6 +679,32 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         }
     }
 
+    {
+        // The transparency froxel fill: one probe per thread, eight directions, one grid light per
+        // direction. Sets 0-5 are the primary's empty sets except the uniform at 2; set 6 is the
+        // shared light layout.
+        if (LoadShader("CmBuildTransparencyFroxels.comp.spv", nvrhi::ShaderType::Compute,
+                       froxelFillShader))
+        {
+            nvrhi::ComputePipelineDesc desc;
+            desc.CS = froxelFillShader;
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 0
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 1
+            desc.bindingLayouts.push_back(primaryPass->GetUniformLayout()); // 2
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 3
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 4
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 5
+            desc.bindingLayouts.push_back(lightLayout);                     // 6
+            froxelFillPipeline = rhi::createComputePipeline(
+                device, desc, "RhiRtDirectPass transparency froxels");
+        }
+
+        if (froxelFillPipeline == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: the transparency froxel fill pipeline is unavailable");
+        }
+    }
+
     // The pipeline: one raygen (RGenDirect, no specialization), the engine's two miss shaders as
     // two GENERAL groups, and the engine's two hit groups in the order the instance records address
     // (fully opaque first, alpha tested second). The twelve layouts are added in set order; the
@@ -1038,6 +1064,11 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
     if (gridBuildPipeline != nullptr && PrepareGridBuildSet(target))
     {
         BuildLightGrid(pCommandList, frameIndex);
+    }
+
+    if (froxelFillPipeline != nullptr)
+    {
+        DispatchTransparencyFroxels(pCommandList, frameIndex);
     }
 
     // The image state contract, spelled out on Render in the header: the engine leaves every
@@ -1589,6 +1620,31 @@ bool RhiRtDirectPass::CreateTransparencyFroxels()
 
     transparencyFroxelsClearPending = true;
     return true;
+}
+
+void RhiRtDirectPass::DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandList,
+                                                   uint32_t frameIndex)
+{
+    Target &target = targets[frameIndex];
+
+    if (target.lightSet == nullptr || target.uniformSet == nullptr)
+    {
+        return;
+    }
+
+    nvrhi::ComputeState state;
+    state.pipeline = froxelFillPipeline;
+    state.addBindingSet(primaryPass->GetHoleSet());  // 0
+    state.addBindingSet(primaryPass->GetHoleSet());  // 1
+    state.addBindingSet(target.uniformSet);          // 2
+    state.addBindingSet(primaryPass->GetHoleSet());  // 3
+    state.addBindingSet(primaryPass->GetHoleSet());  // 4
+    state.addBindingSet(primaryPass->GetHoleSet());  // 5
+    state.addBindingSet(target.lightSet);            // 6
+    pCommandList->setComputeState(state);
+
+    const uint32_t groups = (TransparencyFroxelVolume::kProbeCount + 63u) / 64u;
+    pCommandList->dispatch(groups, 1, 1);
 }
 
 void RhiRtDirectPass::DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)

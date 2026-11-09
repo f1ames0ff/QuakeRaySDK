@@ -387,6 +387,7 @@ private:
     bool CreateLightVolumeBuffer(uint32_t elementCount);
     bool CreateRadianceCache();
     bool CreateTransparencyFroxels();
+    void DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
     void DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
 
     // The ranged statistics fill of the frame: it is recorded on the set-6 wrap of the engine's
@@ -460,6 +461,8 @@ private:
     // so set 6 always has a descriptor. The light-scattering fill is the next pass.
     nvrhi::BufferHandle transparencyFroxels;
     bool     transparencyFroxelsClearPending = false;
+    nvrhi::ShaderHandle froxelFillShader;
+    nvrhi::ComputePipelineHandle froxelFillPipeline;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
     // EnsureLightSet (the reflect/refract sibling asking early) or Render made it.
