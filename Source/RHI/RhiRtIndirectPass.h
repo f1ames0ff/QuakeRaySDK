@@ -355,6 +355,11 @@ private:
         nvrhi::TextureHandle framebufferTextures[14];
         nvrhi::BindingSetHandle framebufferSet;
 
+        // Set 10: the engine's screen-space motion vectors, wrapped separately so set 1 stays the
+        // 14-image interface that rendered before the GI slice.
+        nvrhi::TextureHandle motionTexture;
+        nvrhi::BindingSetHandle motionSet;
+
         // Set 0: the pointer is only the cache key that tells whether the set still addresses the
         // current AS; the set itself holds the reference that keeps the AS alive.
         nvrhi::rt::IAccelStruct *topLevel = nullptr;
@@ -433,6 +438,7 @@ private:
     // ReSTIR GI: two history slots over the full render resolution, one 48-byte record per regular
     // pixel. The buffer is recreated on a size change; the set is rebuilt with it.
     nvrhi::BindingLayoutHandle giReservoirLayout;
+    nvrhi::BindingLayoutHandle giMotionLayout;
     nvrhi::BufferHandle giReservoirs;
     nvrhi::BindingSetHandle giReservoirSet;
     uint32_t giReservoirWidth = 0;

@@ -83,6 +83,7 @@
 #define DESC_SET_CUBEMAPS 7
 #define DESC_SET_RENDER_CUBEMAP 8
 #define DESC_SET_GI_RESERVOIRS 9
+#define DESC_SET_GI_MOTION 10
 #define DESC_SET_RAY_STATS 11
 #define DESC_SET_CLOUD_SHADOW 12
 #define LIGHT_SAMPLE_METHOD (LIGHT_SAMPLE_METHOD_INDIR)
@@ -91,6 +92,9 @@
 #include "Q2LightLists.hlsli"
 #include "LightVolumeGpu.hlsli"
 #include "RestirGi.hlsli"
+
+[[vk::binding(0, DESC_SET_GI_MOTION)]]
+Texture2D<float2> giMotionTexture;
 
 #define Q2_RNG_INDIR_CELL_SELECT 220
 #define Q2_RNG_INDIR_LIGHT_POINT 223
@@ -560,13 +564,11 @@ void main()
         const uint currentSlot = globalUniform.frameId & 1u;
         const uint previousSlot = currentSlot ^ 1u;
         const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
-        // Reproject with the previous frame's view-projection. This is the camera term; object
-        // motion is not in this slice, so the merge/visibility validation below rejects a stale
-        // sample instead of smearing it.
-        const float4 previousClip = mul(globalUniform.volumeViewProj_Prev, float4(surf.position, 1.0));
-        const float2 previousUV = previousClip.w > 1e-6
-            ? previousClip.xy / previousClip.w * 0.5 + 0.5
-            : (float2)2.0;
+        // Motion-vector reprojection (set 10). The image is read as an SRV over the engine's
+        // screen-space vectors; a non-finite or out-of-range UV rejects the history below.
+        const float2 currentUV = (float2(pix) + 0.5) / resolution;
+        const float2 motion = giMotionTexture.Load(int3(pix, 0)).rg;
+        const float2 previousUV = currentUV + motion;
 
         ShRestirGiReservoir current = (ShRestirGiReservoir)0;
         const float3 currentDir = safeNormalize(hitPos - surf.position);
