@@ -31,8 +31,12 @@
 #define Q2_LIGHT_VOLUME_PROBES_PER_LOCAL (Q2_LIGHT_VOLUME_LOCAL_DIM * Q2_LIGHT_VOLUME_LOCAL_DIM * Q2_LIGHT_VOLUME_LOCAL_DIM)
 #define Q2_LIGHT_VOLUME_CASCADE_PROBE_COUNT (Q2_LIGHT_VOLUME_CASCADES * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE)
 #define Q2_LIGHT_VOLUME_MAX_LOCAL 8u
-#define Q2_LIGHT_VOLUME_BASE_BOUNDS 1280.0
-#define Q2_LIGHT_VOLUME_SNAP 640.0
+// The renderer scene is metric (the camera uniform is in meters, e.g. camera.x 12 for
+// Quake x 480). The report's 1280 u / 640 u snap are Quake units: 1280 * 0.0254 and
+// 640 * 0.0254. Keeping the Quake values made the probe cube 1280 m wide, so every
+// cascade probe sat outside the ~50 m map and the volume saw only sky.
+#define Q2_LIGHT_VOLUME_BASE_BOUNDS 32.512
+#define Q2_LIGHT_VOLUME_SNAP 16.256
 #define Q2_LIGHT_VOLUME_PI 3.14159265358979323846
 
 struct ShLightVolumeProbe
