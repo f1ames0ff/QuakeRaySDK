@@ -25,6 +25,7 @@ namespace qray
 
 RadianceCache::RadianceCache()
     : entries(kEntryCount)
+    , activeFrames(kEntryCount, 0u)
 {
 }
 
@@ -66,14 +67,19 @@ RadianceCache::Lookup RadianceCache::MakeLookup(const float position[3], const f
 void RadianceCache::Clear()
 {
     std::memset(entries.data(), 0, entries.size() * sizeof(RadianceCacheEntry));
+    std::fill(activeFrames.begin(), activeFrames.end(), 0u);
+    stats = Stats{};
 }
 
 bool RadianceCache::Get(const Lookup &lookup, uint32_t frame, uint32_t maxAge, float outRadiance[3]) const
 {
+    stats.lookups++;
+
     const RadianceCacheEntry &entry = entries[lookup.index];
 
     if (entry.frame == 0u || entry.key != lookup.key)
     {
+        stats.misses++;
         return false;
     }
 
@@ -81,9 +87,11 @@ bool RadianceCache::Get(const Lookup &lookup, uint32_t frame, uint32_t maxAge, f
 
     if (frame < storedFrame || frame - storedFrame > std::min(maxAge, kMaxAgeFrames))
     {
+        stats.misses++;
         return false;
     }
 
+    stats.hits++;
     outRadiance[0] = entry.radiance[0];
     outRadiance[1] = entry.radiance[1];
     outRadiance[2] = entry.radiance[2];
@@ -92,12 +100,22 @@ bool RadianceCache::Get(const Lookup &lookup, uint32_t frame, uint32_t maxAge, f
 
 void RadianceCache::Put(const Lookup &lookup, uint32_t frame, const float radiance[3])
 {
+    stats.puts++;
+
+    const uint32_t frameTag = frame + 1u;
+
+    if (activeFrames[lookup.index] != frameTag)
+    {
+        activeFrames[lookup.index] = frameTag;
+        stats.activeCells++;
+    }
+
     RadianceCacheEntry &entry = entries[lookup.index];
     entry.radiance[0] = radiance[0];
     entry.radiance[1] = radiance[1];
     entry.radiance[2] = radiance[2];
     entry.key = lookup.key;
-    entry.frame = frame + 1u;
+    entry.frame = frameTag;
     std::memset(entry.pad, 0, sizeof(entry.pad));
 }
 

@@ -37,6 +37,12 @@ struct RadianceCacheEntry
 #if defined(DESC_SET_LIGHT_SOURCES)
 [[vk::binding(BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE, DESC_SET_LIGHT_SOURCES)]]
 RWStructuredBuffer<RadianceCacheEntry> radianceCache;
+
+// One frame tag per hash slot. A slot is "active" in the frame when its first cache insert of the
+// frame exchanges the tag; this is the counter the report uses to size the cache-shading dispatch.
+// Slots are hash-indexed, so colliding cells share a tag exactly as they share an entry.
+[[vk::binding(BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE, DESC_SET_LIGHT_SOURCES)]]
+RWStructuredBuffer<uint> radianceCacheActiveTags;
 #endif
 
 uint q2RadianceHash(const uint value)
@@ -81,6 +87,7 @@ bool q2RadianceCacheGet(const float3 position, out float3 radiance)
 
     if (entry.frame == 0u || entry.key != key)
     {
+        rayStatsAdd(RAY_STATS_CATEGORY_CACHE_MISS, 1);
         return false;
     }
 
@@ -89,9 +96,11 @@ bool q2RadianceCacheGet(const float3 position, out float3 radiance)
 
     if (globalUniform.frameId < storedFrame || globalUniform.frameId - storedFrame > maxAge)
     {
+        rayStatsAdd(RAY_STATS_CATEGORY_CACHE_MISS, 1);
         return false;
     }
 
+    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_HIT, 1);
     radiance = entry.radiance.xyz;
     return true;
 }
@@ -107,10 +116,19 @@ void q2RadianceCachePut(const float3 position, const float3 radiance)
     uint key;
     q2RadianceCacheLookup(position, index, key);
 
+    const uint frameTag = globalUniform.frameId + 1u;
+    uint       previousTag;
+    InterlockedExchange(radianceCacheActiveTags[index], frameTag, previousTag);
+
+    if (previousTag != frameTag)
+    {
+        rayStatsAdd(RAY_STATS_CATEGORY_CACHE_ACTIVE, 1);
+    }
+
     RadianceCacheEntry entry;
     entry.radiance = float4(radiance, 0.0);
     entry.key = key;
-    entry.frame = globalUniform.frameId + 1u;
+    entry.frame = frameTag;
     entry.pad = uint2(0u, 0u);
     radianceCache[index] = entry;
 }

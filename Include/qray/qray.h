@@ -1874,7 +1874,7 @@ QRAPI QrBool32 QRCONV qrIsSuspended(
 
 #define QR_GPU_PASS_COUNT 21
 
-#define QR_RAY_STATS_CATEGORY_COUNT 5
+#define QR_RAY_STATS_CATEGORY_COUNT 9
 
 typedef enum QrCpuPassIndex
 {

@@ -122,6 +122,42 @@ void TestKeyMismatch()
     }
 }
 
+void TestCounters()
+{
+    qray::RadianceCache cache;
+    const float camera[3] = { 0.0f, 0.0f, 0.0f };
+    const float position[3] = { 12.0f, 34.0f, 56.0f };
+    const qray::RadianceCache::Lookup lookup =
+        qray::RadianceCache::MakeLookup(position, camera, 16.0f, 1024.0f);
+    const float radiance[3] = { 0.5f, 0.5f, 0.5f };
+    float out[3] = {};
+
+    CHECK(cache.Get(lookup, 7u, 5u, out) == false, "the first lookup misses");
+    CHECK(cache.GetStats().lookups == 1u && cache.GetStats().misses == 1u,
+          "a miss increments lookups and misses");
+    CHECK(cache.GetStats().hits == 0u, "a miss does not increment hits");
+
+    cache.Put(lookup, 7u, radiance);
+    CHECK(cache.GetStats().puts == 1u && cache.GetStats().activeCells == 1u,
+          "the first insert activates one cell");
+
+    cache.Put(lookup, 7u, radiance);
+    CHECK(cache.GetStats().activeCells == 1u, "a second insert in the same frame reuses the tag");
+
+    cache.Put(lookup, 8u, radiance);
+    CHECK(cache.GetStats().activeCells == 2u, "the next frame activates the cell again");
+
+    CHECK(cache.Get(lookup, 8u, 5u, out), "the inserted entry hits");
+    CHECK(cache.GetStats().hits == 1u, "a hit increments hits");
+
+    CHECK(!cache.Get(lookup, 20u, 5u, out), "the expired entry misses");
+    CHECK(cache.GetStats().misses == 2u, "the expiry increments misses");
+
+    cache.Clear();
+    CHECK(cache.GetStats().lookups == 0u && cache.GetStats().activeCells == 0u,
+          "clear resets the counters");
+}
+
 void TestOverwrite()
 {
     qray::RadianceCache cache;
@@ -150,6 +186,7 @@ int main()
     TestLookupStability();
     TestLodGrowth();
     TestPutGetAge();
+    TestCounters();
     TestKeyMismatch();
     TestOverwrite();
 

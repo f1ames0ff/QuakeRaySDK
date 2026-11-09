@@ -388,6 +388,7 @@ private:
     bool CreateLightVolumeBuffer(uint32_t elementCount);
     bool CreateLightVolumeHits();
     bool CreateRadianceCache();
+    bool CreateRadianceCacheActiveTags();
     bool CreateTransparencyFroxels();
     void DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
     void DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
@@ -463,6 +464,7 @@ private:
     // The world radiance cache: a 2^18-entry spatial hash of shaded probe-hit radiance, reused
     // for a few frames. Allocated eagerly so set 6 always has a valid descriptor.
     nvrhi::BufferHandle radianceCache;
+    nvrhi::BufferHandle radianceCacheActiveTags;
     bool     radianceCacheClearPending = false;
 
     // Transparency froxel irradiance volume: 64 x 32 x 64 SH4 probes (6.3 MB), allocated eagerly

@@ -51,6 +51,18 @@ public:
         uint32_t lod;
     };
 
+    // The counters the volume pass reports through the ray-stats categories. `activeCells` counts
+    // the hash slots whose first insert of the current frame happened, matching the shader's
+    // per-slot frame tag.
+    struct Stats
+    {
+        uint64_t lookups = 0;
+        uint64_t hits = 0;
+        uint64_t misses = 0;
+        uint64_t puts = 0;
+        uint64_t activeCells = 0;
+    };
+
     // The shader's hash: a 32-bit mix, stable across CPU and HLSL.
     static uint32_t Hash(uint32_t value);
 
@@ -66,9 +78,12 @@ public:
     void Put(const Lookup &lookup, uint32_t frame, const float radiance[3]);
 
     const RadianceCacheEntry &Entry(uint32_t index) const { return entries[index]; }
+    const Stats &GetStats() const { return stats; }
 
 private:
     std::vector<RadianceCacheEntry> entries;
+    std::vector<uint32_t>          activeFrames;
+    mutable Stats                  stats;
 };
 
 }
