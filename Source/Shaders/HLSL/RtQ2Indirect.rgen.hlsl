@@ -624,7 +624,8 @@ void main()
             if (visible)
             {
                 hitPos = expected;
-                hitRadiance = reservoir.radiance.xyz;
+                // TEMP debug: a green history-selected sample proves reprojection/reuse is active.
+                hitRadiance = float3(0.0, 5.0, 0.0);
                 oneOverSourcePdf = 3.14159265 / max(dot(surf.normal, dir), 1e-6);
             }
             else
