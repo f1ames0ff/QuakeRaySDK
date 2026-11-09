@@ -561,7 +561,7 @@ void main()
         const uint previousSlot = currentSlot ^ 1u;
         const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
         const float2 currentUV = (float2(pix) + 0.5) / resolution;
-        const float2 motion = framebufMotion_Sampled.Load(int3(pix, 0)).rg;
+        const float2 motion = (float2)0.0; // TEMP: isolate the motion binding
         const float2 previousUV = currentUV + motion;
 
         ShRestirGiReservoir current = (ShRestirGiReservoir)0;
