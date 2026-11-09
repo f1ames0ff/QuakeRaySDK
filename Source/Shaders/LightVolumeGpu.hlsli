@@ -252,6 +252,15 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
     outSh.r = float4(integrated[0][0], integrated[2][0], integrated[3][0], integrated[1][0]) * scale;
     outSh.g = float4(integrated[0][1], integrated[2][1], integrated[3][1], integrated[1][1]) * scale;
     outSh.b = float4(integrated[0][2], integrated[2][2], integrated[3][2], integrated[1][2]) * scale;
+
+    if (local >= 0)
+    {
+        // TEMP debug: a green flood proves the local branch is selected at runtime.
+        outSh.r = float4(0.0, 0.0, 0.0, 0.0);
+        outSh.g = float4(5.0, 0.0, 0.0, 0.0);
+        outSh.b = float4(0.0, 0.0, 0.0, 0.0);
+    }
+
     return true;
 }
 
