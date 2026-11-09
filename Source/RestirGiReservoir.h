@@ -32,6 +32,7 @@ namespace qray
 {
 
 inline constexpr uint32_t kRestirGiMaxSamples = 64u;
+inline constexpr uint32_t kRestirGiSlots = 2u;
 
 struct RestirGiReservoir
 {

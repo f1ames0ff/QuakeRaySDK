@@ -656,6 +656,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 4, "lightVolumeLocalParams",   8),
     # World radiance cache: .x = enabled, .y = base cell, .z = LOD distance, .w = max age.
     (FLOAT32, 4, "radianceCacheParams",      1),
+    # ReSTIR GI: .x = enabled.
+    (UINT32,  4, "giReservoirParams",        1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 

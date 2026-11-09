@@ -425,6 +425,15 @@ private:
     nvrhi::ITexture *blueNoiseSetTexture = nullptr;
     nvrhi::BindingSetHandle blueNoiseSet;
 
+    // ReSTIR GI: two history slots over the full render resolution, one 48-byte record per regular
+    // pixel. The buffer is recreated on a size change; the set is rebuilt with it.
+    nvrhi::BindingLayoutHandle giReservoirLayout;
+    nvrhi::BufferHandle giReservoirs;
+    nvrhi::BindingSetHandle giReservoirSet;
+    uint32_t giReservoirWidth = 0;
+    uint32_t giReservoirHeight = 0;
+    bool     giReservoirClearPending = false;
+
     // The two placeholder cube sets: the 32-slot bindless table for set 7 and the two-cube set for
     // set 8, all backed by the same 1x1 dummy texture (the primary pass's placeholder, until the
     // real cubemaps get RHI accessors - a43_recon.md §8.9). 'dummyCubemapCleared' makes the black

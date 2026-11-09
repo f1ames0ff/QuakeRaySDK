@@ -9,6 +9,7 @@
 #include "RhiTextureTable.h"
 
 #include "../Framebuffers.h"
+#include "../RestirGiReservoir.h"
 #include "../Generated/ShaderCommonC.h"
 
 #include <cstring>
@@ -94,7 +95,7 @@ struct FramebufferBinding
     bool isUAV;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 14;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 15;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_UNFILTERED_SPECULAR,        true  }, //  15  framebufUnfilteredSpecular (r32ui)
@@ -108,6 +109,7 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false }, // 131  framebufMetallicRoughness_Sampled
     { FB_IMAGE_INDEX_SURFACE_POSITION,           false }, // 143  framebufSurfacePosition_Sampled
+    { FB_IMAGE_INDEX_MOTION_DLSS,                false }, // 148  framebufMotionDlss_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,           false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,                false }, // 245  framebufQ2RngSeed_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER,                 false }, // 247  framebufQ2Cluster_Sampled
@@ -393,6 +395,18 @@ bool RhiRtIndirectPass::Create(nvrhi::IDevice *pDevice,
     // too (vulkan-constants.cpp:282-285) and this device has no rayQuery feature to make that legal
     // (the A3.1 fix).
     {
+        // Set 9: the ReSTIR GI history buffer (two slots, UAV). The indirect pipeline declares
+        // this layout at position 9 instead of the primary's empty set.
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::AllRayTracing;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
+        giReservoirLayout = device->createBindingLayout(desc);
+    }
+
+    {
         // Set 1: one item per image of the raygen, at the engine's raw binding of that image. A
         // partial layout in the same sense the direct pass's set 1 is - only the 14 bindings the
         // post-fix raygen declares have an item. Both kinds keep an offset of 0, so an item's slot
@@ -573,7 +587,7 @@ bool RhiRtIndirectPass::Create(nvrhi::IDevice *pDevice,
         desc.addBindingLayout(directPass->GetLightLayout());           // 6
         desc.addBindingLayout(cubemapLayout);                          // 7
         desc.addBindingLayout(renderCubemapLayout);                    // 8
-        desc.addBindingLayout(primaryPass->GetHoleLayout());           // 9
+        desc.addBindingLayout(giReservoirLayout);                      // 9
         desc.addBindingLayout(primaryPass->GetHoleLayout());           // 10
         desc.addBindingLayout(primaryPass->GetRayStatsLayout());       // 11
         desc.addBindingLayout(cloudShadowBinding.GetLayout());
@@ -941,6 +955,65 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
         dummyCubemapCleared = true;
     }
 
+    // ReSTIR GI history: two 48-byte slots over the full render resolution. The set is rebuilt
+    // with the buffer on a size change; a fresh buffer is cleared once before its first write.
+    const uint64_t giReservoirBytes = uint64_t(width) * uint64_t(height) *
+        kRestirGiSlots * sizeof(RestirGiReservoir);
+
+    if (giReservoirs == nullptr || giReservoirWidth != width || giReservoirHeight != height)
+    {
+        nvrhi::BufferDesc bufferDesc;
+        bufferDesc.byteSize = giReservoirBytes;
+        bufferDesc.structStride = static_cast<uint32_t>(sizeof(RestirGiReservoir));
+        bufferDesc.canHaveUAVs = true;
+        bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        bufferDesc.debugName = "RhiRtIndirectPass ReSTIR GI reservoirs";
+
+        nvrhi::BufferHandle created = rhi::createBuffer(device, bufferDesc, bufferDesc.debugName);
+
+        if (created == nullptr)
+        {
+            return;
+        }
+
+        if (giReservoirs != nullptr)
+        {
+            frameContext->Retire(giReservoirs);
+        }
+
+        giReservoirs = created;
+        giReservoirWidth = width;
+        giReservoirHeight = height;
+        giReservoirClearPending = true;
+
+        if (giReservoirSet != nullptr)
+        {
+            frameContext->Retire(giReservoirSet);
+            giReservoirSet = nullptr;
+        }
+    }
+
+    if (giReservoirSet == nullptr)
+    {
+        nvrhi::BindingSetDesc setDesc;
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, giReservoirs));
+        giReservoirSet = device->createBindingSet(setDesc, giReservoirLayout);
+
+        if (giReservoirSet == nullptr)
+        {
+            return;
+        }
+    }
+
+    pCommandList->beginTrackingBufferState(giReservoirs, nvrhi::ResourceStates::UnorderedAccess);
+
+    if (giReservoirClearPending)
+    {
+        pCommandList->clearBufferUInt(giReservoirs, 0u);
+        pCommandList->setBufferState(giReservoirs, nvrhi::ResourceStates::UnorderedAccess);
+        giReservoirClearPending = false;
+    }
+
     // The twelve sets, in the layout order the pipeline was built with; the pinned backend's legacy
     // binding mode binds the list positionally (vulkan-resource-bindings.cpp:940-958). Sets 9 and 10
     // are the primary's empty set: the blob declares nothing there, but the automatic-barrier pass
@@ -957,7 +1030,7 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
     state.addBindingSet(lightSet);                        // 6
     state.addBindingSet(cubemapTable);                    // 7
     state.addBindingSet(renderCubemapSet);                // 8
-    state.addBindingSet(primaryPass->GetHoleSet());       // 9
+    state.addBindingSet(giReservoirSet);                  // 9
     state.addBindingSet(primaryPass->GetHoleSet());       // 10
     state.addBindingSet(primaryPass->GetRayStatsSet(frameIndex)); // 11
     state.addBindingSet(cloudShadowBinding.GetSet());

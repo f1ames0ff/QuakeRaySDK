@@ -82,6 +82,7 @@
 #define DESC_SET_LIGHT_SOURCES 6
 #define DESC_SET_CUBEMAPS 7
 #define DESC_SET_RENDER_CUBEMAP 8
+#define DESC_SET_GI_RESERVOIRS 9
 #define DESC_SET_RAY_STATS 11
 #define DESC_SET_CLOUD_SHADOW 12
 #define LIGHT_SAMPLE_METHOD (LIGHT_SAMPLE_METHOD_INDIR)
@@ -89,6 +90,7 @@
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
 #include "LightVolumeGpu.hlsli"
+#include "RestirGi.hlsli"
 
 #define Q2_RNG_INDIR_CELL_SELECT 220
 #define Q2_RNG_INDIR_LIGHT_POINT 223
@@ -552,6 +554,85 @@ void main()
     }
 
     float3 diffuse, specular;
+    if (globalUniform.giReservoirParams.x != 0u)
+    {
+        const uint stride = uint(globalUniform.renderWidth) * uint(globalUniform.renderHeight);
+        const uint currentSlot = globalUniform.frameId & 1u;
+        const uint previousSlot = currentSlot ^ 1u;
+        const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
+        const float2 currentUV = (float2(pix) + 0.5) / resolution;
+        const float2 motion = framebufMotionDlss_Sampled.Load(int3(pix, 0)).rg;
+        const float2 previousUV = currentUV + motion;
+
+        ShRestirGiReservoir current = (ShRestirGiReservoir)0;
+        const float3 currentDir = safeNormalize(hitPos - surf.position);
+        const float currentDistance = length(hitPos - surf.position);
+        const float3 currentRadiance = hitRadiance;
+        const float currentTarget = max(getLuminance(currentRadiance), 1e-6);
+        q2GiAddSample(current, currentDir, currentDistance, currentRadiance, 1.0, currentTarget,
+                      rnd16(seed, 900u));
+
+        ShRestirGiReservoir reservoir = current;
+        ShRestirGiReservoir history = (ShRestirGiReservoir)0;
+        bool historyValid = false;
+
+        if (all(isfinite(previousUV)) && all(previousUV >= (float2)0.0) &&
+            all(previousUV < (float2)1.0))
+        {
+            const int2 maxPixel = int2(int(globalUniform.renderWidth) - 1,
+                                       int(globalUniform.renderHeight) - 1);
+            const int2 historyPix = clamp(int2(floor(previousUV * resolution)),
+                                          int2(0, 0), maxPixel);
+            history = giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
+            historyValid = q2GiUsable(history);
+        }
+
+        bool selectedHistory = false;
+
+        if (historyValid)
+        {
+            const float3 historyRadiance = history.radiance.xyz;
+            const float3 historyDir = history.direction.xyz;
+            const float historyTarget = max(
+                getLuminance(historyRadiance) * max(dot(surf.normal, historyDir), 0.0), 1e-6);
+
+            q2GiMerge(reservoir, history, historyTarget, rnd16(seed, 901u));
+            q2GiClampHistory(reservoir);
+
+            selectedHistory =
+                dot(reservoir.direction.xyz, historyDir) > 0.9999 &&
+                abs(reservoir.direction.w - history.direction.w) <= 0.01;
+        }
+
+        if (selectedHistory)
+        {
+            const float3 dir = reservoir.direction.xyz;
+            const float distanceToHit = reservoir.direction.w;
+            const float3 expected = surf.position + dir * distanceToHit;
+            const Surface check = traceBounce(surf.position + surf.normalGeom * 2.5e-4,
+                                              surf.roughness, surf.instCustomIndex, dir,
+                                              FIRST_BOUNCE_MIP_BIAS);
+            rayStatsAdd(RAY_STATS_CATEGORY_INDIRECT, 1);
+
+            const float tolerance = 0.5 + 0.005 * distanceToHit;
+            const bool visible = !check.isSky && distance(check.position, expected) <= tolerance;
+
+            if (visible)
+            {
+                hitPos = expected;
+                hitRadiance = reservoir.radiance.xyz;
+                oneOverSourcePdf = 3.14159265 / max(dot(surf.normal, dir), 1e-6);
+            }
+            else
+            {
+                // Visibility reuse failed: keep the current frame's sample instead of a stale one.
+                reservoir = current;
+            }
+        }
+
+        giReservoirs[currentSlot * stride + q2GiPixelIndex(pix)] = reservoir;
+    }
+
     q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, oneOverSourcePdf, diffuse, specular );
 
     {

@@ -1516,6 +1516,11 @@ typedef struct QrDrawFrameIlluminationParams
     float       radianceCacheLodDistance;
     float       radianceCacheAge;
 
+    // ReSTIR GI: reuse the previous frame's indirect bounce sample at the
+    // reprojected pixel (host cvar rt_restir_gi).
+    // Default: 0
+    uint32_t    restirGiEnabled;
+
     float       giBounceRays;
 
     QrBool32    denoiserEnabled;
