@@ -1484,6 +1484,10 @@ typedef struct QrDrawFrameIlluminationParams
     // blend; the volume path is opt-in.
     // Default: 0.25
     float       lightVolumeWeight;
+    // Visibility rays traced per probe (host cvar rt_light_volume_rays),
+    // clamped to 16..64. The report's tiers are 64/32/16 for high/medium/low.
+    // Default: 16
+    uint32_t    lightVolumeRays;
 
     float       giBounceRays;
 

@@ -628,7 +628,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[3]            = 0u;
         gu->lightVolumeParams[0]       = drawInfo.pIlluminationParams->lightVolumeEnabled != 0 ? 1.0f : 0.0f;
         gu->lightVolumeParams[1]       = std::clamp( drawInfo.pIlluminationParams->lightVolumeWeight, 0.0f, 1.0f );
-        gu->lightVolumeParams[2]       = 0.0f;
+        gu->lightVolumeParams[2]       = float( std::clamp( drawInfo.pIlluminationParams->lightVolumeRays, 16u, 64u ) );
         gu->lightVolumeParams[3]       = 0.0f;
         gu->giBounceRays[0]            = std::clamp( drawInfo.pIlluminationParams->giBounceRays, 0.0f, 2.0f );
         gu->fltEnable[0]               = drawInfo.pIlluminationParams->denoiserEnabled != 0 ? 1.0f : 0.0f;
@@ -655,7 +655,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[3]            = 0u;
         gu->lightVolumeParams[0]       = 0.0f;
         gu->lightVolumeParams[1]       = 1.0f;
-        gu->lightVolumeParams[2]       = 0.0f;
+        gu->lightVolumeParams[2]       = 16.0f;
         gu->lightVolumeParams[3]       = 0.0f;
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;

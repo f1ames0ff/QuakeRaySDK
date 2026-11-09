@@ -20,8 +20,10 @@
 // buffer. Sky misses contribute the uniform sky fallback colour (no cubemap dependency, so this
 // pass needs no sets 7/8).
 //
-// Local lights on the hit are not sampled yet: the first GPU slice is the sun + sky + emission
-// field, which is enough to exercise the atlas, the schedule and the final-gather path.
+// Hit shading runs the same grid/cluster local-light NEE as the indirect raygen, so torches and
+// other local lights reach the world-space field. The per-probe ray count comes from the host
+// quality tier (64/32/16 -> lightVolumeParams.z); the loop and the normalization use the actual
+// count.
 
 #define MATERIAL_MAX_ALBEDO_LAYERS 0
 #define DESC_SET_TLAS 0
@@ -39,7 +41,8 @@
 #include "Q2LightLists.hlsli"
 #include "LightVolumeGpu.hlsli"
 
-#define Q2_LIGHT_VOLUME_RAYS 16u
+#define Q2_LIGHT_VOLUME_MIN_RAYS 16u
+#define Q2_LIGHT_VOLUME_MAX_RAYS 64u
 #define Q2_RNG_VOLUME_BASE 800u
 #define Q2_RNG_VOLUME_STRIDE 8u
 
@@ -201,7 +204,10 @@ void main()
         }
     }
 
-    for (uint ray = 0u; ray < Q2_LIGHT_VOLUME_RAYS; ray++)
+    const uint rayCount = clamp(uint(globalUniform.lightVolumeParams.z + 0.5),
+                                Q2_LIGHT_VOLUME_MIN_RAYS, Q2_LIGHT_VOLUME_MAX_RAYS);
+
+    for (uint ray = 0u; ray < rayCount; ray++)
     {
         const uint salt = Q2_RNG_VOLUME_BASE + ray * Q2_RNG_VOLUME_STRIDE;
         const float2 u = rnd16_2(seed, salt);
@@ -216,7 +222,7 @@ void main()
         q2LightVolumeAccumulate(direction, radiance, sh);
     }
 
-    q2LightVolumeNormalize(sh, Q2_LIGHT_VOLUME_RAYS);
+    q2LightVolumeNormalize(sh, rayCount);
 
     const uint probeIndex = cascade * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE + localIndex;
 
