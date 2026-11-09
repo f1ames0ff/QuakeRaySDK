@@ -143,18 +143,34 @@ void main()
     const uint rayCount = clamp(uint(globalUniform.lightVolumeParams.z + 0.5),
                                 Q2_LIGHT_VOLUME_MIN_RAYS, Q2_LIGHT_VOLUME_MAX_RAYS);
 
-    // DIAGNOSTIC (not for merge): one downward ray from the camera and one from this probe.
-    // The camera ray proves the volume pipeline's TLAS/mask; the probe ray tests the position.
+    // DIAGNOSTIC (not for merge): the same downward camera/probe rays with RAY_FLAG_NONE.
+    // The normal trace uses RAY_FLAG_CULL_FRONT_FACING_TRIANGLES; if these hit, culling is the
+    // reason the volume probes see only sky.
     {
-        const Surface cameraTest = traceVolumeBounce(
-            globalUniform.cameraPosition.xyz, float3(0.0, 0.0, -1.0));
-        if (!cameraTest.isSky)
+        ShPayload cameraPayload;
+        resetPayload(cameraPayload);
+        RayDesc cameraRay;
+        cameraRay.Origin = globalUniform.cameraPosition.xyz;
+        cameraRay.Direction = float3(0.0, 0.0, -1.0);
+        cameraRay.TMin = globalUniform.primaryRayMinDist;
+        cameraRay.TMax = globalUniform.rayLength;
+        TraceRay(topLevelAS, RAY_FLAG_NONE, getIndirectIlluminationCullMask(0u),
+                 0, 0, SBT_INDEX_MISS_DEFAULT, cameraRay, cameraPayload);
+        if (doesPayloadContainHitInfo(cameraPayload))
         {
             rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
         }
 
-        const Surface probeTest = traceVolumeBounce(probePosition, float3(0.0, 0.0, -1.0));
-        if (!probeTest.isSky)
+        ShPayload probePayload;
+        resetPayload(probePayload);
+        RayDesc probeRay;
+        probeRay.Origin = probePosition;
+        probeRay.Direction = float3(0.0, 0.0, -1.0);
+        probeRay.TMin = globalUniform.primaryRayMinDist;
+        probeRay.TMax = globalUniform.rayLength;
+        TraceRay(topLevelAS, RAY_FLAG_NONE, getIndirectIlluminationCullMask(0u),
+                 0, 0, SBT_INDEX_MISS_DEFAULT, probeRay, probePayload);
+        if (doesPayloadContainHitInfo(probePayload))
         {
             rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
         }
