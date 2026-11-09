@@ -1445,17 +1445,23 @@ bool RhiRtDirectPass::ConfigureLightVolume(bool enabled, const float cameraPosit
     }
 
     const uint32_t localCount = std::min(localVolumeCount, 8u);
+    // Compare all eight slots, not only the live ones: the host zeroes the unused slots, so a
+    // clear followed by a different list is caught even when the first slots happen to match.
     const bool localChanged = localCount != lightVolumeLocalCount ||
-        (localCount > 0u && (localVolumeParams == nullptr ||
-         std::memcmp(localVolumeParams, lightVolumeLocalPrev, sizeof(float) * 4u * localCount) != 0));
+        (localVolumeParams != nullptr &&
+         std::memcmp(localVolumeParams, lightVolumeLocalPrev, sizeof(lightVolumeLocalPrev)) != 0);
 
     if (localChanged)
     {
         lightVolumeLocalCount = localCount;
 
-        if (localCount > 0u && localVolumeParams != nullptr)
+        if (localVolumeParams != nullptr)
         {
-            std::memcpy(lightVolumeLocalPrev, localVolumeParams, sizeof(float) * 4u * localCount);
+            std::memcpy(lightVolumeLocalPrev, localVolumeParams, sizeof(lightVolumeLocalPrev));
+        }
+        else
+        {
+            std::memset(lightVolumeLocalPrev, 0, sizeof(lightVolumeLocalPrev));
         }
 
         // A new local-volume list invalidates the local atlas slots; the next frame clears the
