@@ -385,6 +385,7 @@ private:
     void InvalidateLightSets();
 
     bool CreateLightVolumeBuffer(uint32_t elementCount);
+    bool CreateRadianceCache();
     void DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
 
     // The ranged statistics fill of the frame: it is recorded on the set-6 wrap of the engine's
@@ -448,6 +449,11 @@ private:
     float    lightVolumeLocalPrev[8][4] = {};
     bool     lightVolumeEnabled = false;
     bool     lightVolumeClearPending = false;
+
+    // The world radiance cache: a 2^18-entry spatial hash of shaded probe-hit radiance, reused
+    // for a few frames. Allocated eagerly so set 6 always has a valid descriptor.
+    nvrhi::BufferHandle radianceCache;
+    bool     radianceCacheClearPending = false;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
     // EnsureLightSet (the reflect/refract sibling asking early) or Render made it.

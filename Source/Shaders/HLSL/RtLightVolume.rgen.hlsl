@@ -40,6 +40,7 @@
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
 #include "LightVolumeGpu.hlsli"
+#include "RadianceCache.hlsli"
 
 #define Q2_LIGHT_VOLUME_MIN_RAYS 16u
 #define Q2_LIGHT_VOLUME_MAX_RAYS 64u
@@ -171,6 +172,23 @@ float3 volumeHitRadiance(const Surface hit, const uint seed, const uint salt)
     return radiance;
 }
 
+// World radiance cache: a hit reuses the shaded radiance of a previously seen cell. A miss shades
+// and inserts; collisions overwrite. The cache is gated by radianceCacheParams.x (host cvar
+// rt_radiance_cache), so the first slice stays opt-in.
+float3 volumeHitCachedRadiance(const Surface hit, const uint seed, const uint salt)
+{
+    float3 cached;
+
+    if (q2RadianceCacheGet(hit.position, cached))
+    {
+        return cached;
+    }
+
+    const float3 radiance = volumeHitRadiance(hit, seed, salt);
+    q2RadianceCachePut(hit.position, radiance);
+    return radiance;
+}
+
 [shader("raygeneration")]
 void main()
 {
@@ -259,7 +277,7 @@ void main()
         const Surface hit = traceVolumeBounce(rayOrigin, direction);
         const float3 radiance = hit.isSky
             ? volumeSkyRadiance()
-            : volumeHitRadiance(hit, seed, salt + 1u);
+            : volumeHitCachedRadiance(hit, seed, salt + 1u);
 
         q2LightVolumeAccumulate(direction, radiance, sh);
     }

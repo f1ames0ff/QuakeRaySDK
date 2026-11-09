@@ -260,6 +260,7 @@ CONST = {
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS"       : 16,
     "BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS"       : 17,
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES"     : 18,
+    "BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE"          : 19,
     "BINDING_DECAL_INSTANCES"                   : 0,
     "BINDING_PORTAL_INSTANCES"                  : 0,
     "BINDING_LPM_PARAMS"                        : 0,
@@ -653,6 +654,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 4, "lightVolumeParams",        1),
     # Local 10^3 irradiance volumes: .xyz = cube centre, .w = full side length.
     (FLOAT32, 4, "lightVolumeLocalParams",   8),
+    # World radiance cache: .x = enabled, .y = base cell, .z = LOD distance, .w = max age.
+    (FLOAT32, 4, "radianceCacheParams",      1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 

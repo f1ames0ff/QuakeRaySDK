@@ -633,6 +633,11 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         const uint32_t localVolumeCount = std::min( drawInfo.pIlluminationParams->lightVolumeLocalCount, 8u );
         gu->lightVolumeParams[3]       = float( localVolumeCount );
 
+        gu->radianceCacheParams[0]     = drawInfo.pIlluminationParams->radianceCacheEnabled != 0 ? 1.0f : 0.0f;
+        gu->radianceCacheParams[1]     = std::max( drawInfo.pIlluminationParams->radianceCacheCellSize, 0.01f );
+        gu->radianceCacheParams[2]     = std::max( drawInfo.pIlluminationParams->radianceCacheLodDistance, 1.0f );
+        gu->radianceCacheParams[3]     = std::max( drawInfo.pIlluminationParams->radianceCacheAge, 0.0f );
+
         for ( uint32_t i = 0; i < 8; i++ )
         {
             float *dst = &gu->lightVolumeLocalParams[i * 4];
@@ -677,6 +682,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->lightVolumeParams[1]       = 1.0f;
         gu->lightVolumeParams[2]       = 16.0f;
         gu->lightVolumeParams[3]       = 0.0f;
+        gu->radianceCacheParams[0]     = 0.0f;
+        gu->radianceCacheParams[1]     = 16.0f;
+        gu->radianceCacheParams[2]     = 1024.0f;
+        gu->radianceCacheParams[3]     = 30.0f;
 
         for ( uint32_t i = 0; i < 8; i++ )
         {

@@ -1505,6 +1505,17 @@ typedef struct QrDrawFrameIlluminationParams
     uint32_t    lightVolumeLocalCount;
     QrLightVolumeLocal lightVolumeLocal[QR_LIGHT_VOLUME_MAX_LOCAL];
 
+    // World radiance cache for volume probe hits (host cvar rt_radiance_cache).
+    // The cache quantizes hit positions into a spatial hash and reuses shaded
+    // radiance for a few frames. cellSize is the base cell in game units,
+    // lodDistance the distance at which the cell size doubles, age the maximum
+    // reuse age in frames.
+    // Default: disabled, 16 u cells, 1024 u LOD distance, 30 frames
+    uint32_t    radianceCacheEnabled;
+    float       radianceCacheCellSize;
+    float       radianceCacheLodDistance;
+    float       radianceCacheAge;
+
     float       giBounceRays;
 
     QrBool32    denoiserEnabled;

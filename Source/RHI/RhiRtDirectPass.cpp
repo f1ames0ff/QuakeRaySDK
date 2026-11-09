@@ -10,6 +10,7 @@
 #include "../Generated/ShaderCommonC.h"
 #include "../LightManager.h"
 #include "../LightVolume.h"
+#include "../RadianceCache.h"
 #include "../RestirReservoir.h"
 
 #include <algorithm>
@@ -602,6 +603,10 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES));
 
+        // The world radiance cache shares set 6 with the light and volume buffers.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE));
+
         lightLayout = device->createBindingLayout(desc);
     }
 
@@ -636,6 +641,13 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     // The cascade atlas is small and lives with the pass; allocating it eagerly keeps the set-6
     // descriptor valid even while rt_light_volume is off.
     if (!CreateLightVolumeBuffer(LIGHT_VOLUME_PROBE_COUNT))
+    {
+        return false;
+    }
+
+    // The radiance cache is small (8 MB) and lives with the pass, so the set-6 descriptor stays
+    // valid while rt_radiance_cache is off.
+    if (!CreateRadianceCache())
     {
         return false;
     }
@@ -1526,6 +1538,27 @@ bool RhiRtDirectPass::CreateLightVolumeBuffer(uint32_t elementCount)
     return true;
 }
 
+bool RhiRtDirectPass::CreateRadianceCache()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(RadianceCache::kEntryCount) * sizeof(RadianceCacheEntry);
+    desc.structStride = static_cast<uint32_t>(sizeof(RadianceCacheEntry));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass world radiance cache";
+
+    radianceCache = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (radianceCache == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the world radiance cache");
+        return false;
+    }
+
+    radianceCacheClearPending = true;
+    return true;
+}
+
 void RhiRtDirectPass::DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)
 {
     if (!lightVolumeEnabled || volumePipeline == nullptr || volumeShaderTable == nullptr ||
@@ -1721,6 +1754,11 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         pCommandList->beginTrackingBufferState(lightVolumeProbes, nvrhi::ResourceStates::UnorderedAccess);
     }
 
+    if (radianceCache != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
     if (target.lightSet == nullptr)
     {
         nvrhi::BindingSetDesc setDesc;
@@ -1739,6 +1777,9 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
 
         setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES, lightVolumeProbes));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE, radianceCache));
 
         target.lightSet = device->createBindingSet(setDesc, lightLayout);
 
@@ -1765,6 +1806,13 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         pCommandList->clearBufferUInt(lightVolumeProbes, 0u);
         pCommandList->setBufferState(lightVolumeProbes, nvrhi::ResourceStates::UnorderedAccess);
         lightVolumeClearPending = false;
+    }
+
+    if (radianceCacheClearPending && radianceCache != nullptr)
+    {
+        pCommandList->clearBufferUInt(radianceCache, 0u);
+        pCommandList->setBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
+        radianceCacheClearPending = false;
     }
 
     // The frame's light copies, the RHI replacement for the `LightManager::CopyFromStaging` calls
