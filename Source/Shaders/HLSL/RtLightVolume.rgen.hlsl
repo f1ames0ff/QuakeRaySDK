@@ -143,6 +143,23 @@ void main()
     const uint rayCount = clamp(uint(globalUniform.lightVolumeParams.z + 0.5),
                                 Q2_LIGHT_VOLUME_MIN_RAYS, Q2_LIGHT_VOLUME_MAX_RAYS);
 
+    // DIAGNOSTIC (not for merge): one downward ray from the camera and one from this probe.
+    // The camera ray proves the volume pipeline's TLAS/mask; the probe ray tests the position.
+    {
+        const Surface cameraTest = traceVolumeBounce(
+            globalUniform.cameraPosition.xyz, float3(0.0, 0.0, -1.0));
+        if (!cameraTest.isSky)
+        {
+            rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
+        }
+
+        const Surface probeTest = traceVolumeBounce(probePosition, float3(0.0, 0.0, -1.0));
+        if (!probeTest.isSky)
+        {
+            rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
+        }
+    }
+
     for (uint ray = 0u; ray < rayCount; ray++)
     {
         const uint salt = Q2_RNG_VOLUME_BASE + ray * Q2_RNG_VOLUME_STRIDE;
