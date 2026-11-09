@@ -659,6 +659,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 4, "radianceCacheParams",      1),
     # ReSTIR GI: .x = enabled.
     (UINT32,  4, "giReservoirParams",        1),
+    # Transparency froxels: .x = enabled.
+    (UINT32,  4, "transparencyFroxelParams", 1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 

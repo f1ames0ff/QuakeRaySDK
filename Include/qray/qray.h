@@ -1521,6 +1521,11 @@ typedef struct QrDrawFrameIlluminationParams
     // Default: 0
     uint32_t    restirGiEnabled;
 
+    // 1: glass and particle shading adds the transparency froxel irradiance
+    // (host cvar rt_transparency_froxel).
+    // Default: 0
+    uint32_t    transparencyFroxelEnabled;
+
     float       giBounceRays;
 
     QrBool32    denoiserEnabled;

@@ -2,6 +2,7 @@
 #define GLASS_PAINT_HLSLI_
 
 #include "Q2LightGrid.hlsli"
+#include "TransparencyFroxels.hlsli"
 
 #ifdef Q2_REFL_REFR_SHADER
 float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 rayDir, const int2 pix)
@@ -109,6 +110,19 @@ float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 ra
                 shadeDiffuse(surf, light, 1.0 / max(memberPdf, 1e-9), diffuse);
                 direct += diffuse;
             }
+        }
+    }
+
+    if (globalUniform.transparencyFroxelParams.x != 0u)
+    {
+        float3 froxel;
+        const float3 origin = float3(-4096.0, -2048.0, -4096.0);
+        const float3 size = float3(8192.0, 4096.0, 8192.0);
+
+        if (q2SampleTransparencyFroxel(surf.position, surf.normal, origin, size, froxel))
+        {
+            // The froxel stores irradiance; the glass path works in radiance/BRDF units.
+            direct += froxel / 3.14159265;
         }
     }
 

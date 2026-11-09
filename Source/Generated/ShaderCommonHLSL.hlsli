@@ -352,6 +352,7 @@ struct ShGlobalUniform
     float4 lightVolumeLocalParams[8];
     float4 radianceCacheParams;
     uint4 giReservoirParams;
+    uint4 transparencyFroxelParams;
     float4 cloudShadowPlacement;
     float4 cloudLayerMotion;
     uint glassBlur;
