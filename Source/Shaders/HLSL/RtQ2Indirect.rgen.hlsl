@@ -560,9 +560,13 @@ void main()
         const uint currentSlot = globalUniform.frameId & 1u;
         const uint previousSlot = currentSlot ^ 1u;
         const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
-        const float2 currentUV = (float2(pix) + 0.5) / resolution;
-        const float2 motion = framebufMotion_Sampled.Load(int3(pix, 0)).rg;
-        const float2 previousUV = currentUV + motion;
+        // Reproject with the previous frame's view-projection. This is the camera term; object
+        // motion is not in this slice, so the merge/visibility validation below rejects a stale
+        // sample instead of smearing it.
+        const float4 previousClip = mul(globalUniform.volumeViewProj_Prev, float4(surf.position, 1.0));
+        const float2 previousUV = previousClip.w > 1e-6
+            ? previousClip.xy / previousClip.w * 0.5 + 0.5
+            : (float2)2.0;
 
         ShRestirGiReservoir current = (ShRestirGiReservoir)0;
         const float3 currentDir = safeNormalize(hitPos - surf.position);
