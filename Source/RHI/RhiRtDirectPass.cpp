@@ -1603,7 +1603,7 @@ bool RhiRtDirectPass::CreateRadianceCache()
 bool RhiRtDirectPass::CreateTransparencyFroxels()
 {
     nvrhi::BufferDesc desc;
-    desc.byteSize = uint64_t(TransparencyFroxelVolume::kProbeCount) *
+    desc.byteSize = uint64_t(TransparencyFroxelVolume::kHighProbeCount) *
         sizeof(TransparencyFroxelProbe);
     desc.structStride = static_cast<uint32_t>(sizeof(TransparencyFroxelProbe));
     desc.canHaveUAVs = true;
@@ -1643,7 +1643,7 @@ void RhiRtDirectPass::DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandL
     state.addBindingSet(target.lightSet);            // 6
     pCommandList->setComputeState(state);
 
-    const uint32_t groups = (TransparencyFroxelVolume::kProbeCount + 63u) / 64u;
+    const uint32_t groups = (TransparencyFroxelVolume::kHighProbeCount + 63u) / 64u;
     pCommandList->dispatch(groups, 1, 1);
 }
 

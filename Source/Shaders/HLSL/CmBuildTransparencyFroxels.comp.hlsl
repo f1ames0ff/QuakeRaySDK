@@ -46,16 +46,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     const uint probeIndex = dispatchThreadId.x;
 
-    if (probeIndex >= Q2_TRANSPARENCY_FROXEL_COUNT)
+    if (probeIndex >= q2TransparencyFroxelCount())
     {
         return;
     }
 
-    const uint x = probeIndex % Q2_TRANSPARENCY_FROXEL_DIM_X;
-    const uint y = (probeIndex / Q2_TRANSPARENCY_FROXEL_DIM_X) % Q2_TRANSPARENCY_FROXEL_DIM_Y;
-    const uint z = probeIndex / (Q2_TRANSPARENCY_FROXEL_DIM_X * Q2_TRANSPARENCY_FROXEL_DIM_Y);
-    const float3 dim = float3(Q2_TRANSPARENCY_FROXEL_DIM_X, Q2_TRANSPARENCY_FROXEL_DIM_Y,
-                              Q2_TRANSPARENCY_FROXEL_DIM_Z);
+    const uint3 dimU = q2TransparencyFroxelDim();
+    const uint x = probeIndex % dimU.x;
+    const uint y = (probeIndex / dimU.x) % dimU.y;
+    const uint z = probeIndex / (dimU.x * dimU.y);
+    const float3 dim = float3(dimU);
     const float3 cell = Q2_FROXEL_BOX_SIZE / dim;
     const float3 position = Q2_FROXEL_BOX_ORIGIN + (float3(x, y, z) + 0.5) * cell;
 

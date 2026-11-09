@@ -1525,6 +1525,9 @@ typedef struct QrDrawFrameIlluminationParams
     // (host cvar rt_transparency_froxel).
     // Default: 0
     uint32_t    transparencyFroxelEnabled;
+    // 0 = 32 x 16 x 32, 1 = 64 x 32 x 64, 2 = 128 x 64 x 128.
+    // Default: 1
+    uint32_t    transparencyFroxelQuality;
 
     float       giBounceRays;
 

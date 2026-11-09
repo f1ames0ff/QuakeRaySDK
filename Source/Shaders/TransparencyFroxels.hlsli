@@ -21,10 +21,20 @@
 #ifndef TRANSPARENCY_FROXELS_HLSLI_
 #define TRANSPARENCY_FROXELS_HLSLI_
 
-#define Q2_TRANSPARENCY_FROXEL_DIM_X 64u
-#define Q2_TRANSPARENCY_FROXEL_DIM_Y 32u
-#define Q2_TRANSPARENCY_FROXEL_DIM_Z 64u
-#define Q2_TRANSPARENCY_FROXEL_COUNT (Q2_TRANSPARENCY_FROXEL_DIM_X * Q2_TRANSPARENCY_FROXEL_DIM_Y * Q2_TRANSPARENCY_FROXEL_DIM_Z)
+// The active tier's dimensions come from transparencyFroxelParams.yzw (32/16/32, 64/32/64 or
+// 128/64/128); the buffer is allocated for the high tier.
+uint3 q2TransparencyFroxelDim()
+{
+    return uint3(globalUniform.transparencyFroxelParams.y,
+                 globalUniform.transparencyFroxelParams.z,
+                 globalUniform.transparencyFroxelParams.w);
+}
+
+uint q2TransparencyFroxelCount()
+{
+    const uint3 dim = q2TransparencyFroxelDim();
+    return dim.x * dim.y * dim.z;
+}
 
 struct ShTransparencyFroxel
 {
@@ -89,8 +99,7 @@ bool q2SampleTransparencyFroxel(const float3 position, const float3 normal,
 {
     outRgb = (float3)0.0;
 
-    const uint3 dim = uint3(Q2_TRANSPARENCY_FROXEL_DIM_X, Q2_TRANSPARENCY_FROXEL_DIM_Y,
-                            Q2_TRANSPARENCY_FROXEL_DIM_Z);
+    const uint3 dim = q2TransparencyFroxelDim();
     const float3 cell = volumeSize / float3(dim);
     const float3 index = (position - volumeOrigin) / cell - float3(0.5, 0.5, 0.5);
 

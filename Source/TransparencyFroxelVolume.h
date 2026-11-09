@@ -44,6 +44,16 @@ public:
     static constexpr uint32_t kDimZ = 64;
     static constexpr uint32_t kProbeCount = kDimX * kDimY * kDimZ;
 
+    // The GPU tiers: the default oracle above is the medium grid. The high grid is the report's
+    // ~50 MB budget (128 x 64 x 128 x 48 B = 50.3 MB); the low grid is the quality fallback.
+    static constexpr uint32_t kLowDimX = 32;
+    static constexpr uint32_t kLowDimY = 16;
+    static constexpr uint32_t kLowDimZ = 32;
+    static constexpr uint32_t kHighDimX = 128;
+    static constexpr uint32_t kHighDimY = 64;
+    static constexpr uint32_t kHighDimZ = 128;
+    static constexpr uint32_t kHighProbeCount = kHighDimX * kHighDimY * kHighDimZ;
+
     TransparencyFroxelVolume();
 
     // The box the froxels cover. 'size' is the full side length on each axis; the volume is

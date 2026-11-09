@@ -642,9 +642,25 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->giReservoirParams[2]       = 0u;
         gu->giReservoirParams[3]       = 0u;
         gu->transparencyFroxelParams[0] = drawInfo.pIlluminationParams->transparencyFroxelEnabled != 0 ? 1u : 0u;
-        gu->transparencyFroxelParams[1] = 0u;
-        gu->transparencyFroxelParams[2] = 0u;
-        gu->transparencyFroxelParams[3] = 0u;
+
+        switch ( drawInfo.pIlluminationParams->transparencyFroxelQuality )
+        {
+            case 0:
+                gu->transparencyFroxelParams[1] = 32u;
+                gu->transparencyFroxelParams[2] = 16u;
+                gu->transparencyFroxelParams[3] = 32u;
+                break;
+            case 2:
+                gu->transparencyFroxelParams[1] = 128u;
+                gu->transparencyFroxelParams[2] = 64u;
+                gu->transparencyFroxelParams[3] = 128u;
+                break;
+            default:
+                gu->transparencyFroxelParams[1] = 64u;
+                gu->transparencyFroxelParams[2] = 32u;
+                gu->transparencyFroxelParams[3] = 64u;
+                break;
+        }
 
         for ( uint32_t i = 0; i < 8; i++ )
         {
@@ -699,9 +715,9 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->giReservoirParams[2]       = 0u;
         gu->giReservoirParams[3]       = 0u;
         gu->transparencyFroxelParams[0] = 0u;
-        gu->transparencyFroxelParams[1] = 0u;
-        gu->transparencyFroxelParams[2] = 0u;
-        gu->transparencyFroxelParams[3] = 0u;
+        gu->transparencyFroxelParams[1] = 64u;
+        gu->transparencyFroxelParams[2] = 32u;
+        gu->transparencyFroxelParams[3] = 64u;
 
         for ( uint32_t i = 0; i < 8; i++ )
         {
