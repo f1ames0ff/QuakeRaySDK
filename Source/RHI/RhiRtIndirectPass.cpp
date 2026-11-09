@@ -981,7 +981,7 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
         {
             target.motionTexture = rhi::wrapEngineTexture(
                 device, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(motionImage)),
-                motionFormat, motionExtent.width, motionExtent.height,
+                motionFormat, motionExtent.width, motionExtent.height, 1,
                 "RhiRtIndirectPass GI motion");
         }
 
