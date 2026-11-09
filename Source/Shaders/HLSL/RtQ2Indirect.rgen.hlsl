@@ -561,10 +561,12 @@ void main()
         const uint currentSlot = globalUniform.frameId & 1u;
         const uint previousSlot = currentSlot ^ 1u;
         const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
-        // Camera reprojection. The screen-space motion image gave wrong history pixels for this
-        // pass (both the regular and the DLSS variant over-brightened the reused field), so the
-        // verified path projects the current world position with the previous view-projection.
-        const float4 previousClip = mul(globalUniform.volumeViewProj_Prev, float4(surf.position, 1.0));
+        // Camera reprojection with the main camera pair, the same matrices HitInfo.hlsli uses to
+        // build the motion vectors. The earlier volumeViewProj_Prev path reprojected to a
+        // different pixel (a same-pixel control image matched the motion output instead), so the
+        // volumetric fog projection was not a valid screen-space reprojection.
+        const float4 previousView = mul(globalUniform.viewPrev, float4(surf.position, 1.0));
+        const float4 previousClip = mul(globalUniform.projectionPrev, previousView);
         const float2 previousUV = previousClip.w > 1e-6
             ? previousClip.xy / previousClip.w * 0.5 + 0.5
             : (float2)2.0;
