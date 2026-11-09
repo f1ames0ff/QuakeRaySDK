@@ -1,0 +1,167 @@
+#include "RestirGiReservoir.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+
+namespace
+{
+
+int g_failures = 0;
+int g_checks = 0;
+
+#define CHECK(condition, ...)                          \
+    do                                                 \
+    {                                                  \
+        g_checks++;                                    \
+        if (!(condition))                              \
+        {                                              \
+            g_failures++;                              \
+            std::printf("FAIL: ");                     \
+            std::printf(__VA_ARGS__);                  \
+            std::printf("\n");                         \
+        }                                              \
+    } while (0)
+
+void TestLayout()
+{
+    CHECK(sizeof(qray::RestirGiReservoir) == 48u, "the reservoir stays at 48 bytes");
+    CHECK(qray::kRestirGiMaxSamples == 64u, "history caps at 64 source samples");
+}
+
+void TestEmpty()
+{
+    qray::RestirGiReservoir reservoir;
+    CHECK(!qray::RestirGiIsUsable(reservoir), "an empty reservoir is not usable");
+    CHECK(qray::RestirGiWeight(reservoir) == 0.0f, "an empty reservoir has zero weight");
+}
+
+void TestSingleSample()
+{
+    qray::RestirGiReservoir reservoir;
+    const float direction[3] = { 0.0f, 1.0f, 0.0f };
+    const float radiance[3] = { 2.0f, 3.0f, 4.0f };
+
+    qray::RestirGiAddSample(reservoir, direction, 128.0f, radiance, 0.5f, 0.5f, 0.25f);
+
+    CHECK(qray::RestirGiIsUsable(reservoir), "a valid sample makes the reservoir usable");
+    CHECK(reservoir.sampleCount == 1u, "one source sample");
+    CHECK(reservoir.direction[0] == 0.0f && reservoir.direction[1] == 1.0f &&
+              reservoir.direction[2] == 0.0f && reservoir.direction[3] == 128.0f,
+          "the selected direction and distance round-trip");
+    CHECK(reservoir.radiance[0] == 2.0f && reservoir.radiance[1] == 3.0f &&
+              reservoir.radiance[2] == 4.0f,
+          "the selected radiance round-trips");
+    CHECK(qray::RestirGiWeight(reservoir) == 1.0f, "W = sum / (M * target) = 1");
+}
+
+void TestRepresentativePick()
+{
+    qray::RestirGiReservoir reservoir;
+    const float left[3] = { -1.0f, 0.0f, 0.0f };
+    const float right[3] = { 1.0f, 0.0f, 0.0f };
+    const float radiance[3] = { 1.0f, 1.0f, 1.0f };
+
+    qray::RestirGiAddSample(reservoir, left, 10.0f, radiance, 1.0f, 1.0f, 0.5f);
+    qray::RestirGiAddSample(reservoir, right, 20.0f, radiance, 1.0f, 1.0f, 0.9f);
+
+    CHECK(reservoir.sampleCount == 2u, "two source samples");
+    CHECK(reservoir.weightSum == 2.0f, "the weights accumulate");
+    CHECK(reservoir.direction[0] == -1.0f, "u = 0.9 keeps the first representative");
+    CHECK(qray::RestirGiWeight(reservoir) == 1.0f, "W is 2 / (2 * 1)");
+
+    qray::RestirGiReservoir second;
+    qray::RestirGiAddSample(second, left, 10.0f, radiance, 1.0f, 1.0f, 0.5f);
+    qray::RestirGiAddSample(second, right, 20.0f, radiance, 1.0f, 1.0f, 0.1f);
+
+    CHECK(second.direction[0] == 1.0f, "u = 0.1 switches to the second representative");
+}
+
+void TestMerge()
+{
+    qray::RestirGiReservoir source;
+    const float direction[3] = { 0.0f, 0.0f, 1.0f };
+    const float radiance[3] = { 0.25f, 0.5f, 0.75f };
+
+    qray::RestirGiAddSample(source, direction, 64.0f, radiance, 1.0f, 1.0f, 0.5f);
+    qray::RestirGiAddSample(source, direction, 64.0f, radiance, 1.0f, 1.0f, 0.9f);
+    qray::RestirGiClampHistory(source);
+
+    qray::RestirGiReservoir destination;
+    qray::RestirGiMerge(destination, source, 2.0f, 0.25f);
+
+    CHECK(destination.sampleCount == 2u, "the merge adds the whole source count");
+    CHECK(destination.weightSum == 4.0f, "the merge weight is target(y) * sum / target(x)");
+    CHECK(destination.selectedTarget == 2.0f, "the merged representative uses the new target");
+    CHECK(destination.direction[2] == 1.0f, "the merged direction is the selected source");
+    CHECK(qray::RestirGiWeight(destination) == 1.0f, "W = 4 / (2 * 2)");
+}
+
+void TestRejectsBadSources()
+{
+    qray::RestirGiReservoir destination;
+    qray::RestirGiReservoir empty;
+    qray::RestirGiMerge(destination, empty, 1.0f, 0.5f);
+
+    CHECK(destination.sampleCount == 0u, "an empty source adds nothing");
+
+    qray::RestirGiReservoir source;
+    const float direction[3] = { 1.0f, 0.0f, 0.0f };
+    const float radiance[3] = { 1.0f, 1.0f, 1.0f };
+    qray::RestirGiAddSample(source, direction, 1.0f, radiance, 1.0f, 1.0f, 0.5f);
+
+    qray::RestirGiMerge(destination, source, 0.0f, 0.5f);
+    CHECK(destination.sampleCount == 0u, "a zero target at the new pixel adds nothing");
+
+    qray::RestirGiMerge(destination, source, NAN, 0.5f);
+    CHECK(destination.sampleCount == 0u, "a non-finite target adds nothing");
+}
+
+void TestClampHistory()
+{
+    qray::RestirGiReservoir reservoir;
+    const float direction[3] = { 0.0f, 1.0f, 0.0f };
+    const float radiance[3] = { 1.0f, 1.0f, 1.0f };
+
+    qray::RestirGiAddSample(reservoir, direction, 1.0f, radiance, 1.0f, 1.0f, 0.5f);
+    reservoir.sampleCount = 100u;
+    reservoir.weightSum = 100.0f;
+
+    const float before = reservoir.weightSum / (float(reservoir.sampleCount) * reservoir.selectedTarget);
+    qray::RestirGiClampHistory(reservoir);
+
+    CHECK(reservoir.sampleCount == qray::kRestirGiMaxSamples, "the count is capped");
+    CHECK(std::fabs(reservoir.weightSum - 64.0f) < 1e-6f, "the weight sum scales with the cap");
+    CHECK(std::fabs(qray::RestirGiWeight(reservoir) - before) < 1e-6f, "W is unchanged by the cap");
+}
+
+void TestNonFiniteSample()
+{
+    qray::RestirGiReservoir reservoir;
+    const float direction[3] = { 0.0f, 1.0f, 0.0f };
+    const float radiance[3] = { 1.0f, 1.0f, 1.0f };
+
+    qray::RestirGiAddSample(reservoir, direction, 1.0f, radiance, INFINITY, 1.0f, 0.5f);
+    CHECK(reservoir.sampleCount == 1u, "the sample count still advances");
+    CHECK(reservoir.weightSum == 0.0f, "a non-finite weight is clamped to zero");
+
+    qray::RestirGiAddSample(reservoir, direction, 1.0f, radiance, 0.0f, 0.0f, 0.5f);
+    CHECK(reservoir.weightSum == 0.0f, "a zero target adds no weight");
+}
+
+}
+
+int main()
+{
+    TestLayout();
+    TestEmpty();
+    TestSingleSample();
+    TestRepresentativePick();
+    TestMerge();
+    TestRejectsBadSources();
+    TestClampHistory();
+    TestNonFiniteSample();
+
+    std::printf("%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}
