@@ -80,6 +80,7 @@ float q2GiWeight(const ShRestirGiReservoir reservoir)
 
 void q2GiAddSample(inout ShRestirGiReservoir reservoir,
                    const float3 direction, const float distance, const float3 radiance,
+                   const float oneOverSourcePdf,
                    const float weight, const float target, const float u)
 {
     float safeWeight = weight;
@@ -100,7 +101,9 @@ void q2GiAddSample(inout ShRestirGiReservoir reservoir,
     if (safeWeight > 0.0 && safeTarget > 0.0 && u * reservoir.weightSum < safeWeight)
     {
         reservoir.direction = float4(direction, distance);
-        reservoir.radiance = float4(radiance, 0.0);
+        // .w carries the source sample's 1/pdf, so a reused sample divides by the pdf that
+        // generated it instead of the receiver's pdf.
+        reservoir.radiance = float4(radiance, oneOverSourcePdf);
         reservoir.selectedTarget = safeTarget;
     }
 }

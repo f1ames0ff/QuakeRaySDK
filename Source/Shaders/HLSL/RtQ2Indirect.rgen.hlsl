@@ -575,8 +575,8 @@ void main()
         const float currentDistance = length(hitPos - surf.position);
         const float3 currentRadiance = hitRadiance;
         const float currentTarget = max(getLuminance(currentRadiance), 1e-6);
-        q2GiAddSample(current, currentDir, currentDistance, currentRadiance, 1.0, currentTarget,
-                      rnd16(seed, 900u));
+        q2GiAddSample(current, currentDir, currentDistance, currentRadiance, oneOverSourcePdf,
+                      1.0, currentTarget, rnd16(seed, 900u));
 
         ShRestirGiReservoir reservoir = current;
         ShRestirGiReservoir history = (ShRestirGiReservoir)0;
@@ -653,11 +653,8 @@ void main()
             {
                 hitPos = expected;
                 hitRadiance = reservoir.radiance.xyz;
-                // Exact GGX pdf of the reused direction (the first bounce is a Smith-GGX
-                // sample), instead of the cosine approximation.
-                const float reusedPdf = evalSpecularBouncePdf(
-                    surf.normal, surf.toViewerDir, surf.roughness, dir);
-                oneOverSourcePdf = 1.0 / max(reusedPdf, 1e-6);
+                // Use the pdf that generated the stored sample, not the receiver's pdf.
+                oneOverSourcePdf = max(reservoir.radiance.w, 1e-6);
             }
             else
             {
