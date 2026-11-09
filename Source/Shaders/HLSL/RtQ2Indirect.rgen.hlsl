@@ -651,7 +651,11 @@ void main()
             {
                 hitPos = expected;
                 hitRadiance = reservoir.radiance.xyz;
-                oneOverSourcePdf = 3.14159265 / max(dot(surf.normal, dir), 1e-6);
+                // Exact GGX pdf of the reused direction (the first bounce is a Smith-GGX
+                // sample), instead of the cosine approximation.
+                const float reusedPdf = evalSpecularBouncePdf(
+                    surf.normal, surf.toViewerDir, surf.roughness, dir);
+                oneOverSourcePdf = 1.0 / max(reusedPdf, 1e-6);
             }
             else
             {
