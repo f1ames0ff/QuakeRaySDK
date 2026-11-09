@@ -93,9 +93,6 @@
 #include "LightVolumeGpu.hlsli"
 #include "RestirGi.hlsli"
 
-[[vk::binding(0, DESC_SET_GI_MOTION)]]
-Texture2D<float2> giMotionTexture;
-
 #define Q2_RNG_INDIR_CELL_SELECT 220
 #define Q2_RNG_INDIR_LIGHT_POINT 223
 #define Q2_RNG_INDIR_LIGHT_MEMBER 226
@@ -564,11 +561,13 @@ void main()
         const uint currentSlot = globalUniform.frameId & 1u;
         const uint previousSlot = currentSlot ^ 1u;
         const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
-        // Motion-vector reprojection (set 10). The image is read as an SRV over the engine's
-        // screen-space vectors; a non-finite or out-of-range UV rejects the history below.
-        const float2 currentUV = (float2(pix) + 0.5) / resolution;
-        const float2 motion = giMotionTexture.Load(int3(pix, 0)).rg;
-        const float2 previousUV = currentUV + motion;
+        // Camera reprojection. The screen-space motion image gave wrong history pixels for this
+        // pass (both the regular and the DLSS variant over-brightened the reused field), so the
+        // verified path projects the current world position with the previous view-projection.
+        const float4 previousClip = mul(globalUniform.volumeViewProj_Prev, float4(surf.position, 1.0));
+        const float2 previousUV = previousClip.w > 1e-6
+            ? previousClip.xy / previousClip.w * 0.5 + 0.5
+            : (float2)2.0;
 
         ShRestirGiReservoir current = (ShRestirGiReservoir)0;
         const float3 currentDir = safeNormalize(hitPos - surf.position);
