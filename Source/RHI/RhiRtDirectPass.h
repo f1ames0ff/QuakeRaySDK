@@ -386,6 +386,7 @@ private:
 
     bool CreateLightVolumeBuffer(uint32_t elementCount);
     bool CreateRadianceCache();
+    bool CreateTransparencyFroxels();
     void DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
 
     // The ranged statistics fill of the frame: it is recorded on the set-6 wrap of the engine's
@@ -454,6 +455,11 @@ private:
     // for a few frames. Allocated eagerly so set 6 always has a valid descriptor.
     nvrhi::BufferHandle radianceCache;
     bool     radianceCacheClearPending = false;
+
+    // Transparency froxel irradiance volume: 64 x 32 x 64 SH4 probes (6.3 MB), allocated eagerly
+    // so set 6 always has a descriptor. The light-scattering fill is the next pass.
+    nvrhi::BufferHandle transparencyFroxels;
+    bool     transparencyFroxelsClearPending = false;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
     // EnsureLightSet (the reflect/refract sibling asking early) or Render made it.

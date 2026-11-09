@@ -11,6 +11,7 @@
 #include "../LightManager.h"
 #include "../LightVolume.h"
 #include "../RadianceCache.h"
+#include "../TransparencyFroxelVolume.h"
 #include "../RestirReservoir.h"
 
 #include <algorithm>
@@ -607,6 +608,10 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE));
 
+        // The transparency froxel volume: the same set, filled by the scattering pass later.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS));
+
         lightLayout = device->createBindingLayout(desc);
     }
 
@@ -648,6 +653,11 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     // The radiance cache is small (8 MB) and lives with the pass, so the set-6 descriptor stays
     // valid while rt_radiance_cache is off.
     if (!CreateRadianceCache())
+    {
+        return false;
+    }
+
+    if (!CreateTransparencyFroxels())
     {
         return false;
     }
@@ -1559,6 +1569,28 @@ bool RhiRtDirectPass::CreateRadianceCache()
     return true;
 }
 
+bool RhiRtDirectPass::CreateTransparencyFroxels()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(TransparencyFroxelVolume::kProbeCount) *
+        sizeof(TransparencyFroxelProbe);
+    desc.structStride = static_cast<uint32_t>(sizeof(TransparencyFroxelProbe));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass transparency froxels";
+
+    transparencyFroxels = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (transparencyFroxels == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the transparency froxel buffer");
+        return false;
+    }
+
+    transparencyFroxelsClearPending = true;
+    return true;
+}
+
 void RhiRtDirectPass::DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)
 {
     if (!lightVolumeEnabled || volumePipeline == nullptr || volumeShaderTable == nullptr ||
@@ -1759,6 +1791,11 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         pCommandList->beginTrackingBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
     }
 
+    if (transparencyFroxels != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(transparencyFroxels, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
     if (target.lightSet == nullptr)
     {
         nvrhi::BindingSetDesc setDesc;
@@ -1780,6 +1817,9 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
 
         setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE, radianceCache));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS, transparencyFroxels));
 
         target.lightSet = device->createBindingSet(setDesc, lightLayout);
 
@@ -1813,6 +1853,13 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         pCommandList->clearBufferUInt(radianceCache, 0u);
         pCommandList->setBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
         radianceCacheClearPending = false;
+    }
+
+    if (transparencyFroxelsClearPending && transparencyFroxels != nullptr)
+    {
+        pCommandList->clearBufferUInt(transparencyFroxels, 0u);
+        pCommandList->setBufferState(transparencyFroxels, nvrhi::ResourceStates::UnorderedAccess);
+        transparencyFroxelsClearPending = false;
     }
 
     // The frame's light copies, the RHI replacement for the `LightManager::CopyFromStaging` calls
