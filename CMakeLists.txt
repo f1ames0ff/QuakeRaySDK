@@ -461,6 +461,17 @@ if(QR_BUILD_TESTS)
     )
     add_test(NAME qray_restir_gi_tests COMMAND qray_restir_gi_tests)
     set_tests_properties(qray_restir_gi_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+
+    add_executable(qray_transparency_froxel_tests
+        Tests/TransparencyFroxelTests.cpp
+        Source/TransparencyFroxelVolume.cpp
+    )
+    target_compile_features(qray_transparency_froxel_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_transparency_froxel_tests PRIVATE
+        Source
+    )
+    add_test(NAME qray_transparency_froxel_tests COMMAND qray_transparency_froxel_tests)
+    set_tests_properties(qray_transparency_froxel_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
 endif()
 
 add_library(qray_alias OBJECT Source/rt_alias.c)
