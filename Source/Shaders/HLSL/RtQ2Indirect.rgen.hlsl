@@ -595,7 +595,8 @@ void main()
         const float3 currentRadiance = hitRadiance;
         const float currentTarget = max(getLuminance(currentRadiance), 1e-6);
         q2GiAddSample(current, currentDir, currentDistance, currentRadiance, oneOverSourcePdf,
-                      1.0, currentTarget, rnd16(seed, 900u));
+                      1.0, currentTarget, surf.normalGeom, globalUniform.frameId,
+                      rnd16(seed, 900u));
 
         ShRestirGiReservoir reservoir = current;
         ShRestirGiReservoir history = (ShRestirGiReservoir)0;
@@ -610,7 +611,7 @@ void main()
             historyPix = clamp(int2(floor(previousUV * resolution)),
                                int2(0, 0), maxPixel);
             history = giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
-            historyValid = q2GiUsable(history);
+            historyValid = q2GiUsable(history) && q2GiHistoryValid(history, surf.normalGeom);
         }
 
         if (historyValid)
@@ -635,7 +636,7 @@ void main()
                 const ShRestirGiReservoir tapReservoir =
                     giReservoirs[previousSlot * stride + q2GiPixelIndex(tapPix)];
 
-                if (!q2GiUsable(tapReservoir))
+                if (!q2GiUsable(tapReservoir) || !q2GiHistoryValid(tapReservoir, surf.normalGeom))
                 {
                     continue;
                 }

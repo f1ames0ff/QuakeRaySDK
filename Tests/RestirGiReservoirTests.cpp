@@ -77,6 +77,34 @@ void TestRepresentativePick()
     CHECK(second.direction[0] == 1.0f, "u = 0.1 switches to the second representative");
 }
 
+void TestNormalAgeValidation()
+{
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    const float down[3] = { 0.0f, 0.0f, -1.0f };
+    const float tilted[3] = { 0.0f, 0.3f, 0.9539392f };
+
+    const uint32_t packed = qray::RestirGiPackNormalFrame(up, 100u);
+    CHECK(qray::RestirGiUnpackFrame(packed) == 100u, "the frame round-trips");
+
+    float decoded[3];
+    qray::RestirGiUnpackNormal(packed, decoded);
+    CHECK(decoded[2] > 0.99f, "the octahedral normal round-trips");
+
+    qray::RestirGiReservoir reservoir;
+    reservoir.pad = packed;
+    CHECK(qray::RestirGiHistoryValid(reservoir, up, 100u), "same normal and frame is valid");
+    CHECK(qray::RestirGiHistoryValid(reservoir, tilted, 110u), "a 17 degree tilt is valid");
+    CHECK(!qray::RestirGiHistoryValid(reservoir, down, 100u), "an opposite normal is rejected");
+    CHECK(!qray::RestirGiHistoryValid(reservoir, up, 100u + qray::kRestirGiMaxAgeFrames + 1u),
+          "an old frame is rejected");
+
+    const float side[3] = { 1.0f, 0.0f, 0.0f };
+    const uint32_t sidePacked = qray::RestirGiPackNormalFrame(side, 100u);
+    reservoir.pad = sidePacked;
+    qray::RestirGiUnpackNormal(sidePacked, decoded);
+    CHECK(decoded[0] > 0.99f, "a side normal round-trips");
+}
+
 void TestMerge()
 {
     qray::RestirGiReservoir source;
@@ -158,6 +186,7 @@ int main()
     TestSingleSample();
     TestRepresentativePick();
     TestMerge();
+    TestNormalAgeValidation();
     TestRejectsBadSources();
     TestClampHistory();
     TestNonFiniteSample();

@@ -33,6 +33,7 @@ namespace qray
 
 inline constexpr uint32_t kRestirGiMaxSamples = 64u;
 inline constexpr uint32_t kRestirGiSlots = 2u;
+inline constexpr uint32_t kRestirGiMaxAgeFrames = 64u;
 
 struct RestirGiReservoir
 {
@@ -47,6 +48,105 @@ struct RestirGiReservoir
 };
 
 static_assert(sizeof(RestirGiReservoir) == 48, "RestirGiReservoir has to keep the 48-byte GPU layout");
+
+// Octahedral normal + frame packing: 8+8 bits of normal in the low 16 bits of `pad`, the frame
+// in the high 16. Mirrors q2GiPackNormalFrame / q2GiHistoryValid in RestirGi.hlsli.
+inline void RestirGiOctEncode(const float n[3], float out[2])
+{
+    const float sum = std::abs(n[0]) + std::abs(n[1]) + std::abs(n[2]);
+    const float inv = 1.0f / (sum > 1e-6f ? sum : 1e-6f);
+    float x = n[0] * inv;
+    float y = n[1] * inv;
+    const float z = n[2] * inv;
+
+    if (z < 0.0f)
+    {
+        const float wx = (1.0f - std::abs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
+        const float wy = (1.0f - std::abs(x)) * (y >= 0.0f ? 1.0f : -1.0f);
+        x = wx;
+        y = wy;
+    }
+
+    out[0] = x;
+    out[1] = y;
+}
+
+inline void RestirGiOctDecode(const float e[2], float out[3])
+{
+    float x = e[0];
+    float y = e[1];
+    float z = 1.0f - std::abs(x) - std::abs(y);
+
+    if (z < 0.0f)
+    {
+        const float wx = (1.0f - std::abs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
+        const float wy = (1.0f - std::abs(x)) * (y >= 0.0f ? 1.0f : -1.0f);
+        x = wx;
+        y = wy;
+    }
+
+    const float length = std::sqrt(x * x + y * y + z * z);
+    const float inv = length > 1e-6f ? 1.0f / length : 0.0f;
+    out[0] = x * inv;
+    out[1] = y * inv;
+    out[2] = z * inv;
+}
+
+inline uint32_t RestirGiPackNormalFrame(const float normal[3], uint32_t frame)
+{
+    float e[2];
+    RestirGiOctEncode(normal, e);
+
+    const auto quantize = [](float value)
+    {
+        float q = value * 0.5f + 0.5f;
+        q = q < 0.0f ? 0.0f : (q > 1.0f ? 1.0f : q);
+        return uint32_t(q * 255.0f + 0.5f);
+    };
+
+    const uint32_t qx = quantize(e[0]);
+    const uint32_t qy = quantize(e[1]);
+    return ((frame & 0xFFFFu) << 16) | (qy << 8) | qx;
+}
+
+inline void RestirGiUnpackNormal(uint32_t packed, float out[3])
+{
+    const float e[2] = {
+        float(packed & 0xFFu) / 255.0f * 2.0f - 1.0f,
+        float((packed >> 8) & 0xFFu) / 255.0f * 2.0f - 1.0f
+    };
+    RestirGiOctDecode(e, out);
+}
+
+inline uint32_t RestirGiUnpackFrame(uint32_t packed)
+{
+    return (packed >> 16) & 0xFFFFu;
+}
+
+inline bool RestirGiHistoryValid(const RestirGiReservoir &reservoir, const float currentNormal[3],
+                                 uint32_t frame)
+{
+    const uint32_t age = (frame - RestirGiUnpackFrame(reservoir.pad)) & 0xFFFFu;
+
+    if (age > kRestirGiMaxAgeFrames)
+    {
+        return false;
+    }
+
+    float historyNormal[3];
+    RestirGiUnpackNormal(reservoir.pad, historyNormal);
+
+    const float length = std::sqrt(currentNormal[0] * currentNormal[0] +
+                                   currentNormal[1] * currentNormal[1] +
+                                   currentNormal[2] * currentNormal[2]);
+    if (length <= 1e-6f)
+    {
+        return false;
+    }
+
+    return (historyNormal[0] * currentNormal[0] + historyNormal[1] * currentNormal[1] +
+            historyNormal[2] * currentNormal[2]) / length >= 0.9f;
+}
 
 inline bool RestirGiFinite(float value)
 {

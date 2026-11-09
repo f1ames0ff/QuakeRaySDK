@@ -38,6 +38,68 @@ struct ShRestirGiReservoir
 [[vk::binding(0, DESC_SET_GI_RESERVOIRS)]]
 RWStructuredBuffer<ShRestirGiReservoir> giReservoirs;
 
+#define Q2_GI_MAX_AGE_FRAMES 64u
+
+// The selected sample carries its receiver normal and frame in `pad`: 8+8-bit octahedral normal
+// in the low 16 bits, the frame in the high 16. The history merge rejects a sample whose receiver
+// normal differs or whose age exceeds Q2_GI_MAX_AGE_FRAMES, which removes the wrong-surface reuse
+// the geometric visibility trace alone did not catch.
+float2 q2GiOctWrap(const float2 v)
+{
+    return (1.0 - abs(v.yx)) * float2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+float2 q2GiOctEncode(const float3 n)
+{
+    float3 v = n / max(abs(n.x) + abs(n.y) + abs(n.z), 1e-6);
+    return v.z >= 0.0 ? v.xy : q2GiOctWrap(v.xy);
+}
+
+float3 q2GiOctDecode(const float2 e)
+{
+    float3 n = float3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+
+    if (n.z < 0.0)
+    {
+        n.xy = (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+
+    return normalize(n);
+}
+
+uint q2GiPackNormalFrame(const float3 normal, const uint frame)
+{
+    const float2 e = q2GiOctEncode(normal);
+    const uint qx = uint(clamp(e.x * 0.5 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+    const uint qy = uint(clamp(e.y * 0.5 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+    return ((frame & 0xFFFFu) << 16) | (qy << 8) | qx;
+}
+
+float3 q2GiUnpackNormal(const uint packed)
+{
+    const float2 e = float2(float(packed & 0xFFu), float((packed >> 8) & 0xFFu)) / 255.0 * 2.0 - 1.0;
+    return q2GiOctDecode(e);
+}
+
+uint q2GiUnpackFrame(const uint packed)
+{
+    return (packed >> 16) & 0xFFFFu;
+}
+
+bool q2GiHistoryValid(const ShRestirGiReservoir reservoir, const float3 currentNormal)
+{
+    const uint age = (globalUniform.frameId - q2GiUnpackFrame(reservoir.pad)) & 0xFFFFu;
+
+    if (age > Q2_GI_MAX_AGE_FRAMES)
+    {
+        return false;
+    }
+
+    const float3 historyNormal = q2GiUnpackNormal(reservoir.pad);
+    const float3 normal = normalize(currentNormal);
+    return dot(historyNormal, normal) >= 0.9;
+}
+
 bool q2GiUsable(const ShRestirGiReservoir reservoir)
 {
     if (reservoir.sampleCount == 0u || reservoir.sampleCount > Q2_GI_MAX_SAMPLES)
@@ -81,7 +143,8 @@ float q2GiWeight(const ShRestirGiReservoir reservoir)
 void q2GiAddSample(inout ShRestirGiReservoir reservoir,
                    const float3 direction, const float distance, const float3 radiance,
                    const float oneOverSourcePdf,
-                   const float weight, const float target, const float u)
+                   const float weight, const float target,
+                   const float3 surfaceNormal, const uint frame, const float u)
 {
     float safeWeight = weight;
     float safeTarget = target;
@@ -105,6 +168,7 @@ void q2GiAddSample(inout ShRestirGiReservoir reservoir,
         // generated it instead of the receiver's pdf.
         reservoir.radiance = float4(radiance, oneOverSourcePdf);
         reservoir.selectedTarget = safeTarget;
+        reservoir.pad = q2GiPackNormalFrame(surfaceNormal, frame);
     }
 }
 
@@ -132,6 +196,7 @@ void q2GiMerge(inout ShRestirGiReservoir destination,
         destination.direction = source.direction;
         destination.radiance = source.radiance;
         destination.selectedTarget = targetAtNewPixel;
+        destination.pad = source.pad;
     }
 }
 
