@@ -143,37 +143,37 @@ void main()
     const uint rayCount = clamp(uint(globalUniform.lightVolumeParams.z + 0.5),
                                 Q2_LIGHT_VOLUME_MIN_RAYS, Q2_LIGHT_VOLUME_MAX_RAYS);
 
-    // DIAGNOSTIC (not for merge): the same downward camera/probe rays with RAY_FLAG_NONE.
-    // The normal trace uses RAY_FLAG_CULL_FRONT_FACING_TRIANGLES; if these hit, culling is the
-    // reason the volume probes see only sky.
+    // DIAGNOSTIC (not for merge): six axis rays from this probe with RAY_FLAG_NONE. With the
+    // cache off, the CACHE_ACTIVE counter reads the axis-hit count, so the run separates the
+    // probe position/geometry from the sampled sphere directions.
     {
-        ShPayload cameraPayload;
-        resetPayload(cameraPayload);
-        RayDesc cameraRay;
-        cameraRay.Origin = globalUniform.cameraPosition.xyz;
-        cameraRay.Direction = float3(0.0, 0.0, -1.0);
-        cameraRay.TMin = globalUniform.primaryRayMinDist;
-        cameraRay.TMax = globalUniform.rayLength;
-        TraceRay(topLevelAS, RAY_FLAG_NONE, getIndirectIlluminationCullMask(0u),
-                 0, 0, SBT_INDEX_MISS_DEFAULT, cameraRay, cameraPayload);
-        if (doesPayloadContainHitInfo(cameraPayload))
+        const float3 axes[6] = {
+            float3(1.0, 0.0, 0.0), float3(-1.0, 0.0, 0.0),
+            float3(0.0, 1.0, 0.0), float3(0.0, -1.0, 0.0),
+            float3(0.0, 0.0, 1.0), float3(0.0, 0.0, -1.0)
+        };
+
+        uint axisHits = 0u;
+
+        for (uint axis = 0u; axis < 6u; axis++)
         {
-            rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
+            ShPayload payload;
+            resetPayload(payload);
+            RayDesc ray;
+            ray.Origin = probePosition;
+            ray.Direction = axes[axis];
+            ray.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
+            ray.TMax = globalUniform.rayLength;
+            TraceRay(topLevelAS, RAY_FLAG_NONE, getIndirectIlluminationCullMask(0u),
+                     0, 0, SBT_INDEX_MISS_DEFAULT, ray, payload);
+
+            if (doesPayloadContainHitInfo(payload))
+            {
+                axisHits++;
+            }
         }
 
-        ShPayload probePayload;
-        resetPayload(probePayload);
-        RayDesc probeRay;
-        probeRay.Origin = probePosition;
-        probeRay.Direction = float3(0.0, 0.0, -1.0);
-        probeRay.TMin = globalUniform.primaryRayMinDist;
-        probeRay.TMax = globalUniform.rayLength;
-        TraceRay(topLevelAS, RAY_FLAG_NONE, getIndirectIlluminationCullMask(0u),
-                 0, 0, SBT_INDEX_MISS_DEFAULT, probeRay, probePayload);
-        if (doesPayloadContainHitInfo(probePayload))
-        {
-            rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
-        }
+        rayStatsAdd(RAY_STATS_CATEGORY_CACHE_ACTIVE, axisHits);
     }
 
     for (uint ray = 0u; ray < rayCount; ray++)
