@@ -109,7 +109,7 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false }, // 131  framebufMetallicRoughness_Sampled
     { FB_IMAGE_INDEX_SURFACE_POSITION,           false }, // 143  framebufSurfacePosition_Sampled
-    { FB_IMAGE_INDEX_MOTION_DLSS,                false }, // 148  framebufMotionDlss_Sampled
+    { FB_IMAGE_INDEX_MOTION,                     false }, // 125  framebufMotion_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,           false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,                false }, // 245  framebufQ2RngSeed_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER,                 false }, // 247  framebufQ2Cluster_Sampled
