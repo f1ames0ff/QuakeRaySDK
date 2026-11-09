@@ -975,7 +975,7 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
     if (target.motionSet == nullptr)
     {
         const auto [motionImage, motionView, motionFormat, motionExtent] =
-            pFramebuffers->GetImageHandles(FB_IMAGE_INDEX_MOTION, frameIndex, resolutionState);
+            pFramebuffers->GetImageHandles(FB_IMAGE_INDEX_MOTION_DLSS, frameIndex, resolutionState);
 
         if (motionImage != 0)
         {
