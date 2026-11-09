@@ -350,6 +350,7 @@ struct ShGlobalUniform
     float levelFogSkyBlend[4];
     uint32_t restirParams[4];
     float lightVolumeParams[4];
+    float lightVolumeLocalParams[32];
     float cloudShadowPlacement[4];
     float cloudLayerMotion[4];
     uint32_t glassBlur;

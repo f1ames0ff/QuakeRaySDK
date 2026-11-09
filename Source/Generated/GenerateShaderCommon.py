@@ -651,6 +651,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     # the per-cluster lists, .y = candidates drawn per NEE light sample.
     (UINT32,  4, "restirParams",             1),
     (FLOAT32, 4, "lightVolumeParams",        1),
+    # Local 10^3 irradiance volumes: .xyz = cube centre, .w = full side length.
+    (FLOAT32, 4, "lightVolumeLocalParams",   8),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 

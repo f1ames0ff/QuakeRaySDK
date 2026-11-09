@@ -242,7 +242,8 @@ public:
     // with the pass; this call only follows the enable flag and the 640 u camera snap, and clears
     // every cascade when the snap moves so no probe from the previous origin is sampled. A failed
     // configure leaves the volume disabled; the shader's lightVolumeParams.x gate is the host's.
-    bool ConfigureLightVolume(bool enabled, const float cameraPosition[3]);
+    bool ConfigureLightVolume(bool enabled, const float cameraPosition[3],
+                              uint32_t localVolumeCount, const float *localVolumeParams);
 
     // One call per frame, on the frame context's open command list of 'frameIndex', after
     // RhiRtPrimaryPass::Render of the same slot. 'frameId' is the engine counter
@@ -443,6 +444,8 @@ private:
     nvrhi::rt::ShaderTableHandle volumeShaderTable;
     nvrhi::ShaderHandle volumeRaygenShader;
     float    lightVolumeOrigin[3] = {};
+    uint32_t lightVolumeLocalCount = 0;
+    float    lightVolumeLocalPrev[8][4] = {};
     bool     lightVolumeEnabled = false;
     bool     lightVolumeClearPending = false;
 

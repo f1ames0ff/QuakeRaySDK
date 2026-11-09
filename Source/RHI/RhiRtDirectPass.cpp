@@ -1436,11 +1436,31 @@ bool RhiRtDirectPass::ConfigureRestir(uint32_t width, uint32_t height, bool enab
     return true;
 }
 
-bool RhiRtDirectPass::ConfigureLightVolume(bool enabled, const float cameraPosition[3])
+bool RhiRtDirectPass::ConfigureLightVolume(bool enabled, const float cameraPosition[3],
+                                           uint32_t localVolumeCount, const float *localVolumeParams)
 {
     if (!created || device == nullptr)
     {
         return false;
+    }
+
+    const uint32_t localCount = std::min(localVolumeCount, 8u);
+    const bool localChanged = localCount != lightVolumeLocalCount ||
+        (localCount > 0u && (localVolumeParams == nullptr ||
+         std::memcmp(localVolumeParams, lightVolumeLocalPrev, sizeof(float) * 4u * localCount) != 0));
+
+    if (localChanged)
+    {
+        lightVolumeLocalCount = localCount;
+
+        if (localCount > 0u && localVolumeParams != nullptr)
+        {
+            std::memcpy(lightVolumeLocalPrev, localVolumeParams, sizeof(float) * 4u * localCount);
+        }
+
+        // A new local-volume list invalidates the local atlas slots; the next frame clears the
+        // whole atlas and refills one cascade and one local volume per frame.
+        lightVolumeClearPending = true;
     }
 
     if (!enabled)
@@ -1537,7 +1557,8 @@ void RhiRtDirectPass::DispatchLightVolume(nvrhi::ICommandList *pCommandList, uin
 
     // One invocation per probe of the cascade selected by frameId % 6 in the shader.
     nvrhi::rt::DispatchRaysArguments args;
-    args.setDimensions(LightVolume::kProbesPerCascade, 1, 1);
+    // 4,096 cascade probes plus one 10^3 local volume (the shader picks the slot by frameId).
+    args.setDimensions(LightVolume::kProbesPerCascade + LightVolume::kProbesPerLocalVolume, 1, 1);
     pCommandList->dispatchRays(args);
 }
 

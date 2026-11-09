@@ -1440,6 +1440,14 @@ typedef struct QrDrawFrameDebugParams
     QrDebugDrawFlags drawFlags;
 } QrDrawFrameDebugParams;
 
+#define QR_LIGHT_VOLUME_MAX_LOCAL 8
+
+typedef struct QrLightVolumeLocal
+{
+    QrFloat3D   origin;
+    float       bounds;
+} QrLightVolumeLocal;
+
 typedef struct QrDrawFrameIlluminationParams
 {
     uint32_t    maxBounceShadows;
@@ -1488,6 +1496,14 @@ typedef struct QrDrawFrameIlluminationParams
     // clamped to 16..64. The report's tiers are 64/32/16 for high/medium/low.
     // Default: 16
     uint32_t    lightVolumeRays;
+
+    // Hand-placed local irradiance volumes (10^3 probes each). 'origin' is the
+    // cube centre and 'bounds' the full side length in game units; the GPU
+    // updates one slot per frame and prefers the smallest containing local
+    // volume over the cascades. Slots with bounds <= 0 are ignored.
+    // Default: 0 slots
+    uint32_t    lightVolumeLocalCount;
+    QrLightVolumeLocal lightVolumeLocal[QR_LIGHT_VOLUME_MAX_LOCAL];
 
     float       giBounceRays;
 

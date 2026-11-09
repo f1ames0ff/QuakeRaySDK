@@ -174,25 +174,67 @@ float3 volumeHitRadiance(const Surface hit, const uint seed, const uint salt)
 [shader("raygeneration")]
 void main()
 {
-    const uint localIndex = DispatchRaysIndex().x;
+    const uint invocation = DispatchRaysIndex().x;
+    const uint localVolumeCount = q2LightVolumeLocalCount();
 
-    if (localIndex >= Q2_LIGHT_VOLUME_PROBES_PER_CASCADE)
+    uint probeIndex;
+    uint probeLocalIndex;
+    uint dim;
+    float bounds;
+    float3 origin;
+    uint seedSalt;
+
+    if (invocation < Q2_LIGHT_VOLUME_PROBES_PER_CASCADE)
     {
-        return;
+        const uint cascade = globalUniform.frameId % Q2_LIGHT_VOLUME_CASCADES;
+        dim = Q2_LIGHT_VOLUME_DIM;
+        bounds = q2LightVolumeBounds(cascade);
+        origin = q2LightVolumeOrigin();
+        probeLocalIndex = invocation;
+        probeIndex = cascade * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE + invocation;
+        seedSalt = cascade;
+    }
+    else
+    {
+        // One local volume per frame, matching the report's interleaved schedule. The host
+        // clears the atlas when the local-volume list changes.
+        if (localVolumeCount == 0u)
+        {
+            return;
+        }
+
+        const uint localProbe = invocation - Q2_LIGHT_VOLUME_PROBES_PER_CASCADE;
+
+        if (localProbe >= Q2_LIGHT_VOLUME_PROBES_PER_LOCAL)
+        {
+            return;
+        }
+
+        const uint slot = globalUniform.frameId % localVolumeCount;
+        const float4 volume = globalUniform.lightVolumeLocalParams[slot];
+
+        if (!(volume.w > 0.0))
+        {
+            return;
+        }
+
+        dim = Q2_LIGHT_VOLUME_LOCAL_DIM;
+        bounds = volume.w;
+        origin = volume.xyz;
+        probeLocalIndex = localProbe;
+        probeIndex = Q2_LIGHT_VOLUME_CASCADE_PROBE_COUNT +
+            slot * Q2_LIGHT_VOLUME_PROBES_PER_LOCAL + localProbe;
+        seedSalt = Q2_LIGHT_VOLUME_CASCADES + slot;
     }
 
-    const uint cascade = globalUniform.frameId % Q2_LIGHT_VOLUME_CASCADES;
-    const float bounds = q2LightVolumeBounds(cascade);
-    const float cell = bounds / float(Q2_LIGHT_VOLUME_DIM);
-    const float3 origin = q2LightVolumeOrigin();
-
-    const uint x = localIndex % Q2_LIGHT_VOLUME_DIM;
-    const uint y = (localIndex / Q2_LIGHT_VOLUME_DIM) % Q2_LIGHT_VOLUME_DIM;
-    const uint z = localIndex / (Q2_LIGHT_VOLUME_DIM * Q2_LIGHT_VOLUME_DIM);
+    const float cell = bounds / float(dim);
+    const uint x = probeLocalIndex % dim;
+    const uint y = (probeLocalIndex / dim) % dim;
+    const uint z = probeLocalIndex / (dim * dim);
     const float3 probePosition = origin - bounds * 0.5 +
         (float3(float(x), float(y), float(z)) + 0.5) * cell;
 
-    const uint seed = getRandomSeed(int2(int(localIndex), int(cascade)), globalUniform.frameId);
+    const uint seed = getRandomSeed(int2(int(probeLocalIndex), int(seedSalt)), globalUniform.frameId);
 
     float sh[4][3];
 
@@ -223,8 +265,6 @@ void main()
     }
 
     q2LightVolumeNormalize(sh, rayCount);
-
-    const uint probeIndex = cascade * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE + localIndex;
 
     for (uint band = 0u; band < 4u; band++)
     {

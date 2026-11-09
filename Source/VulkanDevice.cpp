@@ -629,7 +629,27 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->lightVolumeParams[0]       = drawInfo.pIlluminationParams->lightVolumeEnabled != 0 ? 1.0f : 0.0f;
         gu->lightVolumeParams[1]       = std::clamp( drawInfo.pIlluminationParams->lightVolumeWeight, 0.0f, 1.0f );
         gu->lightVolumeParams[2]       = float( std::clamp( drawInfo.pIlluminationParams->lightVolumeRays, 16u, 64u ) );
-        gu->lightVolumeParams[3]       = 0.0f;
+
+        const uint32_t localVolumeCount = std::min( drawInfo.pIlluminationParams->lightVolumeLocalCount, 8u );
+        gu->lightVolumeParams[3]       = float( localVolumeCount );
+
+        for ( uint32_t i = 0; i < 8; i++ )
+        {
+            float *dst = &gu->lightVolumeLocalParams[i * 4];
+
+            if ( i < localVolumeCount )
+            {
+                const QrLightVolumeLocal &src = drawInfo.pIlluminationParams->lightVolumeLocal[i];
+                dst[0] = src.origin.data[0];
+                dst[1] = src.origin.data[1];
+                dst[2] = src.origin.data[2];
+                dst[3] = std::max( src.bounds, 0.0f );
+            }
+            else
+            {
+                dst[0] = dst[1] = dst[2] = dst[3] = 0.0f;
+            }
+        }
         gu->giBounceRays[0]            = std::clamp( drawInfo.pIlluminationParams->giBounceRays, 0.0f, 2.0f );
         gu->fltEnable[0]               = drawInfo.pIlluminationParams->denoiserEnabled != 0 ? 1.0f : 0.0f;
         gu->fixedAlbedo[0]             = std::max( drawInfo.pIlluminationParams->fixedAlbedo, 0.0f );
@@ -657,6 +677,12 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->lightVolumeParams[1]       = 1.0f;
         gu->lightVolumeParams[2]       = 16.0f;
         gu->lightVolumeParams[3]       = 0.0f;
+
+        for ( uint32_t i = 0; i < 8; i++ )
+        {
+            float *dst = &gu->lightVolumeLocalParams[i * 4];
+            dst[0] = dst[1] = dst[2] = dst[3] = 0.0f;
+        }
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;

@@ -27,6 +27,10 @@
 #define Q2_LIGHT_VOLUME_CASCADES 6u
 #define Q2_LIGHT_VOLUME_DIM 16u
 #define Q2_LIGHT_VOLUME_PROBES_PER_CASCADE (Q2_LIGHT_VOLUME_DIM * Q2_LIGHT_VOLUME_DIM * Q2_LIGHT_VOLUME_DIM)
+#define Q2_LIGHT_VOLUME_LOCAL_DIM 10u
+#define Q2_LIGHT_VOLUME_PROBES_PER_LOCAL (Q2_LIGHT_VOLUME_LOCAL_DIM * Q2_LIGHT_VOLUME_LOCAL_DIM * Q2_LIGHT_VOLUME_LOCAL_DIM)
+#define Q2_LIGHT_VOLUME_CASCADE_PROBE_COUNT (Q2_LIGHT_VOLUME_CASCADES * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE)
+#define Q2_LIGHT_VOLUME_MAX_LOCAL 8u
 #define Q2_LIGHT_VOLUME_BASE_BOUNDS 1280.0
 #define Q2_LIGHT_VOLUME_SNAP 640.0
 #define Q2_LIGHT_VOLUME_PI 3.14159265358979323846
@@ -115,6 +119,42 @@ void q2LightVolumeNormalize(inout float sh[4][3], const uint sampleCount)
     }
 }
 
+// Number of hand-placed local volumes uploaded this frame (lightVolumeParams.w).
+uint q2LightVolumeLocalCount()
+{
+    return min(uint(globalUniform.lightVolumeParams.w + 0.5), Q2_LIGHT_VOLUME_MAX_LOCAL);
+}
+
+// Smallest containing local volume, or -1. Local volumes take precedence over the cascades,
+// matching LightVolume::FindLocalVolume on the CPU.
+int q2LightVolumeFindLocal(const float3 position)
+{
+    int best = -1;
+    float bestBounds = 1e30;
+    const uint count = q2LightVolumeLocalCount();
+
+    for (uint i = 0u; i < count; i++)
+    {
+        const float4 volume = globalUniform.lightVolumeLocalParams[i];
+
+        if (!(volume.w > 0.0))
+        {
+            continue;
+        }
+
+        const float half = volume.w * 0.5;
+        const float3 delta = abs(position - volume.xyz);
+
+        if (delta.x <= half && delta.y <= half && delta.z <= half && volume.w < bestBounds)
+        {
+            best = int(i);
+            bestBounds = volume.w;
+        }
+    }
+
+    return best;
+}
+
 // Samples the integrated radiance SH and converts it to the screen-space SH layout used by
 // SphericalHarmonics.hlsli: (L0, Ly, Lz, Lx), radiance coefficients (the volume's integral is
 // divided by 4*pi). The weight comes from lightVolumeParams.y.
@@ -127,17 +167,39 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
         return false;
     }
 
-    const int cascade = q2LightVolumeFindCascade(position);
+    uint dim;
+    float bounds;
+    float3 origin;
+    uint baseProbe;
 
-    if (cascade < 0)
+    const int local = q2LightVolumeFindLocal(position);
+
+    if (local >= 0)
     {
-        return false;
+        const float4 volume = globalUniform.lightVolumeLocalParams[uint(local)];
+        dim = Q2_LIGHT_VOLUME_LOCAL_DIM;
+        bounds = volume.w;
+        origin = volume.xyz;
+        baseProbe = Q2_LIGHT_VOLUME_CASCADE_PROBE_COUNT +
+            uint(local) * Q2_LIGHT_VOLUME_PROBES_PER_LOCAL;
+    }
+    else
+    {
+        const int cascade = q2LightVolumeFindCascade(position);
+
+        if (cascade < 0)
+        {
+            return false;
+        }
+
+        dim = Q2_LIGHT_VOLUME_DIM;
+        bounds = q2LightVolumeBounds(uint(cascade));
+        origin = q2LightVolumeOrigin();
+        baseProbe = uint(cascade) * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE;
     }
 
-    const float bounds = q2LightVolumeBounds(uint(cascade));
-    const float cell = bounds / float(Q2_LIGHT_VOLUME_DIM);
-    const float3 origin = q2LightVolumeOrigin();
-    const float3 index = (position - origin) / cell + float(Q2_LIGHT_VOLUME_DIM) * 0.5;
+    const float cell = bounds / float(dim);
+    const float3 index = (position - origin) / cell + float(dim) * 0.5;
 
     int3 base;
     float3 frac;
@@ -145,12 +207,11 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
     for (uint axis = 0u; axis < 3u; axis++)
     {
         const float baseValue = floor(index[axis] - 0.5);
-        base[axis] = clamp(int(baseValue), 0, int(Q2_LIGHT_VOLUME_DIM) - 2);
+        base[axis] = clamp(int(baseValue), 0, int(dim) - 2);
         frac[axis] = clamp(index[axis] - 0.5 - float(base[axis]), 0.0, 1.0);
     }
 
-    const uint baseProbe = uint(cascade) * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE +
-        uint((base.z * int(Q2_LIGHT_VOLUME_DIM) + base.y) * int(Q2_LIGHT_VOLUME_DIM) + base.x);
+    baseProbe += uint((base.z * int(dim) + base.y) * int(dim) + base.x);
 
     float integrated[4][3];
     for (uint band = 0u; band < 4u; band++)
@@ -171,8 +232,7 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
                 const float wy = dy ? frac.y : (1.0 - frac.y);
                 const float wz = dz ? frac.z : (1.0 - frac.z);
                 const float w = wx * wy * wz;
-                const uint probeIndex = baseProbe + dx + Q2_LIGHT_VOLUME_DIM * dy +
-                    Q2_LIGHT_VOLUME_DIM * Q2_LIGHT_VOLUME_DIM * dz;
+                const uint probeIndex = baseProbe + dx + dim * dy + dim * dim * dz;
                 const ShLightVolumeProbe probe = lightVolumeProbes[probeIndex];
 
                 for (uint band = 0u; band < 4u; band++)
