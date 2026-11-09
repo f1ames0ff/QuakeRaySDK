@@ -92,7 +92,8 @@ bool q2RadianceCacheGet(const float3 position, out float3 radiance)
         return false;
     }
 
-    radiance = entry.radiance.xyz;
+    // TEMP debug: a green hit proves the cache lookup is active at runtime.
+    radiance = float3(0.0, 5.0, 0.0);
     return true;
 }
 
