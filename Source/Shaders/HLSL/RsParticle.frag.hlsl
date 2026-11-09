@@ -3,9 +3,11 @@
 #define DESC_SET_TEXTURES       0
 #define DESC_SET_GLOBAL_UNIFORM 1
 #define DESC_SET_FRAMEBUFFERS   4
+#define DESC_SET_LIGHT_SOURCES  6
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "Q2Asvgf.hlsli"
 #include "Smoke.hlsli"
+#include "TransparencyFroxels.hlsli"
 
 struct RasterizerFrag_BT
 {
@@ -59,7 +61,30 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
     lf.shY /= Q2_STORAGE_SCALE_LF;
     lf.CoCg /= Q2_STORAGE_SCALE_LF;
 
-    const float3 ambient = q2SHToIrradiance(lf, (float3)0.0) * SMOKE_AMBIENT_GAIN;
+    float3 ambient = q2SHToIrradiance(lf, (float3)0.0) * SMOKE_AMBIENT_GAIN;
+
+    if (globalUniform.transparencyFroxelParams.x != 0u)
+    {
+        // Reconstruct the particle's world position from the scene depth along the view ray and
+        // sample the shared transparency froxel volume; the particle fragment has no world
+        // position of its own in this raster path.
+        const float sceneDist = framebufDepthWorld_Sampled.Load(int3(cbPix, 0)).r;
+        const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
+        const float2 uv = (fragCoord.xy + 0.5) / resolution;
+        float4 world = mul(globalUniform.volumeViewProjInv, float4(uv * 2.0 - 1.0, 1.0, 1.0));
+        world /= max(world.w, 1e-6);
+        const float3 rayDir = normalize(world.xyz - globalUniform.cameraPosition.xyz);
+        const float3 particlePos = globalUniform.cameraPosition.xyz + rayDir * sceneDist;
+        float3 froxel;
+        const float3 origin = float3(-4096.0, -2048.0, -4096.0);
+        const float3 size = float3(8192.0, 4096.0, 8192.0);
+
+        if (q2SampleTransparencyFroxel(particlePos, -rayDir, origin, size, froxel))
+        {
+            ambient += froxel / 3.14159265;
+        }
+    }
+
     const float3 factor  = selfLit ? (float3)lightGain : lightGain * max(inLit + ambient, (float3)lightFloor);
 
     const float4 albedo = getTextureSample(rasterizerFragInfo.textureIndex, inTexCoord);
