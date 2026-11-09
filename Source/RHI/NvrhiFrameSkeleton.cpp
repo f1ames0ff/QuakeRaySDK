@@ -1102,9 +1102,11 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
 
         // The ReSTIR GI history buffer is sized to the render resolution and created outside the
         // frame's command list; a mid-list allocation is what stalled the first runtime build.
-        if (rtIndirectPass != nullptr && sky.width > 0 && sky.height > 0)
+        if (rtIndirectPass != nullptr && sky.width > 0 && sky.height > 0 && uniform != nullptr)
         {
-            rtIndirectPass->ConfigureGiReservoirs(sky.width, sky.height);
+            const bool halfRes = uniform->giBounceRays[0] > 0.25f &&
+                                 uniform->giBounceRays[0] < 0.75f;
+            rtIndirectPass->ConfigureGiReservoirs(sky.width, sky.height, halfRes);
         }
 
         // The cascaded irradiance volume follows the same switch and snap as the grid. The direct

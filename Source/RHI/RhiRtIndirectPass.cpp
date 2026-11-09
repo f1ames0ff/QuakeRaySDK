@@ -730,20 +730,25 @@ void RhiRtIndirectPass::SetRenderCubemaps(nvrhi::ITexture *pCubemap, nvrhi::ITex
     renderCubemapSampler = pSampler;
 }
 
-bool RhiRtIndirectPass::ConfigureGiReservoirs(uint32_t width, uint32_t height)
+bool RhiRtIndirectPass::ConfigureGiReservoirs(uint32_t width, uint32_t height, bool halfRes)
 {
     if (!created || device == nullptr || width == 0 || height == 0)
     {
         return false;
     }
 
-    if (giReservoirs != nullptr && giReservoirWidth == width && giReservoirHeight == height)
+    // At rt_gi_level 0.5 the raygen traces half the rows and stands each traced row in for a
+    // pair, so the history buffer stores one record per pair.
+    const uint32_t rows = halfRes ? (height + 1u) / 2u : height;
+
+    if (giReservoirs != nullptr && giReservoirWidth == width && giReservoirHeight == rows &&
+        giReservoirHalfRes == halfRes)
     {
         return true;
     }
 
     nvrhi::BufferDesc bufferDesc;
-    bufferDesc.byteSize = uint64_t(width) * uint64_t(height) * kRestirGiSlots *
+    bufferDesc.byteSize = uint64_t(width) * uint64_t(rows) * kRestirGiSlots *
         sizeof(RestirGiReservoir);
     bufferDesc.structStride = static_cast<uint32_t>(sizeof(RestirGiReservoir));
     bufferDesc.canHaveUAVs = true;
@@ -778,7 +783,8 @@ bool RhiRtIndirectPass::ConfigureGiReservoirs(uint32_t width, uint32_t height)
     giReservoirs = created;
     giReservoirSet = createdSet;
     giReservoirWidth = width;
-    giReservoirHeight = height;
+    giReservoirHeight = rows;
+    giReservoirHalfRes = halfRes;
     giReservoirClearPending = true;
     return true;
 }
@@ -1056,8 +1062,12 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
 
     // ReSTIR GI history: ConfigureGiReservoirs created the buffer and its set before the frame.
     // A missing pair skips the indirect dispatch instead of binding an invalid descriptor.
+    const bool halfResMotion = numBounceRays > HALF_RES_MIN_BOUNCE_RAYS &&
+                               numBounceRays < HALF_RES_MAX_BOUNCE_RAYS;
+    const uint32_t giRows = halfResMotion ? (height + 1u) / 2u : height;
+
     if (giReservoirs == nullptr || giReservoirSet == nullptr ||
-        giReservoirWidth != width || giReservoirHeight != height)
+        giReservoirWidth != width || giReservoirHeight != giRows)
     {
         return;
     }
@@ -1105,8 +1115,7 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
     // the same uniform member the raygen reads for its row mapping. The raygen's DispatchRaysIndex
     // is the checkerboard-packed texel itself, so the images stay at the render size and no dispatch
     // index is unused. The width is never halved.
-    const bool halfRes = numBounceRays > HALF_RES_MIN_BOUNCE_RAYS &&
-                         numBounceRays < HALF_RES_MAX_BOUNCE_RAYS;
+    const bool halfRes = halfResMotion;
 
     nvrhi::rt::DispatchRaysArguments args;
     args.setDimensions(width, halfRes ? (height + 1) / 2 : height, 1);

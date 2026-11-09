@@ -170,18 +170,30 @@ bool q2GiSurfaceMatches(const Surface previous, const Surface current)
                current.normalGeom * rsqrt(currentLengthSq)) > 0.9;
 }
 
+uint q2GiReservoirRows()
+{
+    const uint height = uint(globalUniform.renderHeight);
+    return globalUniform.giBounceRays.x < 0.75 ? ((height + 1u) / 2u) : height;
+}
+
 uint q2GiPixelIndex(const int2 regularPix)
 {
     const uint width = uint(globalUniform.renderWidth);
-    const uint height = uint(globalUniform.renderHeight);
+    const uint rows = q2GiReservoirRows();
     const uint x = min(uint(max(regularPix.x, 0)), width - 1u);
-    const uint y = min(uint(max(regularPix.y, 0)), height - 1u);
-    return y * width + x;
+    uint y = min(uint(max(regularPix.y, 0)), uint(globalUniform.renderHeight) - 1u);
+
+    if (globalUniform.giBounceRays.x < 0.75)
+    {
+        y >>= 1;
+    }
+
+    return min(y, rows - 1u) * width + x;
 }
 
 uint q2GiSlotBase(const uint slot)
 {
-    return slot * uint(globalUniform.renderWidth) * uint(globalUniform.renderHeight);
+    return slot * uint(globalUniform.renderWidth) * q2GiReservoirRows();
 }
 
 #endif

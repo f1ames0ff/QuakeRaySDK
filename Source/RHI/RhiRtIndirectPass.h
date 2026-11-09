@@ -313,7 +313,7 @@ public:
     // Creates or resizes the ReSTIR GI history buffer outside the frame's command list. The
     // skeleton calls it with the render size before Render; a mid-list 88 MB allocation is what
     // stalled the first GI runtime build.
-    bool ConfigureGiReservoirs(uint32_t width, uint32_t height);
+    bool ConfigureGiReservoirs(uint32_t width, uint32_t height, bool halfRes);
 
     void Render(nvrhi::ICommandList *pCommandList,
                 uint32_t frameIndex,
@@ -443,6 +443,7 @@ private:
     nvrhi::BindingSetHandle giReservoirSet;
     uint32_t giReservoirWidth = 0;
     uint32_t giReservoirHeight = 0;
+    bool     giReservoirHalfRes = false;
     bool     giReservoirClearPending = false;
 
     // The two placeholder cube sets: the 32-slot bindless table for set 7 and the two-cube set for

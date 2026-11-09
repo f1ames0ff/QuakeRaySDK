@@ -557,7 +557,7 @@ void main()
     float3 diffuse, specular;
     if (globalUniform.giReservoirParams.x != 0u)
     {
-        const uint stride = uint(globalUniform.renderWidth) * uint(globalUniform.renderHeight);
+        const uint stride = q2GiSlotBase(1u);
         const uint currentSlot = globalUniform.frameId & 1u;
         const uint previousSlot = currentSlot ^ 1u;
         const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
