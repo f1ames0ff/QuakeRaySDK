@@ -578,6 +578,7 @@ void main()
 
         ShRestirGiReservoir reservoir = current;
         ShRestirGiReservoir history = (ShRestirGiReservoir)0;
+        int2 historyPix = pix;
         bool historyValid = false;
 
         if (all(isfinite(previousUV)) && all(previousUV >= (float2)0.0) &&
@@ -585,13 +586,11 @@ void main()
         {
             const int2 maxPixel = int2(int(globalUniform.renderWidth) - 1,
                                        int(globalUniform.renderHeight) - 1);
-            const int2 historyPix = clamp(int2(floor(previousUV * resolution)),
-                                          int2(0, 0), maxPixel);
+            historyPix = clamp(int2(floor(previousUV * resolution)),
+                               int2(0, 0), maxPixel);
             history = giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
             historyValid = q2GiUsable(history);
         }
-
-        bool selectedHistory = false;
 
         if (historyValid)
         {
@@ -601,12 +600,39 @@ void main()
                 getLuminance(historyRadiance) * max(dot(surf.normal, historyDir), 0.0), 1e-6);
 
             q2GiMerge(reservoir, history, historyTarget, rnd16(seed, 901u));
-            q2GiClampHistory(reservoir);
 
-            selectedHistory =
-                dot(reservoir.direction.xyz, historyDir) > 0.9999 &&
-                abs(reservoir.direction.w - history.direction.w) <= 0.01;
+            // Four spatial taps from the same previous-frame slot. The slot is not written by this
+            // frame, so the taps cannot race with the current pixel's store.
+            for (uint tap = 0u; tap < 4u; tap++)
+            {
+                const int2 offset = tap == 0u ? int2(2, 0) :
+                                    tap == 1u ? int2(-2, 0) :
+                                    tap == 2u ? int2(0, 2) : int2(0, -2);
+                const int2 tapPix = clamp(historyPix + offset, int2(0, 0),
+                                          int2(int(globalUniform.renderWidth) - 1,
+                                               int(globalUniform.renderHeight) - 1));
+                const ShRestirGiReservoir tapReservoir =
+                    giReservoirs[previousSlot * stride + q2GiPixelIndex(tapPix)];
+
+                if (!q2GiUsable(tapReservoir))
+                {
+                    continue;
+                }
+
+                const float3 tapDir = tapReservoir.direction.xyz;
+                const float tapTarget = max(
+                    getLuminance(tapReservoir.radiance.xyz) * max(dot(surf.normal, tapDir), 0.0),
+                    1e-6);
+                q2GiMerge(reservoir, tapReservoir, tapTarget, rnd16(seed, 910u + tap));
+            }
+
+            q2GiClampHistory(reservoir);
         }
+
+        // The selected sample is a reuse if it is not the current frame's candidate.
+        const bool selectedHistory =
+            !(dot(reservoir.direction.xyz, current.direction.xyz) > 0.9999 &&
+              abs(reservoir.direction.w - current.direction.w) <= 0.01);
 
         if (selectedHistory)
         {
