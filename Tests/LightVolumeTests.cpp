@@ -38,20 +38,20 @@ void TestDefaults()
     CHECK(stats.probesPerCascade == 4096u, "16^3 probes per cascade");
     CHECK(stats.localVolumes == qray::LightVolume::kMaxLocalVolumes, "the local slots are reported");
     CHECK(stats.activeLocalVolumes == 0u, "a reset volume has no active local volume");
-    CHECK(stats.baseBounds == qray::LightVolume::kBaseBounds, "the base bounds are 1280 u");
+    CHECK(stats.baseBounds == qray::LightVolume::kBaseBounds, "the base bounds match the metric constant");
 }
 
 void TestCameraSnap()
 {
     qray::LightVolume volume;
-    const float origin[3] = { 700.0f, -700.0f, 0.0f };
+    const float origin[3] = { 17.78f, -17.78f, 0.0f };
     float snapped[3];
 
     volume.SetCameraOrigin(origin);
     volume.GetCameraOrigin(snapped);
 
-    CHECK(NearlyEqual(snapped[0], 640.0f), "x must snap to 640");
-    CHECK(NearlyEqual(snapped[1], -640.0f), "y must snap to -640");
+    CHECK(NearlyEqual(snapped[0], 16.256f), "x must snap to 16.256 m");
+    CHECK(NearlyEqual(snapped[1], -16.256f), "y must snap to -16.256 m");
     CHECK(NearlyEqual(snapped[2], 0.0f), "z must stay at zero");
 }
 
@@ -62,19 +62,19 @@ void TestCascadeSelection()
     volume.SetCameraOrigin(origin);
 
     const float originPoint[3] = { 0.0f, 0.0f, 0.0f };
-    const float insideZero[3] = { 600.0f, 0.0f, 0.0f };
-    const float edgeZero[3] = { 640.0f, 0.0f, 0.0f };
-    const float cascadeOne[3] = { 700.0f, 0.0f, 0.0f };
-    const float cascadeTwo[3] = { 1300.0f, 0.0f, 0.0f };
-    const float cascadeThree[3] = { 3000.0f, 0.0f, 0.0f };
-    const float outside[3] = { 50000.0f, 0.0f, 0.0f };
+    const float insideZero[3] = { 15.0f, 0.0f, 0.0f };
+    const float edgeZero[3] = { 16.256f, 0.0f, 0.0f };
+    const float cascadeOne[3] = { 17.78f, 0.0f, 0.0f };
+    const float cascadeTwo[3] = { 33.5f, 0.0f, 0.0f };
+    const float cascadeThree[3] = { 76.2f, 0.0f, 0.0f };
+    const float outside[3] = { 1270.0f, 0.0f, 0.0f };
 
     CHECK(volume.FindCascade(originPoint) == 0, "the origin must be in cascade 0");
-    CHECK(volume.FindCascade(insideZero) == 0, "600 u must be in cascade 0");
+    CHECK(volume.FindCascade(insideZero) == 0, "15 m must be in cascade 0");
     CHECK(volume.FindCascade(edgeZero) == 0, "the cascade boundary is inclusive");
-    CHECK(volume.FindCascade(cascadeOne) == 1, "700 u must be in cascade 1");
-    CHECK(volume.FindCascade(cascadeTwo) == 2, "1300 u must be in cascade 2");
-    CHECK(volume.FindCascade(cascadeThree) == 3, "3000 u must be in cascade 3");
+    CHECK(volume.FindCascade(cascadeOne) == 1, "17.78 m must be in cascade 1");
+    CHECK(volume.FindCascade(cascadeTwo) == 2, "33.5 m must be in cascade 2");
+    CHECK(volume.FindCascade(cascadeThree) == 3, "76.2 m must be in cascade 3");
     CHECK(volume.FindCascade(outside) == -1, "a point outside all cascades must be rejected");
 }
 
@@ -89,22 +89,22 @@ void TestProbePositions()
     float cellSize = 0.0f;
 
     CHECK(volume.GetProbePosition(probe, position, cellSize), "the first probe must resolve");
-    CHECK(NearlyEqual(cellSize, 80.0f), "cascade 0 must have 80 u cells");
-    CHECK(NearlyEqual(position[0], -600.0f), "the first probe must sit half a cell inside the boundary");
-    CHECK(NearlyEqual(position[1], -600.0f), "the first probe must sit half a cell inside the boundary");
-    CHECK(NearlyEqual(position[2], -600.0f), "the first probe must sit half a cell inside the boundary");
+    CHECK(NearlyEqual(cellSize, 2.032f), "cascade 0 must have 2.032 m cells");
+    CHECK(NearlyEqual(position[0], -15.24f), "the first probe must sit half a cell inside the boundary");
+    CHECK(NearlyEqual(position[1], -15.24f), "the first probe must sit half a cell inside the boundary");
+    CHECK(NearlyEqual(position[2], -15.24f), "the first probe must sit half a cell inside the boundary");
 
     const uint32_t last = volume.GetCascadeProbeIndex(0, 15, 15, 15);
     CHECK(volume.GetProbePosition(last, position, cellSize), "the last cascade probe must resolve");
-    CHECK(NearlyEqual(position[0], 600.0f), "the last probe must sit half a cell inside the boundary");
+    CHECK(NearlyEqual(position[0], 15.24f), "the last probe must sit half a cell inside the boundary");
 
     const uint32_t center = volume.GetCascadeProbeIndex(0, 8, 8, 8);
     CHECK(volume.GetProbePosition(center, position, cellSize), "the center probe must resolve");
-    CHECK(NearlyEqual(position[0], 40.0f), "the center probe must be one cell away from the origin");
+    CHECK(NearlyEqual(position[0], 1.016f), "the center probe must be one cell away from the origin");
 
     const uint32_t farProbe = volume.GetCascadeProbeIndex(5, 0, 0, 0);
     CHECK(volume.GetProbePosition(farProbe, position, cellSize), "the last cascade probe must resolve");
-    CHECK(NearlyEqual(cellSize, 2560.0f), "cascade 5 must have 2560 u cells");
+    CHECK(NearlyEqual(cellSize, 65.024f), "cascade 5 must have 65.024 m cells");
 }
 
 void TestTrilinearWeights()
@@ -113,7 +113,7 @@ void TestTrilinearWeights()
     const float origin[3] = { 0.0f, 0.0f, 0.0f };
     volume.SetCameraOrigin(origin);
 
-    const float probeCenter[3] = { 40.0f, 40.0f, 40.0f };
+    const float probeCenter[3] = { 1.016f, 1.016f, 1.016f };
     uint32_t cascade = 0;
     uint32_t base = 0;
     float weights[2][2][2] = {};
@@ -124,7 +124,7 @@ void TestTrilinearWeights()
     CHECK(NearlyEqual(weights[0][0][0], 1.0f), "a probe centre must give all weight to its corner");
     CHECK(NearlyEqual(weights[1][1][1], 0.0f), "the far corner must have no weight");
 
-    const float between[3] = { 80.0f, 40.0f, 40.0f };
+    const float between[3] = { 2.032f, 1.016f, 1.016f };
     CHECK(volume.GetCascadeLookup(between, cascade, base, weights), "a point between probes must resolve");
 
     float sum = 0.0f;
@@ -144,7 +144,7 @@ void TestTrilinearWeights()
     CHECK(NearlyEqual(weights[0][0][0], 0.5f), "the point halfway along x must split the two x corners");
     CHECK(NearlyEqual(weights[0][0][1], 0.5f), "the point halfway along x must split the two x corners");
 
-    const float outside[3] = { 10000.0f, 0.0f, 0.0f };
+    const float outside[3] = { 254.0f, 0.0f, 0.0f };
     CHECK(!volume.GetCascadeLookup(outside, cascade, base, weights) || cascade > 0u,
           "a far point must not resolve as cascade 0");
 }
@@ -153,14 +153,14 @@ void TestLocalVolume()
 {
     qray::LightVolume volume;
     const float origin[3] = { 0.0f, 0.0f, 0.0f };
-    const float localOrigin[3] = { 100.0f, 0.0f, 0.0f };
+    const float localOrigin[3] = { 2.54f, 0.0f, 0.0f };
     volume.SetCameraOrigin(origin);
-    volume.SetLocalVolume(2, localOrigin, 100.0f, true);
+    volume.SetLocalVolume(2, localOrigin, 2.54f, true);
 
     CHECK(volume.GetStats().activeLocalVolumes == 1u, "one local volume must be active");
 
-    const float inside[3] = { 100.0f, 0.0f, 0.0f };
-    const float outside[3] = { 400.0f, 0.0f, 0.0f };
+    const float inside[3] = { 2.54f, 0.0f, 0.0f };
+    const float outside[3] = { 10.16f, 0.0f, 0.0f };
 
     CHECK(volume.FindLocalVolume(inside) == 2, "the point inside must find local volume 2");
     CHECK(volume.FindLocalVolume(outside) == -1, "the point outside must not find a local volume");
@@ -191,9 +191,9 @@ void TestLocalPreference()
 {
     qray::LightVolume volume;
     const float origin[3] = { 0.0f, 0.0f, 0.0f };
-    const float localOrigin[3] = { 100.0f, 0.0f, 0.0f };
+    const float localOrigin[3] = { 2.54f, 0.0f, 0.0f };
     volume.SetCameraOrigin(origin);
-    volume.SetLocalVolume(0, localOrigin, 100.0f, true);
+    volume.SetLocalVolume(0, localOrigin, 2.54f, true);
 
     for (uint32_t index = 0; index < qray::LightVolume::kCascadeProbeCount; index++)
     {
@@ -206,8 +206,8 @@ void TestLocalPreference()
     }
 
     const float normal[3] = { 0.0f, 0.0f, 1.0f };
-    const float localPoint[3] = { 100.0f, 0.0f, 0.0f };
-    const float cascadePoint[3] = { 400.0f, 0.0f, 0.0f };
+    const float localPoint[3] = { 2.54f, 0.0f, 0.0f };
+    const float cascadePoint[3] = { 10.16f, 0.0f, 0.0f };
     float localColor[3];
     float cascadeColor[3];
 
@@ -229,8 +229,8 @@ void TestProbeCornerMapping()
     volume.Probe(volume.GetCascadeProbeIndex(0, 8, 8, 9)).sh[0][0] = 4.0f;
 
     const float normal[3] = { 0.0f, 0.0f, 1.0f };
-    const float centre[3] = { 40.0f, 40.0f, 40.0f };
-    const float betweenX[3] = { 80.0f, 40.0f, 40.0f };
+    const float centre[3] = { 1.016f, 1.016f, 1.016f };
+    const float betweenX[3] = { 2.032f, 1.016f, 1.016f };
     float colour[3];
 
     CHECK(volume.SampleIrradiance(centre, normal, colour), "the centre sample must resolve");
@@ -240,8 +240,8 @@ void TestProbeCornerMapping()
     CHECK(NearlyEqual(colour[0], 0.5f * 0.886227f + 0.5f * 1.772454f),
           "the halfway x sample must blend probes (8,8,8) and (9,8,8)");
 
-    const float betweenY[3] = { 40.0f, 80.0f, 40.0f };
-    const float betweenZ[3] = { 40.0f, 40.0f, 80.0f };
+    const float betweenY[3] = { 1.016f, 2.032f, 1.016f };
+    const float betweenZ[3] = { 1.016f, 1.016f, 2.032f };
 
     CHECK(volume.SampleIrradiance(betweenY, normal, colour), "the y sample must resolve");
     CHECK(NearlyEqual(colour[0], 0.5f * 0.886227f + 0.5f * 2.658681f),
