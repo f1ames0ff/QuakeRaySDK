@@ -1100,6 +1100,13 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
             rtDirectPass->ConfigureRestir(sky.width, sky.height, uniform->restirParams[0] != 0u);
         }
 
+        // The ReSTIR GI history buffer is sized to the render resolution and created outside the
+        // frame's command list; a mid-list allocation is what stalled the first runtime build.
+        if (rtIndirectPass != nullptr && sky.width > 0 && sky.height > 0)
+        {
+            rtIndirectPass->ConfigureGiReservoirs(sky.width, sky.height);
+        }
+
         // The cascaded irradiance volume follows the same switch and snap as the grid. The direct
         // pass owns the atlas and the one-cascade-per-frame update; the indirect pass only reads
         // the shared binding.

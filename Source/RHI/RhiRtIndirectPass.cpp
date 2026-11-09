@@ -716,6 +716,59 @@ void RhiRtIndirectPass::SetRenderCubemaps(nvrhi::ITexture *pCubemap, nvrhi::ITex
     renderCubemapSampler = pSampler;
 }
 
+bool RhiRtIndirectPass::ConfigureGiReservoirs(uint32_t width, uint32_t height)
+{
+    if (!created || device == nullptr || width == 0 || height == 0)
+    {
+        return false;
+    }
+
+    if (giReservoirs != nullptr && giReservoirWidth == width && giReservoirHeight == height)
+    {
+        return true;
+    }
+
+    nvrhi::BufferDesc bufferDesc;
+    bufferDesc.byteSize = uint64_t(width) * uint64_t(height) * kRestirGiSlots *
+        sizeof(RestirGiReservoir);
+    bufferDesc.structStride = static_cast<uint32_t>(sizeof(RestirGiReservoir));
+    bufferDesc.canHaveUAVs = true;
+    bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    bufferDesc.debugName = "RhiRtIndirectPass ReSTIR GI reservoirs";
+
+    nvrhi::BufferHandle created = rhi::createBuffer(device, bufferDesc, bufferDesc.debugName);
+
+    if (created == nullptr)
+    {
+        return false;
+    }
+
+    nvrhi::BindingSetDesc setDesc;
+    setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, created));
+    nvrhi::BindingSetHandle createdSet = device->createBindingSet(setDesc, giReservoirLayout);
+
+    if (createdSet == nullptr)
+    {
+        return false;
+    }
+
+    if (giReservoirSet != nullptr)
+    {
+        frameContext->Retire(giReservoirSet);
+    }
+    if (giReservoirs != nullptr)
+    {
+        frameContext->Retire(giReservoirs);
+    }
+
+    giReservoirs = created;
+    giReservoirSet = createdSet;
+    giReservoirWidth = width;
+    giReservoirHeight = height;
+    giReservoirClearPending = true;
+    return true;
+}
+
 void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
                                uint32_t frameIndex,
                                float numBounceRays,
@@ -954,54 +1007,12 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
         dummyCubemapCleared = true;
     }
 
-    // ReSTIR GI history: two 48-byte slots over the full render resolution. The set is rebuilt
-    // with the buffer on a size change; a fresh buffer is cleared once before its first write.
-    const uint64_t giReservoirBytes = uint64_t(width) * uint64_t(height) *
-        kRestirGiSlots * sizeof(RestirGiReservoir);
-
-    if (giReservoirs == nullptr || giReservoirWidth != width || giReservoirHeight != height)
+    // ReSTIR GI history: ConfigureGiReservoirs created the buffer and its set before the frame.
+    // A missing pair skips the indirect dispatch instead of binding an invalid descriptor.
+    if (giReservoirs == nullptr || giReservoirSet == nullptr ||
+        giReservoirWidth != width || giReservoirHeight != height)
     {
-        nvrhi::BufferDesc bufferDesc;
-        bufferDesc.byteSize = giReservoirBytes;
-        bufferDesc.structStride = static_cast<uint32_t>(sizeof(RestirGiReservoir));
-        bufferDesc.canHaveUAVs = true;
-        bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufferDesc.debugName = "RhiRtIndirectPass ReSTIR GI reservoirs";
-
-        nvrhi::BufferHandle created = rhi::createBuffer(device, bufferDesc, bufferDesc.debugName);
-
-        if (created == nullptr)
-        {
-            return;
-        }
-
-        if (giReservoirs != nullptr)
-        {
-            frameContext->Retire(giReservoirs);
-        }
-
-        giReservoirs = created;
-        giReservoirWidth = width;
-        giReservoirHeight = height;
-        giReservoirClearPending = true;
-
-        if (giReservoirSet != nullptr)
-        {
-            frameContext->Retire(giReservoirSet);
-            giReservoirSet = nullptr;
-        }
-    }
-
-    if (giReservoirSet == nullptr)
-    {
-        nvrhi::BindingSetDesc setDesc;
-        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, giReservoirs));
-        giReservoirSet = device->createBindingSet(setDesc, giReservoirLayout);
-
-        if (giReservoirSet == nullptr)
-        {
-            return;
-        }
+        return;
     }
 
     pCommandList->beginTrackingBufferState(giReservoirs, nvrhi::ResourceStates::UnorderedAccess);

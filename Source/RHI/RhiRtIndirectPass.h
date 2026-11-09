@@ -310,6 +310,11 @@ public:
     // blue-noise texture is not set, the direct pass has no light set for the slot, the TLAS or the
     // framebuffers are missing, or the uniform/vertex-data inputs are missing or in a shape NVRHI's
     // validation refuses.
+    // Creates or resizes the ReSTIR GI history buffer outside the frame's command list. The
+    // skeleton calls it with the render size before Render; a mid-list 88 MB allocation is what
+    // stalled the first GI runtime build.
+    bool ConfigureGiReservoirs(uint32_t width, uint32_t height);
+
     void Render(nvrhi::ICommandList *pCommandList,
                 uint32_t frameIndex,
                 float numBounceRays,
