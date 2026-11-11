@@ -734,6 +734,10 @@ void main()
 
     q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, oneOverSourcePdf, diffuse, specular );
 
+    // Final-gather feed: the screen-space indirect result at this receiver is stored in the world
+    // cache, so the volume probes and later rays reuse the final gather, not only bounce hits.
+    q2RadianceCachePut( surf.position, diffuse + specular );
+
     {
         // Read the unfiltered specular through the storage image, not the sampled view: this
         // raygen also writes framebufUnfilteredSpecular, and binding both views of one image in
