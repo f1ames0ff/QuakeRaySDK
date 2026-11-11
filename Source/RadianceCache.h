@@ -43,6 +43,7 @@ class RadianceCache
 public:
     static constexpr uint32_t kEntryCount = 1u << 18;
     static constexpr uint32_t kMaxAgeFrames = 600;
+    static constexpr uint32_t kMaxSamples = 64;
 
     struct Lookup
     {

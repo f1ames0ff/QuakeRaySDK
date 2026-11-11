@@ -111,12 +111,27 @@ void RadianceCache::Put(const Lookup &lookup, uint32_t frame, const float radian
     }
 
     RadianceCacheEntry &entry = entries[lookup.index];
-    entry.radiance[0] = radiance[0];
-    entry.radiance[1] = radiance[1];
-    entry.radiance[2] = radiance[2];
+
+    uint32_t samples = 1u;
+    float    value[3] = { radiance[0], radiance[1], radiance[2] };
+
+    if (entry.key == lookup.key && entry.frame != 0u && entry.pad[0] > 0u)
+    {
+        samples = std::min<uint32_t>(entry.pad[0] + 1u, kMaxSamples);
+        const float blend = 1.0f / float(samples);
+        for (int i = 0; i < 3; i++)
+        {
+            value[i] = entry.radiance[i] + (radiance[i] - entry.radiance[i]) * blend;
+        }
+    }
+
+    entry.radiance[0] = value[0];
+    entry.radiance[1] = value[1];
+    entry.radiance[2] = value[2];
     entry.key = lookup.key;
     entry.frame = frameTag;
     std::memset(entry.pad, 0, sizeof(entry.pad));
+    entry.pad[0] = samples;
 }
 
 }

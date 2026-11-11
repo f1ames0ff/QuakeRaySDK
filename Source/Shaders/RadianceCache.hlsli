@@ -25,6 +25,7 @@
 
 #define Q2_RADIANCE_CACHE_SIZE 262144u
 #define Q2_RADIANCE_CACHE_MAX_AGE 600u
+#define Q2_RADIANCE_CACHE_MAX_SAMPLES 64u
 
 struct RadianceCacheEntry
 {
@@ -125,11 +126,23 @@ void q2RadianceCachePut(const float3 position, const float3 radiance)
         rayStatsAdd(RAY_STATS_CATEGORY_CACHE_ACTIVE, 1);
     }
 
+    // Multi-frame reuse: a revisited cell accumulates its radiance with an exponential moving
+    // average capped at 64 samples, instead of overwriting the previous value. pad.x is the count.
+    const RadianceCacheEntry previous = radianceCache[index];
+    uint  samples = 1u;
+    float3 value = radiance;
+
+    if (previous.key == key && previous.frame != 0u && previous.pad.x > 0u)
+    {
+        samples = min(previous.pad.x + 1u, Q2_RADIANCE_CACHE_MAX_SAMPLES);
+        value = lerp(previous.radiance.xyz, radiance, 1.0 / float(samples));
+    }
+
     RadianceCacheEntry entry;
-    entry.radiance = float4(radiance, 0.0);
+    entry.radiance = float4(value, 0.0);
     entry.key = key;
     entry.frame = frameTag;
-    entry.pad = uint2(0u, 0u);
+    entry.pad = uint2(samples, 0u);
     radianceCache[index] = entry;
 }
 

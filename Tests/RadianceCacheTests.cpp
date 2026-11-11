@@ -172,9 +172,17 @@ void TestOverwrite()
     cache.Put(lookup, 10u, first);
     cache.Put(lookup, 11u, second);
 
-    CHECK(cache.Get(lookup, 11u, 30u, out), "the newer write hits");
-    CHECK(out[0] == second[0] && out[1] == second[1] && out[2] == second[2],
-          "the newer write replaces the older one");
+    CHECK(cache.Get(lookup, 11u, 30u, out), "the revisited cell hits");
+    CHECK(out[0] == 2.5f && out[1] == 3.5f && out[2] == 4.5f,
+          "two samples average the cell radiance");
+    CHECK(cache.Entry(lookup.index).pad[0] == 2u, "the sample count accumulates");
+
+    const float third[3] = { 7.0f, 8.0f, 9.0f };
+    cache.Put(lookup, 12u, third);
+    CHECK(cache.Get(lookup, 12u, 30u, out), "the third sample hits");
+    CHECK(out[0] == 4.0f && out[1] == 5.0f && out[2] == 6.0f,
+          "three samples use the running average");
+    CHECK(cache.Entry(lookup.index).pad[0] == 3u, "the sample count reaches three");
 }
 
 }
