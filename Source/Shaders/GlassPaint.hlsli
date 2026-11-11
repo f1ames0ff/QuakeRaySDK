@@ -129,7 +129,8 @@ float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 ra
             else
             {
                 // The froxel stores irradiance; the glass path works in radiance/BRDF units.
-                direct += froxel / 3.14159265;
+                // The blend weight is the policy switch (0 = off, 1 = full).
+                direct += froxel / 3.14159265 * globalUniform.transparencyFroxelBlendParams.x;
             }
         }
     }

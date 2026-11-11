@@ -646,6 +646,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->giReservoirParams[2]       = 0u;
         gu->giReservoirParams[3]       = 0u;
         gu->transparencyFroxelParams[0] = drawInfo.pIlluminationParams->transparencyFroxelEnabled;
+        gu->transparencyFroxelBlendParams[0] =
+            std::clamp( drawInfo.pIlluminationParams->transparencyFroxelBlend, 0.0f, 1.0f );
 
         switch ( drawInfo.pIlluminationParams->transparencyFroxelQuality )
         {
@@ -715,6 +717,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->radianceCacheParams[2]     = 1024.0f;
         gu->radianceCacheParams[3]     = 30.0f;
         gu->radianceSplitParams[0]     = 0u;
+        gu->transparencyFroxelBlendParams[0] = 0.0f;
         gu->radianceSplitParams[1]     = 0u;
         gu->radianceSplitParams[2]     = 0u;
         gu->radianceSplitParams[3]     = 0u;
