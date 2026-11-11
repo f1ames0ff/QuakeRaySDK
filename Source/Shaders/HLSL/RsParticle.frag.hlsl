@@ -81,7 +81,14 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
 
         if (q2SampleTransparencyFroxel(particlePos, -rayDir, origin, size, froxel))
         {
-            ambient += froxel / 3.14159265;
+            if (globalUniform.transparencyFroxelParams.x == 2u)
+            {
+                ambient += float3(0.0, 10.0, 0.0);
+            }
+            else
+            {
+                ambient += froxel / 3.14159265;
+            }
         }
     }
 
