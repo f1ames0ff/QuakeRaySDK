@@ -21,6 +21,22 @@
 #ifndef TRANSPARENCY_FROXELS_HLSLI_
 #define TRANSPARENCY_FROXELS_HLSLI_
 
+// The report measures the froxel volume in Quake units (8192 x 4096 x 8192). The renderer scene
+// is metric, so the box is a camera-centered 32.512 m cube (the report's 1280 u), shared by the
+// fill and both consumers. The previous fixed Quake-unit box put every fill probe kilometres away
+// from the scene and left the sampled cells empty.
+#define Q2_TRANSPARENCY_FROXEL_BOX_SIZE 32.512
+
+float3 q2TransparencyFroxelBoxOrigin()
+{
+    return globalUniform.cameraPosition.xyz - 0.5 * Q2_TRANSPARENCY_FROXEL_BOX_SIZE;
+}
+
+float3 q2TransparencyFroxelBoxSize()
+{
+    return (float3)Q2_TRANSPARENCY_FROXEL_BOX_SIZE;
+}
+
 // The active tier's dimensions come from transparencyFroxelParams.yzw (32/16/32, 64/32/64 or
 // 128/64/128); the buffer is allocated for the high tier.
 uint3 q2TransparencyFroxelDim()

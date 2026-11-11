@@ -116,8 +116,8 @@ float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 ra
     if (globalUniform.transparencyFroxelParams.x != 0u)
     {
         float3 froxel;
-        const float3 origin = float3(-4096.0, -2048.0, -4096.0);
-        const float3 size = float3(8192.0, 4096.0, 8192.0);
+        const float3 origin = q2TransparencyFroxelBoxOrigin();
+        const float3 size = q2TransparencyFroxelBoxSize();
 
         if (q2SampleTransparencyFroxel(surf.position, surf.normal, origin, size, froxel))
         {
@@ -129,7 +129,6 @@ float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 ra
             else
             {
                 // The froxel stores irradiance; the glass path works in radiance/BRDF units.
-                // The blend weight is the policy switch (0 = off, 1 = full).
                 direct += froxel / 3.14159265 * globalUniform.transparencyFroxelBlendParams.x;
             }
         }

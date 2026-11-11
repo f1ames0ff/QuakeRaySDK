@@ -28,8 +28,8 @@
 #include "Q2LightGrid.hlsli"
 #include "TransparencyFroxels.hlsli"
 
-#define Q2_FROXEL_BOX_ORIGIN float3(-4096.0, -2048.0, -4096.0)
-#define Q2_FROXEL_BOX_SIZE float3(8192.0, 4096.0, 8192.0)
+#define Q2_FROXEL_BOX_ORIGIN q2TransparencyFroxelBoxOrigin()
+#define Q2_FROXEL_BOX_SIZE q2TransparencyFroxelBoxSize()
 #define Q2_FROXEL_DIRECTIONS 8u
 
 float3 q2FroxelDirection(const uint index)

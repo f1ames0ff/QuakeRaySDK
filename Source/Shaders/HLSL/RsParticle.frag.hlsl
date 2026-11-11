@@ -76,8 +76,8 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
         const float3 rayDir = normalize(world.xyz - globalUniform.cameraPosition.xyz);
         const float3 particlePos = globalUniform.cameraPosition.xyz + rayDir * sceneDist;
         float3 froxel;
-        const float3 origin = float3(-4096.0, -2048.0, -4096.0);
-        const float3 size = float3(8192.0, 4096.0, 8192.0);
+        const float3 origin = q2TransparencyFroxelBoxOrigin();
+        const float3 size = q2TransparencyFroxelBoxSize();
 
         if (q2SampleTransparencyFroxel(particlePos, -rayDir, origin, size, froxel))
         {
