@@ -611,7 +611,18 @@ void main()
             historyPix = clamp(int2(floor(previousUV * resolution)),
                                int2(0, 0), maxPixel);
             history = giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
-            historyValid = q2GiUsable(history) && q2GiHistoryValid(history, surf.normalGeom);
+            historyValid = q2GiUsable(history);
+            if (historyValid)
+            {
+                if (q2GiHistoryValid(history, surf.normalGeom))
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_HIT, 1);
+                }
+                else
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_MISS, 1);
+                }
+            }
         }
 
         if (historyValid)
@@ -641,11 +652,19 @@ void main()
                 // tap receiver's (validating that rejected most taps); the G-buffer normal is
                 // the receiver at the tap pixel and matches the current pixel on the same
                 // surface.
-                if (!q2GiUsable(tapReservoir) ||
-                    !q2GiHistoryValid(tapReservoir, surf.normalGeom))
+                if (!q2GiUsable(tapReservoir))
                 {
+                    rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
                     continue;
                 }
+
+                if (!q2GiHistoryValid(tapReservoir, surf.normalGeom))
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
+                    continue;
+                }
+
+                rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
 
                 const Surface tapSurface =
                     fetchGbufferSurface_NoAlbedoViewDir_Prev(getCheckerboardPix(tapPix));
