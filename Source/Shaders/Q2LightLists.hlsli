@@ -296,11 +296,12 @@ float q2FastMass(float m, float stratumMax)
 void q2SampleGridLights(
     const int gridCell, const float3 p, const float3 n, const float3 V,
     const float phongExp, const float phongScale, const float phongWeight, const float3 rng,
-    out uint outLightIndex, out uint outSlot, out float outPdf)
+    out uint outLightIndex, out uint outSlot, out float outPdf, out float outMass)
 {
     outLightIndex = LIGHT_INDEX_NONE;
     outSlot = 0u;
     outPdf = 0.0;
+    outMass = 0.0;
 
     if (gridCell < 0 || gridCell >= int(Q2_LIGHT_GRID_CELLS))
     {
@@ -428,6 +429,10 @@ void q2SampleGridLights(
     outLightIndex = id & Q2_LIGHT_GRID_ID_INDEX_MASK;
     outSlot = uint(selected) - base;
     outPdf = pdf / (massSum * partitions);
+    // The floored selection mass of the winner. The ReSTIR target has to use the same mass as the
+    // source pdf; the exact q2LightSelectionMass under-weights the tiny map lights that the
+    // 0.1% stratum floor keeps samplable.
+    outMass = pdf;
 }
 
 void q2SampleClusterLights(

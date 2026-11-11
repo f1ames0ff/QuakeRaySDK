@@ -121,8 +121,16 @@ float4 shadeGlassPaint(const ShHitInfo pane, const RayCone cone, const float3 ra
 
         if (q2SampleTransparencyFroxel(surf.position, surf.normal, origin, size, froxel))
         {
-            // The froxel stores irradiance; the glass path works in radiance/BRDF units.
-            direct += froxel / 3.14159265;
+            if (globalUniform.transparencyFroxelParams.x == 2u)
+            {
+                // Developer proof: value 2 makes the contribution visible as green.
+                direct += float3(0.0, 10.0, 0.0);
+            }
+            else
+            {
+                // The froxel stores irradiance; the glass path works in radiance/BRDF units.
+                direct += froxel / 3.14159265;
+            }
         }
     }
 

@@ -188,16 +188,15 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
             uint lightIndex = uint(LIGHT_INDEX_NONE);
             uint lightSlot = 0u;
             float lightPdf = 0.0;
+            float lightMass = 0.0;
 
             q2SampleGridLights(gridCell, surf.position, surf.normal, surf.toViewerDir,
                                phongExp, phongScale, phongWeight, rng,
-                               lightIndex, lightSlot, lightPdf);
+                               lightIndex, lightSlot, lightPdf, lightMass);
 
             if (lightIndex != uint(LIGHT_INDEX_NONE) && lightPdf > 0.0)
             {
-                const float target = globalLightTargetUnfloored(lightSources[lightIndex], surf.position,
-                                                       surf.normal, surf.toViewerDir,
-                                                       phongExp, phongScale, phongWeight);
+                const float target = lightMass * max(getLuminance(lightSources[lightIndex].color), 0.0);
                 q2RestirAddSample(outReservoir, lightIndex, target / lightPdf, target,
                                   rnd16(seed, salt + 3u));
             }
