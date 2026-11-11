@@ -665,6 +665,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     (UINT32,  4, "radianceSplitParams",      1),
     # Transparency froxels: .x = enabled.
     (UINT32,  4, "transparencyFroxelParams", 1),
+    # Transparency froxel blend: .x = weight.
+    (FLOAT,   4, "transparencyFroxelBlendParams", 1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 
