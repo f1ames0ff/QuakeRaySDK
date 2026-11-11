@@ -617,6 +617,9 @@ void shadeDiffuse(const Surface surf, const LightSample light, float oneOverPdf,
 #define RAY_STATS_CATEGORY_SHADOW_DIRECT      3
 #define RAY_STATS_CATEGORY_SHADOW_INDIRECT    4
 #define RAY_STATS_CATEGORY_PARTICLE           5
+#define RAY_STATS_CATEGORY_CACHE_HIT          6
+#define RAY_STATS_CATEGORY_CACHE_MISS         7
+#define RAY_STATS_CATEGORY_CACHE_ACTIVE       8
 
 struct RtRayStats
 {

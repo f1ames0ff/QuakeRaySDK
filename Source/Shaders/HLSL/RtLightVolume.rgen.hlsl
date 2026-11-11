@@ -48,9 +48,28 @@
 #define Q2_RNG_VOLUME_BASE 800u
 #define Q2_RNG_VOLUME_STRIDE 8u
 
+// The probe rays start at arbitrary cells (including inside solids) and must see both sides of
+// the single-sided Quake geometry: the primary pass's front-face cull makes every probe ray miss
+// (measured: 65,536 rays, ~0 hits; with RAY_FLAG_NONE the same rays hit).
+ShPayload traceVolumeRay(const float3 origin, const float3 direction)
+{
+    ShPayload payload;
+    resetPayload(payload);
+
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
+    ray.TMax = globalUniform.rayLength;
+
+    TraceRay(topLevelAS, RAY_FLAG_NONE, getIndirectIlluminationCullMask(0u),
+             0, 0, SBT_INDEX_MISS_DEFAULT, ray, payload);
+    return payload;
+}
+
 Surface traceVolumeBounce(const float3 origin, const float3 direction)
 {
-    const ShPayload payload = traceIndirectRay(0u, origin, direction);
+    const ShPayload payload = traceVolumeRay(origin, direction);
     rayStatsAdd(RAY_STATS_CATEGORY_INDIRECT, 1);
 
     if (!doesPayloadContainHitInfo(payload))

@@ -618,6 +618,10 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS));
 
+        // One frame tag per radiance-cache slot for the active-cell counter.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE));
+
         lightLayout = device->createBindingLayout(desc);
     }
 
@@ -669,6 +673,12 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     }
 
     if (!CreateLightVolumeHits())
+    {
+        return false;
+    }
+
+    // The active-cell tags share the cache lifetime: both are sized by kEntryCount.
+    if (!CreateRadianceCacheActiveTags())
     {
         return false;
     }
@@ -1702,6 +1712,27 @@ bool RhiRtDirectPass::CreateRadianceCache()
     return true;
 }
 
+bool RhiRtDirectPass::CreateRadianceCacheActiveTags()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(RadianceCache::kEntryCount) * sizeof(uint32_t);
+    desc.structStride = sizeof(uint32_t);
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass radiance-cache active tags";
+
+    radianceCacheActiveTags = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (radianceCacheActiveTags == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the radiance-cache active tags");
+        return false;
+    }
+
+    // The tag is frameId + 1, so the zero-initialized buffer is never mistaken for a live tag.
+    return true;
+}
+
 bool RhiRtDirectPass::CreateTransparencyFroxels()
 {
     nvrhi::BufferDesc desc;
@@ -1982,6 +2013,12 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         pCommandList->beginTrackingBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
     }
 
+    if (radianceCacheActiveTags != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(radianceCacheActiveTags,
+                                               nvrhi::ResourceStates::UnorderedAccess);
+    }
+
     if (transparencyFroxels != nullptr)
     {
         pCommandList->beginTrackingBufferState(transparencyFroxels, nvrhi::ResourceStates::UnorderedAccess);
@@ -2008,6 +2045,9 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
 
         setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE, radianceCache));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE, radianceCacheActiveTags));
 
         setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
             BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS, transparencyFroxels));
