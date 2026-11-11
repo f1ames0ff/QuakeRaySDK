@@ -113,9 +113,10 @@ void main()
 
             if (gridCell >= 0)
             {
+                float lightMass = 0.0;
                 q2SampleGridLights(gridCell, surf.position, surf.normal, surf.toViewerDir,
                                    phongExp, phongScale, phongWeight, rng,
-                                   lightIndex, lightSlot, lightPdf);
+                                   lightIndex, lightSlot, lightPdf, lightMass);
                 sampledFromGrid = lightIndex != LIGHT_INDEX_NONE;
             }
 
