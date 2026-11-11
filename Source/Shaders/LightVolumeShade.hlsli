@@ -48,9 +48,10 @@ float3 volumeHitLocalLights(const Surface hit, const uint seed, const uint salt)
 
     if (gridCell >= 0)
     {
+        float lightMass = 0.0;
         q2SampleGridLights(gridCell, hit.position, hit.normal, hit.toViewerDir,
                            phongExp, phongScale, phongWeight, rng,
-                           lightIndex, lightSlot, lightPdf);
+                           lightIndex, lightSlot, lightPdf, lightMass);
         sampledFromGrid = lightIndex != LIGHT_INDEX_NONE;
     }
 
