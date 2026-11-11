@@ -92,6 +92,7 @@
 #include "Q2LightLists.hlsli"
 #include "LightVolumeGpu.hlsli"
 #include "RestirGi.hlsli"
+#include "RadianceCache.hlsli"
 
 [[vk::binding(0, DESC_SET_GI_MOTION)]]
 Texture2D<float2> giMotionTexture;
@@ -223,6 +224,14 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
         return getSkyAmbientMultiplied( bounceDir, SKY_DIFFUSE_BOUNCE_LOD ) * oneOverPdf;
     }
 
+    // The world radiance cache feeds the second bounce: a hit cell that was shaded by an
+    // earlier ray (first or second bounce) reuses its radiance instead of running the NEE again.
+    float3 cachedRadiance;
+    if ( q2RadianceCacheGet( hitSurf.position, cachedRadiance ) )
+    {
+        return cachedRadiance * oneOverPdf;
+    }
+
     // Q2RTX processes analytic lights only in the first bounce pass, so the second bounce
     // of the diffuse path is lit by the sky it can reach and by the sun alone: the
     // `get_direct_illumination` call sits behind `spec_bounce_index == 0` and the light
@@ -262,6 +271,7 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
         radiance += hitSurf.emission * hitSurf.albedo;
     }
 
+    q2RadianceCachePut( hitSurf.position, radiance );
     return radiance * oneOverPdf;
 }
 
@@ -556,6 +566,8 @@ void main()
         {
             hitRadiance += hitSurf.emission * hitSurf.albedo;
         }
+
+        q2RadianceCachePut( hitSurf.position, hitRadiance );
     }
 
     float3 diffuse, specular;
