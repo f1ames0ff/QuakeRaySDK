@@ -89,6 +89,15 @@ uint q2GiUnpackFrame(const uint packed)
 // Refresh the reservoir age while keeping the selected sample's normal. The high 16 bits of
 // `pad` are the reservoir's last update, not the sample's origin frame: a long-lived selected
 // sample must not age out and reset the temporal accumulation.
+// Store the receiver pixel's normal and the current frame. The reservoir belongs to the pixel it
+// is written at, so both the main history and the spatial taps validate against the receiver
+// normal, not the selected sample's origin normal.
+void q2GiUpdateReceiver(inout ShRestirGiReservoir reservoir, const float3 receiverNormal,
+                        const uint frame)
+{
+    reservoir.pad = q2GiPackNormalFrame(receiverNormal, frame);
+}
+
 void q2GiTouch(inout ShRestirGiReservoir reservoir, const uint frame)
 {
     reservoir.pad = (reservoir.pad & 0xFFFFu) | ((frame & 0xFFFFu) << 16);
@@ -151,8 +160,7 @@ float q2GiWeight(const ShRestirGiReservoir reservoir)
 void q2GiAddSample(inout ShRestirGiReservoir reservoir,
                    const float3 direction, const float distance, const float3 radiance,
                    const float oneOverSourcePdf,
-                   const float weight, const float target,
-                   const float3 surfaceNormal, const uint frame, const float u)
+                   const float weight, const float target, const float u)
 {
     float safeWeight = weight;
     float safeTarget = target;
@@ -176,7 +184,6 @@ void q2GiAddSample(inout ShRestirGiReservoir reservoir,
         // generated it instead of the receiver's pdf.
         reservoir.radiance = float4(radiance, oneOverSourcePdf);
         reservoir.selectedTarget = safeTarget;
-        reservoir.pad = q2GiPackNormalFrame(surfaceNormal, frame);
     }
 }
 
@@ -204,7 +211,6 @@ void q2GiMerge(inout ShRestirGiReservoir destination,
         destination.direction = source.direction;
         destination.radiance = source.radiance;
         destination.selectedTarget = targetAtNewPixel;
-        destination.pad = source.pad;
     }
 }
 

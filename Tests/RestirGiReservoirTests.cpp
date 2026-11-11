@@ -123,6 +123,25 @@ void TestAgeTouch()
           "the refreshed age still expires");
 }
 
+void TestReceiverNormal()
+{
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    const float tilted[3] = { 0.0f, 0.6f, 0.8f };
+    qray::RestirGiReservoir reservoir;
+
+    qray::RestirGiUpdateReceiver(reservoir, up, 5u);
+    CHECK(qray::RestirGiHistoryValid(reservoir, up, 6u), "the receiver normal validates at the next frame");
+
+    qray::RestirGiUpdateReceiver(reservoir, tilted, 100u);
+
+    float decoded[3];
+    qray::RestirGiUnpackNormal(reservoir.pad, decoded);
+    CHECK(decoded[1] > 0.55f, "the update replaces the receiver normal");
+    CHECK(qray::RestirGiUnpackFrame(reservoir.pad) == 100u, "the update refreshes the frame");
+    CHECK(qray::RestirGiHistoryValid(reservoir, tilted, 110u), "the new normal validates");
+    CHECK(!qray::RestirGiHistoryValid(reservoir, up, 110u), "the old normal is rejected");
+}
+
 void TestMerge()
 {
     qray::RestirGiReservoir source;
@@ -206,6 +225,7 @@ int main()
     TestMerge();
     TestNormalAgeValidation();
     TestAgeTouch();
+    TestReceiverNormal();
     TestRejectsBadSources();
     TestClampHistory();
     TestNonFiniteSample();

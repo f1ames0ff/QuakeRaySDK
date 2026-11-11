@@ -596,8 +596,7 @@ void main()
         const float3 currentRadiance = hitRadiance;
         const float currentTarget = max(getLuminance(currentRadiance), 1e-6);
         q2GiAddSample(current, currentDir, currentDistance, currentRadiance, oneOverSourcePdf,
-                      1.0, currentTarget, surf.normalGeom, globalUniform.frameId,
-                      rnd16(seed, 900u));
+                      1.0, currentTarget, rnd16(seed, 900u));
 
         ShRestirGiReservoir reservoir = current;
         ShRestirGiReservoir history = (ShRestirGiReservoir)0;
@@ -642,7 +641,8 @@ void main()
                 // tap receiver's (validating that rejected most taps); the G-buffer normal is
                 // the receiver at the tap pixel and matches the current pixel on the same
                 // surface.
-                if (!q2GiUsable(tapReservoir))
+                if (!q2GiUsable(tapReservoir) ||
+                    !q2GiHistoryValid(tapReservoir, surf.normalGeom))
                 {
                     continue;
                 }
@@ -697,7 +697,7 @@ void main()
             }
         }
 
-        q2GiTouch(reservoir, globalUniform.frameId);
+        q2GiUpdateReceiver(reservoir, surf.normalGeom, globalUniform.frameId);
         giReservoirs[currentSlot * stride + q2GiPixelIndex(pix)] = reservoir;
     }
 

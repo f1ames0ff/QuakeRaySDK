@@ -125,6 +125,13 @@ inline uint32_t RestirGiUnpackFrame(uint32_t packed)
 
 // Refreshes the reservoir age while keeping the selected sample's normal, mirroring
 // q2GiTouch in RestirGi.hlsli.
+// Stores the receiver pixel's normal and the current frame, mirroring q2GiUpdateReceiver.
+inline void RestirGiUpdateReceiver(RestirGiReservoir &reservoir, const float receiverNormal[3],
+                                   uint32_t frame)
+{
+    reservoir.pad = RestirGiPackNormalFrame(receiverNormal, frame);
+}
+
 inline void RestirGiTouch(RestirGiReservoir &reservoir, uint32_t frame)
 {
     reservoir.pad = (reservoir.pad & 0xFFFFu) | ((frame & 0xFFFFu) << 16);
