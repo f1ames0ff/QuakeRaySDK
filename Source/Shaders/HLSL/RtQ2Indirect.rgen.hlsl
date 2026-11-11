@@ -637,11 +637,20 @@ void main()
                 const ShRestirGiReservoir tapReservoir =
                     giReservoirs[previousSlot * stride + q2GiPixelIndex(tapPix)];
 
-                // The pad carries the selected sample's origin normal, not the tap receiver's;
-                // validating it against this pixel rejects most taps and removes the spatial
-                // contribution (measured: [64.5] vs [73.5]). The taps keep the usability check
-                // and rely on the merge target and the visibility trace.
+                // Validate the tap receiver's own normal from the previous-frame G-buffer. The
+                // reservoir pad carries the selected sample's origin normal, which is not the
+                // tap receiver's (validating that rejected most taps); the G-buffer normal is
+                // the receiver at the tap pixel and matches the current pixel on the same
+                // surface.
                 if (!q2GiUsable(tapReservoir))
+                {
+                    continue;
+                }
+
+                const Surface tapSurface =
+                    fetchGbufferSurface_NoAlbedoViewDir_Prev(getCheckerboardPix(tapPix));
+
+                if (dot(normalize(tapSurface.normalGeom), normalize(surf.normalGeom)) < 0.9)
                 {
                     continue;
                 }
