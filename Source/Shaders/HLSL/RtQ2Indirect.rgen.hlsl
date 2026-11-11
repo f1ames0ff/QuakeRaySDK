@@ -636,7 +636,11 @@ void main()
                 const ShRestirGiReservoir tapReservoir =
                     giReservoirs[previousSlot * stride + q2GiPixelIndex(tapPix)];
 
-                if (!q2GiUsable(tapReservoir) || !q2GiHistoryValid(tapReservoir, surf.normalGeom))
+                // The pad carries the selected sample's origin normal, not the tap receiver's;
+                // validating it against this pixel rejects most taps and removes the spatial
+                // contribution (measured: [64.5] vs [73.5]). The taps keep the usability check
+                // and rely on the merge target and the visibility trace.
+                if (!q2GiUsable(tapReservoir))
                 {
                     continue;
                 }
@@ -683,6 +687,7 @@ void main()
             }
         }
 
+        q2GiTouch(reservoir, globalUniform.frameId);
         giReservoirs[currentSlot * stride + q2GiPixelIndex(pix)] = reservoir;
     }
 

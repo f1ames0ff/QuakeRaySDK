@@ -105,6 +105,24 @@ void TestNormalAgeValidation()
     CHECK(decoded[0] > 0.99f, "a side normal round-trips");
 }
 
+void TestAgeTouch()
+{
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    qray::RestirGiReservoir reservoir;
+    reservoir.pad = qray::RestirGiPackNormalFrame(up, 5u);
+
+    qray::RestirGiTouch(reservoir, 100u);
+    CHECK(qray::RestirGiUnpackFrame(reservoir.pad) == 100u, "touch refreshes the frame");
+
+    float decoded[3];
+    qray::RestirGiUnpackNormal(reservoir.pad, decoded);
+    CHECK(decoded[2] > 0.99f, "touch keeps the packed normal");
+
+    CHECK(qray::RestirGiHistoryValid(reservoir, up, 110u), "a touched reservoir stays valid");
+    CHECK(!qray::RestirGiHistoryValid(reservoir, up, 100u + qray::kRestirGiMaxAgeFrames + 1u),
+          "the refreshed age still expires");
+}
+
 void TestMerge()
 {
     qray::RestirGiReservoir source;
@@ -187,6 +205,7 @@ int main()
     TestRepresentativePick();
     TestMerge();
     TestNormalAgeValidation();
+    TestAgeTouch();
     TestRejectsBadSources();
     TestClampHistory();
     TestNonFiniteSample();

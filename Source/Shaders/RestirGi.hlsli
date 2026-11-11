@@ -86,6 +86,14 @@ uint q2GiUnpackFrame(const uint packed)
     return (packed >> 16) & 0xFFFFu;
 }
 
+// Refresh the reservoir age while keeping the selected sample's normal. The high 16 bits of
+// `pad` are the reservoir's last update, not the sample's origin frame: a long-lived selected
+// sample must not age out and reset the temporal accumulation.
+void q2GiTouch(inout ShRestirGiReservoir reservoir, const uint frame)
+{
+    reservoir.pad = (reservoir.pad & 0xFFFFu) | ((frame & 0xFFFFu) << 16);
+}
+
 bool q2GiHistoryValid(const ShRestirGiReservoir reservoir, const float3 currentNormal)
 {
     const uint age = (globalUniform.frameId - q2GiUnpackFrame(reservoir.pad)) & 0xFFFFu;

@@ -123,6 +123,13 @@ inline uint32_t RestirGiUnpackFrame(uint32_t packed)
     return (packed >> 16) & 0xFFFFu;
 }
 
+// Refreshes the reservoir age while keeping the selected sample's normal, mirroring
+// q2GiTouch in RestirGi.hlsli.
+inline void RestirGiTouch(RestirGiReservoir &reservoir, uint32_t frame)
+{
+    reservoir.pad = (reservoir.pad & 0xFFFFu) | ((frame & 0xFFFFu) << 16);
+}
+
 inline bool RestirGiHistoryValid(const RestirGiReservoir &reservoir, const float currentNormal[3],
                                  uint32_t frame)
 {
