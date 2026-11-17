@@ -713,8 +713,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->lightVolumeParams[2]       = 16.0f;
         gu->lightVolumeParams[3]       = 0.0f;
         gu->radianceCacheParams[0]     = 0.0f;
-        gu->radianceCacheParams[1]     = 16.0f;
-        gu->radianceCacheParams[2]     = 1024.0f;
+        gu->radianceCacheParams[1]     = 0.25f;
+        gu->radianceCacheParams[2]     = 25.6f;
         gu->radianceCacheParams[3]     = 30.0f;
         gu->radianceSplitParams[0]     = 0u;
         gu->transparencyFroxelBlendParams[0] = 0.0f;

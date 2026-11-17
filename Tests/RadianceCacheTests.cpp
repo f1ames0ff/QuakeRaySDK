@@ -185,6 +185,28 @@ void TestOverwrite()
     CHECK(cache.Entry(lookup.index).pad[0] == 3u, "the sample count reaches three");
 }
 
+void TestMetricCellScale()
+{
+    const float camera[3] = { 0.0f, 0.0f, 0.0f };
+    const float p0[3] = { 0.05f, 0.10f, 0.15f };
+    const float pSame[3] = { 0.24f, 0.24f, 0.24f };
+    const float pNext[3] = { 0.26f, 0.10f, 0.15f };
+    const float pLod2[3] = { 25.6f, 0.0f, 0.0f };
+
+    const qray::RadianceCache::Lookup l0 =
+        qray::RadianceCache::MakeLookup(p0, camera, 0.25f, 25.6f);
+    const qray::RadianceCache::Lookup lSame =
+        qray::RadianceCache::MakeLookup(pSame, camera, 0.25f, 25.6f);
+    const qray::RadianceCache::Lookup lNext =
+        qray::RadianceCache::MakeLookup(pNext, camera, 0.25f, 25.6f);
+    const qray::RadianceCache::Lookup lLod2 =
+        qray::RadianceCache::MakeLookup(pLod2, camera, 0.25f, 25.6f);
+
+    CHECK(l0.lod == 1u && l0.key == lSame.key, "0.25 m cells group points within 25 cm");
+    CHECK(l0.key != lNext.key, "crossing 0.25 m changes the cell key");
+    CHECK(lLod2.lod == 2u, "metric 25.6 m LOD threshold doubles the cell size");
+}
+
 }
 
 int main()
@@ -197,6 +219,7 @@ int main()
     TestCounters();
     TestKeyMismatch();
     TestOverwrite();
+    TestMetricCellScale();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

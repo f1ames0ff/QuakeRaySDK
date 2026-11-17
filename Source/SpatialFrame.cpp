@@ -366,6 +366,8 @@ void ConvertDrawFrame(const SpatialFrame &frame, const QrDrawFrameInfo &source,
         storage.illumination = *source.pIlluminationParams;
         storage.illumination.cellWorldSize = frame.Length(storage.illumination.cellWorldSize);
         storage.illumination.sunBounceRange = frame.Length(storage.illumination.sunBounceRange);
+        storage.illumination.radianceCacheCellSize = frame.Length(storage.illumination.radianceCacheCellSize);
+        storage.illumination.radianceCacheLodDistance = frame.Length(storage.illumination.radianceCacheLodDistance);
         storage.info.pIlluminationParams = &storage.illumination;
     }
 

@@ -61,7 +61,7 @@ void q2RadianceCacheLookup(const float3 position, out uint index, out uint key)
 {
     const float3 delta = position - globalUniform.cameraPosition.xyz;
     const float distance = length(delta);
-    const float lodDistance = max(globalUniform.radianceCacheParams.z, 1.0);
+    const float lodDistance = max(globalUniform.radianceCacheParams.z, 0.25);
     const uint lod = uint(exp2(floor(log2(1.0 + distance / lodDistance))));
     const float cell = max(globalUniform.radianceCacheParams.y, 0.01) * float(lod);
     const int3 cellPosition = int3(floor(position / cell));

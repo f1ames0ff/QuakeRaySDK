@@ -47,7 +47,7 @@ RadianceCache::Lookup RadianceCache::MakeLookup(const float position[3], const f
     const float dz = position[2] - cameraPosition[2];
     const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    const float safeDistance = std::max(lodDistance, 1.0f);
+    const float safeDistance = std::max(lodDistance, 0.25f);
     const uint32_t lod = uint32_t(std::exp2(std::floor(std::log2(1.0f + distance / safeDistance))));
     const float cell = std::max(baseCellSize, 0.01f) * float(lod);
 
