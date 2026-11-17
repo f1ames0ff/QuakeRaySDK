@@ -167,6 +167,26 @@ inline bool RestirGiFinite(float value)
     return std::isfinite(value);
 }
 
+inline float RestirGiTarget(const float radiance[3],
+                            const float receiverNormal[3],
+                            const float sampleDirection[3])
+{
+    if (!RestirGiFinite(radiance[0]) || !RestirGiFinite(radiance[1]) || !RestirGiFinite(radiance[2]))
+    {
+        return 0.0f;
+    }
+
+    const float luminance = 0.2125f * radiance[0] + 0.7154f * radiance[1] + 0.0721f * radiance[2];
+    const float cosTheta = receiverNormal[0] * sampleDirection[0] +
+                           receiverNormal[1] * sampleDirection[1] +
+                           receiverNormal[2] * sampleDirection[2];
+
+    return (RestirGiFinite(luminance) && luminance > 0.0f &&
+            RestirGiFinite(cosTheta) && cosTheta > 0.0f)
+        ? (luminance * cosTheta)
+        : 0.0f;
+}
+
 inline bool RestirGiIsUsable(const RestirGiReservoir &reservoir)
 {
     if (reservoir.sampleCount == 0u || reservoir.sampleCount > kRestirGiMaxSamples)
@@ -240,6 +260,7 @@ inline void RestirGiAddSample(RestirGiReservoir &reservoir,
         reservoir.radiance[0] = radiance[0];
         reservoir.radiance[1] = radiance[1];
         reservoir.radiance[2] = radiance[2];
+        reservoir.radiance[3] = 0.0f;
         reservoir.selectedTarget = target;
     }
 }

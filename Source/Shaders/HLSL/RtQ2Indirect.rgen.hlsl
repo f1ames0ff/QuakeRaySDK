@@ -571,6 +571,7 @@ void main()
     }
 
     float3 diffuse, specular;
+    float shadingWeight = oneOverSourcePdf;
     if (globalUniform.giReservoirParams.x != 0u)
     {
         const uint stride = q2GiSlotBase(1u);
@@ -606,45 +607,34 @@ void main()
         const float3 currentDir = safeNormalize(hitPos - surf.position);
         const float currentDistance = length(hitPos - surf.position);
         const float3 currentRadiance = hitRadiance;
-        const float currentTarget = max(getLuminance(currentRadiance), 1e-6);
-        q2GiAddSample(current, currentDir, currentDistance, currentRadiance, oneOverSourcePdf,
-                      1.0, currentTarget, rnd16(seed, 900u));
+        const float currentTarget = q2GiTarget(currentRadiance, surf.normal, currentDir);
+        const float currentWeight = currentTarget * max(oneOverSourcePdf, 0.0);
+        q2GiAddSample(current, currentDir, currentDistance, currentRadiance,
+                      currentWeight, currentTarget, rnd16(seed, 900u));
 
         ShRestirGiReservoir reservoir = current;
-        ShRestirGiReservoir history = (ShRestirGiReservoir)0;
-        int2 historyPix = pix;
-        bool historyValid = false;
 
-        if (all(isfinite(previousUV)) && all(previousUV >= (float2)0.0) &&
-            all(previousUV < (float2)1.0))
+        if (globalUniform.frameId > 0u && all(isfinite(previousUV)) &&
+            all(previousUV >= (float2)0.0) && all(previousUV < (float2)1.0))
         {
             const int2 maxPixel = int2(int(globalUniform.renderWidth) - 1,
                                        int(globalUniform.renderHeight) - 1);
-            historyPix = clamp(int2(floor(previousUV * resolution)),
-                               int2(0, 0), maxPixel);
-            history = giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
-            historyValid = q2GiUsable(history);
+            const int2 historyPix = clamp(int2(floor(previousUV * resolution)),
+                                          int2(0, 0), maxPixel);
+            const ShRestirGiReservoir history =
+                giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
+            const Surface historySurface =
+                fetchGbufferSurface_NoAlbedoViewDir_Prev(getCheckerboardPix(historyPix));
+            const bool historyValid = q2GiUsable(history) &&
+                                      q2GiHistoryValid(history, surf.normalGeom) &&
+                                      q2GiSurfaceMatches(historySurface, surf);
+
             if (historyValid)
             {
-                if (q2GiHistoryValid(history, surf.normalGeom))
-                {
-                    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_HIT, 1);
-                }
-                else
-                {
-                    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_MISS, 1);
-                }
+                const float historyTarget =
+                    q2GiTarget(history.radiance.xyz, surf.normal, history.direction.xyz);
+                q2GiMerge(reservoir, history, historyTarget, rnd16(seed, 901u));
             }
-        }
-
-        if (historyValid)
-        {
-            const float3 historyRadiance = history.radiance.xyz;
-            const float3 historyDir = history.direction.xyz;
-            const float historyTarget = max(
-                getLuminance(historyRadiance) * max(dot(surf.normal, historyDir), 0.0), 1e-6);
-
-            q2GiMerge(reservoir, history, historyTarget, rnd16(seed, 901u));
 
             // Four spatial taps from the same previous-frame slot. The slot is not written by this
             // frame, so the taps cannot race with the current pixel's store.
@@ -653,43 +643,27 @@ void main()
                 const int2 offset = tap == 0u ? int2(2, 0) :
                                     tap == 1u ? int2(-2, 0) :
                                     tap == 2u ? int2(0, 2) : int2(0, -2);
-                const int2 tapPix = clamp(historyPix + offset, int2(0, 0),
-                                          int2(int(globalUniform.renderWidth) - 1,
-                                               int(globalUniform.renderHeight) - 1));
+                const int2 tapPix = clamp(historyPix + offset, int2(0, 0), maxPixel);
                 const ShRestirGiReservoir tapReservoir =
                     giReservoirs[previousSlot * stride + q2GiPixelIndex(tapPix)];
 
-                // Validate the tap receiver's own normal from the previous-frame G-buffer. The
-                // reservoir pad carries the selected sample's origin normal, which is not the
-                // tap receiver's (validating that rejected most taps); the G-buffer normal is
-                // the receiver at the tap pixel and matches the current pixel on the same
-                // surface.
-                if (!q2GiUsable(tapReservoir))
+                // Validate both the tap reservoir's stored receiver normal/age and the tap pixel's
+                // previous-frame G-buffer surface against the current pixel.
+                if (!q2GiUsable(tapReservoir) || !q2GiHistoryValid(tapReservoir, surf.normalGeom))
                 {
-                    rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
                     continue;
                 }
-
-                if (!q2GiHistoryValid(tapReservoir, surf.normalGeom))
-                {
-                    rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
-                    continue;
-                }
-
-                rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
 
                 const Surface tapSurface =
                     fetchGbufferSurface_NoAlbedoViewDir_Prev(getCheckerboardPix(tapPix));
 
-                if (dot(normalize(tapSurface.normalGeom), normalize(surf.normalGeom)) < 0.9)
+                if (!q2GiSurfaceMatches(tapSurface, surf))
                 {
                     continue;
                 }
 
-                const float3 tapDir = tapReservoir.direction.xyz;
-                const float tapTarget = max(
-                    getLuminance(tapReservoir.radiance.xyz) * max(dot(surf.normal, tapDir), 0.0),
-                    1e-6);
+                const float tapTarget =
+                    q2GiTarget(tapReservoir.radiance.xyz, surf.normal, tapReservoir.direction.xyz);
                 q2GiMerge(reservoir, tapReservoir, tapTarget, rnd16(seed, 910u + tap));
             }
 
@@ -698,6 +672,7 @@ void main()
 
         // The selected sample is a reuse if it is not the current frame's candidate.
         const bool selectedHistory =
+            q2GiUsable(reservoir) &&
             !(dot(reservoir.direction.xyz, current.direction.xyz) > 0.9999 &&
               abs(reservoir.direction.w - current.direction.w) <= 0.01);
 
@@ -709,7 +684,6 @@ void main()
             const Surface check = traceBounce(surf.position + surf.normalGeom * 2.5e-4,
                                               surf.roughness, surf.instCustomIndex, dir,
                                               FIRST_BOUNCE_MIP_BIAS);
-            rayStatsAdd(RAY_STATS_CATEGORY_INDIRECT, 1);
 
             const float tolerance = 0.5 + 0.005 * distanceToHit;
             const bool visible = !check.isSky && distance(check.position, expected) <= tolerance;
@@ -718,8 +692,7 @@ void main()
             {
                 hitPos = expected;
                 hitRadiance = reservoir.radiance.xyz;
-                // Use the pdf that generated the stored sample, not the receiver's pdf.
-                oneOverSourcePdf = max(reservoir.radiance.w, 1e-6);
+                skyBsdfWeight = 1.0;
             }
             else
             {
@@ -728,11 +701,12 @@ void main()
             }
         }
 
+        shadingWeight = q2GiWeight(reservoir);
         q2GiUpdateReceiver(reservoir, surf.normalGeom, globalUniform.frameId);
         giReservoirs[currentSlot * stride + q2GiPixelIndex(pix)] = reservoir;
     }
 
-    q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, oneOverSourcePdf, diffuse, specular );
+    q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, shadingWeight, diffuse, specular );
 
     // Final-gather feed: the screen-space indirect result at this receiver is stored in the world
     // cache, so the volume probes and later rays reuse the final gather, not only bounce hits.

@@ -214,6 +214,88 @@ void TestNonFiniteSample()
     CHECK(reservoir.weightSum == 0.0f, "a zero target adds no weight");
 }
 
+void TestTargetFunction()
+{
+    const float normal[3] = { 0.0f, 0.0f, 1.0f };
+    const float frontDir[3] = { 0.0f, 0.6f, 0.8f };
+    const float orthogonalDir[3] = { 1.0f, 0.0f, 0.0f };
+    const float backDir[3] = { 0.0f, 0.0f, -1.0f };
+    const float radiance[3] = { 1.0f, 2.0f, 3.0f };
+
+    const float expectedLum = 0.2125f * 1.0f + 0.7154f * 2.0f + 0.0721f * 3.0f;
+    const float target = qray::RestirGiTarget(radiance, normal, frontDir);
+    CHECK(std::fabs(target - expectedLum * 0.8f) < 1e-6f,
+          "target must equal luminance times positive cosine term");
+
+    CHECK(qray::RestirGiTarget(radiance, normal, orthogonalDir) == 0.0f,
+          "orthogonal direction must have zero target");
+    CHECK(qray::RestirGiTarget(radiance, normal, backDir) == 0.0f,
+          "back-facing direction must have zero target");
+
+    const float zeroRad[3] = { 0.0f, 0.0f, 0.0f };
+    const float negRad[3] = { -1.0f, 0.0f, 0.0f };
+    const float nanRad[3] = { NAN, 1.0f, 1.0f };
+    CHECK(qray::RestirGiTarget(zeroRad, normal, frontDir) == 0.0f, "zero radiance gives zero target");
+    CHECK(qray::RestirGiTarget(negRad, normal, frontDir) == 0.0f, "negative radiance gives zero target");
+    CHECK(qray::RestirGiTarget(nanRad, normal, frontDir) == 0.0f, "non-finite radiance gives zero target");
+}
+
+void TestSingleSampleWeightMatchesOneOverPdf()
+{
+    const float normal[3] = { 0.0f, 0.0f, 1.0f };
+    const float dir[3] = { 0.0f, 0.6f, 0.8f };
+    const float radiance[3] = { 2.0f, 3.0f, 4.0f };
+    const float oneOverPdf = 3.5f;
+
+    const float target = qray::RestirGiTarget(radiance, normal, dir);
+    qray::RestirGiReservoir reservoir;
+    reservoir.radiance[3] = 99.0f;
+    qray::RestirGiAddSample(reservoir, dir, 12.0f, radiance, target * oneOverPdf, target, 0.0f);
+
+    CHECK(reservoir.radiance[3] == 0.0f, "radiance[3] must stay zeroed padding");
+    CHECK(std::fabs(qray::RestirGiWeight(reservoir) - oneOverPdf) < 1e-5f,
+          "single-sample W must reproduce oneOverSourcePdf without storing 1/pdf in radiance[3]");
+}
+
+void TestTemporalSpatialMergeEstimatorW()
+{
+    const float normalA[3] = { 0.0f, 0.0f, 1.0f };
+    const float dirA[3] = { 0.0f, 0.0f, 1.0f };
+    const float radA[3] = { 4.0f, 4.0f, 4.0f };
+    const float oneOverPdfA = 2.0f;
+    const float targetA = qray::RestirGiTarget(radA, normalA, dirA);
+
+    qray::RestirGiReservoir history;
+    qray::RestirGiAddSample(history, dirA, 5.0f, radA, targetA * oneOverPdfA, targetA, 0.0f);
+
+    const float normalB[3] = { 0.0f, 0.6f, 0.8f };
+    const float dirB[3] = { 0.0f, 0.6f, 0.8f };
+    const float radB[3] = { 2.0f, 2.0f, 2.0f };
+    const float oneOverPdfB = 5.0f;
+    const float targetB = qray::RestirGiTarget(radB, normalB, dirB);
+
+    qray::RestirGiReservoir current;
+    qray::RestirGiAddSample(current, dirB, 7.0f, radB, targetB * oneOverPdfB, targetB, 0.0f);
+
+    const float historyTargetAtB = qray::RestirGiTarget(history.radiance, normalB, history.direction);
+    qray::RestirGiMerge(current, history, historyTargetAtB, 0.0f);
+
+    const float expectedW = 0.5f * (oneOverPdfA + (targetB / historyTargetAtB) * oneOverPdfB);
+    CHECK(current.sampleCount == 2u, "merge must accumulate both sample counts");
+    CHECK(current.direction[2] == 1.0f && current.radiance[3] == 0.0f,
+          "u = 0 picks history sample and preserves zero padding");
+    CHECK(std::fabs(qray::RestirGiWeight(current) - expectedW) < 1e-5f,
+          "combined W must reflect source PDFs across differing receiver normals without radiance[3]");
+
+    // Equal-target merge: two samples from same target at different PDFs yield mean 1/pdf.
+    qray::RestirGiReservoir sameCurr;
+    const float sameTarget = qray::RestirGiTarget(radA, normalA, dirA);
+    qray::RestirGiAddSample(sameCurr, dirA, 5.0f, radA, sameTarget * oneOverPdfB, sameTarget, 0.0f);
+    qray::RestirGiMerge(sameCurr, history, sameTarget, 0.0f);
+    CHECK(std::fabs(qray::RestirGiWeight(sameCurr) - 0.5f * (oneOverPdfA + oneOverPdfB)) < 1e-5f,
+          "equal-target merge must average the two 1/pdf estimators");
+}
+
 }
 
 int main()
@@ -229,6 +311,9 @@ int main()
     TestRejectsBadSources();
     TestClampHistory();
     TestNonFiniteSample();
+    TestTargetFunction();
+    TestSingleSampleWeightMatchesOneOverPdf();
+    TestTemporalSpatialMergeEstimatorW();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
