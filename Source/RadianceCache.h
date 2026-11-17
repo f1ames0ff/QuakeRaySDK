@@ -14,10 +14,11 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //
-// CPU reference for the world radiance cache: a 1D spatial hash over quantized hit positions with
-// distance-based LOD cells, matching the shader in Source/Shaders/RadianceCache.hlsli. The cache
-// stores shaded radiance for a short frame window; a collision overwrites the slot, so the GPU
-// path is a bounded approximation and not a replacement for the screen-space cache.
+// CPU reference for the world radiance cache: a 1D spatial+normal hash over quantized hit
+// positions and surface normals with distance-based LOD cells and 4-slot linear probing,
+// matching the shader in Source/Shaders/RadianceCache.hlsli. The cache stores outgoing shaded
+// radiance for a short frame window; expired or oldest probe slots are reclaimed when full, so the
+// GPU path is a bounded approximation and not a replacement for the screen-space cache.
 
 #pragma once
 
@@ -44,6 +45,7 @@ public:
     static constexpr uint32_t kEntryCount = 1u << 18;
     static constexpr uint32_t kMaxAgeFrames = 600;
     static constexpr uint32_t kMaxSamples = 64;
+    static constexpr uint32_t kProbeSteps = 4u;
 
     struct Lookup
     {
@@ -67,8 +69,14 @@ public:
     // The shader's hash: a 32-bit mix, stable across CPU and HLSL.
     static uint32_t Hash(uint32_t value);
 
-    // Quantizes the position into a cell whose size is baseCellSize * 2^lod, where lod grows with
-    // the distance to the camera, then hashes the LOD and the integer cell.
+    // Quantizes a world normal into 7 bins per axis (9 bits), falling back to +Z when degenerate.
+    static uint32_t QuantizeNormal(const float normal[3]);
+
+    // Quantizes the position into a cell whose size is baseCellSize * 2^lod and mixes the
+    // quantized surface normal into the hash key so opposite/orthogonal walls stay isolated.
+    static Lookup MakeLookup(const float position[3], const float normal[3],
+                             const float cameraPosition[3],
+                             float baseCellSize, float lodDistance);
     static Lookup MakeLookup(const float position[3], const float cameraPosition[3],
                              float baseCellSize, float lodDistance);
 
@@ -76,7 +84,8 @@ public:
 
     void Clear();
     bool Get(const Lookup &lookup, uint32_t frame, uint32_t maxAge, float outRadiance[3]) const;
-    void Put(const Lookup &lookup, uint32_t frame, const float radiance[3]);
+    void Put(const Lookup &lookup, uint32_t frame, const float radiance[3],
+             uint32_t maxAge = kMaxAgeFrames);
 
     const RadianceCacheEntry &Entry(uint32_t index) const { return entries[index]; }
     const Stats &GetStats() const { return stats; }

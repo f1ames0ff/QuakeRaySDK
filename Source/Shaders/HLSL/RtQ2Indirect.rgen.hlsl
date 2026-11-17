@@ -224,43 +224,51 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
         return getSkyAmbientMultiplied( bounceDir, SKY_DIFFUSE_BOUNCE_LOD ) * oneOverPdf;
     }
 
-    // The world radiance cache feeds the second bounce: a hit cell that was shaded by an
-    // earlier ray (first or second bounce) reuses its radiance instead of running the NEE again.
+    const float bounceBrdf = evalBRDFLambertian( 1.0 ) * max( dot( surf.normal, bounceDir ), 0.0 );
+
+    // The world radiance cache feeds the second bounce: a hit cell that was shaded with full
+    // direct illumination on an earlier ray reuses its outgoing radiance without re-tracing NEE.
     float3 cachedRadiance;
-    if ( q2RadianceCacheGet( hitSurf.position, cachedRadiance ) )
+    if ( q2RadianceCacheGet( hitSurf.position, hitSurf.normalGeom, cachedRadiance ) )
     {
-        return cachedRadiance * oneOverPdf;
+        return bounceBrdf * cachedRadiance * oneOverPdf;
     }
 
-    // Q2RTX processes analytic lights only in the first bounce pass, so the second bounce
-    // of the diffuse path is lit by the sky it can reach and by the sun alone: the
-    // `get_direct_illumination` call sits behind `spec_bounce_index == 0` and the light
-    // list would otherwise be sampled twice for the same pixel.
-    const float sunAttenuation = q2SunBounceAttenuation(
-        length( hitSurf.position - surf.position ), globalUniform.sunBounce.x );
-
     float3 directDiffuse = (float3)0.0;
+    float3 volumeIrradiance;
 
-    if ( globalUniform.directionalLightExists != 0 && sunAttenuation > 0.0 )
+    if ( q2EvaluateLightVolumeIrradiance( hitSurf.position, hitSurf.normal, volumeIrradiance ) )
     {
-        const DirectionalLight sun =
-            decodeAsDirectionalLight( lightSources[ LIGHT_ARRAY_DIRECTIONAL_LIGHT_OFFSET ] );
-        const float2 sunRnd = rnd16_2( seed, Q2_RNG_INDIR2_SUN_DISK ) * 0.99;
-        const LightSample sunLight = sampleDirectionalLight( sun, hitSurf.position, sunRnd );
+        directDiffuse = volumeIrradiance * evalBRDFLambertian( 1.0 );
+    }
+    else
+    {
+        // Outside the probe volume (or when volumes are off), fall back to Q2RTX second-bounce
+        // sun visibility with range attenuation.
+        const float sunAttenuation = q2SunBounceAttenuation(
+            length( hitSurf.position - surf.position ), globalUniform.sunBounce.x );
 
-        if ( getLuminance( sunLight.color ) > 0.0 )
+        if ( globalUniform.directionalLightExists != 0 && sunAttenuation > 0.0 )
         {
-            bool sunTraced;
-            const float3 sunVis = traceSunVisibility( hitSurf, sunLight, sunTraced );
+            const DirectionalLight sun =
+                decodeAsDirectionalLight( lightSources[ LIGHT_ARRAY_DIRECTIONAL_LIGHT_OFFSET ] );
+            const float2 sunRnd = rnd16_2( seed, Q2_RNG_INDIR2_SUN_DISK ) * 0.99;
+            const LightSample sunLight = sampleDirectionalLight( sun, hitSurf.position, sunRnd );
 
-            if ( sunTraced )
+            if ( getLuminance( sunLight.color ) > 0.0 )
             {
-                rayStatsAdd( RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1 );
-            }
+                bool sunTraced;
+                const float3 sunVis = traceSunVisibility( hitSurf, sunLight, sunTraced );
 
-            float3 d;
-            shadeDiffuse( hitSurf, sunLight, 1.0, d );
-            directDiffuse += d * sunVis * sunAttenuation * globalUniform.sunBounce.y;
+                if ( sunTraced )
+                {
+                    rayStatsAdd( RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1 );
+                }
+
+                float3 d;
+                shadeDiffuse( hitSurf, sunLight, 1.0, d );
+                directDiffuse += d * sunVis * sunAttenuation * globalUniform.sunBounce.y;
+            }
         }
     }
 
@@ -271,8 +279,7 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
         radiance += hitSurf.emission * hitSurf.albedo;
     }
 
-    q2RadianceCachePut( hitSurf.position, radiance );
-    return radiance * oneOverPdf;
+    return bounceBrdf * radiance * oneOverPdf;
 }
 
 void q2ShadeIndirect(const Surface surf, const float3 hitPos, const float3 hitRadiance,
@@ -567,7 +574,7 @@ void main()
             hitRadiance += hitSurf.emission * hitSurf.albedo;
         }
 
-        q2RadianceCachePut( hitSurf.position, hitRadiance );
+        q2RadianceCachePut( hitSurf.position, hitSurf.normalGeom, hitRadiance );
     }
 
     float3 diffuse, specular;
@@ -707,10 +714,6 @@ void main()
     }
 
     q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, shadingWeight, diffuse, specular );
-
-    // Final-gather feed: the screen-space indirect result at this receiver is stored in the world
-    // cache, so the volume probes and later rays reuse the final gather, not only bounce hits.
-    q2RadianceCachePut( surf.position, diffuse + specular );
 
     {
         // Read the unfiltered specular through the storage image, not the sampled view: this
