@@ -23,8 +23,131 @@
 #include "glsl_compiler.h"
 #include "utils.h"
 
+#include <dlfcn.h>
 #include <md5.h>
 #include <spirv_reflect.h>
+
+namespace
+{
+struct SpirvToolsApi
+{
+    struct spv_optimizer_t;
+    struct spv_optimizer_options_t;
+    struct spv_binary_t
+    {
+        uint32_t* code;
+        size_t    wordCount;
+    };
+
+    int (*parseTargetEnv)(const char* s, int* env) = nullptr;
+    spv_optimizer_t* (*optimizerCreate)(int env) = nullptr;
+    void (*optimizerDestroy)(spv_optimizer_t* optimizer) = nullptr;
+    void (*registerSizePasses)(spv_optimizer_t* optimizer) = nullptr;
+    spv_optimizer_options_t* (*optionsCreate)() = nullptr;
+    void (*optionsDestroy)(spv_optimizer_options_t* options) = nullptr;
+    int (*optimizerRun)(const spv_optimizer_t* optimizer, const uint32_t* binary, size_t wordCount,
+                        spv_binary_t** optimizedBinary, const spv_optimizer_options_t* options) = nullptr;
+    void (*binaryDestroy)(spv_binary_t* binary) = nullptr;
+    bool loaded = false;
+};
+
+template <typename Fn>
+bool LoadSymbol(const std::vector<void*>& handles, const char* name, Fn& out)
+{
+    for (void* handle : handles)
+    {
+        if (void* sym = dlsym(handle, name))
+        {
+            out = reinterpret_cast<Fn>(sym);
+            return true;
+        }
+    }
+    return false;
+}
+
+const SpirvToolsApi& GetSpirvToolsApi()
+{
+    static SpirvToolsApi api = []() {
+        SpirvToolsApi resolved;
+        static const char* const kCandidates[] = {
+            "libSPIRV-Tools-shared.so",
+            "libSPIRV-Tools.so",
+            "libSPIRV-Tools.so.0",
+            "libSPIRV-Tools-opt.so",
+            "libSPIRV-Tools-opt.so.0",
+            "libshaderc_shared.so.1",
+            "libshaderc.so.1",
+        };
+        std::vector<void*> handles;
+        for (const char* lib : kCandidates)
+        {
+            if (void* h = dlopen(lib, RTLD_LAZY | RTLD_GLOBAL))
+                handles.push_back(h);
+        }
+
+        if (LoadSymbol(handles, "spvParseTargetEnv", resolved.parseTargetEnv) &&
+            LoadSymbol(handles, "spvOptimizerCreate", resolved.optimizerCreate) &&
+            LoadSymbol(handles, "spvOptimizerDestroy", resolved.optimizerDestroy) &&
+            LoadSymbol(handles, "spvOptimizerRegisterSizePasses", resolved.registerSizePasses) &&
+            LoadSymbol(handles, "spvOptimizerOptionsCreate", resolved.optionsCreate) &&
+            LoadSymbol(handles, "spvOptimizerOptionsDestroy", resolved.optionsDestroy) &&
+            LoadSymbol(handles, "spvOptimizerRun", resolved.optimizerRun) &&
+            LoadSymbol(handles, "spvBinaryDestroy", resolved.binaryDestroy))
+        {
+            resolved.loaded = true;
+        }
+        return resolved;
+    }();
+    return api;
+}
+
+bool OptimizeSpirvSize(std::vector<uint8_t>& spirv, const std::string& targetEnv)
+{
+    if (spirv.empty() || (spirv.size() % sizeof(uint32_t)) != 0)
+        return false;
+
+    const SpirvToolsApi& api = GetSpirvToolsApi();
+    if (!api.loaded)
+    {
+        std::fprintf(stderr,
+                     "glslangValidator lacks -Os (spirv-opt) and no SPIRV-Tools optimizer library "
+                     "(libSPIRV-Tools-opt or libshaderc) could be loaded via dlopen\n");
+        return false;
+    }
+
+    int env = 0;
+    if (!api.parseTargetEnv(targetEnv.c_str(), &env))
+    {
+        std::fprintf(stderr, "spvParseTargetEnv failed for target '%s'\n", targetEnv.c_str());
+        return false;
+    }
+
+    auto* optimizer = api.optimizerCreate(env);
+    if (!optimizer)
+        return false;
+
+    api.registerSizePasses(optimizer);
+    auto* options = api.optionsCreate();
+    SpirvToolsApi::spv_binary_t* optimized = nullptr;
+    const int rc = api.optimizerRun(optimizer, reinterpret_cast<const uint32_t*>(spirv.data()),
+                                    spirv.size() / sizeof(uint32_t), &optimized, options);
+    api.optionsDestroy(options);
+    api.optimizerDestroy(optimizer);
+
+    if (rc != 0 || !optimized || !optimized->code || optimized->wordCount == 0)
+    {
+        if (optimized)
+            api.binaryDestroy(optimized);
+        std::fprintf(stderr, "spvOptimizerRun failed (rc=%d)\n", rc);
+        return false;
+    }
+
+    const uint8_t* begin = reinterpret_cast<const uint8_t*>(optimized->code);
+    spirv.assign(begin, begin + optimized->wordCount * sizeof(uint32_t));
+    api.binaryDestroy(optimized);
+    return true;
+}
+} // namespace
 
 std::string MD5HashString(unsigned char* sig)
 {
@@ -176,28 +299,34 @@ bool GLSLCompiler::GLSLCompiler::Compile(Permutation& permutation, const std::ve
     // Assemble command line arguments
     // ------------------------------------------------------------------------------------------------
 
-    std::string cmdLine = m_GlslangExe + " ";
-
-    if (m_DebugCompile)
-    {
-        cmdLine += "-g -gVS -Od ";
-    }
-
     std::vector<fs::path> includeSearchPaths;
-    for (int i = 0; i < arguments.size(); i++)
+    std::string targetEnv = "vulkan1.2";
+    bool requestedSizeOpt = false;
+    for (size_t i = 0; i < arguments.size(); i++)
     {
-        if (arguments[i][0] == '-' && arguments[i][1] == 'I')
-        {
-            cmdLine += "\"" + arguments[i] + "\"";
+        if (arguments[i].size() >= 2 && arguments[i][0] == '-' && arguments[i][1] == 'I')
             includeSearchPaths.push_back(&(arguments[i][2]));
-        }
-        else
-        {
-            cmdLine += arguments[i];
-        }
-
-        cmdLine += " ";
+        else if (arguments[i] == "-Os")
+            requestedSizeOpt = true;
+        else if (arguments[i] == "--target-env" && (i + 1) < arguments.size())
+            targetEnv = arguments[i + 1];
     }
+
+    const auto buildCmdLine = [&](bool stripOs) {
+        std::string cmd = m_GlslangExe + " ";
+        if (m_DebugCompile)
+            cmd += "-g -gVS -Od ";
+        for (size_t i = 0; i < arguments.size(); i++)
+        {
+            if (stripOs && arguments[i] == "-Os")
+                continue;
+            if (arguments[i].size() >= 2 && arguments[i][0] == '-' && arguments[i][1] == 'I')
+                cmd += "\"" + arguments[i] + "\" ";
+            else
+                cmd += arguments[i] + " ";
+        }
+        return cmd;
+    };
 
     // Our code for collecting shader dependencies is not smart enough to deal with the possibility that each permutation
     // might have different #include files, so we only need to collect them once and then reuse them for each permutation.
@@ -215,22 +344,24 @@ bool GLSLCompiler::GLSLCompiler::Compile(Permutation& permutation, const std::ve
 
     std::string tempFilePath = m_OutputPath + "/" + m_ShaderName + "_temp/" + std::to_string(permutation.key) + ".spv";
 
-    cmdLine += "-o \"" + tempFilePath + "\" \"" + m_ShaderPath + "\"";
-
     // ------------------------------------------------------------------------------------------------
     // Launch process and compile SPIRV using glslangValidator
     // ------------------------------------------------------------------------------------------------
 
-    const auto func = [&](const char* bytes, size_t n) {
+    const auto runGlslang = [&](bool stripOs, std::vector<ErrorData>& outErrors, std::string& rawOutput) {
+        outErrors.clear();
+        rawOutput.clear();
+        const std::string cmdLine = buildCmdLine(stripOs) + "-o \"" + tempFilePath + "\" \"" + m_ShaderPath + "\"";
 
-        std::stringstream ss(std::string(bytes, n));
+        const auto func = [&](const char* bytes, size_t n) {
+            rawOutput.append(bytes, n);
+            std::stringstream ss(std::string(bytes, n));
+            std::string token;
 
-        std::string token;
-
-        while (std::getline(ss, token, '\n'))
-        {
-            if (token != "\r") // avoid carriage return
+            while (std::getline(ss, token, '\n'))
             {
+                if (!token.empty() && token.back() == '\r')
+                    token.pop_back();
                 if (token.empty())
                     continue;
 
@@ -255,25 +386,39 @@ bool GLSLCompiler::GLSLCompiler::Compile(Permutation& permutation, const std::ve
                         }
                     }
                 }
-                if (!token.empty())
-                    token.pop_back();
-                errors.push_back(ErrorData{token, lineNumber});
+                outErrors.push_back(ErrorData{token, lineNumber});
             }
-        }
+        };
+
+        tpl::Process process(cmdLine, "", func, func);
+        return process.get_exit_status() == 0;
     };
 
-    tpl::Process process(cmdLine, "", func, func);
+    std::string rawOutput;
+    bool needsExternalSizeOpt = false;
+    bool succeeded = runGlslang(false, errors, rawOutput);
 
-    bool succeeded = process.get_exit_status() == 0;
+    // Some Linux distributions build glslangValidator without SPIRV-Tools linked,
+    // rejecting -Os. Retry without -Os and run SPIRV-Tools size passes instead so
+    // unused shader bindings are still stripped before spirv-reflect runs.
+    if (!succeeded && requestedSizeOpt &&
+        (rawOutput.find("optimizer not linked") != std::string::npos ||
+         rawOutput.find("-Os not available") != std::string::npos))
+    {
+        needsExternalSizeOpt = true;
+        succeeded = runGlslang(true, errors, rawOutput);
+    }
 
-    if (!m_DisableLogs && errors.size() > 1)
+    if (!succeeded && !m_DisableLogs && !errors.empty())
     {
         writeMutex.lock();
 
         fprintf(stderr, "%s[%u]\n", m_ShaderFileName.c_str(), permutation.key);
 
-        for (size_t i = 1; i < errors.size(); i++)
+        for (size_t i = 0; i < errors.size(); i++)
         {
+            if (i == 0 && errors[i].error == m_ShaderPath)
+                continue;
             if (errors[i].lineNumber > -1)
             {
                 fprintf(stderr, "%s(%d) : glslangValidator error : %s\n", m_ShaderPath.c_str(), errors[i].lineNumber, errors[i].error.c_str());
@@ -306,13 +451,20 @@ bool GLSLCompiler::GLSLCompiler::Compile(Permutation& permutation, const std::ve
 
         file.close();
 
-        // ------------------------------------------------------------------------------------------------
-        // Generate hash for SPIRV
-        // ------------------------------------------------------------------------------------------------
+        if (needsExternalSizeOpt && !OptimizeSpirvSize(glslShaderBinary->spirv, targetEnv))
+        {
+            succeeded = false;
+        }
+        else
+        {
+            // ------------------------------------------------------------------------------------------------
+            // Generate hash for SPIRV
+            // ------------------------------------------------------------------------------------------------
 
-        permutation.hashDigest     = GetMD5HashDigest(glslShaderBinary->BufferPointer(), glslShaderBinary->BufferSize());
-        permutation.name           = m_ShaderName + "_" + permutation.hashDigest;
-        permutation.headerFileName = permutation.name + ".h";
+            permutation.hashDigest     = GetMD5HashDigest(glslShaderBinary->BufferPointer(), glslShaderBinary->BufferSize());
+            permutation.name           = m_ShaderName + "_" + permutation.hashDigest;
+            permutation.headerFileName = permutation.name + ".h";
+        }
     }
 
     permutation.dependencies = m_ShaderDependencies;
