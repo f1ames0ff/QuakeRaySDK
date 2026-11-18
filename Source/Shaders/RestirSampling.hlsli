@@ -27,8 +27,9 @@
 //     sampleCount together, so the estimator is unchanged and old history fades out.
 //   * Spatial taps come from the history slot too (4 taps, 2 pixels away). They are validated
 //     against the same world position and normal, so an edge does not leak a neighbour's light.
-//   * The target is the grid-consistent unfloored mass; with the grid the candidate source pdf is the
-//     grid sample's pdf, so target/pdf is the RIS weight over the grid distribution.
+//   * All four target sites (grid, uniform, fallback, history) evaluate q2RestirTarget: mass floored
+//     by proxy * 1e-3, multiplied once by luminance and textured-area scale, so temporal and
+//     spatial merges stay in consistent units.
 
 #ifndef RESTIR_SAMPLING_HLSLI_
 #define RESTIR_SAMPLING_HLSLI_
@@ -116,6 +117,23 @@ bool q2RestirSurfaceMatches(const Surface previous, const Surface current)
                current.normalGeom * rsqrt(currentLengthSq)) > 0.9;
 }
 
+float q2RestirTarget(const ShLightEncoded encoded, const float3 p, const float3 n,
+                     const float3 V, const float phongExp, const float phongScale,
+                     const float phongWeight)
+{
+    if (encoded.lightType == LIGHT_TYPE_DIRECTIONAL)
+    {
+        return 0.0;
+    }
+
+    const float mass  = q2LightSelectionMass(encoded, p, n, V, phongExp, phongScale, phongWeight);
+    const float proxy = globalLightSolidAngleProxy(encoded, p);
+    const float scale = (encoded.lightType == LIGHT_TYPE_TEXTURED_AREA)
+        ? max(decodeAsTexturedAreaLight(encoded).meanEmiss, 0.0) : 1.0;
+
+    return max(mass, proxy * 1e-3) * max(getLuminance(encoded.color), 0.0) * scale;
+}
+
 void q2RestirMergeHistory(inout ShRestirReservoir reservoir, const uint historyBase,
                           const uint2 resolution, const int2 historyPacked,
                           const Surface surf, const float phongExp, const float phongScale,
@@ -129,9 +147,9 @@ void q2RestirMergeHistory(inout ShRestirReservoir reservoir, const uint historyB
         return;
     }
 
-    const float target = globalLightTargetUnfloored(lightSources[history.lightIndex], surf.position,
-                                           surf.normal, surf.toViewerDir,
-                                           phongExp, phongScale, phongWeight);
+    const float target = q2RestirTarget(lightSources[history.lightIndex], surf.position,
+                                        surf.normal, surf.toViewerDir,
+                                        phongExp, phongScale, phongWeight);
 
     q2RestirMerge(reservoir, history, target, rnd16(seed, salt));
 }
@@ -196,7 +214,9 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
 
             if (lightIndex != uint(LIGHT_INDEX_NONE) && lightPdf > 0.0)
             {
-                const float target = lightMass * max(getLuminance(lightSources[lightIndex].color), 0.0);
+                const float target = q2RestirTarget(lightSources[lightIndex], surf.position,
+                                                    surf.normal, surf.toViewerDir,
+                                                    phongExp, phongScale, phongWeight);
                 q2RestirAddSample(outReservoir, lightIndex, target / lightPdf, target,
                                   rnd16(seed, salt + 3u));
             }
@@ -205,9 +225,9 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
         {
             const uint lightIndex = (uint)LIGHT_ARRAY_REGULAR_LIGHTS_OFFSET +
                 min((uint)(rnd16(seed, salt) * float(count)), count - 1u);
-            const float target = globalLightTargetUnfloored(lightSources[lightIndex], surf.position,
-                                                   surf.normal, surf.toViewerDir,
-                                                   phongExp, phongScale, phongWeight);
+            const float target = q2RestirTarget(lightSources[lightIndex], surf.position,
+                                                surf.normal, surf.toViewerDir,
+                                                phongExp, phongScale, phongWeight);
 
             q2RestirAddSample(outReservoir, lightIndex, target * float(count), target,
                               rnd16(seed, salt + 1u));
@@ -226,9 +246,9 @@ void q2SampleRestirLights(const uint seed, const int2 pix, const int2 regularPix
             const uint salt = (uint)Q2_RNG_RESTIR_FALLBACK_BASE + j * 4u;
             const uint lightIndex = (uint)LIGHT_ARRAY_REGULAR_LIGHTS_OFFSET +
                 min((uint)(rnd16(seed, salt + 2u) * float(count)), count - 1u);
-            const float target = globalLightTargetUnfloored(lightSources[lightIndex], surf.position,
-                                                   surf.normal, surf.toViewerDir,
-                                                   phongExp, phongScale, phongWeight);
+            const float target = q2RestirTarget(lightSources[lightIndex], surf.position,
+                                                surf.normal, surf.toViewerDir,
+                                                phongExp, phongScale, phongWeight);
 
             q2RestirAddSample(outReservoir, lightIndex, target * float(count), target,
                               rnd16(seed, salt + 3u));

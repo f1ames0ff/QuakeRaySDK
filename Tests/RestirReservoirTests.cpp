@@ -178,6 +178,51 @@ void TestRepeatedMergeAccumulates()
     CHECK(NearlyEqual(qray::RestirWeight(current), 10.0f), "identical merges must keep the estimator");
 }
 
+void TestLuminanceScaleTargetPreservesInversePdf()
+{
+    const float sourcePdf = 0.04f;
+    const float expectedWeight = 1.0f / sourcePdf;
+    const float mass = 2.5f;
+    const float luminance = 18.0f;
+    const float target = mass * luminance;
+
+    qray::RestirReservoir scaled;
+    qray::RestirAddSample(scaled, 4u, target / sourcePdf, target, 0.0f);
+
+    CHECK(NearlyEqual(qray::RestirWeight(scaled), expectedWeight),
+          "any positive luminance scale on target must preserve W == 1 / pdf for a single candidate");
+
+    qray::RestirReservoir mismatched;
+    qray::RestirAddSample(mismatched, 4u, (target * luminance) / sourcePdf, target, 0.0f);
+    CHECK(NearlyEqual(qray::RestirWeight(mismatched), expectedWeight * luminance),
+          "duplicating luminance only in weight inflates W by luminance");
+}
+
+void TestConsistentTargetMergePreservesEstimator()
+{
+    // History sampled from a uniform or grid distribution with target = mass * lum * scale
+    // and current sampled at an identical surface with the same target definition.
+    const float mass = 0.5f;
+    const float luminance = 12.0f;
+    const float scale = 3.0f;
+    const float unifiedTarget = mass * luminance * scale;
+    const float historyPdf = 0.2f;
+    const float currentPdf = 0.5f;
+
+    qray::RestirReservoir history;
+    qray::RestirAddSample(history, 5u, unifiedTarget / historyPdf, unifiedTarget, 0.0f);
+
+    qray::RestirReservoir current;
+    qray::RestirAddSample(current, 5u, unifiedTarget / currentPdf, unifiedTarget, 0.0f);
+
+    qray::RestirMerge(current, history, unifiedTarget, 0.0f);
+
+    const float expectedCombinedWeight = 0.5f * ((1.0f / historyPdf) + (1.0f / currentPdf));
+    CHECK(current.sampleCount == 2u, "consistent merge must combine source sample counts");
+    CHECK(NearlyEqual(qray::RestirWeight(current), expectedCombinedWeight),
+          "consistent target evaluation across history and current must preserve the mean 1/pdf weight");
+}
+
 }
 
 int main()
@@ -192,6 +237,8 @@ int main()
     TestClampPreservesWeight();
     TestClampIgnoresShortHistory();
     TestRepeatedMergeAccumulates();
+    TestLuminanceScaleTargetPreservesInversePdf();
+    TestConsistentTargetMergePreservesEstimator();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

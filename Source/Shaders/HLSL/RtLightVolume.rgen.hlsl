@@ -171,7 +171,7 @@ void main()
 
         if (globalUniform.radianceSplitParams.x != 0u)
         {
-            const ShPayload payload = traceIndirectRay(0u, rayOrigin, direction);
+            const ShPayload payload = traceVolumeRay(rayOrigin, direction);
             rayStatsAdd(RAY_STATS_CATEGORY_INDIRECT, 1);
 
             ShLightVolumeHit record;
@@ -180,7 +180,7 @@ void main()
             record.pad0 = 0u;
             record.pad1 = 0u;
             record.pad2 = 0u;
-            lightVolumeHits[probeIndex * Q2_LIGHT_VOLUME_MAX_RAYS + ray] = record;
+            lightVolumeHits[invocation * Q2_LIGHT_VOLUME_MAX_RAYS + ray] = record;
         }
         else
         {

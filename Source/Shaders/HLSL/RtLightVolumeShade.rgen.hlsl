@@ -130,7 +130,7 @@ void main()
         const float2 u = rnd16_2(seed, salt);
         const float3 direction = sampleSphere(u.x, u.y);
         const float3 rayOrigin = probePosition + direction * (0.01 * globalUniform.sceneUnitsPerHostUnit);
-        const ShLightVolumeHit record = lightVolumeHits[probeIndex * Q2_LIGHT_VOLUME_MAX_RAYS + ray];
+        const ShLightVolumeHit record = lightVolumeHits[invocation * Q2_LIGHT_VOLUME_MAX_RAYS + ray];
 
         float3 radiance;
 

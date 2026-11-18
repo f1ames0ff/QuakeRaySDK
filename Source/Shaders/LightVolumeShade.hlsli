@@ -129,20 +129,20 @@ float3 volumeHitRadiance(const Surface hit, const uint seed, const uint salt)
     return radiance;
 }
 
-// World radiance cache: a hit reuses the shaded radiance of a previously seen cell. A miss shades
-// and inserts; collisions overwrite. The cache is gated by radianceCacheParams.x (host cvar
-// rt_radiance_cache), so the first slice stays opt-in.
+// World radiance cache: a hit reuses the shaded radiance of a previously seen cell and surface
+// normal. A miss shades and inserts; active entries probe four slots before evicting. The cache is
+// gated by radianceCacheParams.x (host cvar rt_radiance_cache).
 float3 volumeHitCachedRadiance(const Surface hit, const uint seed, const uint salt)
 {
     float3 cached;
 
-    if (q2RadianceCacheGet(hit.position, cached))
+    if (q2RadianceCacheGet(hit.position, hit.normalGeom, cached))
     {
         return cached;
     }
 
     const float3 radiance = volumeHitRadiance(hit, seed, salt);
-    q2RadianceCachePut(hit.position, radiance);
+    q2RadianceCachePut(hit.position, hit.normalGeom, radiance);
     return radiance;
 }
 

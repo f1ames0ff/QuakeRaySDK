@@ -75,7 +75,7 @@ void LightGrid::Build(const LightGridSource *sources, uint32_t sourceCount, cons
     {
         const float reach = std::isfinite(source.reach) && source.reach > 0.0f ? source.reach : 0.0f;
         const float radius = std::isfinite(source.radius) && source.radius > 0.0f ? source.radius : 0.0f;
-        const float influence = reach + radius + 32.0f;
+        const float influence = reach + radius + kInfluenceMargin;
         const float influence2 = influence * influence;
         int lo[3];
         int hi[3];
@@ -101,7 +101,7 @@ void LightGrid::Build(const LightGridSource *sources, uint32_t sourceCount, cons
             return;
         }
 
-        const double scale = std::max(1.0, double(radius) * double(radius));
+        const double scale = std::max(kMinDistanceScaleSq, double(radius) * double(radius));
         const double power = std::isfinite(source.power) && source.power > 0.0f ? double(source.power) : 0.0;
 
         for (int z = lo[2]; z <= hi[2]; z++)
