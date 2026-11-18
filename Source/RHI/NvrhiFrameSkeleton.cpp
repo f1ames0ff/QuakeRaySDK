@@ -2449,7 +2449,9 @@ nvrhi::ITexture *NvrhiFrameSkeleton::ResolvePresentDirectTexture(uint32_t frameI
         return nullptr;
     }
 
-    if (presentDirectTextures[frameIndex] == nullptr || presentDirectImageHandles[frameIndex] != handle)
+    if (presentDirectTextures[frameIndex] == nullptr || presentDirectImageHandles[frameIndex] != handle ||
+        presentDirectTextures[frameIndex]->getDesc().width != sky.width ||
+        presentDirectTextures[frameIndex]->getDesc().height != sky.height)
     {
         // The image is new or the engine re-created its framebuffers (the same point at which the
         // sky pass re-wraps ALBEDO): the previous wrap goes through the retire queue, and the new
