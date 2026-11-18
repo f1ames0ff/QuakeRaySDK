@@ -241,8 +241,8 @@ RhiRtIndirectPass::~RhiRtIndirectPass()
     for (Target &target : targets)
     {
         target.framebufferSet = nullptr;
-    target.motionSet = nullptr;
-    target.motionTexture = nullptr;
+        target.motionSet = nullptr;
+        target.motionTexture = nullptr;
         for (nvrhi::TextureHandle &texture : target.framebufferTextures)
         {
             texture = nullptr;
@@ -1176,6 +1176,8 @@ void RhiRtIndirectPass::ReleaseFramebufferTarget(Target &target)
     }
 
     target.framebufferSet = nullptr;
+    target.motionSet = nullptr;
+    target.motionTexture = nullptr;
 
     for (nvrhi::TextureHandle &texture : target.framebufferTextures)
     {
