@@ -886,6 +886,13 @@ QRAPI QrResult QRCONV qrUploadDtalGroups(
 
 #define QR_CLUSTER_LIGHT_MAX_SOURCES_CLUSTERS 128
 
+#define QR_LIGHT_GRID_ID_INDEX_MASK 0xFFFFu
+#define QR_LIGHT_GRID_ID_TYPE_SHIFT 30
+#define QR_LIGHT_GRID_ID_TYPE_MASK 3u
+#define QR_LIGHT_GRID_ID_TYPE_LIGHT 0u
+#define QR_LIGHT_GRID_ID_TYPE_REFLECTION_PROBE 1u
+#define QR_LIGHT_GRID_ID_TYPE_DECAL 2u
+
 typedef struct QrClusterLightSource
 {
     uint64_t  uniqueID;
@@ -914,6 +921,10 @@ typedef struct QrClusterLightSourcesUploadInfo
     int32_t                     allowOverflow;
 
     int32_t                     validate;
+
+    QrFloat3D                   viewOrigin;
+
+    int32_t                     allowGrid;
 } QrClusterLightSourcesUploadInfo;
 
 QRAPI QrResult QRCONV qrUploadClusterLightSources(
@@ -1023,6 +1034,50 @@ QRAPI QrResult QRCONV qrGetClusterLightList(
 QRAPI QrResult QRCONV qrGetClusterLightTail(
     QrInstance  qrInstance,
     uint32_t    cluster,
+    uint64_t   *pLightUniqueIds,
+    float      *pProb,
+    float      *pMarginal,
+    uint32_t   *pAlias,
+    float      *pBeta,
+    uint32_t    maxCount,
+    uint32_t   *pCount);
+
+typedef struct QrLightGridStats
+{
+    uint32_t   enabled;
+    uint32_t   cells;
+    uint32_t   cascades;
+    uint32_t   sources;
+
+    uint32_t   occupiedCells;
+    uint32_t   fastEntries;
+    uint32_t   tailEntries;
+    uint32_t   tailDropped;
+    uint32_t   cellsWithTail;
+
+    uint32_t   candidateMax;
+    uint32_t   candidateMedian;
+    uint32_t   candidateP95;
+
+    float      buildMs;
+    float      cellSize[8];
+    QrFloat3D  origin[8];
+} QrLightGridStats;
+
+QRAPI QrResult QRCONV qrGetLightGridStats(
+    QrInstance       qrInstance,
+    QrLightGridStats *pStats);
+
+QRAPI QrResult QRCONV qrGetLightGridList(
+    QrInstance  qrInstance,
+    uint32_t    cell,
+    uint64_t   *pLightUniqueIds,
+    uint32_t    maxCount,
+    uint32_t   *pCount);
+
+QRAPI QrResult QRCONV qrGetLightGridTail(
+    QrInstance  qrInstance,
+    uint32_t    cell,
     uint64_t   *pLightUniqueIds,
     float      *pProb,
     float      *pMarginal,
@@ -1399,6 +1454,14 @@ typedef struct QrDrawFrameDebugParams
     QrDebugDrawFlags drawFlags;
 } QrDrawFrameDebugParams;
 
+#define QR_LIGHT_VOLUME_MAX_LOCAL 8
+
+typedef struct QrLightVolumeLocal
+{
+    QrFloat3D   origin;
+    float       bounds;
+} QrLightVolumeLocal;
+
 typedef struct QrDrawFrameIlluminationParams
 {
     uint32_t    maxBounceShadows;
@@ -1423,14 +1486,72 @@ typedef struct QrDrawFrameIlluminationParams
 
     uint32_t    neeLightSamples;
 
-    // 1: the direct pass samples the global light array with RIS instead of the
-    // per-cluster light lists (host cvar rt_restir; 0 keeps the cluster path).
+    // 1: the direct pass uses the temporal/spatial ReSTIR reservoir instead of
+    // the per-frame grid/cluster selection (host cvar rt_restir; 0 keeps the
+    // grid/cluster path).
     // Default: 0
     uint32_t    restirEnabled;
-    // Candidates drawn per NEE light sample in the global light RIS (host cvar
-    // rt_restir_candidates), clamped to 1..64.
+    // Initial candidates drawn per pixel for the ReSTIR reservoir (host cvar
+    // rt_restir_candidates), clamped to 1..64. Temporal and spatial reuse add
+    // up to Q2_RESTIR_MAX_SAMPLES source samples on top.
     // Default: 8
     uint32_t    restirCandidates;
+
+    // 1: the indirect pass adds the cascaded irradiance-volume term to its SH
+    // (host cvar rt_light_volume; 0 keeps the screen-space GI only).
+    // Default: 0
+    uint32_t    lightVolumeEnabled;
+    // Additive weight of the volume SH added by the indirect pass (host cvar
+    // rt_light_volume_weight), clamped to 0..1. 0.25 is the tested first-slice
+    // blend; the volume path is opt-in.
+    // Default: 0.25
+    float       lightVolumeWeight;
+    // Visibility rays traced per probe (host cvar rt_light_volume_rays),
+    // clamped to 16..64. The report's tiers are 64/32/16 for high/medium/low.
+    // Default: 16
+    uint32_t    lightVolumeRays;
+
+    // Hand-placed local irradiance volumes (10^3 probes each). 'origin' is the
+    // cube centre and 'bounds' the full side length in game units; the GPU
+    // updates one slot per frame and prefers the smallest containing local
+    // volume over the cascades. Slots with bounds <= 0 are ignored.
+    // Default: 0 slots
+    uint32_t    lightVolumeLocalCount;
+    QrLightVolumeLocal lightVolumeLocal[QR_LIGHT_VOLUME_MAX_LOCAL];
+
+    // World radiance cache for volume probe hits (host cvar rt_radiance_cache).
+    // The cache quantizes hit positions into a spatial hash and reuses shaded
+    // radiance for a few frames. cellSize is the base cell in game units,
+    // lodDistance the distance at which the cell size doubles, age the maximum
+    // reuse age in frames.
+    // Default: disabled, 16 u cells, 1024 u LOD distance, 30 frames
+    uint32_t    radianceCacheEnabled;
+    float       radianceCacheCellSize;
+    float       radianceCacheLodDistance;
+    float       radianceCacheAge;
+
+    // 1: split the volume probe update into a visibility pass that writes
+    // packed hit records and a separate cache-shading pass (host cvar
+    // rt_radiance_cache_split).
+    // Default: 0
+    uint32_t    radianceCacheSplitEnabled;
+
+    // ReSTIR GI: reuse the previous frame's indirect bounce sample at the
+    // reprojected pixel (host cvar rt_restir_gi).
+    // Default: 0
+    uint32_t    restirGiEnabled;
+
+    // 1: glass and particle shading adds the transparency froxel irradiance
+    // (host cvar rt_transparency_froxel).
+    // Default: 0
+    uint32_t    transparencyFroxelEnabled;
+    // 0 = 32 x 16 x 32, 1 = 64 x 32 x 64, 2 = 128 x 64 x 128.
+    // Default: 1
+    uint32_t    transparencyFroxelQuality;
+
+    // Weight of the transparency froxel irradiance in the glass/particle consumers:
+    // 0 = off, 1 = full. Host cvar rt_transparency_froxel_blend.
+    float       transparencyFroxelBlend;
 
     float       giBounceRays;
 
@@ -1771,7 +1892,7 @@ QRAPI QrBool32 QRCONV qrIsSuspended(
 
 #define QR_GPU_PASS_COUNT 21
 
-#define QR_RAY_STATS_CATEGORY_COUNT 5
+#define QR_RAY_STATS_CATEGORY_COUNT 9
 
 typedef enum QrCpuPassIndex
 {

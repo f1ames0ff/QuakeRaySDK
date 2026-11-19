@@ -14,12 +14,11 @@
 // along with this program; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //
-// HLSL counterpart of GlobalLightSampling.h, kept beside it as the legacy golden: the global-light
-// RIS path the direct pass can select instead of the per-cluster light lists. For every NEE light
-// sample it draws up to Q2_RESTIR_MAX_CANDIDATES uniform candidates from the whole light array,
-// weights each by a target - the existing selection mass, floored by a solid-angle proxy so a
-// light the mass cannot see is still samplable - and picks one by a reservoir draw, so the pdf of
-// the pick is selectedWeight / (lightCount * mean target).
+// HLSL counterpart of GlobalLightSampling.h, kept beside it as the legacy golden: the per-sample
+// global-light RIS the direct pass used before ReSTIR. The direct pass now builds its reservoir
+// from the same globalLightTarget and uniform source pdf, and RestirSampling.hlsli reuses
+// q2SampleGlobalLightsRIS's math in reservoir form; this function stays as the readable reference
+// for the target/proxy/pdf formulas.
 //
 // Spellings that had to change:
 //   * vec3 -> float3 and the C-style scalar casts become the HLSL truncating casts (uint(x) ->
@@ -89,6 +88,26 @@ float globalLightTarget(const ShLightEncoded encoded, const float3 p, const floa
         ? max(decodeAsTexturedAreaLight(encoded).meanEmiss, 0.0) : 1.0;
 
     return max(mass, proxy * kGlobalLightTargetFloor) * max(getLuminance(encoded.color), 0.0) * scale;
+}
+
+// The ReSTIR target: the same mass as the grid's sampler, without the global RIS proxy floor.
+// The floor exists to keep lights the selection mass cannot see samplable from the uniform
+// global array; reusing it with the grid source pdf inflated the estimator's weight (target/p
+// no longer equals 1/p for a single candidate) and over-brightened the image.
+float globalLightTargetUnfloored(const ShLightEncoded encoded, const float3 p, const float3 n,
+                                 const float3 V, const float phongExp, const float phongScale,
+                                 const float phongWeight)
+{
+    if (encoded.lightType == LIGHT_TYPE_DIRECTIONAL)
+    {
+        return 0.0;
+    }
+
+    const float mass  = q2LightSelectionMass(encoded, p, n, V, phongExp, phongScale, phongWeight);
+    const float scale = (encoded.lightType == LIGHT_TYPE_TEXTURED_AREA)
+        ? max(decodeAsTexturedAreaLight(encoded).meanEmiss, 0.0) : 1.0;
+
+    return mass * max(getLuminance(encoded.color), 0.0) * scale;
 }
 
 void q2SampleGlobalLightsRIS(const uint seed, const uint sampleIndex,

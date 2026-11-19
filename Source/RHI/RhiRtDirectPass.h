@@ -53,7 +53,7 @@ class RhiTextureTable;
 // the A4.2a shader-side fix that drops the sampled view-direction binding 147 is in the source
 // state and in that blob):
 //   set 0  TLAS                - RhiAccelStructs::GetTopLevel, raw binding 0;
-//   set 1  framebuffers        - 12 items, exactly: the UAVs at raw bindings 14
+//   set 1  framebuffers        - 17 items, exactly: the UAVs at raw bindings 14
 //                                (framebufUnfilteredDirect), 15 (framebufUnfilteredSpecular) and
 //                                23 (framebufViewDirection), and the SRVs at raw bindings 124
 //                                (framebufAlbedo_Sampled), 126 (IsSky), 127 (Normal), 129
@@ -93,7 +93,7 @@ class RhiTextureTable;
 //
 // The twelve sets, in the engine's RT set order (RayTracingPipeline.cpp:62-86):
 //   set 0  TLAS                - own per-slot set over the primary's tlasLayout;
-//   set 1  framebuffers        - own per-slot set over the module's exact 12-item layout;
+//   set 1  framebuffers        - own per-slot set over the module's exact 17-item layout;
 //   set 2  global uniform      - own per-slot set over the primary's uniformLayout;
 //   set 3  vertex data         - own per-slot set over the primary's 7-item vertexDataLayout (the
 //                                direct raygen itself fetches no geometry, but `RtAlphaTest.rahit`,
@@ -229,6 +229,23 @@ public:
     bool EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t frameIndex, uint32_t frameId,
                         uint32_t lightStatsMode);
 
+    // ReSTIR reservoir configuration (host cvar rt_restir). The host calls it once per traced frame
+    // before any pass that borrows the set 6: a size or enable change re-creates the two-slot
+    // reservoir ring, retires the replaced buffer, marks it for a zero fill and drops every slot's
+    // stale light set so the next EnsureLightSet binds the new buffer. Disabled frames keep a
+    // two-element stand-in bound, so the descriptor is always valid and an unused feature costs no
+    // render-sized allocation. Returns false when the new buffer could not be created; the current
+    // binding stays usable and the shader still sees restirParams.x == 0 on disabled frames.
+    bool ConfigureRestir(uint32_t width, uint32_t height, bool enabled);
+
+    // Cascaded irradiance volume (host cvar rt_light_volume). The probe buffer is allocated once
+    // with the pass; this call only follows the enable flag and the 640 u camera snap, and clears
+    // every cascade when the snap moves so no probe from the previous origin is sampled. A failed
+    // configure leaves the volume disabled; the shader's lightVolumeParams.x gate is the host's.
+    bool ConfigureLightVolume(bool enabled, const float cameraPosition[3],
+                              uint32_t localVolumeCount, const float *localVolumeParams,
+                              bool split);
+
     // One call per frame, on the frame context's open command list of 'frameIndex', after
     // RhiRtPrimaryPass::Render of the same slot. 'frameId' is the engine counter
     // (`ShGlobalUniform::frameId`, i.e. sky.uniform->GetData()->frameId) and 'lightStatsMode' the
@@ -244,7 +261,7 @@ public:
     // image extent through Framebuffers::GetImageHandles' 4-tuple form, so the one set-1 image that
     // is not render-sized (Q2_GRAD_SMPL_POS, 1/3) is wrapped at its own extent.
     //
-    // What is recorded: the wraps of the 12 set-1 images (created on first use, re-created when the
+    // What is recorded: the wraps of the 17 set-1 images (created on first use, re-created when the
     // engine re-created an image or the size changed; the replaced wraps and the sets over them go
     // through the frame context's retire queue), the per-slot sets 0-3 and 6, the four light copies
     // and the light-statistics fill of the slots the frame needs while the mode is not disabled
@@ -257,7 +274,7 @@ public:
     //
     // The image-state contract: the engine leaves every framebuffer image in VK_IMAGE_LAYOUT_GENERAL
     // (= NVRHI's UnorderedAccess), and a native wrap keeps no state between command lists, so the
-    // pass announces that state for all 12 images before its first use on every list
+    // pass announces that state for all 17 images before its first use on every list
     // (beginTrackingTextureState, exactly RhiRtPrimaryPass's contract). After the dispatch the 9
     // images that are bound as SRVs and by no UAV are moved back to UnorderedAccess: their
     // Texture_SRV requirement left them in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -296,15 +313,15 @@ private:
     // same handle-change rule.
     struct Target
     {
-        // Set 1: the 12 engine images (the .cpp's FRAMEBUFFER_BINDINGS table) the slot currently
+        // Set 1: the 17 engine images (the .cpp's FRAMEBUFFER_BINDINGS table) the slot currently
         // wraps and the set over them. The handles are kept in the form Render received them, not
         // as VkImages, because they are what the change detection compares; a change in any of them
         // or in the size means the engine re-created the framebuffers and the wraps and the set
         // have to follow.
-        uint64_t imageHandles[12] = {};
+        uint64_t imageHandles[17] = {};
         uint32_t width = 0;
         uint32_t height = 0;
-        nvrhi::TextureHandle framebufferTextures[12];
+        nvrhi::TextureHandle framebufferTextures[17];
         nvrhi::BindingSetHandle framebufferSet;
 
         // Set 0: the pointer is only the cache key that tells whether the set still addresses the
@@ -325,11 +342,14 @@ private:
         // Set 6: the eight device-local engine buffers as the slot wraps them (the raw handles are
         // the key) and the set over the wraps, plus the seven copy-source wraps of this slot's
         // pending light copies, keyed by their staging handles.
-        VkBuffer lightHandles[8] = {};
-        nvrhi::BufferHandle lightWraps[8];
+        VkBuffer lightHandles[13] = {};
+        nvrhi::BufferHandle lightWraps[13];
         nvrhi::BindingSetHandle lightSet;
-        VkBuffer lightStagingHandles[7] = {};
-        nvrhi::BufferHandle lightStagingWraps[7];
+        VkBuffer lightStagingHandles[11] = {};
+        nvrhi::BufferHandle lightStagingWraps[11];
+
+        VkBuffer gridBuildHandles[5] = {};
+        nvrhi::BindingSetHandle gridBuildSet;
     };
 
     bool LoadShader(const char *pFileName, nvrhi::ShaderType type, nvrhi::ShaderHandle &result);
@@ -354,6 +374,24 @@ private:
     // Returns false when an engine buffer or a pending copy source is missing.
     bool PrepareLightSet(nvrhi::ICommandList *pCommandList, Target &target, uint32_t frameIndex,
                          uint32_t frameId, uint32_t lightStatsMode);
+    bool PrepareGridBuildSet(Target &target);
+    void BuildLightGrid(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
+
+    // The reservoir ring: one structured buffer, two render-sized slots written alternately by
+    // frameId parity. Disabled frames bind a two-element stand-in. A replaced buffer is retired
+    // through the frame context and the next PrepareLightSet zeroes the new one before the pass
+    // reads any of it.
+    bool CreateRestirReservoir(uint64_t elementCount);
+    void ReleaseRestirReservoir();
+    void InvalidateLightSets();
+
+    bool CreateLightVolumeBuffer(uint32_t elementCount);
+    bool CreateLightVolumeHits();
+    bool CreateRadianceCache();
+    bool CreateRadianceCacheActiveTags();
+    bool CreateTransparencyFroxels();
+    void DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
+    void DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
 
     // The ranged statistics fill of the frame: it is recorded on the set-6 wrap of the engine's
     // statistics buffer inside 'target' (the same wrap the binding set binds, which is what makes
@@ -385,10 +423,56 @@ private:
     nvrhi::ShaderHandle closestHitShader;
     nvrhi::ShaderHandle anyHitShader;
 
-    // The two layouts this module owns: set 1 (the exact 12 items above) and set 6 (the exact 5
+    // The two layouts this module owns: set 1 (the exact 17 items above) and set 6 (the exact 5
     // items). Every other layout is the primary's.
     nvrhi::BindingLayoutHandle framebufferLayout;
     nvrhi::BindingLayoutHandle lightLayout;
+    nvrhi::BindingLayoutHandle gridBuildLayout;
+    nvrhi::ComputePipelineHandle gridBuildPipeline;
+
+    // The direct-light ReSTIR reservoir ring (Source/Shaders/Restir.hlsli): two render-sized
+    // slots in one structured buffer. The two-element stand-in is bound while rt_restir is off so
+    // set 6 always has a valid descriptor and no render-sized allocation is ever made for the
+    // default configuration.
+    nvrhi::BufferHandle restirReservoir;
+    uint64_t restirReservoirElements = 0;
+    uint32_t restirWidth = 0;
+    uint32_t restirHeight = 0;
+    bool     restirEnabled = false;
+    bool     restirRequested = false;
+    bool     restirReservoirClearPending = false;
+
+    // The cascade probe atlas: six 16^3 SH4 RGB records, allocated once with the pass. The
+    // pipeline that updates one cascade per frame and its table are optional; without them the
+    // buffer stays zero and the indirect pass adds nothing.
+    nvrhi::BufferHandle lightVolumeProbes;
+    nvrhi::BufferHandle lightVolumeHits;
+    nvrhi::rt::PipelineHandle volumePipeline;
+    nvrhi::rt::ShaderTableHandle volumeShaderTable;
+    nvrhi::rt::PipelineHandle volumeShadePipeline;
+    nvrhi::rt::ShaderTableHandle volumeShadeShaderTable;
+    nvrhi::ShaderHandle volumeShadeShader;
+    nvrhi::ShaderHandle volumeRaygenShader;
+    float    lightVolumeOrigin[3] = {};
+    uint32_t lightVolumeLocalCount = 0;
+    float    lightVolumeLocalPrev[8][4] = {};
+    bool     lightVolumeEnabled = false;
+    bool     lightVolumeSplitEnabled = false;
+    bool     lightVolumeClearPending = false;
+    bool     lightVolumeHitsClearPending = false;
+
+    // The world radiance cache: a 2^18-entry spatial hash of shaded probe-hit radiance, reused
+    // for a few frames. Allocated eagerly so set 6 always has a valid descriptor.
+    nvrhi::BufferHandle radianceCache;
+    nvrhi::BufferHandle radianceCacheActiveTags;
+    bool     radianceCacheClearPending = false;
+
+    // Transparency froxel irradiance volume: 64 x 32 x 64 SH4 probes (6.3 MB), allocated eagerly
+    // so set 6 always has a descriptor. The light-scattering fill is the next pass.
+    nvrhi::BufferHandle transparencyFroxels;
+    bool     transparencyFroxelsClearPending = false;
+    nvrhi::ShaderHandle froxelFillShader;
+    nvrhi::ComputePipelineHandle froxelFillPipeline;
 
     // The frame id each slot's set 6 was prepared for: one preparation per frame, whether
     // EnsureLightSet (the reflect/refract sibling asking early) or Render made it.
@@ -424,6 +508,7 @@ private:
     bool warnedBadVertexData = false;
     bool warnedMissingLights = false;
     bool warnedMissingLightStaging = false;
+    bool warnedRestirUnavailable = false;
 
     bool created = false;
 };

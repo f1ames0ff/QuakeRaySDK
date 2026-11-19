@@ -32,11 +32,17 @@
 namespace qray
 {
 
-constexpr uint32_t RAY_STATS_CATEGORY_COUNT = 6;
+constexpr uint32_t RAY_STATS_CATEGORY_COUNT = 10;
 
 constexpr uint32_t RAY_STATS_CATEGORY_REFLECTION_REFRACTION = 1;
 
 constexpr uint32_t RAY_STATS_CATEGORY_PARTICLE = 5;
+
+// The world-radiance-cache counters. They are accumulated by the volume raygen: hit/miss per
+// lookup, active per distinct cache slot touched in the frame.
+constexpr uint32_t RAY_STATS_CATEGORY_CACHE_HIT = 6;
+constexpr uint32_t RAY_STATS_CATEGORY_CACHE_MISS = 7;
+constexpr uint32_t RAY_STATS_CATEGORY_CACHE_ACTIVE = 8;
 
 class RayStats
 {

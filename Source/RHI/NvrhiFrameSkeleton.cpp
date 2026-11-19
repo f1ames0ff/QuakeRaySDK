@@ -1092,6 +1092,37 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         // from the same CPU copy the write above uploaded.
         const ShGlobalUniform *uniform = sky.uniform != nullptr ? sky.uniform->GetData() : nullptr;
 
+        // The direct-light ReSTIR ring follows the frame's rt_restir switch and the render extent.
+        // It has to be configured before the reflect/refract pass borrows set 6, because a resize
+        // or an enable change re-creates the reservoir and drops the slot's stale light set.
+        if (rtDirectPass != nullptr && uniform != nullptr)
+        {
+            rtDirectPass->ConfigureRestir(sky.width, sky.height, uniform->restirParams[0] != 0u);
+        }
+
+        // The ReSTIR GI history buffer is sized to the render resolution and created outside the
+        // frame's command list; a mid-list allocation is what stalled the first runtime build.
+        if (rtIndirectPass != nullptr && sky.width > 0 && sky.height > 0 && uniform != nullptr)
+        {
+            const bool halfRes = uniform->giBounceRays[0] > 0.25f &&
+                                 uniform->giBounceRays[0] < 0.75f;
+            rtIndirectPass->ConfigureGiReservoirs(sky.width, sky.height, halfRes);
+        }
+
+        // The cascaded irradiance volume follows the same switch and snap as the grid. The direct
+        // pass owns the atlas and the one-cascade-per-frame update; the indirect pass only reads
+        // the shared binding.
+        if (rtDirectPass != nullptr && uniform != nullptr)
+        {
+            const uint32_t localVolumeCount =
+                uint32_t(std::min(std::max(uniform->lightVolumeParams[3], 0.0f), 8.0f) + 0.5f);
+            rtDirectPass->ConfigureLightVolume(uniform->lightVolumeParams[0] != 0.0f,
+                                               uniform->cameraPosition,
+                                               localVolumeCount,
+                                               uniform->lightVolumeLocalParams,
+                                               uniform->radianceSplitParams[0] != 0u);
+        }
+
         // The procedural sky (A5.4): the default frame's cube content, the same RenderCubemap ->
         // DrawProcedural call the legacy frame records before the trace (VulkanDevice.cpp:862), so
         // the primary, indirect and reflect/refract passes sample a written cube on the same list.

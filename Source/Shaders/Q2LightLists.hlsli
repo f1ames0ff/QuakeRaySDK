@@ -107,6 +107,7 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "Q2ClusterLights.hlsli"
 #include "Light.hlsli"
+#include "Q2LightGrid.hlsli"
 
 #define Q2_MAX_BRUTEFORCE_SAMPLING 16
 
@@ -284,12 +285,154 @@ float q2LightSelectionMass(const ShLightEncoded encoded, const float3 p, const f
 
 float q2FastMass(float m, float stratumMax)
 {
-    if (!(stratumMax > 0.0))
+    if (!(m > 0.0))
     {
-        return 1.0;
+        return 0.0;
     }
 
     return max(m, 0.001 * stratumMax);
+}
+
+void q2SampleGridLights(
+    const int gridCell, const float3 p, const float3 n, const float3 V,
+    const float phongExp, const float phongScale, const float phongWeight, const float3 rng,
+    out uint outLightIndex, out uint outSlot, out float outPdf, out float outMass)
+{
+    outLightIndex = LIGHT_INDEX_NONE;
+    outSlot = 0u;
+    outPdf = 0.0;
+    outMass = 0.0;
+
+    if (gridCell < 0 || gridCell >= int(Q2_LIGHT_GRID_CELLS))
+    {
+        return;
+    }
+
+    const uint cell = uint(gridCell);
+    const uint cellCount = q2LightGridCounts[cell];
+
+    // The GPU builder keeps at most Q2_LIGHT_GRID_MAX_IDS_PER_CELL entries and stores the compacted
+    // count. A full cell may have dropped candidates; return none so the caller falls back to the
+    // cluster lists (direct/indirect) or the global array (ReSTIR) instead of losing the tail.
+    if (cellCount >= uint(Q2_LIGHT_GRID_MAX_IDS_PER_CELL))
+    {
+        return;
+    }
+
+    const uint base = q2LightGridOffsets[uint(Q2_LIGHT_GRID_HEADER_WORDS) + cell];
+    const int lightCount = int(cellCount);
+    const int listEnd = int(base) + lightCount;
+
+    if (lightCount <= 0)
+    {
+        return;
+    }
+
+    const float partitions = ceil((float)lightCount / (float)Q2_MAX_BRUTEFORCE_SAMPLING);
+    float r0 = rng.x * partitions;
+    const int fpart = (int)min(floor(r0), partitions - 1.0);
+    r0 -= (float)fpart;
+    const int stride = (int)partitions;
+    const int listStart = int(base) + fpart;
+
+    float masses[Q2_MAX_BRUTEFORCE_SAMPLING];
+    float stratumMax = 0.0;
+
+    for (int i = 0; i < Q2_MAX_BRUTEFORCE_SAMPLING; i++)
+    {
+        const int nIdx = listStart + i * stride;
+
+        if (nIdx >= listEnd)
+        {
+            masses[i] = 0.0;
+            continue;
+        }
+
+        const uint id = q2LightGridIds[uint(nIdx)];
+
+        if (((id >> Q2_LIGHT_GRID_ID_TYPE_SHIFT) & Q2_LIGHT_GRID_ID_TYPE_MASK) != Q2_LIGHT_GRID_ID_TYPE_LIGHT)
+        {
+            masses[i] = 0.0;
+            continue;
+        }
+
+        const uint li = id & Q2_LIGHT_GRID_ID_INDEX_MASK;
+
+        if (li < uint(LIGHT_ARRAY_REGULAR_LIGHTS_OFFSET) ||
+            li >= uint(LIGHT_ARRAY_REGULAR_LIGHTS_OFFSET) + globalUniform.lightCount)
+        {
+            masses[i] = 0.0;
+            continue;
+        }
+
+        const ShLightEncoded l = lightSources[li];
+        float m = q2LightSelectionMass(l, p, n, V, phongExp, phongScale, phongWeight);
+        m *= abs(getLuminance(l.color));
+        masses[i] = m;
+        stratumMax = max(stratumMax, m);
+    }
+
+    float massSum = 0.0;
+
+    for (int i = 0; i < Q2_MAX_BRUTEFORCE_SAMPLING; i++)
+    {
+        const int nIdx = listStart + i * stride;
+
+        if (nIdx >= listEnd)
+        {
+            break;
+        }
+
+        massSum += q2FastMass(masses[i], stratumMax);
+    }
+
+    if (!(massSum > 0.0))
+    {
+        return;
+    }
+
+    float r = r0 * massSum;
+    float pdf = 0.0;
+    int selected = -1;
+
+    for (int i = 0; i < Q2_MAX_BRUTEFORCE_SAMPLING; i++)
+    {
+        const int nIdx = listStart + i * stride;
+
+        if (nIdx >= listEnd)
+        {
+            break;
+        }
+
+        pdf = q2FastMass(masses[i], stratumMax);
+        r -= pdf;
+
+        if (r <= 0.0)
+        {
+            selected = nIdx;
+            break;
+        }
+    }
+
+    if (selected < 0)
+    {
+        return;
+    }
+
+    const uint id = q2LightGridIds[uint(selected)];
+
+    if (((id >> Q2_LIGHT_GRID_ID_TYPE_SHIFT) & Q2_LIGHT_GRID_ID_TYPE_MASK) != Q2_LIGHT_GRID_ID_TYPE_LIGHT)
+    {
+        return;
+    }
+
+    outLightIndex = id & Q2_LIGHT_GRID_ID_INDEX_MASK;
+    outSlot = uint(selected) - base;
+    outPdf = pdf / (massSum * partitions);
+    // The floored selection mass of the winner. The ReSTIR target has to use the same mass as the
+    // source pdf; the exact q2LightSelectionMass under-weights the tiny map lights that the
+    // 0.1% stratum floor keeps samplable.
+    outMass = pdf;
 }
 
 void q2SampleClusterLights(

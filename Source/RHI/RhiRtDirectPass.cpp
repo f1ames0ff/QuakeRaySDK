@@ -2,14 +2,20 @@
 
 #include "RhiFrameContext.h"
 #include "RhiPipeline.h"
+#include "RhiResources.h"
 #include "RhiTextureSource.h"
 #include "RhiTextureTable.h"
 
 #include "../Framebuffers.h"
 #include "../Generated/ShaderCommonC.h"
 #include "../LightManager.h"
+#include "../LightVolume.h"
+#include "../RadianceCache.h"
+#include "../TransparencyFroxelVolume.h"
+#include "../RestirReservoir.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -43,6 +49,8 @@ const char *const ANY_HIT_SHADER_FILE_NAME = "RtAlphaTest.rahit.spv";
 // (instanceShaderBindingTableRecordOffset 0/1, ASManager.cpp:976-991). The names carry this
 // module's prefix so a message or a capture can tell the two pipelines' groups apart.
 const char *const RAYGEN_EXPORT_NAME = "RhiRtDirectRGen";
+const char *const VOLUME_RAYGEN_EXPORT_NAME = "RhiRtVolumeRGen";
+const char *const VOLUME_SHADE_EXPORT_NAME = "RhiRtVolumeShade";
 const char *const MISS_EXPORT_NAME = "RhiRtDirectRMiss";
 const char *const SHADOW_MISS_EXPORT_NAME = "RhiRtDirectRMissShadow";
 const char *const HIT_GROUP_OPAQUE_EXPORT_NAME = "RhiRtDirectRClsOpaque";
@@ -97,7 +105,7 @@ struct FramebufferBinding
     bool isUAV;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 12;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 17;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_UNFILTERED_DIRECT,      true  }, //  14  framebufUnfilteredDirect
@@ -112,6 +120,13 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,       false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,            false }, // 245  framebufQ2RngSeed_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER,             false }, // 247  framebufQ2Cluster_Sampled
+    { FB_IMAGE_INDEX_MOTION_DLSS,            false }, // 163  framebufMotionDlss_Sampled
+    // The history read of ReSTIR's reprojection/validation: the other frame slot's position,
+    // normals and roughness (Surface.hlsli fetchGbufferSurface_NoAlbedoViewDir_Prev).
+    { FB_IMAGE_INDEX_NORMAL_PREV,            false }, // 136  framebufNormal_Prev_Sampled
+    { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,   false }, // 138  framebufNormalGeometry_Prev_Sampled
+    { FB_IMAGE_INDEX_METALLIC_ROUGHNESS_PREV, false }, // 140  framebufMetallicRoughness_Prev_Sampled
+    { FB_IMAGE_INDEX_SURFACE_POSITION_PREV,  false }, // 152  framebufSurfacePosition_Prev_Sampled
 };
 
 // The engine raw binding of one entry: the UAV array for the storage images, the sampled array for
@@ -175,7 +190,7 @@ struct LightBufferBinding
     uint32_t structStride;
 };
 
-constexpr uint32_t LIGHT_BUFFER_COUNT = 8;
+constexpr uint32_t LIGHT_BUFFER_COUNT = 13;
 constexpr LightBufferBinding LIGHT_BUFFER_BINDINGS[LIGHT_BUFFER_COUNT] =
 {
     {
@@ -227,6 +242,36 @@ constexpr LightBufferBinding LIGHT_BUFFER_BINDINGS[LIGHT_BUFFER_COUNT] =
         uint64_t(sizeof(ShQ2LightTail)) * Q2_LIGHT_LIST_TAIL_CAPACITY,
         static_cast<uint32_t>(sizeof(ShQ2LightTail)),
     },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_OFFSETS,
+        false,
+        uint64_t(sizeof(uint32_t)) * (Q2_LIGHT_GRID_HEADER_WORDS + Q2_LIGHT_GRID_CELLS + 1),
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_IDS,
+        false,
+        uint64_t(sizeof(uint32_t)) * Q2_LIGHT_GRID_CELLS * Q2_LIGHT_GRID_MAX_IDS_PER_CELL,
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_HEADER,
+        false,
+        uint64_t(sizeof(uint32_t)) * Q2_LIGHT_GRID_HEADER_WORDS,
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_SOURCES,
+        false,
+        uint64_t(sizeof(ShLightGridSource)) * Q2_LIGHT_GRID_SOURCE_CAPACITY,
+        static_cast<uint32_t>(sizeof(ShLightGridSource)),
+    },
+    {
+        BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS,
+        false,
+        uint64_t(sizeof(uint32_t)) * Q2_LIGHT_GRID_CELLS,
+        static_cast<uint32_t>(sizeof(uint32_t)),
+    },
 };
 
 // The statistics buffer of the table above: the only item the light-statistics fill touches, and
@@ -240,11 +285,16 @@ static_assert(LIGHT_BUFFER_BINDINGS[LIGHT_STATS_BUFFER_INDEX].binding ==
 static_assert(sizeof(ShLightEncoded) == 160,
               "the shader's StructuredBuffer<ShLightEncoded> strides by 160 B (Generated/ShaderCommonC.h:389-401)");
 
+constexpr uint32_t LIGHT_VOLUME_PROBE_COUNT = LightVolume::kProbeCount;
+
+static_assert(sizeof(RestirReservoir) == 16,
+              "the shader's ShRestirReservoir is four 4-byte fields (Shaders/Restir.hlsli)");
+
 // The seven items `LightManager::GetFrameCopies` reports, mapped to the set-6 buffer each one
 // copies into: the light-array prefix (binding 0), the list offsets (4), the list words (5), the
 // sky visibility (8), the DTAL group members (9) and the two overflow tail buffers (10, 11). The
 // statistics buffer (6) has no copy. The order is `FrameCopies`'s.
-constexpr uint32_t LIGHT_COPY_COUNT = 7;
+constexpr uint32_t LIGHT_COPY_COUNT = 11;
 constexpr uint32_t LIGHT_COPY_BUFFER_INDICES[LIGHT_COPY_COUNT] =
 {
     0, // lights
@@ -254,6 +304,10 @@ constexpr uint32_t LIGHT_COPY_BUFFER_INDICES[LIGHT_COPY_COUNT] =
     5, // dtalMembers
     6, // tailOffsets
     7, // tailEntries
+    8, // gridOffsets
+    9, // gridIds
+    10, // gridHeader
+    11, // gridSources
 };
 
 const char *const LIGHT_BUFFER_DEBUG_NAMES[LIGHT_BUFFER_COUNT] =
@@ -266,6 +320,11 @@ const char *const LIGHT_BUFFER_DEBUG_NAMES[LIGHT_BUFFER_COUNT] =
     "dtal group members",
     "q2 light list tail offsets",
     "q2 light list tail entries",
+    "q2 light grid offsets",
+    "q2 light grid ids",
+    "q2 light grid header",
+    "q2 light grid sources",
+    "q2 light grid counts",
 };
 
 // The descriptor of a native wrap of an engine device-local buffer that a shader reads as a
@@ -290,7 +349,10 @@ nvrhi::BufferDesc MakeLightBufferDesc(const LightBufferBinding &binding, std::st
     nvrhi::BufferDesc desc;
     desc.byteSize = binding.byteSize;
     desc.structStride = binding.structStride;
-    desc.canHaveUAVs = binding.isUAV;
+    desc.canHaveUAVs = binding.isUAV ||
+                       binding.binding == BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_OFFSETS ||
+                       binding.binding == BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_IDS ||
+                       binding.binding == BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS;
     desc.initialState = binding.isUAV ? nvrhi::ResourceStates::UnorderedAccess
                                       : nvrhi::ResourceStates::CopyDest;
     desc.keepInitialState = true;
@@ -377,6 +439,12 @@ RhiRtDirectPass::~RhiRtDirectPass()
 
     lightLayout = nullptr;
     framebufferLayout = nullptr;
+    restirReservoir = nullptr;
+    restirReservoirElements = 0;
+    lightVolumeProbes = nullptr;
+    volumeShaderTable = nullptr;
+    volumePipeline = nullptr;
+    volumeRaygenShader = nullptr;
     anyHitShader = nullptr;
     closestHitShader = nullptr;
     shadowMissShader = nullptr;
@@ -467,6 +535,14 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
+    // The volume raygen is optional: without it the direct/indirect path stays valid and the
+    // volume buffer simply stays zero.
+    if (!LoadShader("RtLightVolume.rgen.spv", nvrhi::ShaderType::RayGeneration, volumeRaygenShader) ||
+        !LoadShader("RtLightVolumeShade.rgen.spv", nvrhi::ShaderType::RayGeneration, volumeShadeShader))
+    {
+        LogMessage(print, "Warning: RHI: the light-volume update shader is unavailable");
+    }
+
     // The two layouts this module owns. Both carry the ray-tracing visibility, for the reason
     // RhiDebugTracePass documents: the acceleration-structure-read barrier names the compute stage
     // too (vulkan-constants.cpp:282-285) and this device has no rayQuery feature to make that
@@ -496,9 +572,10 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         framebufferLayout = device->createBindingLayout(desc);
     }
     {
-        // Set 6: the five light buffers at their raw bindings, the same offsets as set 1. The
-        // statistics buffer is the only UAV item; the other four are structured SRVs. The partial
-        // shape is right here too: the engine's layout has nine items, the raygen declares five.
+        // Set 6: the engine's light buffers at their raw bindings, the same offsets as set 1, plus
+        // the direct-light ReSTIR reservoir the direct pass owns. The statistics buffer and the
+        // reservoir are the UAV items; the light buffers are structured SRVs. The partial shape is
+        // right here too: the engine's layout has more items than the raygen declares.
         // The vertex and compute stages are added to the ray-tracing visibility because the raster
         // overlay's smoke shaders read the light list from their vertex stage, exactly as the
         // engine's own set-6 layout spans VK_SHADER_STAGE_RAYGEN|COMPUTE|VERTEX
@@ -518,13 +595,135 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
                              : nvrhi::BindingLayoutItem::StructuredBuffer_SRV(LIGHT_BUFFER_BINDINGS[i].binding));
         }
 
+        // The direct-light ReSTIR reservoir is the only item of set 6 the pass owns instead of the
+        // engine's light registry; it is a UAV because the raygen writes the current frame's slot
+        // and reads the previous one through the same descriptor.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS));
+
+        // The cascaded irradiance-volume probe atlas: written by the volume raygen and read by the
+        // indirect raygen, both through this UAV slot.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES));
+
+        // The world radiance cache shares set 6 with the light and volume buffers.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE));
+
+        // The transparency froxel volume: the same set, filled by the scattering pass later.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS));
+
+        // The split volume update's packed visibility records.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS));
+
+        // One frame tag per radiance-cache slot for the active-cell counter.
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE));
+
         lightLayout = device->createBindingLayout(desc);
     }
 
-    if (framebufferLayout == nullptr || lightLayout == nullptr)
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(1));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(2));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(3));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(4));
+
+        gridBuildLayout = device->createBindingLayout(desc);
+    }
+
+    if (framebufferLayout == nullptr || lightLayout == nullptr || gridBuildLayout == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a direct RT pass binding layout");
         return false;
+    }
+
+    // Set 6 always binds the reservoir descriptor. Two elements are enough until ConfigureRestir
+    // asks for a render-sized ring on the first rt_restir frame.
+    if (!CreateRestirReservoir(2u))
+    {
+        return false;
+    }
+
+    // The cascade atlas is small and lives with the pass; allocating it eagerly keeps the set-6
+    // descriptor valid even while rt_light_volume is off.
+    if (!CreateLightVolumeBuffer(LIGHT_VOLUME_PROBE_COUNT))
+    {
+        return false;
+    }
+
+    // The radiance cache is small (8 MB) and lives with the pass, so the set-6 descriptor stays
+    // valid while rt_radiance_cache is off.
+    if (!CreateRadianceCache())
+    {
+        return false;
+    }
+
+    if (!CreateTransparencyFroxels())
+    {
+        return false;
+    }
+
+    if (!CreateLightVolumeHits())
+    {
+        return false;
+    }
+
+    // The active-cell tags share the cache lifetime: both are sized by kEntryCount.
+    if (!CreateRadianceCacheActiveTags())
+    {
+        return false;
+    }
+
+    {
+        nvrhi::ShaderHandle gridBuildShader;
+
+        if (LoadShader("CmBuildLightGrid.comp.spv", nvrhi::ShaderType::Compute, gridBuildShader))
+        {
+            nvrhi::ComputePipelineDesc desc;
+            desc.CS = gridBuildShader;
+            desc.bindingLayouts.push_back(gridBuildLayout);
+            gridBuildPipeline = rhi::createComputePipeline(device, desc, "RhiRtDirectPass grid build");
+        }
+
+        if (gridBuildPipeline == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: the GPU light-grid builder is unavailable; the CPU grid publication stays active");
+        }
+    }
+
+    {
+        // The transparency froxel fill: one probe per thread, eight directions, one grid light per
+        // direction. Sets 0-5 are the primary's empty sets except the uniform at 2; set 6 is the
+        // shared light layout.
+        if (LoadShader("CmBuildTransparencyFroxels.comp.spv", nvrhi::ShaderType::Compute,
+                       froxelFillShader))
+        {
+            nvrhi::ComputePipelineDesc desc;
+            desc.CS = froxelFillShader;
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 0
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 1
+            desc.bindingLayouts.push_back(primaryPass->GetUniformLayout()); // 2
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 3
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 4
+            desc.bindingLayouts.push_back(primaryPass->GetHoleLayout());    // 5
+            desc.bindingLayouts.push_back(lightLayout);                     // 6
+            froxelFillPipeline = rhi::createComputePipeline(
+                device, desc, "RhiRtDirectPass transparency froxels");
+        }
+
+        if (froxelFillPipeline == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: the transparency froxel fill pipeline is unavailable");
+        }
     }
 
     // The pipeline: one raygen (RGenDirect, no specialization), the engine's two miss shaders as
@@ -613,6 +812,146 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
+    // The volume update pipeline: the same misses and hit groups (the probe rays shade hits and
+    // trace sun shadows), a different raygen and its own table. A failure here only disables the
+    // volume update; the direct and indirect passes stay usable.
+    if (volumeRaygenShader != nullptr)
+    {
+        nvrhi::rt::PipelineDesc volumeDesc;
+
+        volumeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                 .setExportName(VOLUME_RAYGEN_EXPORT_NAME)
+                                 .setShader(volumeRaygenShader));
+        volumeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                 .setExportName(MISS_EXPORT_NAME)
+                                 .setShader(missShader));
+        volumeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                 .setExportName(SHADOW_MISS_EXPORT_NAME)
+                                 .setShader(shadowMissShader));
+        volumeDesc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                                   .setExportName(HIT_GROUP_OPAQUE_EXPORT_NAME)
+                                   .setClosestHitShader(closestHitShader));
+        volumeDesc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                                   .setExportName(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME)
+                                   .setClosestHitShader(closestHitShader)
+                                   .setAnyHitShader(anyHitShader));
+
+        volumeDesc.addBindingLayout(primaryPass->GetTlasLayout());
+        volumeDesc.addBindingLayout(framebufferLayout);
+        volumeDesc.addBindingLayout(primaryPass->GetUniformLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetVertexDataLayout());
+        volumeDesc.addBindingLayout(textureTable->GetLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(lightLayout);
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        volumeDesc.addBindingLayout(primaryPass->GetRayStatsLayout());
+        volumeDesc.addBindingLayout(cloudShadowBinding.GetLayout());
+
+        volumeDesc.setMaxPayloadSize(MAX_PAYLOAD_SIZE);
+        volumeDesc.setMaxAttributeSize(MAX_ATTRIBUTE_SIZE);
+        volumeDesc.setMaxRecursionDepth(MAX_RECURSION_DEPTH);
+
+        volumePipeline = device->createRayTracingPipeline(volumeDesc);
+    }
+
+    if (volumePipeline != nullptr)
+    {
+        volumeShaderTable = volumePipeline->createShaderTable(nvrhi::rt::ShaderTableDesc());
+
+        if (volumeShaderTable != nullptr)
+        {
+            volumeShaderTable->setRayGenerationShader(VOLUME_RAYGEN_EXPORT_NAME);
+
+            if (volumeShaderTable->addMissShader(MISS_EXPORT_NAME) != SBT_INDEX_MISS_DEFAULT ||
+                volumeShaderTable->addMissShader(SHADOW_MISS_EXPORT_NAME) != SBT_INDEX_MISS_SHADOW ||
+                volumeShaderTable->addHitGroup(HIT_GROUP_OPAQUE_EXPORT_NAME) != SBT_INDEX_HITGROUP_FULLY_OPAQUE ||
+                volumeShaderTable->addHitGroup(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME) != SBT_INDEX_HITGROUP_ALPHA_TESTED)
+            {
+                LogMessage(print, "Warning: RHI: the light-volume shader table does not match the engine's SBT indices");
+                volumeShaderTable = nullptr;
+                volumePipeline = nullptr;
+            }
+        }
+        else
+        {
+            volumePipeline = nullptr;
+        }
+    }
+
+    if (volumePipeline != nullptr && volumeShadeShader != nullptr)
+    {
+        nvrhi::rt::PipelineDesc shadeDesc;
+
+        shadeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                .setExportName(VOLUME_SHADE_EXPORT_NAME)
+                                .setShader(volumeShadeShader));
+        shadeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                .setExportName(MISS_EXPORT_NAME)
+                                .setShader(missShader));
+        shadeDesc.addShader(nvrhi::rt::PipelineShaderDesc()
+                                .setExportName(SHADOW_MISS_EXPORT_NAME)
+                                .setShader(shadowMissShader));
+        shadeDesc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                                  .setExportName(HIT_GROUP_OPAQUE_EXPORT_NAME)
+                                  .setClosestHitShader(closestHitShader));
+        shadeDesc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                                  .setExportName(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME)
+                                  .setClosestHitShader(closestHitShader)
+                                  .setAnyHitShader(anyHitShader));
+
+        shadeDesc.addBindingLayout(primaryPass->GetTlasLayout());
+        shadeDesc.addBindingLayout(framebufferLayout);
+        shadeDesc.addBindingLayout(primaryPass->GetUniformLayout());
+        shadeDesc.addBindingLayout(primaryPass->GetVertexDataLayout());
+        shadeDesc.addBindingLayout(textureTable->GetLayout());
+        shadeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        shadeDesc.addBindingLayout(lightLayout);
+        shadeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        shadeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        shadeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        shadeDesc.addBindingLayout(primaryPass->GetHoleLayout());
+        shadeDesc.addBindingLayout(primaryPass->GetRayStatsLayout());
+        shadeDesc.addBindingLayout(cloudShadowBinding.GetLayout());
+
+        shadeDesc.setMaxPayloadSize(MAX_PAYLOAD_SIZE);
+        shadeDesc.setMaxAttributeSize(MAX_ATTRIBUTE_SIZE);
+        shadeDesc.setMaxRecursionDepth(MAX_RECURSION_DEPTH);
+
+        volumeShadePipeline = device->createRayTracingPipeline(shadeDesc);
+
+        if (volumeShadePipeline != nullptr)
+        {
+            volumeShadeShaderTable = volumeShadePipeline->createShaderTable(nvrhi::rt::ShaderTableDesc());
+
+            if (volumeShadeShaderTable != nullptr)
+            {
+                volumeShadeShaderTable->setRayGenerationShader(VOLUME_SHADE_EXPORT_NAME);
+
+                if (volumeShadeShaderTable->addMissShader(MISS_EXPORT_NAME) != SBT_INDEX_MISS_DEFAULT ||
+                    volumeShadeShaderTable->addMissShader(SHADOW_MISS_EXPORT_NAME) != SBT_INDEX_MISS_SHADOW ||
+                    volumeShadeShaderTable->addHitGroup(HIT_GROUP_OPAQUE_EXPORT_NAME) != SBT_INDEX_HITGROUP_FULLY_OPAQUE ||
+                    volumeShadeShaderTable->addHitGroup(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME) != SBT_INDEX_HITGROUP_ALPHA_TESTED)
+                {
+                    LogMessage(print, "Warning: RHI: the light-volume shade shader table does not match the engine's SBT indices");
+                    volumeShadeShaderTable = nullptr;
+                }
+            }
+        }
+
+        if (volumeShadeShaderTable == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: the split light-volume shade pipeline is unavailable");
+        }
+    }
+
+    if (volumePipeline == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the light-volume update pipeline is unavailable");
+    }
+
     created = true;
     return true;
 }
@@ -635,6 +974,19 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
 
     if (width == 0 || height == 0)
     {
+        return;
+    }
+
+    // The uniform still asks for ReSTIR, but the ring could not be sized: without render-sized
+    // storage the shader would index past the two-element stand-in, so the whole trace is skipped
+    // for that frame instead. This only happens on an allocation failure.
+    if (restirRequested && !restirEnabled)
+    {
+        if (!warnedRestirUnavailable)
+        {
+            warnedRestirUnavailable = true;
+            LogMessage(print, "Warning: RHI: the ReSTIR reservoir is unavailable, the direct trace is skipped");
+        }
         return;
     }
 
@@ -796,6 +1148,16 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
+    if (gridBuildPipeline != nullptr && PrepareGridBuildSet(target))
+    {
+        BuildLightGrid(pCommandList, frameIndex);
+    }
+
+    if (froxelFillPipeline != nullptr)
+    {
+        DispatchTransparencyFroxels(pCommandList, frameIndex);
+    }
+
     // The image state contract, spelled out on Render in the header: the engine leaves every
     // framebuffer image in VK_IMAGE_LAYOUT_GENERAL - NVRHI's UnorderedAccess - and this native
     // wrap keeps no state between command lists (RhiTextureSource.h), so every list announces that
@@ -813,6 +1175,10 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
     // the list that samples them (RhiTextureTable.h); the primary pass does this too, and a
     // repeated call is a no-op.
     textureTable->TrackPendingTextures(pCommandList);
+
+    // The light-volume update runs before the direct/indirect dispatches of this list: it writes
+    // one cascade of the probe atlas, and the indirect raygen reads the atlas later in the frame.
+    DispatchLightVolume(pCommandList, frameIndex);
 
     // The twelve sets, in the layout order the pipeline was built with; the pinned backend's legacy
     // binding mode binds the list positionally (vulkan-resource-bindings.cpp:940-958). Sets 5, 7, 8,
@@ -949,6 +1315,12 @@ void RhiRtDirectPass::ReleaseLightTarget(Target &target)
             frameContext->Retire(target.lightSet);
         }
 
+        if (target.gridBuildSet != nullptr)
+        {
+            frameContext->Retire(target.gridBuildSet);
+        }
+
+
         for (nvrhi::BufferHandle &wrap : target.lightWraps)
         {
             if (wrap != nullptr)
@@ -980,6 +1352,9 @@ void RhiRtDirectPass::ReleaseLightTarget(Target &target)
 
     std::memset(target.lightHandles, 0, sizeof(target.lightHandles));
     std::memset(target.lightStagingHandles, 0, sizeof(target.lightStagingHandles));
+
+    target.gridBuildSet = nullptr;
+    std::memset(target.gridBuildHandles, 0, sizeof(target.gridBuildHandles));
 }
 
 bool RhiRtDirectPass::PrepareTlasSet(Target &target, nvrhi::rt::IAccelStruct *pTopLevel)
@@ -1146,6 +1521,398 @@ bool RhiRtDirectPass::EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t
     return true;
 }
 
+bool RhiRtDirectPass::ConfigureRestir(uint32_t width, uint32_t height, bool enabled)
+{
+    if (!created || device == nullptr)
+    {
+        return false;
+    }
+
+    restirRequested = enabled;
+
+    const bool wantsReservoir = enabled && width > 0 && height > 0;
+
+    if (wantsReservoir)
+    {
+        const uint64_t elements = uint64_t(width) * uint64_t(height) * 2u;
+
+        if (!restirEnabled || restirWidth != width || restirHeight != height ||
+            restirReservoirElements != elements || restirReservoir == nullptr)
+        {
+            if (!CreateRestirReservoir(elements))
+            {
+                restirEnabled = false;
+                restirWidth = 0;
+                restirHeight = 0;
+                InvalidateLightSets();
+                return false;
+            }
+
+            restirEnabled = true;
+            restirWidth = width;
+            restirHeight = height;
+            InvalidateLightSets();
+        }
+
+        return true;
+    }
+
+    // The disabled frame still binds a valid descriptor; the two-element stand-in keeps the set 6
+    // contract without a render-sized allocation.
+    if (restirEnabled || restirReservoir == nullptr || restirReservoirElements != 2u)
+    {
+        if (!CreateRestirReservoir(2u))
+        {
+            InvalidateLightSets();
+            return false;
+        }
+
+        restirEnabled = false;
+        restirWidth = 0;
+        restirHeight = 0;
+        InvalidateLightSets();
+    }
+
+    return true;
+}
+
+bool RhiRtDirectPass::ConfigureLightVolume(bool enabled, const float cameraPosition[3],
+                                           uint32_t localVolumeCount, const float *localVolumeParams,
+                                           bool split)
+{
+    if (!created || device == nullptr)
+    {
+        return false;
+    }
+
+    lightVolumeSplitEnabled = split;
+
+    const uint32_t localCount = std::min(localVolumeCount, 8u);
+    // Compare all eight slots, not only the live ones: the host zeroes the unused slots, so a
+    // clear followed by a different list is caught even when the first slots happen to match.
+    const bool localChanged = localCount != lightVolumeLocalCount ||
+        (localVolumeParams != nullptr &&
+         std::memcmp(localVolumeParams, lightVolumeLocalPrev, sizeof(lightVolumeLocalPrev)) != 0);
+
+    if (localChanged)
+    {
+        lightVolumeLocalCount = localCount;
+
+        if (localVolumeParams != nullptr)
+        {
+            std::memcpy(lightVolumeLocalPrev, localVolumeParams, sizeof(lightVolumeLocalPrev));
+        }
+        else
+        {
+            std::memset(lightVolumeLocalPrev, 0, sizeof(lightVolumeLocalPrev));
+        }
+
+        // A new local-volume list invalidates the local atlas slots; the next frame clears the
+        // whole atlas and refills one cascade and one local volume per frame.
+        lightVolumeClearPending = true;
+    }
+
+    if (!enabled)
+    {
+        lightVolumeEnabled = false;
+        return true;
+    }
+
+    float snapped[3];
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        snapped[axis] = std::floor(cameraPosition[axis] / LightVolume::kSnap + 0.5f) * LightVolume::kSnap;
+    }
+
+    if (std::memcmp(snapped, lightVolumeOrigin, sizeof(snapped)) != 0)
+    {
+        std::memcpy(lightVolumeOrigin, snapped, sizeof(snapped));
+        // A new snap origin invalidates every cascade: the next list zeroes the atlas and the
+        // six following frames refill one cascade each.
+        lightVolumeClearPending = true;
+    }
+
+    lightVolumeEnabled = true;
+    return true;
+}
+
+bool RhiRtDirectPass::CreateLightVolumeBuffer(uint32_t elementCount)
+{
+    if (elementCount == 0u)
+    {
+        return false;
+    }
+
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(elementCount) * sizeof(LightVolumeProbe);
+    desc.structStride = static_cast<uint32_t>(sizeof(LightVolumeProbe));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass light-volume probes";
+
+    nvrhi::BufferHandle created = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (created == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the light-volume probe buffer");
+        return false;
+    }
+
+    if (lightVolumeProbes != nullptr && frameContext != nullptr)
+    {
+        frameContext->Retire(lightVolumeProbes);
+    }
+
+    lightVolumeProbes = created;
+    lightVolumeClearPending = true;
+    return true;
+}
+
+bool RhiRtDirectPass::CreateLightVolumeHits()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(LightVolume::kProbesPerCascade + LightVolume::kProbesPerLocalVolume) *
+        64ull * 64ull;
+    desc.structStride = 64u;
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass light-volume hit records";
+
+    lightVolumeHits = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (lightVolumeHits == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the light-volume hit buffer");
+        return false;
+    }
+
+    lightVolumeHitsClearPending = true;
+    return true;
+}
+
+bool RhiRtDirectPass::CreateRadianceCache()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(RadianceCache::kEntryCount) * sizeof(RadianceCacheEntry);
+    desc.structStride = static_cast<uint32_t>(sizeof(RadianceCacheEntry));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass world radiance cache";
+
+    radianceCache = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (radianceCache == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the world radiance cache");
+        return false;
+    }
+
+    radianceCacheClearPending = true;
+    return true;
+}
+
+bool RhiRtDirectPass::CreateRadianceCacheActiveTags()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(RadianceCache::kEntryCount) * sizeof(uint32_t);
+    desc.structStride = sizeof(uint32_t);
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass radiance-cache active tags";
+
+    radianceCacheActiveTags = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (radianceCacheActiveTags == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the radiance-cache active tags");
+        return false;
+    }
+
+    // The tag is frameId + 1, so the zero-initialized buffer is never mistaken for a live tag.
+    return true;
+}
+
+bool RhiRtDirectPass::CreateTransparencyFroxels()
+{
+    nvrhi::BufferDesc desc;
+    desc.byteSize = uint64_t(TransparencyFroxelVolume::kHighProbeCount) *
+        sizeof(TransparencyFroxelProbe);
+    desc.structStride = static_cast<uint32_t>(sizeof(TransparencyFroxelProbe));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "RhiRtDirectPass transparency froxels";
+
+    transparencyFroxels = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (transparencyFroxels == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the transparency froxel buffer");
+        return false;
+    }
+
+    transparencyFroxelsClearPending = true;
+    return true;
+}
+
+void RhiRtDirectPass::DispatchTransparencyFroxels(nvrhi::ICommandList *pCommandList,
+                                                   uint32_t frameIndex)
+{
+    Target &target = targets[frameIndex];
+
+    if (target.lightSet == nullptr || target.uniformSet == nullptr)
+    {
+        return;
+    }
+
+    nvrhi::ComputeState state;
+    state.pipeline = froxelFillPipeline;
+    state.addBindingSet(primaryPass->GetHoleSet());  // 0
+    state.addBindingSet(primaryPass->GetHoleSet());  // 1
+    state.addBindingSet(target.uniformSet);          // 2
+    state.addBindingSet(primaryPass->GetHoleSet());  // 3
+    state.addBindingSet(primaryPass->GetHoleSet());  // 4
+    state.addBindingSet(primaryPass->GetHoleSet());  // 5
+    state.addBindingSet(target.lightSet);            // 6
+    pCommandList->setComputeState(state);
+
+    const uint32_t groups = (TransparencyFroxelVolume::kHighProbeCount + 63u) / 64u;
+    pCommandList->dispatch(groups, 1, 1);
+}
+
+void RhiRtDirectPass::DispatchLightVolume(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)
+{
+    if (!lightVolumeEnabled || volumePipeline == nullptr || volumeShaderTable == nullptr ||
+        frameIndex >= MAX_FRAMES_IN_FLIGHT)
+    {
+        return;
+    }
+
+    Target &target = targets[frameIndex];
+
+    if (target.tlasSet == nullptr || target.framebufferSet == nullptr ||
+        target.uniformSet == nullptr || target.vertexDataSet == nullptr ||
+        target.lightSet == nullptr)
+    {
+        return;
+    }
+
+    nvrhi::rt::State state;
+    state.setShaderTable(volumeShaderTable);
+    state.addBindingSet(target.tlasSet);                  // 0
+    state.addBindingSet(target.framebufferSet);           // 1
+    state.addBindingSet(target.uniformSet);               // 2
+    state.addBindingSet(target.vertexDataSet);            // 3
+    state.addBindingSet(textureTable->GetTable());        // 4
+    state.addBindingSet(primaryPass->GetHoleSet());       // 5
+    state.addBindingSet(target.lightSet);                 // 6
+    state.addBindingSet(primaryPass->GetHoleSet());       // 7
+    state.addBindingSet(primaryPass->GetHoleSet());       // 8
+    state.addBindingSet(primaryPass->GetHoleSet());       // 9
+    state.addBindingSet(primaryPass->GetHoleSet());       // 10
+    state.addBindingSet(primaryPass->GetRayStatsSet(frameIndex)); // 11
+    state.addBindingSet(cloudShadowBinding.GetSet());
+
+    pCommandList->setRayTracingState(state);
+
+    // One invocation per probe of the cascade selected by frameId % 6 in the shader.
+    nvrhi::rt::DispatchRaysArguments args;
+    // 4,096 cascade probes plus one 10^3 local volume (the shader picks the slot by frameId).
+    args.setDimensions(LightVolume::kProbesPerCascade + LightVolume::kProbesPerLocalVolume, 1, 1);
+    pCommandList->dispatchRays(args);
+
+    if (!lightVolumeSplitEnabled || volumeShadeShaderTable == nullptr)
+    {
+        return;
+    }
+
+    // The shade pass reads the records the visibility pass just wrote: force the two UAV
+    // transitions so the backend emits the read-after-write barrier between the dispatches.
+    pCommandList->setBufferState(lightVolumeHits, nvrhi::ResourceStates::CopyDest);
+    pCommandList->setBufferState(lightVolumeHits, nvrhi::ResourceStates::UnorderedAccess);
+
+    nvrhi::rt::State shadeState;
+    shadeState.setShaderTable(volumeShadeShaderTable);
+    shadeState.addBindingSet(target.tlasSet);
+    shadeState.addBindingSet(target.framebufferSet);
+    shadeState.addBindingSet(target.uniformSet);
+    shadeState.addBindingSet(target.vertexDataSet);
+    shadeState.addBindingSet(textureTable->GetTable());
+    shadeState.addBindingSet(primaryPass->GetHoleSet());
+    shadeState.addBindingSet(target.lightSet);
+    shadeState.addBindingSet(primaryPass->GetHoleSet());
+    shadeState.addBindingSet(primaryPass->GetHoleSet());
+    shadeState.addBindingSet(primaryPass->GetHoleSet());
+    shadeState.addBindingSet(primaryPass->GetHoleSet());
+    shadeState.addBindingSet(primaryPass->GetRayStatsSet(frameIndex));
+    shadeState.addBindingSet(cloudShadowBinding.GetSet());
+    pCommandList->setRayTracingState(shadeState);
+    pCommandList->dispatchRays(args);
+}
+
+bool RhiRtDirectPass::CreateRestirReservoir(uint64_t elementCount)
+{
+    if (elementCount == 0u)
+    {
+        return false;
+    }
+
+    nvrhi::BufferDesc desc;
+    desc.byteSize = elementCount * sizeof(RestirReservoir);
+    desc.structStride = static_cast<uint32_t>(sizeof(RestirReservoir));
+    desc.canHaveUAVs = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    // Not keepInitialState: the one-time clearBufferUInt moves the ring to CopyDest before the
+    // raygen's UAV reads, so the automatic barrier pass has to be able to transition it.
+    desc.debugName = "RhiRtDirectPass restir reservoirs";
+
+    nvrhi::BufferHandle created = rhi::createBuffer(device, desc, desc.debugName);
+
+    if (created == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the direct-light ReSTIR reservoir buffer");
+        return false;
+    }
+
+    ReleaseRestirReservoir();
+
+    restirReservoir = created;
+    restirReservoirElements = elementCount;
+    restirReservoirClearPending = true;
+    return true;
+}
+
+void RhiRtDirectPass::ReleaseRestirReservoir()
+{
+    if (restirReservoir != nullptr && frameContext != nullptr)
+    {
+        frameContext->Retire(restirReservoir);
+    }
+
+    restirReservoir = nullptr;
+    restirReservoirElements = 0;
+    restirReservoirClearPending = false;
+}
+
+void RhiRtDirectPass::InvalidateLightSets()
+{
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (targets[i].lightSet != nullptr)
+        {
+            if (frameContext != nullptr)
+            {
+                frameContext->Retire(targets[i].lightSet);
+            }
+
+            targets[i].lightSet = nullptr;
+        }
+
+        lightSetPrepared[i] = false;
+        lightSetPreparedFrame[i] = 0;
+    }
+}
+
 bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target &target,
                                       uint32_t frameIndex, uint32_t frameId, uint32_t lightStatsMode)
 {
@@ -1160,6 +1927,11 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         buffers.dtalMembers,
         buffers.tailOffsets,
         buffers.tailEntries,
+        buffers.gridOffsets,
+        buffers.gridIds,
+        buffers.gridHeader,
+        buffers.gridSources,
+        buffers.gridCounts,
     };
 
     for (uint32_t i = 0; i < LIGHT_BUFFER_COUNT; i++)
@@ -1218,6 +1990,40 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         std::memcpy(target.lightHandles, rawBuffers, sizeof(target.lightHandles));
     }
 
+    // NVRHI's per-list buffer tracker starts at Unknown unless the buffer is permanent. Both
+    // pass-owned buffers end every list in UnorderedAccess, so announce that state before the
+    // first use; a pending clear then transitions to CopyDest and back.
+    if (restirReservoir != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(restirReservoir, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
+    if (lightVolumeProbes != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(lightVolumeProbes, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
+    if (lightVolumeHits != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(lightVolumeHits, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
+    if (radianceCache != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
+    if (radianceCacheActiveTags != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(radianceCacheActiveTags,
+                                               nvrhi::ResourceStates::UnorderedAccess);
+    }
+
+    if (transparencyFroxels != nullptr)
+    {
+        pCommandList->beginTrackingBufferState(transparencyFroxels, nvrhi::ResourceStates::UnorderedAccess);
+    }
+
     if (target.lightSet == nullptr)
     {
         nvrhi::BindingSetDesc setDesc;
@@ -1231,6 +2037,24 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
                                                                                target.lightWraps[i]));
         }
 
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS, restirReservoir));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES, lightVolumeProbes));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE, radianceCache));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE, radianceCacheActiveTags));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS, transparencyFroxels));
+
+        setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(
+            BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS, lightVolumeHits));
+
         target.lightSet = device->createBindingSet(setDesc, lightLayout);
 
         if (target.lightSet == nullptr)
@@ -1238,6 +2062,45 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
             LogMessage(print, "Warning: RHI: failed to create the direct RT pass light-source binding set");
             return false;
         }
+    }
+
+    // A re-created reservoir ring starts zeroed: sampleCount == 0 is the shader's "no history"
+    // marker, so the first frame after an allocation or a resize cannot merge stale bytes.
+    if (restirReservoirClearPending && restirReservoir != nullptr)
+    {
+        pCommandList->clearBufferUInt(restirReservoir, 0u);
+        // Back to the state the set-6 UAV binding requires; the pending barrier is committed by
+        // the setRayTracingState of this list, like the statistics fill's transition.
+        pCommandList->setBufferState(restirReservoir, nvrhi::ResourceStates::UnorderedAccess);
+        restirReservoirClearPending = false;
+    }
+
+    if (lightVolumeClearPending && lightVolumeProbes != nullptr)
+    {
+        pCommandList->clearBufferUInt(lightVolumeProbes, 0u);
+        pCommandList->setBufferState(lightVolumeProbes, nvrhi::ResourceStates::UnorderedAccess);
+        lightVolumeClearPending = false;
+    }
+
+    if (lightVolumeHitsClearPending && lightVolumeHits != nullptr)
+    {
+        pCommandList->clearBufferUInt(lightVolumeHits, 0u);
+        pCommandList->setBufferState(lightVolumeHits, nvrhi::ResourceStates::UnorderedAccess);
+        lightVolumeHitsClearPending = false;
+    }
+
+    if (radianceCacheClearPending && radianceCache != nullptr)
+    {
+        pCommandList->clearBufferUInt(radianceCache, 0u);
+        pCommandList->setBufferState(radianceCache, nvrhi::ResourceStates::UnorderedAccess);
+        radianceCacheClearPending = false;
+    }
+
+    if (transparencyFroxelsClearPending && transparencyFroxels != nullptr)
+    {
+        pCommandList->clearBufferUInt(transparencyFroxels, 0u);
+        pCommandList->setBufferState(transparencyFroxels, nvrhi::ResourceStates::UnorderedAccess);
+        transparencyFroxelsClearPending = false;
     }
 
     // The frame's light copies, the RHI replacement for the `LightManager::CopyFromStaging` calls
@@ -1258,6 +2121,10 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
         copies.dtalMembers,
         copies.tailOffsets,
         copies.tailEntries,
+        copies.gridOffsets,
+        copies.gridIds,
+        copies.gridHeader,
+        copies.gridSources,
     };
 
     for (uint32_t i = 0; i < LIGHT_COPY_COUNT; i++)
@@ -1332,6 +2199,88 @@ bool RhiRtDirectPass::PrepareLightSet(nvrhi::ICommandList *pCommandList, Target 
     RecordLightStatsFill(pCommandList, target, buffers.lightStats, frameIndex, frameId, lightStatsMode);
 
     return true;
+}
+
+bool RhiRtDirectPass::PrepareGridBuildSet(Target &target)
+{
+    const LightManager::Buffers buffers = lightManager->GetBuffers();
+    const VkBuffer rawHandles[5] =
+    {
+        buffers.gridHeader,
+        buffers.gridSources,
+        buffers.gridOffsets,
+        buffers.gridIds,
+        buffers.gridCounts,
+    };
+
+    for (uint32_t i = 0; i < 5; i++)
+    {
+        if (rawHandles[i] == VK_NULL_HANDLE)
+        {
+            return false;
+        }
+    }
+
+    bool changed = false;
+
+    for (uint32_t i = 0; i < 5; i++)
+    {
+        changed = changed || target.gridBuildHandles[i] != rawHandles[i];
+    }
+
+    if (changed)
+    {
+        target.gridBuildSet = nullptr;
+        std::memcpy(target.gridBuildHandles, rawHandles, sizeof(target.gridBuildHandles));
+    }
+
+    if (target.gridBuildSet == nullptr)
+    {
+        nvrhi::BindingSetDesc desc;
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, target.lightWraps[10]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(1, target.lightWraps[11]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(2, target.lightWraps[8]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, target.lightWraps[9]));
+        desc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(4, target.lightWraps[12]));
+
+        target.gridBuildSet = device->createBindingSet(desc, gridBuildLayout);
+
+        if (target.gridBuildSet == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: failed to create the GPU light-grid binding set");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void RhiRtDirectPass::BuildLightGrid(nvrhi::ICommandList *pCommandList, uint32_t frameIndex)
+{
+    Target &target = targets[frameIndex];
+
+    if (gridBuildPipeline == nullptr || target.gridBuildSet == nullptr)
+    {
+        return;
+    }
+
+    nvrhi::ComputeState state;
+    state.pipeline = gridBuildPipeline;
+    state.addBindingSet(target.gridBuildSet);
+    pCommandList->setComputeState(state);
+
+    const uint32_t groups = (uint32_t(Q2_LIGHT_GRID_CELLS) + 63u) / 64u;
+
+    static bool reportedGridDispatch = false;
+
+    if (!reportedGridDispatch)
+    {
+        reportedGridDispatch = true;
+        LogMessage(print, "RHI: GPU light-grid builder dispatched " + std::to_string(groups) + " groups");
+    }
+
+    pCommandList->dispatch(groups, 1, 1);
+    pCommandList->commitBarriers();
 }
 
 void RhiRtDirectPass::RecordLightStatsFill(nvrhi::ICommandList *pCommandList, const Target &target,

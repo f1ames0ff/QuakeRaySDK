@@ -9,6 +9,7 @@
 #include "RhiTextureTable.h"
 
 #include "../Framebuffers.h"
+#include "../RestirGiReservoir.h"
 #include "../Generated/ShaderCommonC.h"
 
 #include <cstring>
@@ -240,6 +241,8 @@ RhiRtIndirectPass::~RhiRtIndirectPass()
     for (Target &target : targets)
     {
         target.framebufferSet = nullptr;
+        target.motionSet = nullptr;
+        target.motionTexture = nullptr;
         for (nvrhi::TextureHandle &texture : target.framebufferTextures)
         {
             texture = nullptr;
@@ -392,6 +395,30 @@ bool RhiRtIndirectPass::Create(nvrhi::IDevice *pDevice,
     // RhiDebugTracePass documents: the acceleration-structure-read barrier names the compute stage
     // too (vulkan-constants.cpp:282-285) and this device has no rayQuery feature to make that legal
     // (the A3.1 fix).
+    {
+        // Set 9: the ReSTIR GI history buffer (two slots, UAV). The indirect pipeline declares
+        // this layout at position 9 instead of the primary's empty set.
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::AllRayTracing;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
+        giReservoirLayout = device->createBindingLayout(desc);
+    }
+
+    {
+        // Set 10: the motion-vector SRV the GI reprojection reads. It is separate from set 1
+        // because adding the motion image there stalled the indirect pass at runtime.
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::AllRayTracing;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        giMotionLayout = device->createBindingLayout(desc);
+    }
+
     {
         // Set 1: one item per image of the raygen, at the engine's raw binding of that image. A
         // partial layout in the same sense the direct pass's set 1 is - only the 14 bindings the
@@ -573,8 +600,8 @@ bool RhiRtIndirectPass::Create(nvrhi::IDevice *pDevice,
         desc.addBindingLayout(directPass->GetLightLayout());           // 6
         desc.addBindingLayout(cubemapLayout);                          // 7
         desc.addBindingLayout(renderCubemapLayout);                    // 8
-        desc.addBindingLayout(primaryPass->GetHoleLayout());           // 9
-        desc.addBindingLayout(primaryPass->GetHoleLayout());           // 10
+        desc.addBindingLayout(giReservoirLayout);                      // 9
+        desc.addBindingLayout(giMotionLayout);                         // 10
         desc.addBindingLayout(primaryPass->GetRayStatsLayout());       // 11
         desc.addBindingLayout(cloudShadowBinding.GetLayout());
 
@@ -701,6 +728,65 @@ void RhiRtIndirectPass::SetRenderCubemaps(nvrhi::ITexture *pCubemap, nvrhi::ITex
     renderCubemapTexture = pCubemap;
     renderCubemapEnvTexture = pEnvCubemap;
     renderCubemapSampler = pSampler;
+}
+
+bool RhiRtIndirectPass::ConfigureGiReservoirs(uint32_t width, uint32_t height, bool halfRes)
+{
+    if (!created || device == nullptr || width == 0 || height == 0)
+    {
+        return false;
+    }
+
+    // At rt_gi_level 0.5 the raygen traces half the rows and stands each traced row in for a
+    // pair, so the history buffer stores one record per pair.
+    const uint32_t rows = halfRes ? (height + 1u) / 2u : height;
+
+    if (giReservoirs != nullptr && giReservoirWidth == width && giReservoirHeight == rows &&
+        giReservoirHalfRes == halfRes)
+    {
+        return true;
+    }
+
+    nvrhi::BufferDesc bufferDesc;
+    bufferDesc.byteSize = uint64_t(width) * uint64_t(rows) * kRestirGiSlots *
+        sizeof(RestirGiReservoir);
+    bufferDesc.structStride = static_cast<uint32_t>(sizeof(RestirGiReservoir));
+    bufferDesc.canHaveUAVs = true;
+    bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    bufferDesc.debugName = "RhiRtIndirectPass ReSTIR GI reservoirs";
+
+    nvrhi::BufferHandle created = rhi::createBuffer(device, bufferDesc, bufferDesc.debugName);
+
+    if (created == nullptr)
+    {
+        return false;
+    }
+
+    nvrhi::BindingSetDesc setDesc;
+    setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, created));
+    nvrhi::BindingSetHandle createdSet = device->createBindingSet(setDesc, giReservoirLayout);
+
+    if (createdSet == nullptr)
+    {
+        return false;
+    }
+
+    if (giReservoirSet != nullptr)
+    {
+        frameContext->Retire(giReservoirSet);
+    }
+    if (giReservoirs != nullptr)
+    {
+        frameContext->Retire(giReservoirs);
+    }
+
+    giReservoirs = created;
+    giReservoirSet = createdSet;
+    giReservoirWidth = width;
+    giReservoirHeight = rows;
+    giReservoirHalfRes = halfRes;
+    giReservoirClearPending = true;
+    return true;
 }
 
 void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
@@ -889,6 +975,39 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
         }
     }
 
+    // Set 10: the screen-space motion vectors. The image is not part of the 14-image set 1
+    // interface; a separate wrap and set keep that interface unchanged. The pair follows the
+    // framebuffer set's invalidation, so it is rebuilt only after ReleaseFramebufferTarget.
+    if (target.motionSet == nullptr)
+    {
+        const auto [motionImage, motionView, motionFormat, motionExtent] =
+            pFramebuffers->GetImageHandles(FB_IMAGE_INDEX_MOTION_DLSS, frameIndex, resolutionState);
+
+        if (motionImage != 0)
+        {
+            target.motionTexture = rhi::wrapEngineTexture(
+                device, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(motionImage)),
+                motionFormat, motionExtent.width, motionExtent.height, 1,
+                "RhiRtIndirectPass GI motion");
+        }
+
+        if (target.motionTexture == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: failed to wrap the GI motion vectors");
+            return;
+        }
+
+        nvrhi::BindingSetDesc motionDesc;
+        motionDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, target.motionTexture));
+        target.motionSet = device->createBindingSet(motionDesc, giMotionLayout);
+
+        if (target.motionSet == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: failed to create the GI motion set");
+            return;
+        }
+    }
+
     // The per-slot sets 0, 2 and 3, over the primary's layout handles. Their keys are the pointers
     // the host passes, so a re-created AS or a re-created vertex-data buffer is picked up without a
     // second Create.
@@ -941,6 +1060,33 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
         dummyCubemapCleared = true;
     }
 
+    // ReSTIR GI history: ConfigureGiReservoirs created the buffer and its set before the frame.
+    // A missing pair skips the indirect dispatch instead of binding an invalid descriptor.
+    const bool halfResMotion = numBounceRays > HALF_RES_MIN_BOUNCE_RAYS &&
+                               numBounceRays < HALF_RES_MAX_BOUNCE_RAYS;
+    const uint32_t giRows = halfResMotion ? (height + 1u) / 2u : height;
+
+    if (giReservoirs == nullptr || giReservoirSet == nullptr ||
+        giReservoirWidth != width || giReservoirHeight != giRows)
+    {
+        return;
+    }
+
+    pCommandList->beginTrackingBufferState(giReservoirs, nvrhi::ResourceStates::UnorderedAccess);
+
+    if (giReservoirClearPending)
+    {
+        pCommandList->clearBufferUInt(giReservoirs, 0u);
+        pCommandList->setBufferState(giReservoirs, nvrhi::ResourceStates::UnorderedAccess);
+        giReservoirClearPending = false;
+    }
+
+    if (target.motionTexture != nullptr)
+    {
+        pCommandList->beginTrackingTextureState(target.motionTexture, nvrhi::AllSubresources,
+                                                nvrhi::ResourceStates::ShaderResource);
+    }
+
     // The twelve sets, in the layout order the pipeline was built with; the pinned backend's legacy
     // binding mode binds the list positionally (vulkan-resource-bindings.cpp:940-958). Sets 9 and 10
     // are the primary's empty set: the blob declares nothing there, but the automatic-barrier pass
@@ -957,8 +1103,8 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
     state.addBindingSet(lightSet);                        // 6
     state.addBindingSet(cubemapTable);                    // 7
     state.addBindingSet(renderCubemapSet);                // 8
-    state.addBindingSet(primaryPass->GetHoleSet());       // 9
-    state.addBindingSet(primaryPass->GetHoleSet());       // 10
+    state.addBindingSet(giReservoirSet);                  // 9
+    state.addBindingSet(target.motionSet);                // 10
     state.addBindingSet(primaryPass->GetRayStatsSet(frameIndex)); // 11
     state.addBindingSet(cloudShadowBinding.GetSet());
 
@@ -969,8 +1115,7 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
     // the same uniform member the raygen reads for its row mapping. The raygen's DispatchRaysIndex
     // is the checkerboard-packed texel itself, so the images stay at the render size and no dispatch
     // index is unused. The width is never halved.
-    const bool halfRes = numBounceRays > HALF_RES_MIN_BOUNCE_RAYS &&
-                         numBounceRays < HALF_RES_MAX_BOUNCE_RAYS;
+    const bool halfRes = halfResMotion;
 
     nvrhi::rt::DispatchRaysArguments args;
     args.setDimensions(width, halfRes ? (height + 1) / 2 : height, 1);
@@ -1012,6 +1157,15 @@ void RhiRtIndirectPass::ReleaseFramebufferTarget(Target &target)
             frameContext->Retire(target.framebufferSet);
         }
 
+        if (target.motionSet != nullptr)
+        {
+            frameContext->Retire(target.motionSet);
+        }
+        if (target.motionTexture != nullptr)
+        {
+            frameContext->Retire(target.motionTexture);
+        }
+
         for (nvrhi::TextureHandle &texture : target.framebufferTextures)
         {
             if (texture != nullptr)
@@ -1022,6 +1176,8 @@ void RhiRtIndirectPass::ReleaseFramebufferTarget(Target &target)
     }
 
     target.framebufferSet = nullptr;
+    target.motionSet = nullptr;
+    target.motionTexture = nullptr;
 
     for (nvrhi::TextureHandle &texture : target.framebufferTextures)
     {

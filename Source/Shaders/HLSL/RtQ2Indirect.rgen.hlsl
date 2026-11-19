@@ -82,12 +82,20 @@
 #define DESC_SET_LIGHT_SOURCES 6
 #define DESC_SET_CUBEMAPS 7
 #define DESC_SET_RENDER_CUBEMAP 8
+#define DESC_SET_GI_RESERVOIRS 9
+#define DESC_SET_GI_MOTION 10
 #define DESC_SET_RAY_STATS 11
 #define DESC_SET_CLOUD_SHADOW 12
 #define LIGHT_SAMPLE_METHOD (LIGHT_SAMPLE_METHOD_INDIR)
 #include "RaygenCommon.hlsli"
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
+#include "LightVolumeGpu.hlsli"
+#include "RestirGi.hlsli"
+#include "RadianceCache.hlsli"
+
+[[vk::binding(0, DESC_SET_GI_MOTION)]]
+Texture2D<float2> giMotionTexture;
 
 #define Q2_RNG_INDIR_CELL_SELECT 220
 #define Q2_RNG_INDIR_LIGHT_POINT 223
@@ -216,6 +224,14 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
         return getSkyAmbientMultiplied( bounceDir, SKY_DIFFUSE_BOUNCE_LOD ) * oneOverPdf;
     }
 
+    // The world radiance cache feeds the second bounce: a hit cell that was shaded by an
+    // earlier ray (first or second bounce) reuses its radiance instead of running the NEE again.
+    float3 cachedRadiance;
+    if ( q2RadianceCacheGet( hitSurf.position, cachedRadiance ) )
+    {
+        return cachedRadiance * oneOverPdf;
+    }
+
     // Q2RTX processes analytic lights only in the first bounce pass, so the second bounce
     // of the diffuse path is lit by the sky it can reach and by the sun alone: the
     // `get_direct_illumination` call sits behind `spec_bounce_index == 0` and the light
@@ -255,6 +271,7 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
         radiance += hitSurf.emission * hitSurf.albedo;
     }
 
+    q2RadianceCachePut( hitSurf.position, radiance );
     return radiance * oneOverPdf;
 }
 
@@ -433,9 +450,24 @@ void main()
             uint  lightIndex = LIGHT_INDEX_NONE;
             uint  lightSlot  = 0u;
             float lightPdf   = 0.0;
-            q2SampleClusterLights( cluster, hitSurf.position, hitSurf.normal, hitSurf.toViewerDir,
-                                   phongExp, phongScale, phongWeight, isGradient, rng,
-                                   lightIndex, lightSlot, lightPdf );
+            bool  sampledFromGrid = false;
+            const int gridCell = q2GetLightGridCell(hitSurf.position);
+
+            if (gridCell >= 0)
+            {
+                float lightMass = 0.0;
+                q2SampleGridLights(gridCell, hitSurf.position, hitSurf.normal, hitSurf.toViewerDir,
+                                   phongExp, phongScale, phongWeight, rng,
+                                   lightIndex, lightSlot, lightPdf, lightMass);
+                sampledFromGrid = lightIndex != LIGHT_INDEX_NONE;
+            }
+
+            if (!sampledFromGrid)
+            {
+                q2SampleClusterLights( cluster, hitSurf.position, hitSurf.normal, hitSurf.toViewerDir,
+                                       phongExp, phongScale, phongWeight, isGradient, rng,
+                                       lightIndex, lightSlot, lightPdf );
+            }
 
             if ( lightIndex != LIGHT_INDEX_NONE && lightPdf > 0.0 )
             {
@@ -464,9 +496,10 @@ void main()
                         rayStatsAdd( RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1 );
                     }
 
-                    if ( lightSources[ lightIndex ].lightType == LIGHT_TYPE_TRIANGLE ||
-                         lightSources[ lightIndex ].lightType == LIGHT_TYPE_TEXTURED_AREA ||
-                         lightSources[ lightIndex ].lightType == LIGHT_TYPE_DTAL_GROUP )
+                    if ( !sampledFromGrid &&
+                         ( lightSources[ lightIndex ].lightType == LIGHT_TYPE_TRIANGLE ||
+                           lightSources[ lightIndex ].lightType == LIGHT_TYPE_TEXTURED_AREA ||
+                           lightSources[ lightIndex ].lightType == LIGHT_TYPE_DTAL_GROUP ) )
                     {
                         q2AccumulateLightStats( cluster, lightSlot, hitSurf.normal, getLuminance( vis ), 0u );
                     }
@@ -533,10 +566,177 @@ void main()
         {
             hitRadiance += hitSurf.emission * hitSurf.albedo;
         }
+
+        q2RadianceCachePut( hitSurf.position, hitRadiance );
     }
 
     float3 diffuse, specular;
+    if (globalUniform.giReservoirParams.x != 0u)
+    {
+        const uint stride = q2GiSlotBase(1u);
+        const uint currentSlot = globalUniform.frameId & 1u;
+        const uint previousSlot = currentSlot ^ 1u;
+        const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
+        // Reproject with the engine's screen-space motion vectors, the same image and convention
+        // the direct ReSTIR path uses (HitInfo.hlsli: motion = previousUV - currentUV, so the
+        // previous UV is current + motion). A non-finite sample falls back to the main camera
+        // matrices, the pair that also builds the motion vectors; volumeViewProj_Prev is the
+        // volumetric fog projection and lands on a different pixel.
+        const float2 currentUV = (float2(pix) + 0.5) / resolution;
+        const float2 motion = giMotionTexture.Load(int3(pix, 0)).rg;
+        float2 previousUV;
+
+        if (all(isfinite(motion)))
+        {
+            previousUV = currentUV + motion;
+        }
+        else
+        {
+            const float4 previousView = mul(globalUniform.viewPrev, float4(surf.position, 1.0));
+            const float4 previousClip = mul(globalUniform.projectionPrev, previousView);
+            // MakeProjectionMatrix writes w = -z_view, so a point in front of the camera has a
+            // negative w. The old `w > 1e-6` guard rejected every pixel and the camera path was
+            // effectively a no-history path.
+            previousUV = abs(previousClip.w) > 1e-6
+                ? previousClip.xy / previousClip.w * 0.5 + 0.5
+                : (float2)2.0;
+        }
+
+        ShRestirGiReservoir current = (ShRestirGiReservoir)0;
+        const float3 currentDir = safeNormalize(hitPos - surf.position);
+        const float currentDistance = length(hitPos - surf.position);
+        const float3 currentRadiance = hitRadiance;
+        const float currentTarget = max(getLuminance(currentRadiance), 1e-6);
+        q2GiAddSample(current, currentDir, currentDistance, currentRadiance, oneOverSourcePdf,
+                      1.0, currentTarget, rnd16(seed, 900u));
+
+        ShRestirGiReservoir reservoir = current;
+        ShRestirGiReservoir history = (ShRestirGiReservoir)0;
+        int2 historyPix = pix;
+        bool historyValid = false;
+
+        if (all(isfinite(previousUV)) && all(previousUV >= (float2)0.0) &&
+            all(previousUV < (float2)1.0))
+        {
+            const int2 maxPixel = int2(int(globalUniform.renderWidth) - 1,
+                                       int(globalUniform.renderHeight) - 1);
+            historyPix = clamp(int2(floor(previousUV * resolution)),
+                               int2(0, 0), maxPixel);
+            history = giReservoirs[previousSlot * stride + q2GiPixelIndex(historyPix)];
+            historyValid = q2GiUsable(history);
+            if (historyValid)
+            {
+                if (q2GiHistoryValid(history, surf.normalGeom))
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_HIT, 1);
+                }
+                else
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_CACHE_MISS, 1);
+                }
+            }
+        }
+
+        if (historyValid)
+        {
+            const float3 historyRadiance = history.radiance.xyz;
+            const float3 historyDir = history.direction.xyz;
+            const float historyTarget = max(
+                getLuminance(historyRadiance) * max(dot(surf.normal, historyDir), 0.0), 1e-6);
+
+            q2GiMerge(reservoir, history, historyTarget, rnd16(seed, 901u));
+
+            // Four spatial taps from the same previous-frame slot. The slot is not written by this
+            // frame, so the taps cannot race with the current pixel's store.
+            for (uint tap = 0u; tap < 4u; tap++)
+            {
+                const int2 offset = tap == 0u ? int2(2, 0) :
+                                    tap == 1u ? int2(-2, 0) :
+                                    tap == 2u ? int2(0, 2) : int2(0, -2);
+                const int2 tapPix = clamp(historyPix + offset, int2(0, 0),
+                                          int2(int(globalUniform.renderWidth) - 1,
+                                               int(globalUniform.renderHeight) - 1));
+                const ShRestirGiReservoir tapReservoir =
+                    giReservoirs[previousSlot * stride + q2GiPixelIndex(tapPix)];
+
+                // Validate the tap receiver's own normal from the previous-frame G-buffer. The
+                // reservoir pad carries the selected sample's origin normal, which is not the
+                // tap receiver's (validating that rejected most taps); the G-buffer normal is
+                // the receiver at the tap pixel and matches the current pixel on the same
+                // surface.
+                if (!q2GiUsable(tapReservoir))
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
+                    continue;
+                }
+
+                if (!q2GiHistoryValid(tapReservoir, surf.normalGeom))
+                {
+                    rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_INDIRECT, 1);
+                    continue;
+                }
+
+                rayStatsAdd(RAY_STATS_CATEGORY_SHADOW_DIRECT, 1);
+
+                const Surface tapSurface =
+                    fetchGbufferSurface_NoAlbedoViewDir_Prev(getCheckerboardPix(tapPix));
+
+                if (dot(normalize(tapSurface.normalGeom), normalize(surf.normalGeom)) < 0.9)
+                {
+                    continue;
+                }
+
+                const float3 tapDir = tapReservoir.direction.xyz;
+                const float tapTarget = max(
+                    getLuminance(tapReservoir.radiance.xyz) * max(dot(surf.normal, tapDir), 0.0),
+                    1e-6);
+                q2GiMerge(reservoir, tapReservoir, tapTarget, rnd16(seed, 910u + tap));
+            }
+
+            q2GiClampHistory(reservoir);
+        }
+
+        // The selected sample is a reuse if it is not the current frame's candidate.
+        const bool selectedHistory =
+            !(dot(reservoir.direction.xyz, current.direction.xyz) > 0.9999 &&
+              abs(reservoir.direction.w - current.direction.w) <= 0.01);
+
+        if (selectedHistory)
+        {
+            const float3 dir = reservoir.direction.xyz;
+            const float distanceToHit = reservoir.direction.w;
+            const float3 expected = surf.position + dir * distanceToHit;
+            const Surface check = traceBounce(surf.position + surf.normalGeom * 2.5e-4,
+                                              surf.roughness, surf.instCustomIndex, dir,
+                                              FIRST_BOUNCE_MIP_BIAS);
+            rayStatsAdd(RAY_STATS_CATEGORY_INDIRECT, 1);
+
+            const float tolerance = 0.5 + 0.005 * distanceToHit;
+            const bool visible = !check.isSky && distance(check.position, expected) <= tolerance;
+
+            if (visible)
+            {
+                hitPos = expected;
+                hitRadiance = reservoir.radiance.xyz;
+                // Use the pdf that generated the stored sample, not the receiver's pdf.
+                oneOverSourcePdf = max(reservoir.radiance.w, 1e-6);
+            }
+            else
+            {
+                // Visibility reuse failed: keep the current frame's sample instead of a stale one.
+                reservoir = current;
+            }
+        }
+
+        q2GiUpdateReceiver(reservoir, surf.normalGeom, globalUniform.frameId);
+        giReservoirs[currentSlot * stride + q2GiPixelIndex(pix)] = reservoir;
+    }
+
     q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, oneOverSourcePdf, diffuse, specular );
+
+    // Final-gather feed: the screen-space indirect result at this receiver is stored in the world
+    // cache, so the volume probes and later rays reuse the final gather, not only bounce hits.
+    q2RadianceCachePut( surf.position, diffuse + specular );
 
     {
         // Read the unfiltered specular through the storage image, not the sampled view: this
@@ -556,6 +756,12 @@ void main()
     {
         SH sh = irradianceToSH( diffuse * skyBsdfWeight, safeNormalize( hitPos - surf.position ) );
         accumulateSH( sh, irradianceToSH( q2SkyNee( surf, seed ) * halfResScale, surf.normal ), 1.0 );
+
+        SH volumeSh;
+        if ( q2SampleLightVolumeSH( surf.position, globalUniform.lightVolumeParams.y, volumeSh ) )
+        {
+            accumulateSH( sh, volumeSh, 1.0 );
+        }
 
         if ( indirDbg( INDIR_DBG_SANITY ) )
         {

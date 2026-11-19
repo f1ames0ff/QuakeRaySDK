@@ -310,6 +310,11 @@ public:
     // blue-noise texture is not set, the direct pass has no light set for the slot, the TLAS or the
     // framebuffers are missing, or the uniform/vertex-data inputs are missing or in a shape NVRHI's
     // validation refuses.
+    // Creates or resizes the ReSTIR GI history buffer outside the frame's command list. The
+    // skeleton calls it with the render size before Render; a mid-list 88 MB allocation is what
+    // stalled the first GI runtime build.
+    bool ConfigureGiReservoirs(uint32_t width, uint32_t height, bool halfRes);
+
     void Render(nvrhi::ICommandList *pCommandList,
                 uint32_t frameIndex,
                 float numBounceRays,
@@ -349,6 +354,11 @@ private:
         uint32_t height = 0;
         nvrhi::TextureHandle framebufferTextures[14];
         nvrhi::BindingSetHandle framebufferSet;
+
+        // Set 10: the engine's screen-space motion vectors, wrapped separately so set 1 stays the
+        // 14-image interface that rendered before the GI slice.
+        nvrhi::TextureHandle motionTexture;
+        nvrhi::BindingSetHandle motionSet;
 
         // Set 0: the pointer is only the cache key that tells whether the set still addresses the
         // current AS; the set itself holds the reference that keeps the AS alive.
@@ -424,6 +434,17 @@ private:
     nvrhi::TextureHandle blueNoiseTexture;
     nvrhi::ITexture *blueNoiseSetTexture = nullptr;
     nvrhi::BindingSetHandle blueNoiseSet;
+
+    // ReSTIR GI: two history slots over the full render resolution, one 48-byte record per regular
+    // pixel. The buffer is recreated on a size change; the set is rebuilt with it.
+    nvrhi::BindingLayoutHandle giReservoirLayout;
+    nvrhi::BindingLayoutHandle giMotionLayout;
+    nvrhi::BufferHandle giReservoirs;
+    nvrhi::BindingSetHandle giReservoirSet;
+    uint32_t giReservoirWidth = 0;
+    uint32_t giReservoirHeight = 0;
+    bool     giReservoirHalfRes = false;
+    bool     giReservoirClearPending = false;
 
     // The two placeholder cube sets: the 32-slot bindless table for set 7 and the two-cube set for
     // set 8, all backed by the same 1x1 dummy texture (the primary pass's placeholder, until the

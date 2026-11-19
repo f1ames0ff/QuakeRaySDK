@@ -626,6 +626,65 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[1]            = std::clamp( drawInfo.pIlluminationParams->restirCandidates, 1u, 64u );
         gu->restirParams[2]            = 0u;
         gu->restirParams[3]            = 0u;
+        gu->lightVolumeParams[0]       = drawInfo.pIlluminationParams->lightVolumeEnabled != 0 ? 1.0f : 0.0f;
+        gu->lightVolumeParams[1]       = std::clamp( drawInfo.pIlluminationParams->lightVolumeWeight, 0.0f, 1.0f );
+        gu->lightVolumeParams[2]       = float( std::clamp( drawInfo.pIlluminationParams->lightVolumeRays, 16u, 64u ) );
+
+        const uint32_t localVolumeCount = std::min( drawInfo.pIlluminationParams->lightVolumeLocalCount, 8u );
+        gu->lightVolumeParams[3]       = float( localVolumeCount );
+
+        gu->radianceCacheParams[0]     = drawInfo.pIlluminationParams->radianceCacheEnabled != 0 ? 1.0f : 0.0f;
+        gu->radianceCacheParams[1]     = std::max( drawInfo.pIlluminationParams->radianceCacheCellSize, 0.01f );
+        gu->radianceCacheParams[2]     = std::max( drawInfo.pIlluminationParams->radianceCacheLodDistance, 1.0f );
+        gu->radianceCacheParams[3]     = std::max( drawInfo.pIlluminationParams->radianceCacheAge, 0.0f );
+        gu->radianceSplitParams[0]     = drawInfo.pIlluminationParams->radianceCacheSplitEnabled != 0 ? 1u : 0u;
+        gu->radianceSplitParams[1]     = 0u;
+        gu->radianceSplitParams[2]     = 0u;
+        gu->radianceSplitParams[3]     = 0u;
+        gu->giReservoirParams[0]       = drawInfo.pIlluminationParams->restirGiEnabled != 0 ? 1u : 0u;
+        gu->giReservoirParams[1]       = 0u;
+        gu->giReservoirParams[2]       = 0u;
+        gu->giReservoirParams[3]       = 0u;
+        gu->transparencyFroxelParams[0] = drawInfo.pIlluminationParams->transparencyFroxelEnabled;
+        gu->transparencyFroxelBlendParams[0] =
+            std::clamp( drawInfo.pIlluminationParams->transparencyFroxelBlend, 0.0f, 1.0f );
+
+        switch ( drawInfo.pIlluminationParams->transparencyFroxelQuality )
+        {
+            case 0:
+                gu->transparencyFroxelParams[1] = 32u;
+                gu->transparencyFroxelParams[2] = 16u;
+                gu->transparencyFroxelParams[3] = 32u;
+                break;
+            case 2:
+                gu->transparencyFroxelParams[1] = 128u;
+                gu->transparencyFroxelParams[2] = 64u;
+                gu->transparencyFroxelParams[3] = 128u;
+                break;
+            default:
+                gu->transparencyFroxelParams[1] = 64u;
+                gu->transparencyFroxelParams[2] = 32u;
+                gu->transparencyFroxelParams[3] = 64u;
+                break;
+        }
+
+        for ( uint32_t i = 0; i < 8; i++ )
+        {
+            float *dst = &gu->lightVolumeLocalParams[i * 4];
+
+            if ( i < localVolumeCount )
+            {
+                const QrLightVolumeLocal &src = drawInfo.pIlluminationParams->lightVolumeLocal[i];
+                dst[0] = src.origin.data[0];
+                dst[1] = src.origin.data[1];
+                dst[2] = src.origin.data[2];
+                dst[3] = std::max( src.bounds, 0.0f );
+            }
+            else
+            {
+                dst[0] = dst[1] = dst[2] = dst[3] = 0.0f;
+            }
+        }
         gu->giBounceRays[0]            = std::clamp( drawInfo.pIlluminationParams->giBounceRays, 0.0f, 2.0f );
         gu->fltEnable[0]               = drawInfo.pIlluminationParams->denoiserEnabled != 0 ? 1.0f : 0.0f;
         gu->fixedAlbedo[0]             = std::max( drawInfo.pIlluminationParams->fixedAlbedo, 0.0f );
@@ -649,6 +708,33 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[1]            = 8u;
         gu->restirParams[2]            = 0u;
         gu->restirParams[3]            = 0u;
+        gu->lightVolumeParams[0]       = 0.0f;
+        gu->lightVolumeParams[1]       = 1.0f;
+        gu->lightVolumeParams[2]       = 16.0f;
+        gu->lightVolumeParams[3]       = 0.0f;
+        gu->radianceCacheParams[0]     = 0.0f;
+        gu->radianceCacheParams[1]     = 16.0f;
+        gu->radianceCacheParams[2]     = 1024.0f;
+        gu->radianceCacheParams[3]     = 30.0f;
+        gu->radianceSplitParams[0]     = 0u;
+        gu->transparencyFroxelBlendParams[0] = 0.0f;
+        gu->radianceSplitParams[1]     = 0u;
+        gu->radianceSplitParams[2]     = 0u;
+        gu->radianceSplitParams[3]     = 0u;
+        gu->giReservoirParams[0]       = 0u;
+        gu->giReservoirParams[1]       = 0u;
+        gu->giReservoirParams[2]       = 0u;
+        gu->giReservoirParams[3]       = 0u;
+        gu->transparencyFroxelParams[0] = 0u;
+        gu->transparencyFroxelParams[1] = 64u;
+        gu->transparencyFroxelParams[2] = 32u;
+        gu->transparencyFroxelParams[3] = 64u;
+
+        for ( uint32_t i = 0; i < 8; i++ )
+        {
+            float *dst = &gu->lightVolumeLocalParams[i * 4];
+            dst[0] = dst[1] = dst[2] = dst[3] = 0.0f;
+        }
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;
@@ -2860,6 +2946,27 @@ void VulkanDevice::GetClusterLightTail(uint32_t cluster, uint64_t *pLightUniqueI
                                        uint32_t *pCount)
 {
     clusterLightLists->GetClusterTail(cluster, pLightUniqueIds, pProb, pMarginal, pAlias, pBeta, maxCount, pCount);
+}
+
+void VulkanDevice::GetLightGridStats(QrLightGridStats *pStats)
+{
+    if (pStats == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
+    clusterLightLists->GetLightGridStats(pStats);
+}
+
+void VulkanDevice::GetLightGridList(uint32_t cell, uint64_t *pLightUniqueIds, uint32_t maxCount, uint32_t *pCount)
+{
+    clusterLightLists->GetLightGridList(cell, pLightUniqueIds, maxCount, pCount);
+}
+
+void VulkanDevice::GetLightGridTail(uint32_t cell, uint64_t *pLightUniqueIds, float *pProb, float *pMarginal,
+                                    uint32_t *pAlias, float *pBeta, uint32_t maxCount, uint32_t *pCount)
+{
+    clusterLightLists->GetLightGridTail(cell, pLightUniqueIds, pProb, pMarginal, pAlias, pBeta, maxCount, pCount);
 }
 
 void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)

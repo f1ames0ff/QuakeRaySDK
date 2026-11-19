@@ -49,6 +49,17 @@ namespace qray
 #define BINDING_LIGHT_SOURCES_DTAL_MEMBERS (9)
 #define BINDING_LIGHT_SOURCES_Q2_LIGHT_LIST_TAIL_OFFSETS (10)
 #define BINDING_LIGHT_SOURCES_Q2_LIGHT_LIST_TAIL (11)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_OFFSETS (12)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_IDS (13)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_HEADER (14)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_SOURCES (15)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS (16)
+#define BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS (17)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES (18)
+#define BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE (19)
+#define BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS (20)
+#define BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS (21)
+#define BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE (22)
 #define BINDING_DECAL_INSTANCES (0)
 #define BINDING_PORTAL_INSTANCES (0)
 #define BINDING_LPM_PARAMS (0)
@@ -161,7 +172,7 @@ namespace qray
 #define DEBUG_SHOW_FLAG_GOD_RAYS (1 << 9)
 #define DEBUG_SHOW_FLAG_RAY_STATS (1 << 10)
 #define DEBUG_SHOW_FLAG_LUMA (1 << 11)
-#define RAY_STATS_CATEGORY_COUNT (6)
+#define RAY_STATS_CATEGORY_COUNT (10)
 #define MAX_RAY_LENGTH (2.5e5)
 #define MEDIA_TYPE_VACUUM (0)
 #define MEDIA_TYPE_WATER (1)
@@ -187,6 +198,13 @@ namespace qray
 #define Q2_LIGHT_LIST_MAX_PER_CELL (128)
 #define Q2_LIGHT_LIST_STATS_SIDES (6)
 #define Q2_LIGHT_LIST_STATS_BUFFERS (3)
+#define Q2_LIGHT_GRID_CASCADES (8)
+#define Q2_LIGHT_GRID_DIM (16)
+#define Q2_LIGHT_GRID_CELLS (32768)
+#define Q2_LIGHT_GRID_MAX_IDS_PER_CELL (64)
+#define Q2_LIGHT_GRID_HEADER_WORDS (64)
+#define Q2_LIGHT_GRID_SOURCE_CAPACITY (4096)
+#define Q2_LIGHT_GRID_SOURCE_STRIDE (32)
 #define COMPUTE_Q2_LIGHT_LIST_GROUP_SIZE_X (64)
 #define PORTAL_INDEX_NONE (63)
 #define PORTAL_MAX_COUNT (63)
@@ -335,6 +353,13 @@ struct ShGlobalUniform
     float levelFogColorDensity[4];
     float levelFogSkyBlend[4];
     uint32_t restirParams[4];
+    float lightVolumeParams[4];
+    float lightVolumeLocalParams[32];
+    float radianceCacheParams[4];
+    uint32_t giReservoirParams[4];
+    uint32_t radianceSplitParams[4];
+    uint32_t transparencyFroxelParams[4];
+    float    transparencyFroxelBlendParams[4];
     float cloudShadowPlacement[4];
     float cloudLayerMotion[4];
     uint32_t glassBlur;
@@ -443,6 +468,15 @@ struct ShQ2LightTail
     uint32_t aliasIndex;
     float prob;
     float marginalProb;
+};
+
+struct ShLightGridSource
+{
+    float    originReach[4];
+    float    radius;
+    float    power;
+    uint32_t lightIndex;
+    uint32_t pad;
 };
 
 struct ShVertPreprocessing

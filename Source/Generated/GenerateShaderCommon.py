@@ -253,6 +253,17 @@ CONST = {
     "BINDING_LIGHT_SOURCES_DTAL_MEMBERS"          : 9,
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_LIST_TAIL_OFFSETS" : 10,
     "BINDING_LIGHT_SOURCES_Q2_LIGHT_LIST_TAIL"         : 11,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_OFFSETS"      : 12,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_IDS"          : 13,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_HEADER"       : 14,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_SOURCES"      : 15,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_GRID_COUNTS"       : 16,
+    "BINDING_LIGHT_SOURCES_Q2_RESTIR_RESERVOIRS"       : 17,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_PROBES"     : 18,
+    "BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE_ACTIVE"  : 22,
+    "BINDING_LIGHT_SOURCES_Q2_RADIANCE_CACHE"          : 19,
+    "BINDING_LIGHT_SOURCES_Q2_TRANSPARENCY_FROXELS"    : 20,
+    "BINDING_LIGHT_SOURCES_Q2_LIGHT_VOLUME_HITS"       : 21,
     "BINDING_DECAL_INSTANCES"                   : 0,
     "BINDING_PORTAL_INSTANCES"                  : 0,
     "BINDING_LPM_PARAMS"                        : 0,
@@ -383,7 +394,7 @@ CONST = {
     "DEBUG_SHOW_FLAG_RAY_STATS"             : "1 << 10",
     "DEBUG_SHOW_FLAG_LUMA"                  : "1 << 11",
 
-    "RAY_STATS_CATEGORY_COUNT"              : 6,
+    "RAY_STATS_CATEGORY_COUNT"              : 10,
 
     "MAX_RAY_LENGTH"                        : "2.5e5",
 
@@ -418,6 +429,13 @@ CONST = {
     "Q2_LIGHT_LIST_MAX_PER_CELL"            : 128,
     "Q2_LIGHT_LIST_STATS_SIDES"             : 6,
     "Q2_LIGHT_LIST_STATS_BUFFERS"           : 3,
+    "Q2_LIGHT_GRID_CASCADES"                : 8,
+    "Q2_LIGHT_GRID_DIM"                     : 16,
+    "Q2_LIGHT_GRID_CELLS"                   : 32768,
+    "Q2_LIGHT_GRID_MAX_IDS_PER_CELL"        : 64,
+    "Q2_LIGHT_GRID_HEADER_WORDS"            : 64,
+    "Q2_LIGHT_GRID_SOURCE_CAPACITY"          : 4096,
+    "Q2_LIGHT_GRID_SOURCE_STRIDE"            : 32,
     "COMPUTE_Q2_LIGHT_LIST_GROUP_SIZE_X"    : 64,
 
     "PORTAL_INDEX_NONE"                     : 63,
@@ -636,6 +654,19 @@ GLOBAL_UNIFORM_MEMBERS = [
     # .x = 1 samples the direct lights from the global light array instead of
     # the per-cluster lists, .y = candidates drawn per NEE light sample.
     (UINT32,  4, "restirParams",             1),
+    (FLOAT32, 4, "lightVolumeParams",        1),
+    # Local 10^3 irradiance volumes: .xyz = cube centre, .w = full side length.
+    (FLOAT32, 4, "lightVolumeLocalParams",   8),
+    # World radiance cache: .x = enabled, .y = base cell, .z = LOD distance, .w = max age.
+    (FLOAT32, 4, "radianceCacheParams",      1),
+    # ReSTIR GI: .x = enabled.
+    (UINT32,  4, "giReservoirParams",        1),
+    # Radiance-cache split: .x = enabled.
+    (UINT32,  4, "radianceSplitParams",      1),
+    # Transparency froxels: .x = enabled.
+    (UINT32,  4, "transparencyFroxelParams", 1),
+    # Transparency froxel blend: .x = weight.
+    (FLOAT,   4, "transparencyFroxelBlendParams", 1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 
