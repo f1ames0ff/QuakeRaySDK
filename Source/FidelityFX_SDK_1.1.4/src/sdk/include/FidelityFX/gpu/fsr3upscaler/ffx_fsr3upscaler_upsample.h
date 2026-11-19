@@ -445,7 +445,7 @@ void ComputeUpsampledColorAndWeight(const AccumulationPassCommonParams params, F
         ffxSaturate(data.fHistoryWeight * 5.0f)
         ));
 
-    const FfxFloat32 fKernelBias             = ffxLerp(fKernelBiasMin, fKernelBiasMax, fKernelBiasWeight);
+    const FfxFloat32 fKernelBias             = 1.0f;
     
 #if FFX_FSR3UPSCALER_USE_XBOX_PAIRED_16BIT_MATH_OPTIMIZATIONS
     // Unroll the loop to load samples on Scarlett to help the shader compiler

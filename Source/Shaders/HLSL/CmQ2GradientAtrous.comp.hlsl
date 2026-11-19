@@ -76,7 +76,10 @@ struct IterationInfo_BT
 
 float2 q2FilterGradientImage(RWTexture2D<float4> img, const int2 ipos)
 {
-    int2 grad_size = int2((int)globalUniform.renderWidth, (int)globalUniform.renderHeight) / Q2_GRAD_DWN;
+    const int2 grad_size = int2((int)globalUniform.renderWidth, (int)globalUniform.renderHeight) / Q2_GRAD_DWN;
+    const int half_width = grad_size.x / 2;
+    const int field_left = (ipos.x < half_width) ? 0 : half_width;
+    const int field_right = (ipos.x < half_width) ? half_width : grad_size.x;
 
     float2 sum_color = (float2)0;
     float sum_w = 0;
@@ -88,16 +91,14 @@ float2 q2FilterGradientImage(RWTexture2D<float4> img, const int2 ipos)
     {
         for (int xx = -r; xx <= r; xx++)
         {
-            int2 p = ipos + int2(xx, yy) * step_size;
-
-            float2 c = img.Load(p).xy;
-
-            if (any(p >= grad_size))
+            const int2 p = ipos + int2(xx, yy) * step_size;
+            if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= grad_size.y)
             {
-                c = (float2)0;
+                continue;
             }
 
-            float w = Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
+            const float2 c = img.Load(p).xy;
+            const float w = Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
 
             sum_color += c * w;
             sum_w += w;

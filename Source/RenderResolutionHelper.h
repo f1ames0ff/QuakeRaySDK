@@ -86,13 +86,7 @@ public:
 
     float GetMipLodBias(float nativeBias = 0.0f) const
     {
-        if (!IsUpscaleEnabled())
-        {
-            return nativeBias;
-        }
-
-        const float ratio = (float)Width() / (float)UpscaledWidth();
-        return nativeBias + std::log2(std::max(0.01f, ratio)) - 1.0f;
+        return nativeBias;
     }
 
     uint32_t Width()            const { return renderWidth + renderWidth % 2; }
@@ -209,8 +203,8 @@ private:
         default: assert(0); break;
         }
 
-        renderWidth  = static_cast< uint32_t >( static_cast< float >( windowWidth ) / divisor );
-        renderHeight = static_cast< uint32_t >( static_cast< float >( windowHeight ) / divisor );
+        renderWidth  = ( ( static_cast< uint32_t >( static_cast< float >( windowWidth ) / divisor ) + 3u ) / 6u ) * 6u;
+        renderHeight = ( ( static_cast< uint32_t >( static_cast< float >( windowHeight ) / divisor ) + 1u ) / 3u ) * 3u;
     }
 
     void SetupNvDlss( const QrDrawFrameRenderResolutionParams* pParams,

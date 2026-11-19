@@ -242,6 +242,12 @@ Q2SH interpolate_lf(Texture2D<float4> img_lf_shY, Texture2D<float4> img_lf_CoCg,
     Q2SH sum_lf = q2InitSH();
     float sum_w = 0;
 
+    const int width = (int)globalUniform.renderWidth;
+    const int height = (int)globalUniform.renderHeight;
+    const int half_width = width / 2;
+    const int field_left = (ipos.x < half_width) ? 0 : half_width;
+    const int field_right = (ipos.x < half_width) ? half_width : width;
+
     // 4 bilinear taps
     const int2 off[4] = { int2( 0, 0 ), int2( 1, 0 ), int2( 0, 1 ), int2( 1, 1 ) };
     float w[4] = {
@@ -258,9 +264,9 @@ Q2SH interpolate_lf(Texture2D<float4> img_lf_shY, Texture2D<float4> img_lf_CoCg,
         // Out-of-range taps are skipped rather than fetched with a zero weight: an
         // out-of-range texelFetch is undefined, and a NaN would survive the weights.
         // It also rejects the low-res texels that main() never writes when the render
-        // size is not a multiple of Q2_GRAD_DWN.
-        if(any(p_hires < (int2)0)
-                || any(p_hires >= int2(globalUniform.renderWidth, globalUniform.renderHeight)))
+        // size is not a multiple of Q2_GRAD_DWN, as well as taps across the checkerboard separator.
+        if(any(p_hires < int2(field_left, 0))
+                || any(p_hires >= int2(field_right, height)))
             continue;
 
         float p_depth = framebufQ2ViewDepth_Sampled.Load(int3( p_hires, 0 )).r;
