@@ -235,7 +235,8 @@ private:
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
-    void AcquireFrameImage();
+    void AcquireFrameImage(bool allowRecreate);
+    void CompleteAcquireForPresent();
     bool RenderThroughRhi(const QrDrawFrameInfo &drawInfo);
     void EndFrame(VkCommandBuffer cmd);
 

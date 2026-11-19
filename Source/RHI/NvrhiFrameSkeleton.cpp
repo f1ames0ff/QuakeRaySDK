@@ -229,6 +229,7 @@ NvrhiFrameSkeleton::~NvrhiFrameSkeleton()
         device->waitForIdle();
     }
 
+    ReleaseFramebufferTargets();
     DestroySwapchainResources();
 
     // The pass wraps engine images and owns the pipelines and the target of the sky; it goes after
@@ -2614,15 +2615,18 @@ bool NvrhiFrameSkeleton::CreateSwapchainResources(const Swapchain *pSwapchain)
     return true;
 }
 
-void NvrhiFrameSkeleton::DestroySwapchainResources()
+void NvrhiFrameSkeleton::ReleaseFramebufferTargets()
 {
-    DestroyFrameReadback();
+    if (device != nullptr)
+    {
+        // The passes and present sets wrap Framebuffers images; wait before dropping them ahead
+        // of Framebuffers::PrepareForSize or destructor teardown.
+        device->waitForIdle();
+    }
 
     // The sky pass wraps the engine's ALBEDO images and keeps one wrapped target per frame slot.
-    // Dropping them here is what lets the engine destroy and re-create its framebuffers: the
-    // re-create path of the swapchain waits for the device before it notifies
-    // (Swapchain.cpp:323-326), and the next Prepare re-wraps the new images. The releases go
-    // through the frame context's retire queue.
+    // Dropping them here is what lets the engine destroy and re-create its framebuffers, and the
+    // next Render re-wraps the new images. The releases go through the frame context's retire queue.
     if (skyPass != nullptr)
     {
         skyPass->ReleaseTargets();
@@ -2716,9 +2720,7 @@ void NvrhiFrameSkeleton::DestroySwapchainResources()
 
     // A present binding set references the ALBEDO wrap and the direct-term image of one slot, so it
     // goes with them; the next frame builds a set for the new wraps. Every caller runs after a
-    // device wait - the destructor and OnSwapchainDestroy wait themselves, and the swapchain's
-    // re-create waits before it notifies - so the handles can be dropped directly instead of
-    // through the retire queue.
+    // device wait so the handles can be dropped directly instead of through the retire queue.
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         presentBindingSets[i] = nullptr;
@@ -2729,6 +2731,11 @@ void NvrhiFrameSkeleton::DestroySwapchainResources()
         uiFrameTextures[i] = nullptr;
         uiFrameImageHandles[i] = 0;
     }
+}
+
+void NvrhiFrameSkeleton::DestroySwapchainResources()
+{
+    DestroyFrameReadback();
 
     swapchainFramebuffers.clear();
     swapchainTextures.clear();

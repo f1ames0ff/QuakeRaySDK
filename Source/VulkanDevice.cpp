@@ -275,6 +275,7 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     swapchain->RequestPresentMode(startInfo.presentMode);
     swapchain->SetMaxFrameLatency(startInfo.maxFrameLatency);
     swapchain->SetFullscreenExclusive(startInfo.wantFullscreenExclusive != 0, startInfo.hasFocus != 0);
+    swapchain->PrepareForFrame();
 
     assert(pendingPreFrameCmd == VK_NULL_HANDLE);
     pendingPreFrameCmd = currentFrameState.GetPreFrameCmdAndRemove(previousFrameIndex);
@@ -319,15 +320,21 @@ void VulkanDevice::AcquireFrame()
     }
 
     frameAcquireGate.Acquire([this] {
-        AcquireFrameImage();
+        AcquireFrameImage(false);
     });
 }
 
-void VulkanDevice::AcquireFrameImage()
+void VulkanDevice::AcquireFrameImage(bool allowRecreate)
 {
     const uint32_t frameIndex = currentFrameState.GetFrameIndex();
     const SwapchainAcquireTimings acquireTimings =
-        swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
+        swapchain->AcquireImage(imageAvailableSemaphores[frameIndex], allowRecreate);
+    pendingBeginFrameCpuTimings.presentWaitMs += acquireTimings.presentWaitMs;
+    pendingBeginFrameCpuTimings.imageAcquireMs += acquireTimings.imageAcquireMs;
+    if (!acquireTimings.acquired)
+    {
+        return;
+    }
 
     {
         const std::string presentModeName =
@@ -360,8 +367,16 @@ void VulkanDevice::AcquireFrameImage()
     }
 
     currentFrameState.SetSemaphore(semaphoreToWaitOnSubmit, semaphoreWaitStage);
-    pendingBeginFrameCpuTimings.presentWaitMs = acquireTimings.presentWaitMs;
-    pendingBeginFrameCpuTimings.imageAcquireMs = acquireTimings.imageAcquireMs;
+}
+
+void VulkanDevice::CompleteAcquireForPresent()
+{
+    if (!swapchain->IsRecreatePending())
+    {
+        return;
+    }
+
+    AcquireFrameImage(true);
 }
 
 #define QR_SET_VEC3( dst, x, y, z ) \
@@ -1083,7 +1098,15 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
     CpuFrameProfiler *cpuProfiler = cpuFrameProfiler.IsEnabled() ? &cpuFrameProfiler : nullptr;
     CpuProfileScope prepareInputs(cpuProfiler, QR_CPU_PASS_PREPARE);
-    framebuffers->PrepareForSize(renderResolution.GetResolutionState());
+    const ResolutionState resolutionState = renderResolution.GetResolutionState();
+    if (framebuffers->NeedsPrepareForSize(resolutionState))
+    {
+        if (nvrhiFrameSkeleton != nullptr)
+        {
+            nvrhiFrameSkeleton->ReleaseFramebufferTargets();
+        }
+        framebuffers->PrepareForSize(resolutionState);
+    }
 
     const ShGlobalUniform *globalUniform = uniform->GetData();
     const QrFloat3D skyViewerPosition =
@@ -1434,6 +1457,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     FrameSubmissionSynchronization submission;
     const auto acquireForSubmission = [&] {
         AcquireFrame();
+        CompleteAcquireForPresent();
 
         submission.semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         submission.semaphoreToWait =
@@ -1531,6 +1555,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 void VulkanDevice::EndFrame(VkCommandBuffer cmd)
 {
     AcquireFrame();
+    CompleteAcquireForPresent();
 
     CpuFrameProfiler *cpuProfiler = cpuFrameProfiler.IsEnabled() ? &cpuFrameProfiler : nullptr;
     uint32_t frameIndex = currentFrameState.GetFrameIndex();
