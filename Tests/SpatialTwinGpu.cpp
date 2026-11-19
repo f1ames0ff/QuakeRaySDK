@@ -1,7 +1,16 @@
 #include <qray/qray.h>
 #include <qray/gpu_context.h>
 
-#include <windows.h>
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <X11/Xlib.h>
+    #undef None
+    #undef Success
+    #undef Always
+    #undef Bool
+    #undef Status
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -355,10 +364,108 @@ struct RenderResult
     uint32_t rowPitch = 0;
 };
 
+struct TestWindow
+{
+#ifdef _WIN32
+    HWND handle = nullptr;
+#else
+    Display *display = nullptr;
+    ::Window handle = 0;
+#endif
+
+    TestWindow() = default;
+    TestWindow(const TestWindow &) = delete;
+    TestWindow &operator=(const TestWindow &) = delete;
+
+    ~TestWindow()
+    {
+        Destroy();
+    }
+
+    bool Create()
+    {
+#ifdef _WIN32
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = DefWindowProcW;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        windowClass.lpszClassName = L"QuakeRaySpatialTwin";
+
+        if (RegisterClassExW(&windowClass) == 0)
+        {
+            std::fprintf(stderr, "register window class failed\n");
+            return false;
+        }
+
+        handle = CreateWindowExW(0, windowClass.lpszClassName, L"QuakeRay spatial twin",
+                                 WS_OVERLAPPEDWINDOW, 0, 0, kWidth, kHeight,
+                                 nullptr, nullptr, windowClass.hInstance, nullptr);
+        if (handle == nullptr)
+        {
+            std::fprintf(stderr, "create window failed\n");
+            return false;
+        }
+
+        ShowWindow(handle, SW_SHOWNOACTIVATE);
+        SetWindowPos(handle, nullptr, -32000, -32000, kWidth, kHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        return true;
+#else
+        display = XOpenDisplay(nullptr);
+        if (display == nullptr)
+        {
+            std::fprintf(stderr, "open X11 display failed\n");
+            return false;
+        }
+
+        XSetWindowAttributes attributes = {};
+        attributes.override_redirect = True;
+        handle = XCreateWindow(display, DefaultRootWindow(display),
+                               -32000, -32000, kWidth, kHeight, 0,
+                               CopyFromParent, InputOutput, CopyFromParent,
+                               CWOverrideRedirect, &attributes);
+        if (handle == 0)
+        {
+            std::fprintf(stderr, "create X11 window failed\n");
+            Destroy();
+            return false;
+        }
+
+        XStoreName(display, handle, "QuakeRay spatial twin");
+        XMapWindow(display, handle);
+        XSync(display, False);
+        return true;
+#endif
+    }
+
+    void Destroy()
+    {
+#ifdef _WIN32
+        if (handle != nullptr)
+        {
+            DestroyWindow(handle);
+            handle = nullptr;
+        }
+#else
+        if (display != nullptr)
+        {
+            if (handle != 0)
+            {
+                XDestroyWindow(display, handle);
+                handle = 0;
+            }
+            XCloseDisplay(display);
+            display = nullptr;
+        }
+#endif
+    }
+};
+
 class TwinRenderer
 {
 public:
-    TwinRenderer(HWND window, const char *shaderFolder, const char *blueNoisePath)
+    TwinRenderer(const TestWindow &window, const char *shaderFolder, const char *blueNoisePath)
         : window(window)
         , shaderFolder(shaderFolder)
         , blueNoisePath(blueNoisePath)
@@ -378,15 +485,26 @@ public:
 
     bool Create()
     {
+#ifdef _WIN32
         QrWin32SurfaceCreateInfo surface = {
             .hinstance = GetModuleHandleW(nullptr),
-            .hwnd = window,
+            .hwnd = window.handle,
         };
+#else
+        QrXlibSurfaceCreateInfo surface = {
+            .dpy = window.display,
+            .window = window.handle,
+        };
+#endif
 
         QrInstanceCreateInfo info = {};
         info.pAppName = "QuakeRay spatial twin";
         info.pAppGUID = "8aeb2a91-6d74-4d32-9a84-0c6a5e4d2a11";
+#ifdef _WIN32
         info.pWin32SurfaceInfo = &surface;
+#else
+        info.pXlibSurfaceCreateInfo = &surface;
+#endif
         info.pfnPrint = PrintMessage;
         info.pfnOpenFile = OpenFile;
         info.pfnCloseFile = CloseFile;
@@ -943,7 +1061,7 @@ private:
             self->beforePresentCalls++;
     }
 
-    HWND window = nullptr;
+    const TestWindow &window;
     std::string shaderFolder;
     std::string blueNoisePath;
     QrInstance instance = nullptr;
@@ -1247,7 +1365,7 @@ bool RequireContribution(const char *what, const RenderResult &withFeature, cons
 
 }
 
-bool RunPass(HWND window, const std::string &shaderFolder, const std::string &blueNoisePath,
+bool RunPass(const TestWindow &window, const std::string &shaderFolder, const std::string &blueNoisePath,
              const QrSpatialConvention &convention, const SceneVertices &vertices,
              const uint32_t indices[6], const SceneOptions &options, const SkyOptions &sky,
              const float view[16], const float eye[3], const float up[3], float nearPlane,
@@ -1295,37 +1413,16 @@ int main(int argc, char **argv)
     std::string shaderFolder = argv[1];
     if (!shaderFolder.empty() && shaderFolder.back() != '/' && shaderFolder.back() != '\\')
     {
-        shaderFolder.push_back('\\');
+        shaderFolder.push_back('/');
     }
 
-    const std::string blueNoisePath = std::string(argv[2]) + "\\BlueNoise_LDR_RGBA_128.png";
+    const std::string blueNoisePath = std::string(argv[2]) + "/BlueNoise_LDR_RGBA_128.png";
 
-    WNDCLASSEXW windowClass = {};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = DefWindowProcW;
-    windowClass.hInstance = GetModuleHandleW(nullptr);
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-    windowClass.lpszClassName = L"QuakeRaySpatialTwin";
-
-    if (RegisterClassExW(&windowClass) == 0)
+    TestWindow window;
+    if (!window.Create())
     {
-        std::fprintf(stderr, "register window class failed\n");
         return 1;
     }
-
-    HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"QuakeRay spatial twin",
-                                  WS_OVERLAPPEDWINDOW, 0, 0, kWidth, kHeight,
-                                  nullptr, nullptr, windowClass.hInstance, nullptr);
-
-    if (window == nullptr)
-    {
-        std::fprintf(stderr, "create window failed\n");
-        return 1;
-    }
-
-    ShowWindow(window, SW_SHOWNOACTIVATE);
-    SetWindowPos(window, nullptr, -32000, -32000, kWidth, kHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 
     float canonicalPositions[4][3] = {};
     uint32_t indices[6] = {};
@@ -1553,7 +1650,7 @@ int main(int argc, char **argv)
 
     if (!runIdentity(identityOptions, identitySky, identityResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
@@ -1608,13 +1705,13 @@ int main(int argc, char **argv)
 
     if (!runYUp(yUpOptions, yUpSky, yUpResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
     if (!runMirror(mirrorOptions, mirrorSky, mirrorResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
@@ -1663,7 +1760,7 @@ int main(int argc, char **argv)
         !runProxyAlpha(0, proxyZeroAlphaResult) ||
         !runIdentity(emptyScene, noClouds, emptySceneResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
@@ -1715,6 +1812,6 @@ int main(int argc, char **argv)
         probeMirror("mirror-geometry-only", false, false, false, false);
     }
 
-    DestroyWindow(window);
+    window.Destroy();
     return yUpSame && mirrorSame && gates ? 0 : 1;
 }

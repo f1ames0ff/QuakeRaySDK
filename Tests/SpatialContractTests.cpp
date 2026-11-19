@@ -4,6 +4,7 @@
 #include "SpatialFrame.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 

@@ -24,6 +24,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <limits>
 #include <numeric>
