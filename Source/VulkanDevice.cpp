@@ -431,12 +431,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->upscaledRenderWidth  = static_cast< float >( renderResolution.UpscaledWidth() );
         gu->upscaledRenderHeight = static_cast< float >( renderResolution.UpscaledHeight() );
 
-        QrFloat2D jitter = renderResolution.IsNvDlssEnabled() ? HaltonSequence::GetJitter_Halton23( frameId ) :
-                           renderResolution.IsAmdFsr3Enabled() ? FidelityFX::FSR::GetJitter( renderResolution.GetResolutionState(), frameId ) :
-                           QrFloat2D{ 0, 0 };
-
-        gu->jitterX = jitter.data[ 0 ];
-        gu->jitterY = jitter.data[ 1 ];
+        gu->jitterX = 0.0f;
+        gu->jitterY = 0.0f;
     }
 
     {
@@ -625,7 +621,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[0]            = drawInfo.pIlluminationParams->restirEnabled != 0 ? 1u : 0u;
         gu->restirParams[1]            = std::clamp( drawInfo.pIlluminationParams->restirCandidates, 1u, 64u );
         gu->restirParams[2]            = 0u;
-        gu->restirParams[3]            = 0u;
+        gu->restirParams[3]            = renderResolution.IsUpscaleEnabled() ? 0u : 1u;
         gu->giBounceRays[0]            = std::clamp( drawInfo.pIlluminationParams->giBounceRays, 0.0f, 2.0f );
         gu->fltEnable[0]               = drawInfo.pIlluminationParams->denoiserEnabled != 0 ? 1.0f : 0.0f;
         gu->fixedAlbedo[0]             = std::max( drawInfo.pIlluminationParams->fixedAlbedo, 0.0f );
@@ -648,7 +644,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[0]            = 0u;
         gu->restirParams[1]            = 8u;
         gu->restirParams[2]            = 0u;
-        gu->restirParams[3]            = 0u;
+        gu->restirParams[3]            = renderResolution.IsUpscaleEnabled() ? 0u : 1u;
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;
