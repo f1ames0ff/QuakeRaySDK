@@ -83,7 +83,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             continue;
         }
 
-        const float influence = source.originReach.w + source.radius + 32.0;
+        const float influence = source.originReach.w + source.radius + 0.8;
         const float3 delta = max(abs(source.originReach.xyz - center) - halfCell, 0.0);
         const float dist2 = dot(delta, delta);
 
@@ -92,7 +92,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             continue;
         }
 
-        const float scale = max(1.0, source.radius * source.radius);
+        const float scale = max(6.25e-4, source.radius * source.radius);
         const float weight = source.power > 0.0 ? source.power : 1.0;
         const float score = weight / max(dist2, scale);
 

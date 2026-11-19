@@ -157,9 +157,26 @@ float q2GiWeight(const ShRestirGiReservoir reservoir)
     return reservoir.weightSum / (float(reservoir.sampleCount) * reservoir.selectedTarget);
 }
 
+float q2GiTarget(const float3 radiance, const float3 receiverNormal, const float3 sampleDirection)
+{
+    if (!all(isfinite(radiance)))
+    {
+        return 0.0;
+    }
+
+    const float luminance = getLuminance(radiance);
+    const float cosTheta = dot(receiverNormal, sampleDirection);
+
+    if (!isfinite(luminance) || !isfinite(cosTheta) || !(luminance > 0.0) || !(cosTheta > 0.0))
+    {
+        return 0.0;
+    }
+
+    return luminance * cosTheta;
+}
+
 void q2GiAddSample(inout ShRestirGiReservoir reservoir,
                    const float3 direction, const float distance, const float3 radiance,
-                   const float oneOverSourcePdf,
                    const float weight, const float target, const float u)
 {
     float safeWeight = weight;
@@ -180,9 +197,8 @@ void q2GiAddSample(inout ShRestirGiReservoir reservoir,
     if (safeWeight > 0.0 && safeTarget > 0.0 && u * reservoir.weightSum < safeWeight)
     {
         reservoir.direction = float4(direction, distance);
-        // .w carries the source sample's 1/pdf, so a reused sample divides by the pdf that
-        // generated it instead of the receiver's pdf.
-        reservoir.radiance = float4(radiance, oneOverSourcePdf);
+        // .w is padding matching RestirGiReservoir::radiance[3]; W carries the combined weight.
+        reservoir.radiance = float4(radiance, 0.0);
         reservoir.selectedTarget = safeTarget;
     }
 }

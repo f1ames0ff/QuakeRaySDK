@@ -65,16 +65,16 @@ RsParticleFragOutput main( [[vk::location(0)]] float4 inColor     : COLOR0,
 
     if (globalUniform.transparencyFroxelParams.x != 0u)
     {
-        // Reconstruct the particle's world position from the scene depth along the view ray and
-        // sample the shared transparency froxel volume; the particle fragment has no world
-        // position of its own in this raster path.
-        const float sceneDist = framebufDepthWorld_Sampled.Load(int3(cbPix, 0)).r;
-        const float2 resolution = float2(globalUniform.renderWidth, globalUniform.renderHeight);
-        const float2 uv = (fragCoord.xy + 0.5) / resolution;
-        float4 world = mul(globalUniform.volumeViewProjInv, float4(uv * 2.0 - 1.0, 1.0, 1.0));
-        world /= max(world.w, 1e-6);
-        const float3 rayDir = normalize(world.xyz - globalUniform.cameraPosition.xyz);
-        const float3 particlePos = globalUniform.cameraPosition.xyz + rayDir * sceneDist;
+        // Reconstruct the sprite's world position from fragCoord and its own view depth (inViewDepth)
+        // using invProjection and invView so particles sample the froxel at their own depth rather
+        // than the opaque wall behind them.
+        const float2 resolution = max(float2(globalUniform.renderWidth, globalUniform.renderHeight), float2(1.0, 1.0));
+        const float2 ndcXY = (fragCoord.xy / resolution) * 2.0 - 1.0;
+        const float4 viewTarget = mul(globalUniform.invProjection, float4(ndcXY, 1.0, 1.0));
+        const float3 viewDir = abs(viewTarget.w) > 1e-6 ? (viewTarget.xyz / viewTarget.w) : viewTarget.xyz;
+        const float3 viewPos = viewDir * (max(inViewDepth, 0.0) / max(-viewDir.z, 1e-4));
+        const float3 particlePos = mul(globalUniform.invView, float4(viewPos, 1.0)).xyz;
+        const float3 rayDir = safeNormalize(particlePos - globalUniform.cameraPosition.xyz);
         float3 froxel;
         const float3 origin = q2TransparencyFroxelBoxOrigin();
         const float3 size = q2TransparencyFroxelBoxSize();

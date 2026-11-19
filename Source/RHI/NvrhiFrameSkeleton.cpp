@@ -1513,7 +1513,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                 if (rtDirectPass != nullptr)
                 {
                     rtDirectPass->EnsureLightSet(commandList, frameIndex, uniform->frameId,
-                                                 uniform->q2LightStatsMode);
+                                                 uniform->q2LightStatsMode, worldUniformBuffer.Get());
                     lightSet = rtDirectPass->GetLightSet(frameIndex);
                 }
 

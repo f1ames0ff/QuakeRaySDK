@@ -26,8 +26,10 @@ public:
     static constexpr uint32_t kCells = kCascades * kCellsPerCascade;
     static constexpr uint32_t kMaxFastPerCell = 64;
     static constexpr uint32_t kMaxTailPerCell = 0;
-    static constexpr float    kBaseCell = 80.0f;
+    static constexpr float    kBaseCell = 2.0f;
     static constexpr float    kSnap = kBaseCell * 8.0f;
+    static constexpr float    kInfluenceMargin = 0.8f;
+    static constexpr double   kMinDistanceScaleSq = 6.25e-4;
 
     void Reset();
 

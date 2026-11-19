@@ -72,7 +72,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     for (uint directionIndex = 0u; directionIndex < Q2_FROXEL_DIRECTIONS; directionIndex++)
     {
         const float3 direction = q2FroxelDirection(directionIndex);
-        const float3 samplePosition = position + direction * 64.0;
+        const float3 samplePosition = position + direction * 1.6;
         const int gridCell = q2GetLightGridCell(samplePosition);
         const uint count = min(q2GetLightGridCount(gridCell), 4u);
 

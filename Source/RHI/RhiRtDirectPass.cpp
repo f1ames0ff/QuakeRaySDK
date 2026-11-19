@@ -1140,22 +1140,10 @@ void RhiRtDirectPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
-    // Set 6, the four light copies and the light-statistics fill. The copies and the fill go before
-    // the state below, so the automatic barriers order each of them before the dispatch that reads
-    // or writes the buffer.
-    if (!EnsureLightSet(pCommandList, frameIndex, frameId, lightStatsMode))
+    // Set 6, the light copies, statistics fill, GPU light grid, and transparency froxels.
+    if (!EnsureLightSet(pCommandList, frameIndex, frameId, lightStatsMode, pUniformBuffer))
     {
         return;
-    }
-
-    if (gridBuildPipeline != nullptr && PrepareGridBuildSet(target))
-    {
-        BuildLightGrid(pCommandList, frameIndex);
-    }
-
-    if (froxelFillPipeline != nullptr)
-    {
-        DispatchTransparencyFroxels(pCommandList, frameIndex);
     }
 
     // The image state contract, spelled out on Render in the header: the engine leaves every
@@ -1499,7 +1487,8 @@ bool RhiRtDirectPass::PrepareVertexDataSet(Target &target, const RhiRtPrimaryPas
 }
 
 bool RhiRtDirectPass::EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t frameIndex,
-                                     uint32_t frameId, uint32_t lightStatsMode)
+                                     uint32_t frameId, uint32_t lightStatsMode,
+                                     nvrhi::IBuffer *pUniformBuffer)
 {
     if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
     {
@@ -1514,6 +1503,21 @@ bool RhiRtDirectPass::EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t
     if (!PrepareLightSet(pCommandList, targets[frameIndex], frameIndex, frameId, lightStatsMode))
     {
         return false;
+    }
+
+    if (pUniformBuffer != nullptr)
+    {
+        PrepareUniformSet(targets[frameIndex], pUniformBuffer);
+    }
+
+    if (gridBuildPipeline != nullptr && PrepareGridBuildSet(targets[frameIndex]))
+    {
+        BuildLightGrid(pCommandList, frameIndex);
+    }
+
+    if (froxelFillPipeline != nullptr && targets[frameIndex].uniformSet != nullptr)
+    {
+        DispatchTransparencyFroxels(pCommandList, frameIndex);
     }
 
     lightSetPrepared[frameIndex] = true;
