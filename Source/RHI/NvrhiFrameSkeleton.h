@@ -425,6 +425,7 @@ public:
     // Called by the swapchain when its images are (re)created or destroyed.
     void OnSwapchainCreate(const Swapchain *pSwapchain) override;
     void OnSwapchainDestroy() override;
+    void ReleaseFramebufferTargets();
 
     // Records the frame for the image the swapchain acquired into the frame context's slot
     // 'frameIndex' and submits it on the RHI graphics queue; the context owns that slot's command

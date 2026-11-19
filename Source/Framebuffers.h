@@ -49,6 +49,7 @@ public:
     Framebuffers &operator=(Framebuffers &&other) noexcept = delete;
 
     bool PrepareForSize(ResolutionState resolutionState);
+    bool NeedsPrepareForSize(const ResolutionState &resolutionState) const { return !(currentResolution == resolutionState); }
 
     enum class BarrierType { All, Storage, ColorAttachment, Transfer };
 
