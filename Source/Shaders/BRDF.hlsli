@@ -94,9 +94,9 @@ float G1_GGX( float ns, float alpha )
 
 #define MIN_GGX_ROUGHNESS 0.005
 
-float3 evalBRDFSmithGGX(const float3 n, const float3 v, const float3 l, float alpha, const float3 specularColor)
+float3 evalBRDFSmithGGX(const float3 n, const float3 v, const float3 l, float roughness, const float3 specularColor)
 {
-    alpha = max(alpha, MIN_GGX_ROUGHNESS);
+    const float alpha = max(square(roughness), MIN_GGX_ROUGHNESS);
 
     const float nl = max(dot(n, l), 0);
 
@@ -161,8 +161,9 @@ float3 sampleGGXVNDF(const float3 v, float alpha, float u1, float u2, out float 
     return Ne;
 }
 
-float3 sampleSmithGGX(const float3 n, const float3 v, float alpha, float u1, float u2, out float oneOverPdf)
+float3 sampleSmithGGX(const float3 n, const float3 v, float roughness, float u1, float u2, out float oneOverPdf)
 {
+    const float alpha = max(square(roughness), MIN_GGX_ROUGHNESS);
     const float3x3 basis = getONB(n);
 
     const float3 ve = mul(transpose(basis), v);
@@ -175,7 +176,7 @@ float3 sampleSmithGGX(const float3 n, const float3 v, float alpha, float u1, flo
     return mul(basis, l);
 }
 
-float evalSpecularBouncePdf(const float3 n, const float3 v, float alpha, const float3 l)
+float evalSpecularBouncePdf(const float3 n, const float3 v, float roughness, const float3 l)
 {
     const float nv = dot(n, v);
     const float nl = dot(n, l);
@@ -185,7 +186,7 @@ float evalSpecularBouncePdf(const float3 n, const float3 v, float alpha, const f
         return 0.0;
     }
 
-    alpha = max(alpha, MIN_GGX_ROUGHNESS);
+    const float alpha = max(square(roughness), MIN_GGX_ROUGHNESS);
 
     const float3 m = normalize(v + l);
     const float nm = dot(n, m);
