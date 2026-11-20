@@ -20,8 +20,16 @@ float4 transformTangentByModel(float3x3 model, float3 normal, float4 tangent)
 {
     const float3 scaled = mul(model, tangent.xyz);
     const float3 orthogonal = scaled - normal * dot(normal, scaled);
-    const float lengthSquared = dot(orthogonal, orthogonal);
-    tangent.xyz = lengthSquared > 1.0e-12 ? orthogonal * rsqrt(lengthSquared) : float3(0.0, 1.0, 0.0);
+    const float maxComp = max(abs(orthogonal.x), max(abs(orthogonal.y), abs(orthogonal.z)));
+    if (all(isfinite(orthogonal)) && maxComp > 1.0e-20)
+    {
+        const float3 unitScaled = orthogonal / maxComp;
+        tangent.xyz = unitScaled * rsqrt(dot(unitScaled, unitScaled));
+    }
+    else
+    {
+        tangent.xyz = float3(0.0, 1.0, 0.0);
+    }
     tangent.w *= determinant(model) < 0.0 ? -1.0 : 1.0;
     return tangent;
 }
