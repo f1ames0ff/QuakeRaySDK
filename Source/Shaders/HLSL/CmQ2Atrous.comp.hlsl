@@ -158,7 +158,11 @@ filter_image(
         field_right = width;
     }
 
-    float spec_filter_width_scale = clamp(roughness_center * 30 - (float)q2AtrousIteration, 0, 1);
+    // Primary opaque surfaces (depth_center > 0) receive 1-spp stochastic specular from
+    // RtQ2Indirect rather than the deterministic mirror path; keep a small spatial filter
+    // floor so mirror-smooth texels (e.g. weapon gloss=255) do not expose raw 1-spp dots.
+    const float spec_filter_roughness = depth_center > 0.0 ? max(roughness_center, 0.08) : roughness_center;
+    float spec_filter_width_scale = clamp(spec_filter_roughness * 30 - (float)q2AtrousIteration, 0, 1);
 
     // Compute the weighted average of color and moments from a sparse 3x3 pattern around the target pixel
     const int r = 1;

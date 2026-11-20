@@ -394,7 +394,8 @@ ShHitInfo getHitInfoBounce(
     #endif
     }
 
-    h.roughness = globalUniform.squareInputRoughness == 0 ? h.roughness : square( h.roughness );
+    // Keep G-buffer roughness in perceptual space for Q2RTX ASVGF and light-sampling
+    // passes; GGX BRDF entry points convert perceptual roughness to alpha = r^2 internally.
     h.roughness = max( h.roughness, MIN_GGX_ROUGHNESS );
 
     float lightStyleEmissionScale = 1.0;
