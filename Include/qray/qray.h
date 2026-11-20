@@ -36,6 +36,12 @@
     #define QRCONV
 #endif
 
+#ifdef __cplusplus
+    #define QR_ENUM_UINT32 : uint32_t
+#else
+    #define QR_ENUM_UINT32
+#endif
+
 #define QR_API_VERSION "1.06.0000"
 
 #define QR_SPATIAL_CONVENTION_VERSION 2
@@ -1235,7 +1241,7 @@ QRAPI QrResult QRCONV qrDestroyCubemap(
     QrInstance                          qrInstance,
     QrCubemap                           cubemap);
 
-typedef enum QrPresentMode
+typedef enum QrPresentMode QR_ENUM_UINT32
 {
     QR_PRESENT_MODE_MAILBOX = 0,   // Uncapped rendering using native Mailbox presentation.
     QR_PRESENT_MODE_VSYNC,         // Display-paced FIFO presentation.
@@ -1773,7 +1779,7 @@ QRAPI QrBool32 QRCONV qrIsSuspended(
 
 #define QR_RAY_STATS_CATEGORY_COUNT 5
 
-typedef enum QrCpuPassIndex
+typedef enum QrCpuPassIndex QR_ENUM_UINT32
 {
     QR_CPU_PASS_PREPARE = 0,
     QR_CPU_PASS_HOT_RELOAD,
