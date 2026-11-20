@@ -1,4 +1,4 @@
-// Copyright (C) 2019, NVIDIA CORPORATION. All rights reserved.
+﻿// Copyright (C) 2019, NVIDIA CORPORATION. All rights reserved.
 // Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This file is a port of shader/god_rays.comp from Quake 2 RTX (https://github.com/NVIDIA/Q2RTX),
@@ -71,6 +71,7 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "CloudShadowWorld.hlsli"
 #include "Random.hlsli"
+#include "LightShafts.hlsli"
 
 // The GLSL original declares the workgroup size here; in HLSL it is an attribute of the
 // entry point instead, so the shader itself carries [numthreads(16, 16, 1)].
@@ -97,7 +98,11 @@ struct GodRaysParams_BT
     float godRaysIntensity;
     float godRaysEccentricity;
     uint godRaysEnabled;
-    float _padding;
+    float sunStepScale;
+    uint lightShaftCount;
+    float lightShaftIntensity;
+    uint lightShaftSteps;
+    LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
 };
 
 [[vk::binding(0, DESC_SET_GOD_RAYS_PARAMS)]] StructuredBuffer<GodRaysParams_BT> godRaysParams;
@@ -118,6 +123,7 @@ float GetShadow(float3 worldPos)
 }
 
 static const float PI = 3.1415926535;
+static const float Q2_UNIT_IN_METERS = 0.0254;
 
 float ScatterPhase_HenyeyGreenstein(float cosa, float g)
 {
@@ -151,7 +157,8 @@ float getDensity(float3 p)
 
 float getStep(float t, float density)
 {
-    return max(1.0, lerp(20.0, 5.0, density)) * globalUniform.sceneUnitsPerHostUnit;
+    const float scale = clamp(godRaysParams[0].sunStepScale, 0.25, 4.0);
+    return max(1.0, lerp(20.0, 5.0, density) * scale) * Q2_UNIT_IN_METERS;
 }
 
 [numthreads(16, 16, 1)]
@@ -170,6 +177,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     // render is broken; if it is right, the sampling (VP in GetShadow) is.
     if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_GOD_RAYS) != 0)
     {
+        if (push.passIndex == 0)
+        {
+        }
         if (godRaysParams[0].godRaysEnabled == 0)
         {
             framebufGodRays[pixelPos] = float4(0.0, 1.0, 0.0, 0.0);
@@ -196,7 +206,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    if (getLuminance(godRaysParams[0].sunColor.rgb) == 0.0)
+    if (getLuminance(godRaysParams[0].sunColor.rgb) == 0.0 &&
+        godRaysParams[0].lightShaftCount == 0)
     {
         if (push.passIndex == 0)
         {
@@ -304,6 +315,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             // Q2RTX clears in both passes: a reflection whose segment misses
             // the world box shows no god rays at all
             framebufGodRays[pixelPos] = (float4)0;
+            if (push.passIndex == 0)
+            {
+            }
             return;
         }
 
@@ -313,6 +327,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     else
     {
         framebufGodRays[pixelPos] = (float4)0;
+        if (push.passIndex == 0)
+        {
+        }
         return;
     }
 
@@ -357,7 +374,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         // don't leak through thin walls or at grazing angles. The final step
         // before the surface is not sampled (Q2RTX breaks here), which keeps
         // the surface-facing samples from being pushed behind the geometry.
-        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0 * globalUniform.sceneUnitsPerHostUnit;
+        const float3 shadowBias = -godRaysParams[0].sunDirection.xyz * 20.0 * Q2_UNIT_IN_METERS;
         const float shadow = GetShadow(currentPos + shadowBias) *
             getCloudSunTransmittance(currentPos, godRaysParams[0].sunDirection.xyz, true);
 

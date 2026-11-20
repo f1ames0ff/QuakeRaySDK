@@ -69,7 +69,9 @@ float4 sampleGlassLayer(int2 pix, bool reflection)
 
 float3 sampleGlassBackground( const int2 pix )
 {
-    float3 hdr = framebufFinal.Load( pix ).rgb;
+    const float4 godRays = framebufGodRaysFiltered_Sampled.Load(int3(pix, 0));
+    const float shaftTransmittance = saturate(godRays.a);
+    float3 hdr = framebufFinal.Load( pix ).rgb * shaftTransmittance;
     const float3 screenEmis = framebufScreenEmission_Sampled.Load(int3( pix, 0 )).rgb;
 
     const uint emisBlendMode = decodeEmissionBlendMode(
@@ -79,14 +81,14 @@ float3 sampleGlassBackground( const int2 pix )
     {
         const float glass = framebufQ2GlassFilter_Sampled.Load(int3(getCheckerboardPix(pix), 0)).a;
         hdr += globalUniform.glassBlur != 0u && abs(glass) >= 1.0 ?
-            reconstructGlassLayer(pix, false).rgb : framebufGodRaysFiltered_Sampled.Load(int3(pix, 0)).rgb;
+            reconstructGlassLayer(pix, false).rgb : godRays.rgb;
     }
     else
     {
         const float q2SplitFlag = framebufThroughput_Sampled.Load(int3( getCheckerboardPix(pix), 0 )).a;
         if (q2SplitFlag == 0.0)
         {
-            hdr += framebufGodRaysFiltered_Sampled.Load(int3( pix, 0 )).rgb;
+            hdr += godRays.rgb;
         }
     }
 

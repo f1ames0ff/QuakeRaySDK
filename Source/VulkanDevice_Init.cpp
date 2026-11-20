@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -67,6 +67,7 @@
 #include "RHI/RhiRtComposePass.h"
 #include "RHI/RhiPipeline.h"
 #include "RHI/RhiRtDirectPass.h"
+#include "RHI/RhiLightShaftVolumePass.h"
 #include "RHI/RhiRtGodRaysPass.h"
 #include "RHI/RhiRtIndirectPass.h"
 #include "RHI/RhiRtPrimaryPass.h"
@@ -436,6 +437,17 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                                     rhiRtGodRaysPass->SetShadowMap(rhiShadowMapPass->GetTexture(),
                                                                    rhiShadowMapPass->GetSampler());
                                 }
+
+                                rhiLightShaftVolumePass = std::make_shared<RhiLightShaftVolumePass>();
+                                if (!rhiLightShaftVolumePass->Create(
+                                        nvrhi->GetDevice(), rhiFrameContext.get(), rhiTextureTable.get(),
+                                        rhiRtDirectPass != nullptr ? rhiRtDirectPass->GetLightLayout() : nullptr,
+                                        info->pShaderFolderPath,
+                                        [this](const char *pMessage) { Print(pMessage); }))
+                                {
+                                    rhiLightShaftVolumePass.reset();
+                                    Print("Warning: RHI: the light-shaft volume pass is unavailable, the frame is drawn without light shafts");
+                                }
                             }
                         }
                     }
@@ -536,6 +548,7 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                 rhiBloomPass.get(),
                 rhiShadowMapPass.get(),
                 rhiRtGodRaysPass.get(),
+                rhiLightShaftVolumePass.get(),
                 rhiUiPass.get(),
                 frameMode,
                 [this](const char *pMessage) { Print(pMessage); });
@@ -612,6 +625,7 @@ void VulkanDevice::Destroy() noexcept
     rhiRtComposePass.reset();
     rhiBloomPass.reset();
     rhiRtGodRaysPass.reset();
+    rhiLightShaftVolumePass.reset();
     rhiShadowMapPass.reset();
     rhiUiPass.reset();
     rhiRtIndirectPass.reset();

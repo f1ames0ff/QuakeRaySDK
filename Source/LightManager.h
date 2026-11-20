@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -42,6 +42,22 @@ public:
 
     static constexpr uint32_t LIGHT_STATS_CLUSTER_COUNT = 8192;
     static constexpr uint32_t LIGHT_STATS_SLOT_COUNT = 3;
+    static constexpr uint32_t MAX_LIGHT_SHAFTS = 64;
+
+    struct LightShaft
+    {
+        float position[4];
+        float direction[4];
+        float color[4];
+        float cone[4];
+        float tangentU[4];
+        float tangentV[4];
+        float surface[4];
+        float emission[4];
+        float source[4];
+    };
+
+    uint32_t CollectLightShafts(LightShaft *out, uint32_t max);
     static constexpr float    kLightMinColorSum = 0.0001f;
 
     static constexpr uint32_t CLUSTER_SKY_VIS_WORD_COUNT = LIGHT_STATS_CLUSTER_COUNT / 32;
@@ -162,6 +178,7 @@ private:
     LightArrayIndex GetIndex(const ShLightEncoded &encodedLight) const;
     void IncrementCount(const ShLightEncoded &encodedLight);
     void AddLight(uint32_t frameIndex, uint64_t uniqueId, const ShLightEncoded &encodedLight);
+    void AddLightShaft(const LightShaft &shaft);
 
     void FillMatchPrev(uint32_t curFrameIndex, LightArrayIndex lightIndexInCurFrame, UniqueLightID uniqueID, uint32_t ordinal);
 
@@ -189,6 +206,7 @@ private:
     bool                        clusterSkyVisCopyPending[MAX_FRAMES_IN_FLIGHT] = {};
 
     std::shared_ptr<AutoBuffer> dtalMembersBuffer;
+    std::vector<LightShaft>     lightShafts;
     uint32_t                    dtalMemberCount = 0;
     bool                        dtalMembersCopyPending[MAX_FRAMES_IN_FLIGHT] = {};
 

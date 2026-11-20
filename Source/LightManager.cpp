@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -63,6 +63,18 @@ namespace
     float GetAngularRadius(float angularDiameterDegrees)
     {
         return static_cast<float>(0.5 * static_cast<double>(angularDiameterDegrees) * kPi / 180.0);
+    }
+
+    float ComputeShaftReach(const float color[3], float power, float scale)
+    {
+        const float maxColor = std::max(std::max(color[0], color[1]), color[2]) * power;
+        if (!(maxColor > 0.0f) || !(scale > 0.0f))
+        {
+            return 0.0f;
+        }
+
+        const float reach = scale * std::sqrt(maxColor / 0.001f);
+        return std::min(std::max(reach, 64.0f), 8192.0f);
     }
 
     bool IsColorTooDim(const float color[3])
@@ -353,6 +365,34 @@ qray::LightManager::~LightManager()
     vkDestroyDescriptorPool(device, descPool, nullptr);
 }
 
+void qray::LightManager::AddLightShaft(const LightShaft &shaft)
+{
+    std::lock_guard<std::mutex> registryLock(registryMutex);
+
+    if (lightShafts.size() < MAX_LIGHT_SHAFTS)
+    {
+        lightShafts.push_back(shaft);
+    }
+}
+
+uint32_t qray::LightManager::CollectLightShafts(LightShaft *out, uint32_t max)
+{
+    if (out == nullptr || max == 0)
+    {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> registryLock(registryMutex);
+    const uint32_t count = std::min(max, static_cast<uint32_t>(lightShafts.size()));
+
+    for (uint32_t i = 0; i < count; i++)
+    {
+        out[i] = lightShafts[i];
+    }
+
+    return count;
+}
+
 void qray::LightManager::PrepareForFrame(VkCommandBuffer cmd, uint32_t frameIndex)
 {
     std::lock_guard<std::mutex> registryLock(registryMutex);
@@ -361,6 +401,7 @@ void qray::LightManager::PrepareForFrame(VkCommandBuffer cmd, uint32_t frameInde
 
     regLightCount = 0;
     dirLightCount = 0;
+    lightShafts.clear();
 
     if (!g_arrayOverflowed)
     {
@@ -396,6 +437,7 @@ void qray::LightManager::PrepareForFrame(VkCommandBuffer cmd, uint32_t frameInde
 void qray::LightManager::Reset()
 {
     std::lock_guard<std::mutex> registryLock(registryMutex);
+    lightShafts.clear();
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         const uint32_t arrayEnd = std::max(GetLightArrayEnd(regLightCount, dirLightCount),
@@ -687,6 +729,32 @@ void qray::LightManager::AddSphericalLight(uint32_t frameIndex, const QrSpherica
     }
 
     AddLight(frameIndex, info.uniqueID, EncodeAsSphereLight(info));
+
+    if (info.lightShafts)
+    {
+        uint32_t lightIndex = 0;
+        if (FindRegisteredLight(frameIndex, info.uniqueID, lightIndex))
+        {
+            const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
+            const float radius = std::max(info.radius, 0.001f);
+            const float reach = ComputeShaftReach(info.color.data, power, radius);
+
+            LightShaft shaft = {};
+            shaft.position[0] = info.position.data[0];
+            shaft.position[1] = info.position.data[1];
+            shaft.position[2] = info.position.data[2];
+            shaft.position[3] = radius;
+            shaft.color[0] = info.color.data[0] * power;
+            shaft.color[1] = info.color.data[1] * power;
+            shaft.color[2] = info.color.data[2] * power;
+            shaft.emission[1] = reach;
+            shaft.source[0] = static_cast<float>(lightIndex + 1);
+            shaft.source[1] = power;
+            shaft.source[2] = reach + radius;
+            shaft.source[3] = radius;
+            AddLightShaft(shaft);
+        }
+    }
 }
 
 void qray::LightManager::AddPolygonalLight(uint32_t frameIndex, const QrPolygonalLightUploadInfo &info)
@@ -725,6 +793,84 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
     }
 
     AddLight(frameIndex, info.uniqueID, EncodeAsTexturedAreaLight(info, textureIndex));
+
+    uint32_t areaLightIndex = 0;
+    const bool areaLightRegistered = FindRegisteredLight(frameIndex, info.uniqueID, areaLightIndex);
+
+    if (info.lightShafts && info.numVerts > 0)
+    {
+        float s = 0.0f, t = 0.0f;
+
+        for (int i = 0; i < info.numVerts && i < MAX_TEXTURED_AREA_LIGHT_VERTS; i++)
+        {
+            s += info.uvVerts[i].data[0];
+            t += info.uvVerts[i].data[1];
+        }
+
+        const float inv = 1.0f / static_cast<float>(std::min(info.numVerts, MAX_TEXTURED_AREA_LIGHT_VERTS));
+        s *= inv;
+        t *= inv;
+
+        float direction[3] = {info.normal.data[0], info.normal.data[1], info.normal.data[2]};
+        const float directionLength = std::sqrt(direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]);
+
+        if (directionLength > 0.0f)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                direction[i] /= directionLength;
+            }
+
+            LightShaft shaft = {};
+            shaft.position[0] = info.C.data[0] + info.A.data[0] * s + info.B.data[0] * t;
+            shaft.position[1] = info.C.data[1] + info.A.data[1] * s + info.B.data[1] * t;
+            shaft.position[2] = info.C.data[2] + info.A.data[2] * s + info.B.data[2] * t;
+            shaft.position[3] = std::sqrt(std::max(info.area, 0.0f) / static_cast<float>(kPi));
+            shaft.direction[0] = direction[0];
+            shaft.direction[1] = direction[1];
+            shaft.direction[2] = direction[2];
+            const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
+            shaft.color[0] = info.color.data[0] * power;
+            shaft.color[1] = info.color.data[1] * power;
+            shaft.color[2] = info.color.data[2] * power;
+            const float angleOuter = info.angleOuter > 0.0f ? info.angleOuter : kPi * 0.5f;
+            const float angleInner = info.angleOuter > 0.0f ? std::min(info.angleInner, angleOuter) : 0.0f;
+            shaft.cone[0] = std::cos(std::max(0.0f, angleInner));
+            shaft.cone[1] = std::cos(angleOuter);
+            shaft.surface[0] = 0.0f;
+            shaft.surface[1] = 0.0f;
+            shaft.surface[2] = static_cast<float>(textureIndex);
+            shaft.surface[3] = info.meanEmiss;
+            shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
+
+            const float lengthA = std::sqrt(info.A.data[0] * info.A.data[0] +
+                                            info.A.data[1] * info.A.data[1] +
+                                            info.A.data[2] * info.A.data[2]);
+            const float lengthB = std::sqrt(info.B.data[0] * info.B.data[0] +
+                                            info.B.data[1] * info.B.data[1] +
+                                            info.B.data[2] * info.B.data[2]);
+            const float boundsRadius = 0.5f * std::sqrt(lengthA * lengthA + lengthB * lengthB);
+            shaft.source[0] = areaLightRegistered ? static_cast<float>(areaLightIndex + 1) : 0.0f;
+            shaft.source[1] = power;
+            shaft.source[2] = ComputeShaftReach(info.color.data, power, std::sqrt(std::max(info.area, 0.0f))) +
+                              boundsRadius;
+            shaft.source[3] = boundsRadius;
+            shaft.emission[1] = shaft.source[2];
+
+            if (lengthA > 0.0001f && lengthB > 0.0001f)
+            {
+                for (int k = 0; k < 3; k++)
+                {
+                    shaft.tangentU[k] = info.A.data[k] / lengthA;
+                    shaft.tangentV[k] = info.B.data[k] / lengthB;
+                }
+                shaft.tangentU[3] = 0.5f * lengthA;
+                shaft.tangentV[3] = 0.5f * lengthB;
+            }
+
+            AddLightShaft(shaft);
+        }
+    }
 }
 
 bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUploadBatch &batch,
@@ -765,6 +911,84 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
         const ShLightEncoded encoded = EncodeAsDtalGroup(info, pTextureIndices[i]);
         AddLight(frameIndex, info.uniqueID, encoded);
         published++;
+
+        if (info.lightShafts)
+        {
+            float direction[3] = {info.normal.data[0], info.normal.data[1], info.normal.data[2]};
+            const float directionLength =
+                std::sqrt(direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]);
+
+            if (directionLength > 0.0f)
+            {
+                for (int k = 0; k < 3; k++)
+                {
+                    direction[k] /= directionLength;
+                }
+
+                LightShaft shaft = {};
+                shaft.position[0] = info.center.data[0];
+                shaft.position[1] = info.center.data[1];
+                shaft.position[2] = info.center.data[2];
+                shaft.position[3] = std::sqrt(std::max(info.area, 0.0f) / static_cast<float>(kPi));
+                shaft.direction[0] = direction[0];
+                shaft.direction[1] = direction[1];
+                shaft.direction[2] = direction[2];
+                const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
+                shaft.color[0] = info.color.data[0] * power;
+                shaft.color[1] = info.color.data[1] * power;
+                shaft.color[2] = info.color.data[2] * power;
+                const float angleOuter = info.angleOuter > 0.0f ? info.angleOuter : kPi * 0.5f;
+                const float angleInner = info.angleOuter > 0.0f ? std::min(info.angleInner, angleOuter) : 0.0f;
+                shaft.cone[0] = std::cos(std::max(0.0f, angleInner));
+                shaft.cone[1] = std::cos(angleOuter);
+                shaft.surface[0] = static_cast<float>(info.memberBase);
+                shaft.surface[1] = static_cast<float>(info.memberCount);
+                shaft.surface[2] = static_cast<float>(pTextureIndices[i]);
+                shaft.surface[3] = info.meanEmiss;
+                shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
+                shaft.emission[1] = info.reach;
+                shaft.source[1] = power;
+                shaft.source[2] = info.reach > 0.0f
+                    ? info.reach + std::max(info.boundsRadius, 0.0f) : 0.0f;
+                shaft.source[3] = std::max(info.boundsRadius, 0.0f);
+
+                const QrDtalMemberUpload *pMember = batch.pMembers != nullptr
+                    ? &batch.pMembers[info.memberBase] : nullptr;
+                const float lengthA = pMember != nullptr
+                    ? std::sqrt(pMember->A.data[0] * pMember->A.data[0] +
+                                pMember->A.data[1] * pMember->A.data[1] +
+                                pMember->A.data[2] * pMember->A.data[2]) : 0.0f;
+                const float lengthB = pMember != nullptr
+                    ? std::sqrt(pMember->B.data[0] * pMember->B.data[0] +
+                                pMember->B.data[1] * pMember->B.data[1] +
+                                pMember->B.data[2] * pMember->B.data[2]) : 0.0f;
+                if (lengthA > 0.0001f && lengthB > 0.0001f)
+                {
+                    const QrDtalMemberUpload &member = *pMember;
+                    for (int k = 0; k < 3; k++)
+                    {
+                        shaft.tangentU[k] = member.A.data[k] / lengthA;
+                        shaft.tangentV[k] = member.B.data[k] / lengthB;
+                    }
+
+                    float extent[3];
+                    float halfU = 0.0f;
+                    float halfV = 0.0f;
+
+                    for (int k = 0; k < 3; k++)
+                    {
+                        extent[k] = std::abs(info.boundsMax.data[k] - info.boundsMin.data[k]);
+                        halfU += extent[k] * std::abs(shaft.tangentU[k]);
+                        halfV += extent[k] * std::abs(shaft.tangentV[k]);
+                    }
+
+                    shaft.tangentU[3] = std::max(0.5f * halfU, 1e-3f);
+                    shaft.tangentV[3] = std::max(0.5f * halfV, 1e-3f);
+                }
+
+                AddLightShaft(shaft);
+            }
+        }
     }
 
     if (published == 0 && invalid)
@@ -798,6 +1022,49 @@ void qray::LightManager::AddSpotlight(uint32_t frameIndex, const QrSpotLightUplo
     }
 
     AddLight(frameIndex, info.uniqueID, EncodeAsSpotLight(info));
+
+    if (info.lightShafts)
+    {
+        float direction[3] = {info.direction.data[0], info.direction.data[1], info.direction.data[2]};
+        const float directionLength = std::sqrt(direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]);
+
+        if (directionLength > 0.0f && info.angleOuter > 0.0f)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                direction[i] /= directionLength;
+            }
+
+            LightShaft shaft = {};
+            shaft.position[0] = info.position.data[0];
+            shaft.position[1] = info.position.data[1];
+            shaft.position[2] = info.position.data[2];
+            shaft.position[3] = std::max(info.radius, 0.001f);
+            shaft.direction[0] = direction[0];
+            shaft.direction[1] = direction[1];
+            shaft.direction[2] = direction[2];
+            const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
+            shaft.color[0] = info.color.data[0] * power;
+            shaft.color[1] = info.color.data[1] * power;
+            shaft.color[2] = info.color.data[2] * power;
+            shaft.cone[0] = std::cos(std::max(0.0f, std::min(info.angleInner, info.angleOuter)));
+            shaft.cone[1] = std::cos(std::max(0.0f, info.angleOuter));
+
+            uint32_t lightIndex = 0;
+            if (FindRegisteredLight(frameIndex, info.uniqueID, lightIndex))
+            {
+                const float radius = shaft.position[3];
+                const float reach = ComputeShaftReach(info.color.data, power, radius);
+                shaft.emission[1] = reach;
+                shaft.source[0] = static_cast<float>(lightIndex + 1);
+                shaft.source[1] = power;
+                shaft.source[2] = reach + radius;
+                shaft.source[3] = radius;
+            }
+
+            AddLightShaft(shaft);
+        }
+    }
 }
 
 void qray::LightManager::AddDirectionalLight(uint32_t frameIndex, const QrDirectionalLightUploadInfo &info)
