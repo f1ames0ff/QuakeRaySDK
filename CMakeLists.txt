@@ -347,6 +347,7 @@ if(QR_BUILD_TESTS)
         DEPENDS
             Tests/VertexTransformProbe.comp.hlsl
             Source/Shaders/VertexTransform.hlsli
+            Source/Shaders/Utils.hlsli
         VERBATIM)
     add_executable(qray_vertex_transform_gpu Tests/VertexTransformProbe.cpp
         "${QR_VERTEX_TRANSFORM_PROBE}")
