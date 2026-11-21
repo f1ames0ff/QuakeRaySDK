@@ -31,6 +31,7 @@ struct RasterizerFrag_BT
     [[vk::offset(64)]]  float4 color;
     [[vk::offset(80)]]  uint   textureIndex;
     [[vk::offset(84)]]  uint   emissionTextureIndex;
+    [[vk::offset(88)]]  uint   blendFlags;
     [[vk::offset(120)]] uint   particleProxy;
 };
 
@@ -46,6 +47,24 @@ struct RsWorldFragOutput
     [[vk::location(0)]] float4 outColor          : SV_Target0;
     [[vk::location(1)]] float3 outScreenEmission : SV_Target1;
 };
+
+static float3 linearToSrgbSafe( float3 c )
+{
+    float3 x = saturate( c );
+    return float3(
+        x.r > 1e-6 ? pow( x.r, 1.0 / 2.2 ) : 0.0,
+        x.g > 1e-6 ? pow( x.g, 1.0 / 2.2 ) : 0.0,
+        x.b > 1e-6 ? pow( x.b, 1.0 / 2.2 ) : 0.0 );
+}
+
+static float3 srgbToLinearSafe( float3 c )
+{
+    float3 x = saturate( c );
+    return float3(
+        x.r > 1e-6 ? pow( x.r, 2.2 ) : 0.0,
+        x.g > 1e-6 ? pow( x.g, 2.2 ) : 0.0,
+        x.b > 1e-6 ? pow( x.b, 2.2 ) : 0.0 );
+}
 
 RsWorldFragOutput main( [[vk::location(0)]] float4 vertColor    : TEXCOORD0,
                         [[vk::location(1)]] float2 vertTexCoord : TEXCOORD1,
@@ -87,7 +106,24 @@ RsWorldFragOutput main( [[vk::location(0)]] float4 vertColor    : TEXCOORD0,
 
     o.outColor.rgb *= illum;
 #else
-    o.outColor.rgb *= ev100ToLuminousExposure( getCurrentEV100() );
+    if( ( rasterizerFragInfo.blendFlags & 1u ) != 0u )
+    {
+        float3 t = saturate( o.outColor.rgb );
+        if( ( rasterizerFragInfo.blendFlags & 2u ) != 0u )
+        {
+            const float3 srgbMask = linearToSrgbSafe( t );
+            t = 1.0 - srgbToLinearSafe( 1.0 - srgbMask );
+        }
+        o.outColor.rgb = t;
+    }
+    else
+    {
+        const float adaptedLum = tonemapping[0].adaptedLuminance;
+        const float sceneExposure = adaptedLum > 0.0
+            ? adaptedLum * exp2( 2.0 - tonemapping[0].tmExposureBias )
+            : 1.0;
+        o.outColor.rgb *= sceneExposure;
+    }
 #endif
 
     float emis            = 0.0;

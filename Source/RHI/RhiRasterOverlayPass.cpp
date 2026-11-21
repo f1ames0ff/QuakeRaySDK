@@ -252,6 +252,32 @@ nvrhi::BlendFactor DecodeBlendFactor(uint32_t stateFlags, uint32_t offset)
     }
 }
 
+// Bit 0: transmittance/multiplicative blending (ZERO/SRC_COLOR, ZERO/ONE_MINUS_SRC_COLOR,
+// DST_COLOR/ZERO, etc.) where outColor.rgb is a dimensionless factor in [0, 1], not HDR
+// scene radiance. Keep outColor.rgb unscaled by scene exposure so indoor darkening/filter
+// decals do not crush to solid black.
+// Bit 1: ZERO / ONE_MINUS_SRC_COLOR inverse darken decals, where sRGB-decoded masks must
+// preserve their perceptual sRGB attenuation curve in linear HDR blending.
+uint32_t ComputeOverlayBlendFlags(const RasterizedDataCollector::DrawInfo &info)
+{
+    if ((info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE) == 0)
+    {
+        return 0u;
+    }
+
+    const bool srcIsZero = info.blendFuncSrc == QR_BLEND_FACTOR_ZERO;
+    const bool srcIsDstColor = info.blendFuncSrc == QR_BLEND_FACTOR_DST_COLOR ||
+                               info.blendFuncSrc == QR_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    const bool dstUsesSrcColor = info.blendFuncDst == QR_BLEND_FACTOR_SRC_COLOR ||
+                                 info.blendFuncDst == QR_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    const bool dstIsZero = info.blendFuncDst == QR_BLEND_FACTOR_ZERO;
+    const bool isTransmittance = (srcIsZero && dstUsesSrcColor) ||
+                                 (srcIsDstColor && (dstIsZero || dstUsesSrcColor));
+    const bool isInverseDarken = srcIsZero &&
+                                 info.blendFuncDst == QR_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    return (isTransmittance ? 1u : 0u) | (isInverseDarken ? 2u : 0u);
+}
+
 // The per-draw block, byte for byte the legacy RasterizedPushConst (Rasterizer.cpp:33-65): the
 // model-view-projection, the color, and the two texture indices. The type is repeated because
 // RasterizedPushConst is private to the Rasterizer translation unit; the offsets below are the ones
@@ -263,7 +289,8 @@ struct OverlayPushConstants
     float    c[4];
     uint32_t t;
     uint32_t e;
-    float    unused[8];
+    uint32_t blendFlags;
+    float    unused[7];
 
     // The world sub-pass shares `RsWorld.frag.spv` with the overlay's world pipeline, and that
     // fragment reads the particle proxy flag at offset 120: the block has to carry it, or the
@@ -287,6 +314,7 @@ struct OverlayPushConstants
         memcpy(c, info.color.Get(), 4 * sizeof(float));
         t = info.textureIndex;
         e = info.emissionTextureIndex;
+        blendFlags = ComputeOverlayBlendFlags(info);
         memset(unused, 0, sizeof(unused));
         particleProxy = info.particleProxy ? 1u : 0u;
     }
@@ -296,6 +324,7 @@ static_assert(offsetof(OverlayPushConstants, vp) == 0);
 static_assert(offsetof(OverlayPushConstants, c) == 64);
 static_assert(offsetof(OverlayPushConstants, t) == 80);
 static_assert(offsetof(OverlayPushConstants, e) == 84);
+static_assert(offsetof(OverlayPushConstants, blendFlags) == 88);
 static_assert(offsetof(OverlayPushConstants, particleProxy) == 120);
 static_assert(sizeof(OverlayPushConstants) == RASTERIZED_PUSH_CONSTANT_SIZE);
 
