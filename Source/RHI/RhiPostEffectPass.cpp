@@ -69,7 +69,7 @@ constexpr uint32_t SPEC_CONSTANT_IS_SOURCE_PING = 0;
 // 124 + image index. The layout offsets turn a raw binding into an NVRHI slot (RhiPipeline.h), so
 // the storage items need offset 0 and the sampled ALBEDO item the offset 124.
 constexpr uint32_t FRAMEBUFFER_UAV_OFFSET = 0;
-const uint32_t FRAMEBUFFER_SRV_OFFSET = ShFramebuffers_Count;
+constexpr uint32_t FRAMEBUFFER_SRV_OFFSET = ShFramebuffers_Count;
 static_assert(FB_IMAGE_INDEX_UPSCALED_PING == 29 && FB_IMAGE_INDEX_UPSCALED_PONG == 30 &&
               FB_IMAGE_INDEX_WIPE_EFFECT_SOURCE == 72 && FB_IMAGE_INDEX_ALBEDO == 0,
               "the module's raw-binding table is written for the engine's image indices");

@@ -1,5 +1,6 @@
 #include "SwapchainPolicy.h"
 
+#include <cstdio>
 #include <iostream>
 #include <stdexcept>
 
@@ -47,7 +48,7 @@ static std::vector<VkExtensionProperties> Properties(unsigned mask, const char *
         if (mask & (1u << i))
         {
             VkExtensionProperties property{};
-            std::strcpy(property.extensionName, names[i]);
+            std::snprintf(property.extensionName, sizeof(property.extensionName), "%s", names[i]);
             result.push_back(property);
         }
     }

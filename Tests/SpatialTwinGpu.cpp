@@ -40,6 +40,48 @@ void PrintMessage(const char *message, void *)
     }
 }
 
+std::string SanitizeDumpToken(const char *raw, const char *fallback)
+{
+    static constexpr char kAllowed[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+    std::string out;
+    if (raw != nullptr)
+    {
+        out.reserve(64);
+        for (const char *p = raw; *p != '\0' && out.size() < 64; p++)
+        {
+            const char *hit = std::strchr(kAllowed, static_cast<unsigned char>(*p));
+            if (hit != nullptr)
+            {
+                out.push_back(kAllowed[hit - kAllowed]);
+            }
+        }
+    }
+    return out.empty() ? std::string(fallback) : out;
+}
+
+void WriteTwinDumpImage(const std::string &stem, const std::string &label, const char *side,
+                        uint32_t width, uint32_t height, uint32_t rowPitch, const uint8_t *pixels)
+{
+    const std::string sideToken = SanitizeDumpToken(side, "side");
+    const std::string path = stem + "_" + label + "_" + sideToken + ".raw";
+    FILE *file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr)
+    {
+        return;
+    }
+
+    const uint32_t header[3] = { width, height, rowPitch };
+    std::fwrite(header, sizeof(header), 1, file);
+
+    for (uint32_t y = 0; y < height; y++)
+    {
+        std::fwrite(pixels + size_t(y) * rowPitch, 1, size_t(width) * 4, file);
+    }
+
+    std::fclose(file);
+}
+
 void OpenFile(const char *path, void *, const void **data, uint32_t *size, void **fileHandle)
 {
     *data = nullptr;
@@ -1273,30 +1315,10 @@ bool CompareImages(const char *what, const RenderResult &a, const RenderResult &
     // opted-in dump writes both frames for offline inspection.
     if (const char *dumpPrefix = std::getenv("QRAY_TWIN_DUMP"))
     {
-        auto write = [&](const char *side, const RenderResult &image) {
-            char path[512] = {};
-            std::snprintf(path, sizeof(path), "%s_%s_%s.raw", dumpPrefix, what, side);
-            FILE *file = std::fopen(path, "wb");
-
-            if (file == nullptr)
-            {
-                return;
-            }
-
-            const uint32_t header[3] = { image.width, image.height, image.rowPitch };
-            std::fwrite(header, sizeof(header), 1, file);
-
-            for (uint32_t y = 0; y < image.height; y++)
-            {
-                std::fwrite(image.pixels.data() + size_t(y) * image.rowPitch, 1,
-                            size_t(image.width) * 4, file);
-            }
-
-            std::fclose(file);
-        };
-
-        write("a", a);
-        write("b", b);
+        const std::string stem = SanitizeDumpToken(dumpPrefix, "qray_twin");
+        const std::string label = SanitizeDumpToken(what, "frame");
+        WriteTwinDumpImage(stem, label, "a", a.width, a.height, a.rowPitch, a.pixels.data());
+        WriteTwinDumpImage(stem, label, "b", b.width, b.height, b.rowPitch, b.pixels.data());
     }
 
     std::printf("%s: max=%u mean=%.4f p99.5=%u gain=%.4f bbox=%u,%u-%u,%u changed=%u\n", what,
