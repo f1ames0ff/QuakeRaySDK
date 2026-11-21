@@ -54,7 +54,7 @@ MATRIX_DECLARATION = re.compile(r"\b(" + MATRIX_TYPE + r")\s+([A-Za-z_]\w*)\s*(\
 TRANSPOSE_LOCAL = re.compile(r"\b(?:const\s+)?" + MATRIX_TYPE + r"\s+([A-Za-z_]\w*)\s*=\s*transpose\s*\(")
 # A name followed by at least one index.
 INDEXED_NAME = re.compile(r"(?P<dot>\.?)(?P<name>[A-Za-z_]\w*)(?P<subs>(?:\s*\[[^\]]*\])+)")
-STRUCT_BODY = re.compile(r"\bstruct\s+\w+\s*\{(.*?)\n\s*\};", flags=re.S)
+STRUCT_HEAD = re.compile(r"\bstruct\s+[A-Za-z_]\w*\s*\{")
 ASSIGNMENT = re.compile(r"\s*=(?!=)")
 SWIZZLE = re.compile(r"\s*\.\s*([xyzw]+)\b")
 
@@ -69,6 +69,23 @@ def readFile(path):
         return f.read()
 
 
+def iterStructBodies(text):
+    """Yield brace-delimited struct bodies in O(n) without regex backtracking."""
+    limit = len(text)
+    for match in STRUCT_HEAD.finditer(text):
+        depth = 1
+        pos = match.end()
+        while pos < limit and depth > 0:
+            ch = text[pos]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            pos += 1
+        if depth == 0:
+            yield text[match.end():pos - 1]
+
+
 def collectMatrixMembers():
     """Every struct member of the base that is a matrix, and whether it is an array of matrices."""
     members = {}
@@ -77,8 +94,8 @@ def collectMatrixMembers():
             if os.sep + "Build" + os.sep in path or os.sep + "Generated" + os.sep in path:
                 continue
             text = stripComments(readFile(path))
-            for body in STRUCT_BODY.finditer(text):
-                for match in MATRIX_DECLARATION.finditer(body.group(1)):
+            for body in iterStructBodies(text):
+                for match in MATRIX_DECLARATION.finditer(body):
                     members[match.group(2)] = bool(match.group(3))
     return members
 

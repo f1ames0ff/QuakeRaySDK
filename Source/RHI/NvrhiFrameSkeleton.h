@@ -517,6 +517,7 @@ private:
     void DestroySwapchainResources();
     void CompleteFrameReadback(uint32_t frameIndex);
     void DestroyFrameReadback();
+    void LogFallbackSlotsIfNeeded();
 
     nvrhi::vulkan::IDevice *device;
     PrintFunction print;

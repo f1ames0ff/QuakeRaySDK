@@ -2,8 +2,6 @@
 
 #include "ShaderCommonCFramebuf.h"
 
-const uint32_t qray::ShFramebuffers_Count = 132;
-
 const VkFormat qray::ShFramebuffers_Formats[] = 
 {
     VK_FORMAT_B10G11R11_UFLOAT_PACK32,

@@ -1993,21 +1993,16 @@ static thread_local uint32_t g_uploadLaneStack[8];
 static thread_local uint32_t g_uploadLaneDepth = 0;
 
 VulkanDevice::UploadLockScope::UploadLockScope(VulkanDevice &device_, uint32_t lane_)
-    : device(device_), lane(lane_), enabled(false), waitNs(0), holdStartNs(0)
+    : device(device_)
+    , lane(lane_)
+    , enabled(device_.uploadLockTracing.load(std::memory_order_relaxed) && lane_ < QR_UPLOAD_LANE_COUNT)
+    , waitNs(enabled ? UploadNowNs() : 0)
+    , lock(device_.geometryUploadMutex)
+    , holdStartNs(enabled ? UploadNowNs() : 0)
 {
-    enabled = device.uploadLockTracing.load(std::memory_order_relaxed) && lane < QR_UPLOAD_LANE_COUNT;
-
     if (enabled)
     {
-        const uint64_t t0 = UploadNowNs();
-        device.geometryUploadMutex.lock();
-        const uint64_t t1 = UploadNowNs();
-        waitNs = t1 - t0;
-        holdStartNs = t1;
-    }
-    else
-    {
-        device.geometryUploadMutex.lock();
+        waitNs = holdStartNs - waitNs;
     }
 }
 
@@ -2023,8 +2018,6 @@ VulkanDevice::UploadLockScope::~UploadLockScope()
         UploadAtomicMax(device.uploadLockHoldMaxNs[lane], holdNs);
         device.uploadLockCalls[lane].fetch_add(1, std::memory_order_relaxed);
     }
-
-    device.geometryUploadMutex.unlock();
 }
 
 void VulkanDevice::UploadLanePush(uint32_t lane)

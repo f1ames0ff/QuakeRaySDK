@@ -607,9 +607,11 @@ def sourceUsesRayQuery(filename, visited=None):
         if "#include" in line and '"' in line:
             includeFile = line.split('"')[1]
             for folder in INCLUDE_FOLDERS:
-                included = os.path.abspath(folder + "/" + includeFile).replace('\\', '/')
-                if os.path.exists(included) and sourceUsesRayQuery(included, visited):
-                    return True
+                folderRoot = os.path.realpath(os.path.abspath(folder))
+                included = os.path.realpath(os.path.join(folderRoot, includeFile))
+                if os.path.commonpath([folderRoot, included]) == folderRoot and os.path.isfile(included):
+                    if sourceUsesRayQuery(included, visited):
+                        return True
 
     return False
 
@@ -858,23 +860,7 @@ def findOrphanRecordings(pairs):
     return sorted(recording for recording in recordings if recording not in expected)
 
 
-def resolveProbeName(name):
-    if os.path.isfile(name + HLSL_SUFFIX):
-        return name
-    if os.path.isfile(HLSL_FOLDER_PATH + name + HLSL_SUFFIX):
-        return HLSL_FOLDER_PATH + name
-    if os.path.isfile(PROBES_FOLDER_PATH + name + HLSL_SUFFIX):
-        return PROBES_FOLDER_PATH + name
-    return name
-
-
-def getPairs(arguments):
-    if len(arguments) > 0:
-        # Arguments may name the HLSL file or the shader itself, e.g. EfWaves.comp.hlsl or
-        # EfWaves.comp. A probe can be named without its folder.
-        names = [a[:-len(HLSL_SUFFIX)] if a.endswith(HLSL_SUFFIX) else a for a in arguments]
-        return [resolveProbeName(name) for name in names]
-
+def discoverPairs():
     pairs = []
     for folder in ["./", HLSL_FOLDER_PATH, PROBES_FOLDER_PATH]:
         if not os.path.isdir(folder):
@@ -882,7 +868,44 @@ def getPairs(arguments):
         for entry in sorted(os.listdir(folder)):
             if entry.endswith(HLSL_SUFFIX) and getHLSLProfile(entry) is not None:
                 pairs.append(folder + entry[:-len(HLSL_SUFFIX)])
+    return pairs
 
+
+def resolveRequestedPairs(arguments):
+    discovered = discoverPairs()
+    if len(arguments) == 0:
+        return discovered, []
+
+    byKey = {}
+    for pair in discovered:
+        normalized = pair[2:] if pair.startswith("./") else pair
+        byKey[pair] = pair
+        byKey.setdefault(normalized, pair)
+        byKey.setdefault(os.path.basename(pair), pair)
+
+    selected = []
+    seen = set()
+    missing = []
+    for arg in arguments:
+        # Arguments may name the HLSL file or the shader itself, e.g. EfWaves.comp.hlsl or
+        # EfWaves.comp. A probe can be named without its folder.
+        key = arg.replace("\\", "/")
+        if key.startswith("./") and key not in byKey:
+            key = key[2:]
+        if key.endswith(HLSL_SUFFIX):
+            key = key[:-len(HLSL_SUFFIX)]
+        pair = byKey.get(key)
+        if pair is None:
+            missing.append(arg)
+        elif pair not in seen:
+            seen.add(pair)
+            selected.append(pair)
+
+    return selected, missing
+
+
+def getPairs(arguments):
+    pairs, _ = resolveRequestedPairs(arguments)
     return pairs
 
 
@@ -907,7 +930,10 @@ def main():
         return 1
 
     arguments = [a for a in sys.argv[1:] if not a.startswith("-")]
-    pairs = getPairs(arguments)
+    pairs, missing = resolveRequestedPairs(arguments)
+    if len(missing) > 0:
+        print("> Unknown HLSL shader(s): " + ", ".join(missing))
+        return 1
 
     if record:
         if len(pairs) == 0:

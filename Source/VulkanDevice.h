@@ -192,6 +192,7 @@ public:
         uint32_t     lane;
         bool         enabled;
         uint64_t     waitNs;
+        std::unique_lock<std::mutex> lock;
         uint64_t     holdStartNs;
     };
 
