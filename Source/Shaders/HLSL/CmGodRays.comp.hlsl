@@ -206,8 +206,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    if (getLuminance(godRaysParams[0].sunColor.rgb) == 0.0 &&
-        godRaysParams[0].lightShaftCount == 0)
+    if (getLuminance(godRaysParams[0].sunColor.rgb) == 0.0 ||
+        godRaysParams[0].godRaysIntensity <= 0.0)
     {
         if (push.passIndex == 0)
         {

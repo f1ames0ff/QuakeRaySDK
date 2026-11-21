@@ -70,7 +70,7 @@ float4 sampleGlassLayer(int2 pix, bool reflection)
 float3 sampleGlassBackground( const int2 pix )
 {
     const float4 godRays = framebufGodRaysFiltered_Sampled.Load(int3(pix, 0));
-    const float shaftTransmittance = saturate(godRays.a);
+    const float shaftTransmittance = saturate(1.0 - godRays.a);
     float3 hdr = framebufFinal.Load( pix ).rgb * shaftTransmittance;
     const float3 screenEmis = framebufScreenEmission_Sampled.Load(int3( pix, 0 )).rgb;
 

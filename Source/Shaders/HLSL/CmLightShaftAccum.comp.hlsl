@@ -44,7 +44,8 @@ struct LightShaftParams_BT
 float3 lightShaftVolumeUVW(float3 world)
 {
     const float4 clip = mul(globalUniform.volumeViewProj, float4(world, 1.0));
-    const float2 screen = clip.xy * (0.5 / clip.w) + 0.5;
+    const float invW = abs(clip.w) > 1e-6 ? (1.0 / clip.w) : 0.0;
+    const float2 screen = clip.xy * (0.5 * invW) + 0.5;
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
     const float radialDistance = length(world - globalUniform.cameraPosition.xyz);

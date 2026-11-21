@@ -63,4 +63,29 @@ struct LightShaftVolumeParams_BT
     LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
 };
 
+bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadius)
+{
+    const float3 direction = shaft.direction.xyz;
+    const float directionLength2 = dot(direction, direction);
+    if (directionLength2 <= 0.000001)
+    {
+        return true;
+    }
+
+    const float safeBounds = max(boundsRadius, 0.0);
+    const float3 toCell = center - shaft.positionRadius.xyz;
+    const float cellDistance = length(toCell);
+    if (cellDistance <= safeBounds + 0.001)
+    {
+        return true;
+    }
+
+    const float3 normalizedDirection = direction * rsqrt(directionLength2);
+    const float cosAngle = clamp(dot(toCell / cellDistance, normalizedDirection), -1.0, 1.0);
+    const float angle = acos(cosAngle);
+    const float boundsAngle = asin(saturate(safeBounds / cellDistance));
+    const float outerAngle = acos(clamp(shaft.cone.y, -1.0, 1.0));
+    return angle <= outerAngle + boundsAngle + 0.05;
+}
+
 #endif

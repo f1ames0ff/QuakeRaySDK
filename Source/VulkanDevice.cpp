@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "HaltonSequence.h"
+#include "LightShaftMath.h"
 #include "Matrix.h"
 #include "RenderResolutionHelper.h"
 #include "QrException.h"
@@ -189,6 +190,87 @@ QrPortalUploadInfo SpatialPortal(const SpatialFrame &frame, const QrPortalUpload
     result.outDirection = SpatialDirection(frame, source.outDirection);
     result.outUp = SpatialDirection(frame, source.outUp);
     return result;
+}
+
+#define QR_SET_VEC3( dst, x, y, z ) \
+    ( dst )[ 0 ] = ( x );           \
+    ( dst )[ 1 ] = ( y );           \
+    ( dst )[ 2 ] = ( z )
+
+#define QR_SET_VEC3_A( dst, xyz )  \
+    ( dst )[ 0 ] = ( xyz )[ 0 ]; \
+    ( dst )[ 1 ] = ( xyz )[ 1 ]; \
+    ( dst )[ 2 ] = ( xyz )[ 2 ]
+
+#define QR_MAX_VEC3( dst, m ) \
+    ( dst )[ 0 ] = std::max( ( dst )[ 0 ], ( m ) );  \
+    ( dst )[ 1 ] = std::max( ( dst )[ 1 ], ( m ) );  \
+    ( dst )[ 2 ] = std::max( ( dst )[ 2 ], ( m ) )
+
+void FillVolumetricCameraUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo, float aspect)
+{
+    const bool lightShaftsRequested = drawInfo.pSkyParams != nullptr &&
+                                      (drawInfo.pSkyParams->lightShaftsEnabled != 0 ||
+                                       drawInfo.pSkyParams->lightShaftsSun != 0);
+    gu->volumeCameraNear = std::max(drawInfo.cameraNear, 2.5e-5f);
+
+    if (drawInfo.pVolumetricParams != nullptr)
+    {
+        if (drawInfo.pVolumetricParams->enable != 0)
+        {
+            gu->volumeEnableType = drawInfo.pVolumetricParams->useSimpleDepthBased
+                                       ? VOLUME_ENABLE_SIMPLE
+                                       : VOLUME_ENABLE_VOLUMETRIC;
+        }
+        else
+        {
+            gu->volumeEnableType = VOLUME_ENABLE_NONE;
+        }
+        gu->volumeScattering = drawInfo.pVolumetricParams->scaterring;
+        gu->volumeSourceAsymmetry = std::clamp(drawInfo.pVolumetricParams->sourceAssymetry, -1.0f, 1.0f);
+
+        QR_SET_VEC3_A(gu->volumeAmbient, drawInfo.pVolumetricParams->ambientColor.data);
+        QR_MAX_VEC3(gu->volumeAmbient, 0.0f);
+
+        QR_SET_VEC3_A(gu->volumeSourceColor, drawInfo.pVolumetricParams->sourceColor.data);
+        QR_MAX_VEC3(gu->volumeSourceColor, 0.0f);
+
+        QR_SET_VEC3_A(gu->volumeDirToSource, drawInfo.pVolumetricParams->sourceDirection.data);
+        Utils::Negate(gu->volumeDirToSource);
+        Utils::Normalize(gu->volumeDirToSource);
+    }
+    else
+    {
+        gu->volumeEnableType = VOLUME_ENABLE_VOLUMETRIC;
+        gu->volumeScattering = 0.2f;
+        gu->volumeSourceAsymmetry = 0.4f;
+        QR_SET_VEC3(gu->volumeAmbient, 0.8f, 0.85f, 1.0f);
+        QR_SET_VEC3(gu->volumeSourceColor, 0, 0, 0);
+        QR_SET_VEC3(gu->volumeDirToSource, 0, 1, 0);
+    }
+
+    const float volumetricFar =
+        drawInfo.pVolumetricParams != nullptr ? drawInfo.pVolumetricParams->volumetricFar : 0.0f;
+    const bool legacyVolumeOn =
+        drawInfo.pVolumetricParams != nullptr && drawInfo.pVolumetricParams->enable != 0;
+    gu->volumeCameraFar = ResolveVolumetricCameraFar(legacyVolumeOn, volumetricFar, gu->volumeCameraNear,
+                                                     drawInfo.cameraFar, lightShaftsRequested);
+
+    if (gu->volumeEnableType != VOLUME_ENABLE_NONE || lightShaftsRequested)
+    {
+        memcpy(gu->volumeViewProj_Prev, gu->volumeViewProj, 16 * sizeof(float));
+        memcpy(gu->volumeViewProjInv_Prev, gu->volumeViewProjInv, 16 * sizeof(float));
+
+        float volumeproj[16];
+        Matrix::MakeProjectionMatrix(volumeproj,
+                                     aspect,
+                                     drawInfo.fovYRadians,
+                                     gu->volumeCameraNear,
+                                     gu->volumeCameraFar);
+
+        Matrix::Multiply(gu->volumeViewProj, gu->view, volumeproj);
+        Matrix::Inverse(gu->volumeViewProjInv, gu->volumeViewProj);
+    }
 }
 
 }
@@ -379,21 +461,6 @@ void VulkanDevice::CompleteAcquireForPresent()
 
     AcquireFrameImage(true);
 }
-
-#define QR_SET_VEC3( dst, x, y, z ) \
-    ( dst )[ 0 ] = ( x );           \
-    ( dst )[ 1 ] = ( y );           \
-    ( dst )[ 2 ] = ( z )
-
-#define QR_SET_VEC3_A( dst, xyz )  \
-    ( dst )[ 0 ] = ( xyz )[ 0 ]; \
-    ( dst )[ 1 ] = ( xyz )[ 1 ]; \
-    ( dst )[ 2 ] = ( xyz )[ 2 ]
-
-#define QR_MAX_VEC3( dst, m ) \
-    ( dst )[ 0 ] = std::max( ( dst )[ 0 ], ( m ) );  \
-    ( dst )[ 1 ] = std::max( ( dst )[ 1 ], ( m ) );  \
-    ( dst )[ 2 ] = std::max( ( dst )[ 2 ], ( m ) )
 
 void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const
 {
@@ -893,63 +960,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->worldUpVector[ 2 ] = drawInfo.worldUpVector.data[ 2 ];
     }
 
-    {
-        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 2.5e-5f );
-        gu->volumeCameraFar  = std::min(
-            drawInfo.cameraFar,
-            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 2.5f );
-
-        if( drawInfo.pVolumetricParams )
-        {
-            if( drawInfo.pVolumetricParams->enable )
-            {
-                gu->volumeEnableType = drawInfo.pVolumetricParams->useSimpleDepthBased
-                                           ? VOLUME_ENABLE_SIMPLE
-                                           : VOLUME_ENABLE_VOLUMETRIC;
-            }
-            else
-            {
-                gu->volumeEnableType = VOLUME_ENABLE_NONE;
-            }
-            gu->volumeScattering = drawInfo.pVolumetricParams->scaterring;
-            gu->volumeSourceAsymmetry = std::clamp( drawInfo.pVolumetricParams->sourceAssymetry, -1.0f, 1.0f );
-
-            QR_SET_VEC3_A( gu->volumeAmbient, drawInfo.pVolumetricParams->ambientColor.data );
-            QR_MAX_VEC3( gu->volumeAmbient, 0.0f );
-
-            QR_SET_VEC3_A( gu->volumeSourceColor, drawInfo.pVolumetricParams->sourceColor.data );
-            QR_MAX_VEC3( gu->volumeSourceColor, 0.0f );
-
-            QR_SET_VEC3_A( gu->volumeDirToSource, drawInfo.pVolumetricParams->sourceDirection.data );
-            Utils::Negate( gu->volumeDirToSource );
-            Utils::Normalize( gu->volumeDirToSource );
-        }
-        else
-        {
-            gu->volumeEnableType      = VOLUME_ENABLE_VOLUMETRIC;
-            gu->volumeScattering      = 0.2f;
-            gu->volumeSourceAsymmetry = 0.4f;
-            QR_SET_VEC3( gu->volumeAmbient, 0.8f, 0.85f, 1.0f );
-            QR_SET_VEC3( gu->volumeSourceColor, 0, 0, 0 );
-            QR_SET_VEC3( gu->volumeDirToSource, 0, 1, 0 );
-        }
-
-        if( gu->volumeEnableType != VOLUME_ENABLE_NONE )
-        {
-            memcpy( gu->volumeViewProj_Prev, gu->volumeViewProj, 16 * sizeof( float ) );
-            memcpy( gu->volumeViewProjInv_Prev, gu->volumeViewProjInv, 16 * sizeof( float ) );
-
-            float volumeproj[ 16 ];
-            Matrix::MakeProjectionMatrix( volumeproj,
-                                          aspect,
-                                          drawInfo.fovYRadians,
-                                          gu->volumeCameraNear,
-                                          gu->volumeCameraFar );
-
-            Matrix::Multiply( gu->volumeViewProj, gu->view, volumeproj );
-            Matrix::Inverse( gu->volumeViewProjInv, gu->volumeViewProj );
-        }
-    }
+    FillVolumetricCameraUniform(gu, drawInfo, aspect);
 
     gu->antiFireflyEnabled = !!drawInfo.forceAntiFirefly;
 

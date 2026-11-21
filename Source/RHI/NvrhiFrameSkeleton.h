@@ -34,6 +34,8 @@
 #include "../RasterizedDataCollector.h"
 #include "RhiCloudsPass.h"
 #include "RhiProceduralSkyPass.h"
+#include "RhiRtGodRaysPass.h"
+#include "RhiShadowMapPass.h"
 
 namespace qray
 {
@@ -60,6 +62,7 @@ class RhiUiPass;
 class Swapchain;
 class Tonemapping;
 class VertexCollector;
+struct ShGlobalUniform;
 
 namespace rhi
 {
@@ -548,6 +551,25 @@ private:
     void CompleteFrameReadback(uint32_t frameIndex);
     void DestroyFrameReadback();
     void LogFallbackSlotsIfNeeded();
+
+    bool UpdateLightShaftHistoryValid(const ShGlobalUniform *pUniform, bool temporalEnabled, float outPrevCamera[4]);
+    bool TryRenderGodRaysShadowMap(nvrhi::ICommandList *pCommandList,
+                                   const SkyFrameInputs::GodRays &godRays,
+                                   const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
+                                   float shadowMapVP[16],
+                                   float &shadowMapDepthScale) const;
+    bool PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *pCommandList,
+                                           uint32_t frameIndex,
+                                           const SkyFrameInputs::GodRays &godRays,
+                                           const ShGlobalUniform *pUniform,
+                                           bool froxelSunActive,
+                                           RhiRtGodRaysPass::Params &godRaysParams);
+    bool RecordGodRaysAndLightShafts(nvrhi::ICommandList *pCommandList,
+                                     uint32_t frameIndex,
+                                     const SkyFrameInputs &sky,
+                                     const ShGlobalUniform *pUniform,
+                                     const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
+                                     RhiRtGodRaysPass::Params &godRaysParams);
 
     nvrhi::vulkan::IDevice *device;
     PrintFunction print;

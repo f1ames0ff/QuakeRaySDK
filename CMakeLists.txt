@@ -463,6 +463,15 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_dtal_perf COMMAND qray_dtal_perf "${QR_DTAL_PROBE}" "${QR_PROBE_DIR}/DtalPerf.baseline.txt")
     set_tests_properties(qray_dtal_perf PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
+    add_executable(qray_light_shaft_tests
+        Tests/LightShaftTests.cpp
+    )
+    target_compile_features(qray_light_shaft_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_light_shaft_tests PRIVATE
+        Source
+    )
+    add_test(NAME qray_light_shaft_tests COMMAND qray_light_shaft_tests)
+    set_tests_properties(qray_light_shaft_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
 endif()
 
 add_library(qray_alias OBJECT Source/rt_alias.c)

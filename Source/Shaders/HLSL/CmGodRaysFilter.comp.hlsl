@@ -23,7 +23,8 @@
 // resolution. Ported 1:1 from Quake 2 RTX (god_rays_filter.comp), GPL v2.
 // Q2RTX additionally blends the result onto the color buffer in this shader;
 // in qray the compositing happens in CmPrepareHdr. The filtered volumetric
-// sunlight is written to RGB and the light-shaft transmittance to alpha.
+// sunlight is written to RGB and the light-shaft extinction (1 - transmittance)
+// to alpha so a zero-cleared buffer decodes as transmittance 1.0.
 
 
 // HLSL counterpart of CmGodRaysFilter.comp.
@@ -149,5 +150,6 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
     const float shaftTransmittance = shaftWeightSum > 0.0
         ? saturate(shaftTransmittanceSum / shaftWeightSum)
         : saturate(centerShaft.a);
-    framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, shaftTransmittance);
+    const float shaftExtinction = saturate(1.0 - shaftTransmittance);
+    framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, shaftExtinction);
 }

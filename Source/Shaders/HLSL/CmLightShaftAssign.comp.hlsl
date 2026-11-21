@@ -32,7 +32,7 @@ float3 lightShaftVolumePoint(float2 cellUv, float zNorm)
 {
     const float2 ndc = cellUv * 2.0 - 1.0;
     float4 farPoint = mul(globalUniform.volumeViewProjInv, float4(ndc, 1.0, 1.0));
-    farPoint.xyz /= farPoint.w;
+    farPoint.xyz *= abs(farPoint.w) > 1e-6 ? (1.0 / farPoint.w) : 1.0;
     const float3 direction = normalize(farPoint.xyz - globalUniform.cameraPosition.xyz);
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
@@ -59,7 +59,8 @@ bool lightShaftTraceVisible(float3 origin, float3 target)
     ray.TMin = 0.001;
     ray.TMax = distance - 0.001;
 
-    query.TraceRayInline(topLevelAS, RAY_FLAG_NONE, globalUniform.rayCullMaskWorld, ray);
+    query.TraceRayInline(topLevelAS, RAY_FLAG_NONE,
+                         (globalUniform.rayCullMaskWorld_Shadow & ~(uint)INSTANCE_MASK_GLASS), ray);
 
     while (query.Proceed())
     {
@@ -126,6 +127,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float influenceRadius = shaft.source.z;
         if (influenceRadius > 0.0 &&
             distance(clusterCenter, shaft.positionRadius.xyz) > clusterRadius + influenceRadius)
+        {
+            continue;
+        }
+
+        const float boundsRadius = max(shaft.source.w, shaft.positionRadius.w);
+        if (!shaftConeAllows(shaft, clusterCenter, clusterRadius + boundsRadius))
         {
             continue;
         }

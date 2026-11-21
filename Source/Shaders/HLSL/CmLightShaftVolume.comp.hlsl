@@ -81,7 +81,7 @@ float3 volumeRayDirection(float2 cellUv)
 {
     const float2 ndc = cellUv * 2.0 - 1.0;
     float4 farPoint = mul(globalUniform.volumeViewProjInv, float4(ndc, 1.0, 1.0));
-    farPoint.xyz /= farPoint.w;
+    farPoint.xyz *= abs(farPoint.w) > 1e-6 ? (1.0 / farPoint.w) : 1.0;
     return normalize(farPoint.xyz - globalUniform.cameraPosition.xyz);
 }
 
@@ -145,7 +145,8 @@ bool lightShaftVisible(float3 origin, float3 target)
     ray.TMin = 0.001;
     ray.TMax = distance - 0.001;
 
-    query.TraceRayInline(topLevelAS, RAY_FLAG_NONE, globalUniform.rayCullMaskWorld, ray);
+    query.TraceRayInline(topLevelAS, RAY_FLAG_NONE,
+                         (globalUniform.rayCullMaskWorld_Shadow & ~(uint)INSTANCE_MASK_GLASS), ray);
 
     while (query.Proceed())
     {
@@ -154,23 +155,24 @@ bool lightShaftVisible(float3 origin, float3 target)
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
 
-float4 sampleVolumeHistory(int3 cell, float3 center)
+bool sampleVolumeHistory(int3 cell, float3 center, out float4 history)
 {
+    history = (float4)0;
     if (params.temporalEnabled == 0u || params.historyValid == 0u)
     {
-        return (float4)0;
+        return false;
     }
 
     const float4 clip = mul(globalUniform.volumeViewProj_Prev, float4(center, 1.0));
     if (!(clip.w > 0.000001))
     {
-        return (float4)0;
+        return false;
     }
 
     const float2 uv = clip.xy * (0.5 / clip.w) + 0.5;
     if (any(uv < 0.0) || any(uv > 1.0))
     {
-        return (float4)0;
+        return false;
     }
 
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
@@ -179,39 +181,16 @@ float4 sampleVolumeHistory(int3 cell, float3 center)
     const float normalizedDepth = (radialDistance - nearPlane) / (farPlane - nearPlane);
     if (normalizedDepth < 0.0 || normalizedDepth > 1.0)
     {
-        return (float4)0;
+        return false;
     }
 
     const int2 previousXY = int2(clamp(uv, 0.0, 1.0) *
                                  float2((float)params.volumeSizeX, (float)params.volumeSizeY));
     const int previousZ = int(clamp(sqrt(normalizedDepth), 0.0, 1.0) * (float)(params.volumeSizeZ - 1u) + 0.5);
-    return historyVolume.Load(int4(min(previousXY.x, (int)params.volumeSizeX - 1),
-                                   min(previousXY.y, (int)params.volumeSizeY - 1),
-                                   clamp(previousZ, 0, (int)params.volumeSizeZ - 1), 0));
-}
-
-bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadius)
-{
-    const float3 direction = shaft.direction.xyz;
-    const float directionLength2 = dot(direction, direction);
-    if (directionLength2 <= 0.000001)
-    {
-        return true;
-    }
-
-    const float3 toCell = center - shaft.positionRadius.xyz;
-    const float cellDistance = length(toCell);
-    if (cellDistance <= 0.001)
-    {
-        return true;
-    }
-
-    const float3 normalizedDirection = direction * rsqrt(directionLength2);
-    const float cosAngle = clamp(dot(toCell / cellDistance, normalizedDirection), -1.0, 1.0);
-    const float angle = acos(cosAngle);
-    const float boundsAngle = asin(saturate(boundsRadius / max(cellDistance, 0.001)));
-    const float outerAngle = acos(clamp(shaft.cone.y, -1.0, 1.0));
-    return angle <= outerAngle + boundsAngle + 0.05;
+    history = historyVolume.Load(int4(min(previousXY.x, (int)params.volumeSizeX - 1),
+                                      min(previousXY.y, (int)params.volumeSizeY - 1),
+                                      clamp(previousZ, 0, (int)params.volumeSizeZ - 1), 0));
+    return true;
 }
 
 bool sampleShaftEmitter(const LightShaft_BT shaft, float3 center, float2 rnd,
@@ -300,7 +279,7 @@ bool sampleShaftEmitter(const LightShaft_BT shaft, float3 center, float2 rnd,
     if (hasDirection)
     {
         const float cosAngle = dot(toCell / cellDistance, normalize(direction));
-        cone = smoothstep(shaft.cone.y, shaft.cone.x, cosAngle);
+        cone = smoothstep(shaft.cone.y, max(shaft.cone.x, shaft.cone.y + 1e-4), cosAngle);
     }
 
     const float radius = max(shaft.positionRadius.w, 0.001);
@@ -444,7 +423,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             visibility = lightShaftVisible(center, center + sunDirection * MAX_RAY_LENGTH) ? 1.0 : 0.0;
         }
 
-        radiance += params.sunColor.rgb * visibility * shaftPhase(dot(-sunDirection, toViewer), 0.5);
+        radiance += params.sunColor.rgb * visibility * shaftPhase(dot(sunDirection, toViewer), 0.5);
     }
 
     float4 current = float4(radiance * sigmaS, sigma);
@@ -457,16 +436,21 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (params.debugMode == 4u)
     {
-        lightShaftVolume[cell] = sampleVolumeHistory(cell, center);
+        float4 history = (float4)0;
+        sampleVolumeHistory(cell, center, history);
+        lightShaftVolume[cell] = history;
         return;
     }
 
     if (params.temporalEnabled != 0u && params.historyValid != 0u && params.mediumHistoryWeight > 0.0)
     {
-        const float4 history = sampleVolumeHistory(cell, center);
-        const float weight = saturate(params.mediumHistoryWeight);
-        current.rgb = lerp(current.rgb, clamp(history.rgb, current.rgb * 0.5, current.rgb * 2.0 + 1e-6), weight);
-        current.a = lerp(current.a, clamp(history.a, current.a * 0.5, current.a * 2.0 + 1e-6), weight);
+        float4 history = (float4)0;
+        if (sampleVolumeHistory(cell, center, history))
+        {
+            const float weight = saturate(params.mediumHistoryWeight);
+            current.rgb = lerp(current.rgb, clamp(history.rgb, current.rgb * 0.5, current.rgb * 2.0 + 1e-6), weight);
+            current.a = lerp(current.a, clamp(history.a, current.a * 0.5, current.a * 2.0 + 1e-6), weight);
+        }
     }
 
     if (params.debugMode == 5u)
