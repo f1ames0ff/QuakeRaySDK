@@ -82,7 +82,7 @@ uint32_t QualityToMaxLevels(uint32_t quality)
 
 uint32_t ComputeLevelCount(float radius, uint32_t width, uint32_t height, uint32_t maxLevels)
 {
-    const float sanitizedRadius = radius == radius ? std::min(std::max(radius, 0.0f), 1.0f) : 0.04f;
+    const float sanitizedRadius = !std::isnan(radius) ? std::min(std::max(radius, 0.0f), 1.0f) : 0.04f;
     const float characteristic = std::max(sanitizedRadius * static_cast<float>(std::max(width, height)), 1.0f);
     const uint32_t levels = 1 + static_cast<uint32_t>(std::ceil(std::log2(characteristic)));
 

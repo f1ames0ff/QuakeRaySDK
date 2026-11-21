@@ -197,6 +197,7 @@ public:
         uint32_t     lane;
         bool         enabled;
         uint64_t     waitNs;
+        std::unique_lock<std::mutex> lock;
         uint64_t     holdStartNs;
     };
 
@@ -240,7 +241,8 @@ private:
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
-    void AcquireFrameImage();
+    void AcquireFrameImage(bool allowRecreate);
+    void CompleteAcquireForPresent();
     bool RenderThroughRhi(const QrDrawFrameInfo &drawInfo);
     void EndFrame(VkCommandBuffer cmd);
 

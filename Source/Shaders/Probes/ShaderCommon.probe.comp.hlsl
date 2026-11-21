@@ -96,10 +96,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
          globalUniform.giBounceRays.x + globalUniform.fltEnable.x + globalUniform.fixedAlbedo.x +
          globalUniform.sunBounce.x + globalUniform.levelFogColorDensity.x +
          globalUniform.levelFogSkyBlend.x + float(globalUniform.restirParams.x) +
-         globalUniform.cloudShadowPlacement.x + globalUniform.cloudLayerMotion.x +
-         float(globalUniform.glassBlur) + float(globalUniform.glassDenoise) +
-         float(globalUniform.glassParticles) + globalUniform.sceneUnitsPerHostUnit +
-         float(globalUniform.__pad7) + float(globalUniform.__pad8) + float(globalUniform.__pad9);
+         globalUniform.lightVolumeParams.x + globalUniform.lightVolumeLocalParams[0].x +
+         globalUniform.radianceCacheParams.x + float(globalUniform.giReservoirParams.x) +
+         float(globalUniform.radianceSplitParams.x) + float(globalUniform.transparencyFroxelParams.x) +
+         globalUniform.transparencyFroxelBlendParams.x + globalUniform.cloudShadowPlacement.x +
+         globalUniform.cloudLayerMotion.x + float(globalUniform.glassBlur) +
+         float(globalUniform.glassDenoise) + float(globalUniform.glassParticles) +
+         globalUniform.sceneUnitsPerHostUnit + float(globalUniform.__pad7) + float(globalUniform.__pad8) +
+         float(globalUniform.__pad9);
 
     // ShVertPreprocessing
     v += float(pushConstant.push.tlasInstanceCount) + float(pushConstant.push.tlasInstanceIsDynamicBits[0]);

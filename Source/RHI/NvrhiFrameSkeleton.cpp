@@ -229,6 +229,7 @@ NvrhiFrameSkeleton::~NvrhiFrameSkeleton()
         device->waitForIdle();
     }
 
+    ReleaseFramebufferTargets();
     DestroySwapchainResources();
 
     // The pass wraps engine images and owns the pipelines and the target of the sky; it goes after
@@ -430,6 +431,11 @@ QrResult NvrhiFrameSkeleton::GetFrameReadbackStatus(uint64_t requestId, QrBool32
 
 void NvrhiFrameSkeleton::CompleteFrameReadback(uint32_t frameIndex)
 {
+    if (frameIndex >= readbackSlots.size())
+    {
+        return;
+    }
+
     ReadbackSlot &slot = readbackSlots[frameIndex];
 
     if (!slot.pending)
@@ -834,7 +840,7 @@ bool NvrhiFrameSkeleton::GetGpuTimings(float *pFrameMs, float *pPassMs) const
 bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
                                 FrameSubmissionSynchronization &submission)
 {
-    if (unavailable)
+    if (unavailable || frameIndex >= MAX_FRAMES_IN_FLIGHT)
     {
         return false;
     }
@@ -2152,23 +2158,36 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
 
     // The fidelity gap (unwrappable formats or swizzles fall back to the white texture) is reported
     // once, after the engine has had a few frames to fill the table; the counter then stops.
-    if (framesUntilFallbackLog > 0 && --framesUntilFallbackLog == 0)
-    {
-        const auto fallbackSlots = textureTable->GetFallbackSlotCount();
-
-        if (fallbackSlots > 0)
-        {
-            print(("RHI: the texture table holds " + std::to_string(fallbackSlots) +
-                   " fallback slot(s) (unwrapable format/swizzle)").c_str());
-        }
-    }
+    LogFallbackSlotsIfNeeded();
 
     return true;
 }
 
+void NvrhiFrameSkeleton::LogFallbackSlotsIfNeeded()
+{
+    if (framesUntilFallbackLog == 0)
+    {
+        return;
+    }
+
+    --framesUntilFallbackLog;
+    if (framesUntilFallbackLog != 0)
+    {
+        return;
+    }
+
+    const auto fallbackSlots = textureTable->GetFallbackSlotCount();
+    if (fallbackSlots > 0)
+    {
+        print(("RHI: the texture table holds " + std::to_string(fallbackSlots) +
+               " fallback slot(s) (unwrapable format/swizzle)").c_str());
+    }
+}
+
 nvrhi::ITexture *NvrhiFrameSkeleton::PrepareUiTarget(uint32_t frameIndex, const SkyFrameInputs &sky)
 {
-    if (sky.framebuffers == nullptr || sky.upscaledWidth == 0 || sky.upscaledHeight == 0)
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT ||
+        sky.framebuffers == nullptr || sky.upscaledWidth == 0 || sky.upscaledHeight == 0)
     {
         return nullptr;
     }
@@ -2193,7 +2212,8 @@ nvrhi::ITexture *NvrhiFrameSkeleton::PrepareUiTarget(uint32_t frameIndex, const 
 
 bool NvrhiFrameSkeleton::PrepareUiGeometry(uint32_t frameIndex, const SkyFrameInputs &sky)
 {
-    if (sky.swapchainVertexStaging == 0 || sky.swapchainIndexStaging == 0)
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT ||
+        sky.swapchainVertexStaging == 0 || sky.swapchainIndexStaging == 0)
     {
         return false;
     }
@@ -2238,7 +2258,7 @@ bool NvrhiFrameSkeleton::PrepareUiGeometry(uint32_t frameIndex, const SkyFrameIn
 void NvrhiFrameSkeleton::RenderUi(nvrhi::ICommandList *commandList, uint32_t frameIndex,
                                  const SkyFrameInputs &sky, nvrhi::ITexture *target, bool clearTarget)
 {
-    if (target == nullptr)
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT || target == nullptr)
     {
         return;
     }
@@ -2270,7 +2290,8 @@ void NvrhiFrameSkeleton::RenderUi(nvrhi::ICommandList *commandList, uint32_t fra
 
 void NvrhiFrameSkeleton::RenderPostUi(nvrhi::ICommandList *commandList, uint32_t frameIndex, const SkyFrameInputs &sky)
 {
-    if (postEffectPass == nullptr || !postEffectPass->IsCreated() || sky.uniform == nullptr)
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT ||
+        postEffectPass == nullptr || !postEffectPass->IsCreated() || sky.uniform == nullptr)
     {
         return;
     }
@@ -2287,7 +2308,8 @@ bool NvrhiFrameSkeleton::PrepareWorld(uint32_t frameIndex, const SkyFrameInputs 
 {
     // A frame without the engine objects, or a frame whose framebuffers are not there yet, is not
     // a failure: the world simply waits for a later frame to bring them.
-    if (skyPass == nullptr || sky.framebuffers == nullptr ||
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT ||
+        skyPass == nullptr || sky.framebuffers == nullptr ||
         sky.uniform == nullptr || sky.tonemapping == nullptr)
     {
         return false;
@@ -2460,7 +2482,11 @@ bool NvrhiFrameSkeleton::CreatePassResources()
 
 nvrhi::ITexture *NvrhiFrameSkeleton::ResolvePresentDirectTexture(uint32_t frameIndex, const SkyFrameInputs &sky)
 {
-    assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+    {
+        assert(false);
+        return nullptr;
+    }
 
     if (sky.framebuffers == nullptr || sky.width == 0 || sky.height == 0)
     {
@@ -2516,7 +2542,11 @@ nvrhi::ITexture *NvrhiFrameSkeleton::ResolvePresentDirectTexture(uint32_t frameI
 bool NvrhiFrameSkeleton::PreparePresentBindingSet(uint32_t frameIndex, nvrhi::ITexture *albedo,
                                                   nvrhi::ITexture *directTexture)
 {
-    assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+    {
+        assert(false);
+        return false;
+    }
 
     // The set references the slot's ALBEDO wrap and its direct-term image, so it follows both: the
     // sky pass replaces the ALBEDO wrap when the engine re-creates its framebuffers, and
@@ -2645,15 +2675,18 @@ bool NvrhiFrameSkeleton::CreateSwapchainResources(const Swapchain *pSwapchain)
     return true;
 }
 
-void NvrhiFrameSkeleton::DestroySwapchainResources()
+void NvrhiFrameSkeleton::ReleaseFramebufferTargets()
 {
-    DestroyFrameReadback();
+    if (device != nullptr)
+    {
+        // The passes and present sets wrap Framebuffers images; wait before dropping them ahead
+        // of Framebuffers::PrepareForSize or destructor teardown.
+        device->waitForIdle();
+    }
 
     // The sky pass wraps the engine's ALBEDO images and keeps one wrapped target per frame slot.
-    // Dropping them here is what lets the engine destroy and re-create its framebuffers: the
-    // re-create path of the swapchain waits for the device before it notifies
-    // (Swapchain.cpp:323-326), and the next Prepare re-wraps the new images. The releases go
-    // through the frame context's retire queue.
+    // Dropping them here is what lets the engine destroy and re-create its framebuffers, and the
+    // next Render re-wraps the new images. The releases go through the frame context's retire queue.
     if (skyPass != nullptr)
     {
         skyPass->ReleaseTargets();
@@ -2747,9 +2780,7 @@ void NvrhiFrameSkeleton::DestroySwapchainResources()
 
     // A present binding set references the ALBEDO wrap and the direct-term image of one slot, so it
     // goes with them; the next frame builds a set for the new wraps. Every caller runs after a
-    // device wait - the destructor and OnSwapchainDestroy wait themselves, and the swapchain's
-    // re-create waits before it notifies - so the handles can be dropped directly instead of
-    // through the retire queue.
+    // device wait so the handles can be dropped directly instead of through the retire queue.
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         presentBindingSets[i] = nullptr;
@@ -2760,6 +2791,11 @@ void NvrhiFrameSkeleton::DestroySwapchainResources()
         uiFrameTextures[i] = nullptr;
         uiFrameImageHandles[i] = 0;
     }
+}
+
+void NvrhiFrameSkeleton::DestroySwapchainResources()
+{
+    DestroyFrameReadback();
 
     swapchainFramebuffers.clear();
     swapchainTextures.clear();

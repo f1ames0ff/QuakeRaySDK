@@ -58,7 +58,7 @@ int main(int argc, char **argv)
         Require(pipeline != nullptr, "create vertex-transform pipeline");
 
         nvrhi::BufferDesc desc;
-        desc.byteSize = 3 * sizeof(float) * 4;
+        desc.byteSize = 7 * sizeof(float) * 4;
         desc.structStride = sizeof(float) * 4;
         desc.canHaveUAVs = true;
         desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
@@ -66,7 +66,7 @@ int main(int argc, char **argv)
         auto output = device->createBuffer(desc);
 
         desc = {};
-        desc.byteSize = 3 * sizeof(float) * 4;
+        desc.byteSize = 7 * sizeof(float) * 4;
         desc.cpuAccess = nvrhi::CpuAccessMode::Read;
         desc.initialState = nvrhi::ResourceStates::CopyDest;
         desc.keepInitialState = true;
@@ -99,18 +99,68 @@ int main(int argc, char **argv)
             0.25f / expectedNormalLength,
         };
 
+        const float expectedSmallNormalInv[3] = {
+            1.0f / 0.0015f,
+            1.0f / 0.00016f,
+            1.0f / 0.00053f,
+        };
+        const float expectedSmallNormalLength = std::sqrt(
+            expectedSmallNormalInv[0] * expectedSmallNormalInv[0] +
+            expectedSmallNormalInv[1] * expectedSmallNormalInv[1] +
+            expectedSmallNormalInv[2] * expectedSmallNormalInv[2]);
+        const float expectedSmallNormal[3] = {
+            expectedSmallNormalInv[0] / expectedSmallNormalLength,
+            expectedSmallNormalInv[1] / expectedSmallNormalLength,
+            expectedSmallNormalInv[2] / expectedSmallNormalLength,
+        };
+
+        const float scaledSmallTangent[3] = { 0.0015f, 0.0f, 0.00053f };
+        const float dotScaled = expectedSmallNormal[0] * scaledSmallTangent[0] +
+                                expectedSmallNormal[1] * scaledSmallTangent[1] +
+                                expectedSmallNormal[2] * scaledSmallTangent[2];
+        const float orthoSmallTangent[3] = {
+            scaledSmallTangent[0] - expectedSmallNormal[0] * dotScaled,
+            scaledSmallTangent[1] - expectedSmallNormal[1] * dotScaled,
+            scaledSmallTangent[2] - expectedSmallNormal[2] * dotScaled,
+        };
+        const float orthoSmallTangentLength = std::sqrt(
+            orthoSmallTangent[0] * orthoSmallTangent[0] +
+            orthoSmallTangent[1] * orthoSmallTangent[1] +
+            orthoSmallTangent[2] * orthoSmallTangent[2]);
+        const float expectedSmallTangent[3] = {
+            orthoSmallTangent[0] / orthoSmallTangentLength,
+            orthoSmallTangent[1] / orthoSmallTangentLength,
+            orthoSmallTangent[2] / orthoSmallTangentLength,
+        };
+
         bool valid = NearlyEqual(data[0], expectedNormal[0]) &&
                      NearlyEqual(data[1], expectedNormal[1]) &&
                      NearlyEqual(data[2], expectedNormal[2]) &&
                      NearlyEqual(data[3], 24.0f) &&
                      NearlyEqual(data[7], 0.0f) &&
                      NearlyEqual(data[8], 1.0f) &&
-                     NearlyEqual(data[9], -1.0f);
+                     NearlyEqual(data[9], -1.0f) &&
+                     NearlyEqual(data[12], 0.0f) &&
+                     NearlyEqual(data[13], 0.0f) &&
+                     NearlyEqual(data[14], 1.0f) &&
+                     NearlyEqual(data[15], 1.0f) &&
+                     NearlyEqual(data[16], expectedSmallNormal[0]) &&
+                     NearlyEqual(data[17], expectedSmallNormal[1]) &&
+                     NearlyEqual(data[18], expectedSmallNormal[2]) &&
+                     NearlyEqual(data[19], 1.0f) &&
+                     NearlyEqual(data[20], expectedSmallTangent[0]) &&
+                     NearlyEqual(data[21], expectedSmallTangent[1]) &&
+                     NearlyEqual(data[22], expectedSmallTangent[2]) &&
+                     NearlyEqual(data[23], 0.0f) &&
+                     NearlyEqual(data[24], 0.0f) &&
+                     NearlyEqual(data[25], 1.0f) &&
+                     NearlyEqual(data[26], 0.0f) &&
+                     NearlyEqual(data[27], 1.0f);
 
         const float tangentLength = std::sqrt(data[4] * data[4] + data[5] * data[5] + data[6] * data[6]);
         valid = valid && NearlyEqual(tangentLength, 1.0f);
 
-        float values[12] = {};
+        float values[28] = {};
         std::memcpy(values, data, sizeof(values));
         device->unmapBuffer(readback);
 
@@ -118,14 +168,23 @@ int main(int argc, char **argv)
         {
             std::fprintf(stderr,
                          "non-uniform vertex transform mismatch: n=(%g,%g,%g) d=%g t=(%g,%g,%g) dot=%g "
-                         "handedness=%g expectedHandedness=%g\n",
+                         "handedness=%g expectedHandedness=%g smallTri=(%g,%g,%g,%g) "
+                         "smallModelN=(%g,%g,%g,%g) expectedSmallN=(%g,%g,%g) "
+                         "smallModelT=(%g,%g,%g,%g) expectedSmallT=(%g,%g,%g) "
+                         "fallback=(%g,%g,%g,%g)\n",
                          values[0], values[1], values[2], values[3], values[4], values[5], values[6],
-                         values[7], values[8], values[9]);
+                         values[7], values[8], values[9],
+                         values[12], values[13], values[14], values[15],
+                         values[16], values[17], values[18], values[19],
+                         expectedSmallNormal[0], expectedSmallNormal[1], expectedSmallNormal[2],
+                         values[20], values[21], values[22], values[23],
+                         expectedSmallTangent[0], expectedSmallTangent[1], expectedSmallTangent[2],
+                         values[24], values[25], values[26], values[27]);
             return 1;
         }
 
         Require(gpu.errors == 0, "validation errors");
-        std::cout << "Non-uniform normal, tangent and handedness passed\n";
+        std::cout << "Non-uniform normal, tangent, handedness and metric-scale safeNormalize passed\n";
         return 0;
     }
     catch (const std::exception &error)

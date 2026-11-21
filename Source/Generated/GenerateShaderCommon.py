@@ -202,7 +202,7 @@ RESOLVE_LATER = "CONST VALUE MUST BE EVALUATED"
 
 
 
-GRADIENT_ESTIMATION_ENABLED = False
+GRADIENT_ESTIMATION_ENABLED = os.environ.get("QRAY_GRADIENT_ESTIMATION", "0") == "1"
 FRAMEBUF_IGNORE_ATTACHMENTS_DEFINE = "FRAMEBUF_IGNORE_ATTACHMENTS"
 
 MAX_FOG_VOLUMES = 8
@@ -666,7 +666,7 @@ GLOBAL_UNIFORM_MEMBERS = [
     # Transparency froxels: .x = enabled.
     (UINT32,  4, "transparencyFroxelParams", 1),
     # Transparency froxel blend: .x = weight.
-    (FLOAT,   4, "transparencyFroxelBlendParams", 1),
+    (FLOAT32, 4, "transparencyFroxelBlendParams", 1),
     (FLOAT32, 4, "cloudShadowPlacement",     1),
     (FLOAT32, 4, "cloudLayerMotion",         1),
 
@@ -1230,7 +1230,8 @@ def public_flag_expression(flags):
 
 
 def emit_vulkan_framebuffer_declarations():
-    return ("extern const uint32_t ShFramebuffers_Count;\n"
+    count = len(framebuffer_enum_entries())
+    return ("inline constexpr uint32_t ShFramebuffers_Count = %d;\n" % count +
             "extern const VkFormat ShFramebuffers_Formats[];\n"
             "extern const FramebufferImageFlags ShFramebuffers_Flags[];\n"
             "extern const uint32_t ShFramebuffers_Bindings[];\n"
@@ -1271,8 +1272,7 @@ def emit_bindings(first_binding, with_sampler):
 
 
 def emit_vulkan_framebuffer_definitions():
-    template = ("const uint32_t qray::ShFramebuffers_Count = %d;\n\n"
-                "const VkFormat qray::ShFramebuffers_Formats[] = \n{\n%s};\n\n"
+    template = ("const VkFormat qray::ShFramebuffers_Formats[] = \n{\n%s};\n\n"
                 "const qray::FramebufferImageFlags qray::ShFramebuffers_Flags[] = \n{\n%s};\n\n"
                 "const uint32_t qray::ShFramebuffers_Bindings[] = \n{\n%s};\n\n"
                 "const uint32_t qray::ShFramebuffers_BindingsSwapped[] = \n{\n%s};\n\n"
@@ -1305,7 +1305,7 @@ def emit_vulkan_framebuffer_definitions():
     sampled_bindings, sampled_bindings_swapped = emit_bindings(FRAMEBUF_BASE_BINDING + count, False)
     sampler_bindings, sampler_bindings_swapped = emit_bindings(FRAMEBUF_BASE_BINDING + 2 * count, True)
 
-    return template % (count, formats, public_flags, bindings, bindings_swapped,
+    return template % (formats, public_flags, bindings, bindings_swapped,
                        sampled_bindings, sampled_bindings_swapped,
                        sampler_bindings, sampler_bindings_swapped, names)
 
@@ -1355,6 +1355,20 @@ def regenerate_probe():
     subprocess.check_call([sys.executable, script_name], cwd=shaders_folder)
 
 
+def resolve_output_dir(raw_path):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.realpath(os.path.join(script_dir, os.pardir, os.pardir))
+    target = os.path.realpath(raw_path if raw_path else os.getcwd())
+    if not os.path.isdir(target) or os.path.commonpath([repo_root, target]) != repo_root:
+        return None
+    if target == os.path.realpath(script_dir):
+        return script_dir
+    for root, _, _ in os.walk(repo_root):
+        if os.path.realpath(root) == target:
+            return root
+    return None
+
+
 def main():
     base_path = ""
 
@@ -1372,17 +1386,19 @@ def main():
                 print("--path expects folder path in the next argument.")
                 return
 
-    if base_path and not base_path.endswith(("/", "\\")):
-        base_path += os.sep
+    output_dir = resolve_output_dir(base_path)
+    if output_dir is None:
+        print("Target folder must be an existing directory inside the renderer repository.")
+        return
 
     resolve_derived_constants()
 
-    with open(base_path + "ShaderCommonC.h", "w") as common_header_file:
-        with open(base_path + "ShaderCommonCFramebuf.h", "w") as framebuffer_header_file:
-            with open(base_path + "ShaderCommonCFramebuf.cpp", "w") as framebuffer_source_file:
+    with open(os.path.join(output_dir, "ShaderCommonC.h"), "w", encoding="utf-8") as common_header_file:
+        with open(os.path.join(output_dir, "ShaderCommonCFramebuf.h"), "w", encoding="utf-8") as framebuffer_header_file:
+            with open(os.path.join(output_dir, "ShaderCommonCFramebuf.cpp"), "w", encoding="utf-8") as framebuffer_source_file:
                 write_c_files(common_header_file, framebuffer_header_file, framebuffer_source_file)
 
-    with open(base_path + "ShaderCommonHLSL.hlsli", "w") as hlsl_header_file:
+    with open(os.path.join(output_dir, "ShaderCommonHLSL.hlsli"), "w", encoding="utf-8") as hlsl_header_file:
         write_hlsl_header(hlsl_header_file)
 
     regenerate_probe()

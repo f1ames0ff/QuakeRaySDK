@@ -151,6 +151,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const float3 color_center_raw = framebufFinal_Sampled.Load(int3(int_render_pos, 0)).rgb;
 
+    if (globalUniform.restirParams.w != 0u)
+    {
+        framebufUpscaledPing[opos] = float4(color_center_raw, 1);
+        framebufQ2TaaHistory[opos] = float4(color_center_raw, 1);
+        return;
+    }
+
     const float flt_taa_anti_sparkle = 0.25;
     const float anti_sparkle_scale = pow(min(1.0, flt_taa_anti_sparkle), -0.25);
 

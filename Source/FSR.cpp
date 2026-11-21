@@ -309,7 +309,7 @@ void qray::FidelityFX::FSR::RecreateContext()
     upscaleDesc.header.type   = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     upscaleDesc.header.pNext  = &overrideDesc.header;
     overrideDesc.header.pNext = &backendDesc.header;
-    upscaleDesc.flags         = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
+    upscaleDesc.flags         = 0;
     upscaleDesc.maxRenderSize  = { m_renderWidth, m_renderHeight };
     upscaleDesc.maxUpscaleSize = { m_displayWidth, m_displayHeight };
     upscaleDesc.fpMessage      = FsrMessageCallback;
@@ -320,6 +320,30 @@ void qray::FidelityFX::FSR::RecreateContext()
         m_context = nullptr;
         throw QrException(QR_GRAPHICS_API_ERROR, "Failed to create FSR context");
     }
+
+    float velocityFactor = 0.0f;
+    ffxConfigureDescUpscaleKeyValue velocityConfig = {};
+    velocityConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+    velocityConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FVELOCITYFACTOR;
+    velocityConfig.u64         = 0;
+    velocityConfig.ptr         = &velocityFactor;
+    ffxConfigure(&m_context, &velocityConfig.header);
+
+    float shadingChangeScale = 0.0f;
+    ffxConfigureDescUpscaleKeyValue shadingChangeConfig = {};
+    shadingChangeConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+    shadingChangeConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FSHADINGCHANGESCALE;
+    shadingChangeConfig.u64         = 0;
+    shadingChangeConfig.ptr         = &shadingChangeScale;
+    ffxConfigure(&m_context, &shadingChangeConfig.header);
+
+    float reactivenessScale = 0.0f;
+    ffxConfigureDescUpscaleKeyValue reactivenessConfig = {};
+    reactivenessConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+    reactivenessConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FREACTIVENESSSCALE;
+    reactivenessConfig.u64         = 0;
+    reactivenessConfig.ptr         = &reactivenessScale;
+    ffxConfigure(&m_context, &reactivenessConfig.header);
 
     s_contextForJitter = m_context;
     m_loggedFirstDispatch = false;
@@ -393,8 +417,8 @@ qray::FramebufferImageIndex qray::FidelityFX::FSR::Apply(
     info.reactive          = {};
     info.transparencyAndComposition = {};
     info.output            = ToFfxApiResource(OUTPUT_IMAGE_INDEX, frameIndex, *framebuffers, resolutionState);
-    info.jitterOffset.x    = jitterOffset.data[0];
-    info.jitterOffset.y    = jitterOffset.data[1];
+    info.jitterOffset.x    = -jitterOffset.data[0];
+    info.jitterOffset.y    = -jitterOffset.data[1];
     info.motionVectorScale.x = static_cast<float>(resolutionState.renderWidth);
     info.motionVectorScale.y = static_cast<float>(resolutionState.renderHeight);
     info.renderSize.width  = resolutionState.renderWidth;

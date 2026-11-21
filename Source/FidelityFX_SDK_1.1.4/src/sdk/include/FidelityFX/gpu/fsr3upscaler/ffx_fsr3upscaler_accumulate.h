@@ -46,8 +46,8 @@ void RectifyHistory(
     FFX_PARAMETER_INOUT AccumulationPassData data
 )
 {
-    const FfxFloat32 f4kVelocityFactor = ffxSaturate(params.f4KVelocity / 20.0f);
-    const FfxFloat32 fDistanceFactor        = ffxSaturate(0.75f - params.fFarthestDepthInMeters / 20.0f);
+    const FfxFloat32 f4kVelocityFactor = ffxSaturate(params.f4KVelocity / 20.0f) * VelocityFactor();
+    const FfxFloat32 fDistanceFactor        = 0.0f;
     const FfxFloat32 fAccumulationFactor    = 1.0f - params.fAccumulation;
     const FfxFloat32 fReactiveFactor        = ffxPow(params.fReactiveMask, 1.0f / 2.0f);
     const FfxFloat32 fShadingChangeFactor   = params.fShadingChange;
@@ -155,6 +155,8 @@ void Accumulate(FfxInt32x2 iPxHrPos)
     ComputeUpsampledColorAndWeight(params, data);
 
     RectifyHistory(params, data);
+
+    data.fHistoryWeight = 0.0f;
 
     Accumulate(params, data);
 
