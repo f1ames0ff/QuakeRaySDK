@@ -909,6 +909,36 @@ def getPairs(arguments):
     return pairs
 
 
+def verifyPairs(pairs):
+    orphans = findOrphanRecordings(getPairs([]))
+    if len(orphans) > 0:
+        print("> " + str(len(orphans)) + " recording(s) do not correspond to a current shader pair:")
+        for orphan in orphans:
+            print(TAB + orphan)
+        print("> Delete them, or add the pair they record to the tree.")
+        return 1
+
+    failures = 0
+    for pair in pairs:
+        print("=== " + pair)
+        pairFailures, messages = checkRecording(pair)
+        failures += pairFailures
+
+        for message in messages:
+            print(message)
+
+        if pairFailures == 0:
+            print(TAB + "all properties match")
+
+    if failures > 0:
+        print("")
+        print("> " + str(failures) + " failure(s) against the recorded reflections.")
+        print("> Fix them in HLSL, or run --record --force if the change is deliberate.")
+        return 1
+
+    return 0
+
+
 def main():
     addVulkanSdkToPath()
 
@@ -945,34 +975,7 @@ def main():
         print("> No HLSL shaders to check. Nothing to do.")
         return 0
 
-    orphans = findOrphanRecordings(getPairs([]))
-    if len(orphans) > 0:
-        print("> " + str(len(orphans)) + " recording(s) do not correspond to a current shader pair:")
-        for orphan in orphans:
-            print(TAB + orphan)
-        print("> Delete them, or add the pair they record to the tree.")
-        return 1
-
-    failures = 0
-
-    for pair in pairs:
-        print("=== " + pair)
-        pairFailures, messages = checkRecording(pair)
-        failures += pairFailures
-
-        for message in messages:
-            print(message)
-
-        if pairFailures == 0:
-            print(TAB + "all properties match")
-
-    if failures > 0:
-        print("")
-        print("> " + str(failures) + " failure(s) against the recorded reflections.")
-        print("> Fix them in HLSL, or run --record --force if the change is deliberate.")
-        return 1
-
-    return 0
+    return verifyPairs(pairs)
 
 
 if __name__ == "__main__":
