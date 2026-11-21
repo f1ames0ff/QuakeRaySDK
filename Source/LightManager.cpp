@@ -452,9 +452,11 @@ namespace
 
         const float boundsRadius = SafePositiveFloat(info.boundsRadius);
         const float explicitReach = SafePositiveFloat(info.reach);
-        const float reach = explicitReach > 0.0f
-            ? std::min(explicitReach, kLightShaftMaxReachMeters)
-            : ComputeRadianceShaftReach(info.color.data, info.area, info.meanEmiss, power);
+        const float memberArea = info.area / static_cast<float>(std::max(info.memberCount, 1u));
+        const float radianceReach = ComputeRadianceShaftReach(info.color.data, memberArea, info.meanEmiss, power);
+        const float reach = (explicitReach > 0.0f && radianceReach > 0.0f)
+            ? std::min(radianceReach, explicitReach)
+            : (radianceReach > 0.0f ? radianceReach : std::min(explicitReach, kLightShaftMaxReachMeters));
 
         shaft.surface[0] = static_cast<float>(info.memberBase);
         shaft.surface[1] = static_cast<float>(info.memberCount);
@@ -507,6 +509,33 @@ namespace
         shaft.source[1] = power;
         shaft.source[2] = reach > 0.0f ? reach + radius : 0.0f;
         shaft.source[3] = radius;
+        return true;
+    }
+
+    struct RankedLightShaft
+    {
+        float    distanceToSurface;
+        uint32_t index;
+    };
+
+    bool EvaluateLightShaftCandidate(const LightManager::LightShaft &shaft,
+                                     const float cameraPos[3],
+                                     float volumeFar,
+                                     float &outSurfaceDistance)
+    {
+        const float dx = shaft.position[0] - cameraPos[0];
+        const float dy = shaft.position[1] - cameraPos[1];
+        const float dz = shaft.position[2] - cameraPos[2];
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float bounds = std::max(shaft.source[3], shaft.position[3]);
+        const float influence = shaft.source[2] > 0.0f ? shaft.source[2] : (shaft.emission[1] + bounds);
+
+        if (influence > 0.0f && dist > volumeFar + influence)
+        {
+            return false;
+        }
+
+        outSurfaceDistance = std::max(0.0f, dist - bounds);
         return true;
     }
 }
@@ -608,7 +637,7 @@ void qray::LightManager::AddLightShaft(const LightShaft &shaft)
 {
     std::lock_guard<std::mutex> registryLock(registryMutex);
 
-    if (lightShafts.size() < MAX_LIGHT_SHAFTS)
+    if (lightShafts.size() < MAX_LIGHT_SHAFT_CANDIDATES)
     {
         lightShafts.push_back(shaft);
     }
@@ -616,17 +645,55 @@ void qray::LightManager::AddLightShaft(const LightShaft &shaft)
 
 uint32_t qray::LightManager::CollectLightShafts(LightShaft *out, uint32_t max)
 {
+    return CollectLightShafts(out, max, nullptr, 0.0f);
+}
+
+uint32_t qray::LightManager::CollectLightShafts(LightShaft *out, uint32_t max,
+                                                const float cameraPos[3], float volumeFar)
+{
     if (out == nullptr || max == 0)
     {
         return 0;
     }
 
     std::lock_guard<std::mutex> registryLock(registryMutex);
-    const uint32_t count = std::min(max, static_cast<uint32_t>(lightShafts.size()));
+    if (cameraPos == nullptr || !(volumeFar > 0.0f) || lightShafts.empty())
+    {
+        const uint32_t count = std::min(max, static_cast<uint32_t>(lightShafts.size()));
+        for (uint32_t i = 0; i < count; i++)
+        {
+            out[i] = lightShafts[i];
+        }
+        return count;
+    }
+
+    std::vector<RankedLightShaft> ranked;
+    ranked.reserve(lightShafts.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(lightShafts.size()); i++)
+    {
+        float surfaceDist = 0.0f;
+        if (EvaluateLightShaftCandidate(lightShafts[i], cameraPos, volumeFar, surfaceDist))
+        {
+            ranked.push_back({ surfaceDist, i });
+        }
+    }
+
+    const uint32_t count = std::min(max, static_cast<uint32_t>(ranked.size()));
+    const auto cmp = [](const RankedLightShaft &a, const RankedLightShaft &b) {
+        return a.distanceToSurface < b.distanceToSurface;
+    };
+    if (count < ranked.size())
+    {
+        std::partial_sort(ranked.begin(), ranked.begin() + count, ranked.end(), cmp);
+    }
+    else
+    {
+        std::sort(ranked.begin(), ranked.end(), cmp);
+    }
 
     for (uint32_t i = 0; i < count; i++)
     {
-        out[i] = lightShafts[i];
+        out[i] = lightShafts[ranked[i].index];
     }
 
     return count;

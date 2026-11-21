@@ -252,7 +252,7 @@ void FillVolumetricCameraUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &dra
     const float volumetricFar =
         drawInfo.pVolumetricParams != nullptr ? drawInfo.pVolumetricParams->volumetricFar : 0.0f;
     const bool legacyVolumeOn =
-        drawInfo.pVolumetricParams != nullptr && drawInfo.pVolumetricParams->enable != 0;
+        gu->coreQ2RTX == 0 && drawInfo.pVolumetricParams != nullptr && drawInfo.pVolumetricParams->enable != 0;
     gu->volumeCameraFar = ResolveVolumetricCameraFar(legacyVolumeOn, volumetricFar, gu->volumeCameraNear,
                                                      drawInfo.cameraFar, lightShaftsRequested);
 
@@ -1246,7 +1246,8 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
                                         drawInfo.pSkyParams->lightShaftsEnabled != 0;
         LightManager::LightShaft lightShafts[LightManager::MAX_LIGHT_SHAFTS] = {};
         const uint32_t lightShaftCount = lightShaftsEnabled
-            ? scene->GetLightManager()->CollectLightShafts(lightShafts, LightManager::MAX_LIGHT_SHAFTS)
+            ? scene->GetLightManager()->CollectLightShafts(lightShafts, LightManager::MAX_LIGHT_SHAFTS,
+                                                           globalUniform->cameraPosition, globalUniform->volumeCameraFar)
             : 0;
         const bool lightShaftsOn = lightShaftCount > 0;
         const bool godRaysOn = sunShaftsOn || lightShaftsOn;

@@ -231,7 +231,7 @@ public:
             float lightShaftAlbedo = 1.0f;
             float lightShaftLocalFogScale = 1.0f;
             float lightShaftEmissive[3] = {};
-            float lightShaftHistoryWeight = 0.15f;
+            float lightShaftHistoryWeight = 0.85f;
             bool lightShaftTemporal = true;
             bool lightShaftSun = false;
             uint32_t lightShaftDebug = 0;
