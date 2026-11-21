@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(qray_renderer VERSION 1.6.0 LANGUAGES C CXX)
+    project(qray_renderer VERSION 0.2.0 LANGUAGES C CXX)
     set(QR_RENDERER_STANDALONE ON)
 else()
     set(QR_RENDERER_STANDALONE OFF)
@@ -14,27 +14,42 @@ endif()
 
 include(GNUInstallDirs)
 
-# Resolved this early on purpose: the GPU test targets below copy the FidelityFX
-# runtime DLL next to their executables, and a variable that is still unset there
-# expands to an empty prefix silently - the copy is then baked as
-# "/PrebuiltSignedDLL/amd_fidelityfx_vk.dll" and only fails at link time, on the
-# first configure of a fresh build tree. The value is validated further down,
-# next to the rest of the FidelityFX wiring.
+# FidelityFX 1.1.4 is built from source on both platforms. The SDK sources are
+# vendored under Source/FidelityFX_SDK_1.1.4/src; set QR_FFX_SDK_ROOT to use an
+# external checkout instead. The provider itself is produced by
+# Source/FidelityFX_SDK_1.1.4/{linux,windows}/build_provider.* and the engine
+# consumes that output, never a checked-in binary.
+if(NOT DEFINED QR_FFX_SDK_ROOT OR QR_FFX_SDK_ROOT STREQUAL "")
+    set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
+        CACHE PATH "FidelityFX SDK 1.1.4 source root (contains sdk/ and ffx-api/)")
+endif()
+file(TO_CMAKE_PATH "${QR_FFX_SDK_ROOT}" QR_FFX_SDK_ROOT)
+
+set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include"
+    CACHE PATH "FidelityFX ffx-api include directory")
+
 if(WIN32)
-    if(NOT DEFINED QR_FFX_SDK_ROOT OR QR_FFX_SDK_ROOT STREQUAL "")
-        set(QR_FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Source/FidelityFX_SDK_1.1.4/src"
-            CACHE PATH "FidelityFX SDK root (contains ffx-api/include and PrebuiltSignedDLL)")
-    endif()
+    set(QR_FFX_VK_LIBRARY "${CMAKE_BINARY_DIR}/ffx/amd_fidelityfx_vk.lib"
+        CACHE FILEPATH "Source-built amd_fidelityfx_vk import library")
+    set(QR_FFX_VK_RUNTIME_DLL "${CMAKE_BINARY_DIR}/ffx/amd_fidelityfx_vk.dll"
+        CACHE FILEPATH "Source-built amd_fidelityfx_vk runtime DLL")
+else()
+    set(QR_FFX_VK_SO "${CMAKE_BINARY_DIR}/ffx/libamd_fidelityfx_vk.so"
+        CACHE FILEPATH "Source-built libamd_fidelityfx_vk.so")
 endif()
 
 set(renderer_CXX_STANDARD 20)
 
 # The renderer source + public headers + shaders live in this folder.
 set(renderer_PUBLIC_HEADERS
-    Include/qray/qray.h)
+    Include/qray/qray.h
+    Include/qray/host_contract.h
+    Include/qray/gpu_context.h)
 
 set(renderer_SOURCES
     Source/qray.cpp
+    Source/HostContracts.cpp
+    Source/GpuContext.cpp
     Source/VulkanDevice.cpp
     Source/VulkanDevice_Init.cpp
     Source/Buffer.cpp
@@ -136,19 +151,27 @@ set(renderer_KTX_SOURCES
     "${renderer_KTX_FOLDER}/dfdutils/vk2dfd.c"
 )
 
-# Win32 Vulkan surface is required by the host (SDL window).
+# Static build: the QR_* functions are plain internal calls, not exports.
+# qray.h turns QRAPI into an empty macro when QR_STATIC is defined.
 add_compile_definitions(
-    QR_USE_SURFACE_WIN32
-    VK_USE_PLATFORM_WIN32_KHR
-    NOMINMAX
-    # Static build: the QR_* functions are plain internal calls, not exports.
-    # qray.h turns QRAPI into an empty macro when QR_STATIC is defined.
     QR_STATIC
     # KTX-Software
     KHRONOS_STATIC
     LIBKTX
-    QR_USE_FSR3
 )
+
+if(WIN32)
+    add_compile_definitions(
+        QR_USE_SURFACE_WIN32
+        VK_USE_PLATFORM_WIN32_KHR
+        NOMINMAX
+        QR_USE_FSR3
+    )
+else()
+    add_compile_definitions(QR_USE_SURFACE_XLIB)
+    set_source_files_properties(Source/VulkanDevice_Init.cpp
+        PROPERTIES COMPILE_DEFINITIONS "VK_USE_PLATFORM_XLIB_KHR")
+endif()
 
 if(WIN32)
     # DLSS stays optional (off by default, matching the current qray build)
@@ -171,9 +194,20 @@ endif()
 
 option(QR_BUILD_TESTS "Build headless renderer GPU regression tests" OFF)
 option(QR_BUILD_EDITOR "Build the standalone QuakeRay editor" OFF)
+option(QR_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer (GCC/Clang)" OFF)
 if(QR_RENDERER_STANDALONE)
+    if(NOT WIN32 AND QR_BUILD_EDITOR)
+        message(FATAL_ERROR "Standalone QuakeRay editor currently supports Win32 only")
+    endif()
+    if(QR_BUILD_TESTS)
+        enable_testing()
+    endif()
     if(NOT WIN32)
-        message(FATAL_ERROR "qray_renderer currently supports Win32 only")
+        link_libraries(m dl pthread)
+    endif()
+    if(QR_ENABLE_SANITIZERS AND NOT MSVC)
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+        add_link_options(-fsanitize=address,undefined)
     endif()
 
     find_package(Vulkan REQUIRED)
@@ -182,11 +216,28 @@ if(QR_RENDERER_STANDALONE)
         if(NOT DEFINED QR_NVRHI_SOURCE_DIR)
             set(QR_NVRHI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nvrhi")
         endif()
+        file(TO_CMAKE_PATH "${QR_NVRHI_SOURCE_DIR}" QR_NVRHI_SOURCE_DIR)
 
         if(NOT EXISTS "${QR_NVRHI_SOURCE_DIR}/CMakeLists.txt")
             message(FATAL_ERROR
                 "NVRHI was not found. Set QR_NVRHI_SOURCE_DIR to the NVRHI source tree "
                 "or provide an existing nvrhi target.")
+        endif()
+
+        set(QR_NVRHI_HEADER "${QR_NVRHI_SOURCE_DIR}/include/nvrhi/nvrhi.h")
+        if(EXISTS "${QR_NVRHI_HEADER}")
+            file(READ "${QR_NVRHI_HEADER}" QR_NVRHI_HEADER_TEXT)
+            if(QR_NVRHI_HEADER_TEXT MATCHES
+                "c_MaxBindingLayouts[ \t\r\n]*=[ \t\r\n]*([0-9]+)")
+                if(CMAKE_MATCH_1 LESS 13)
+                    message(FATAL_ERROR
+                        "QuakeRaySDK requires NVRHI c_MaxBindingLayouts >= 13. "
+                        "Apply cmake/nvrhi-max-binding-layouts.patch or use a compatible NVRHI fork.")
+                endif()
+            else()
+                message(FATAL_ERROR
+                    "Could not read nvrhi::c_MaxBindingLayouts from ${QR_NVRHI_HEADER}.")
+            endif()
         endif()
 
         set(NVRHI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -201,6 +252,31 @@ if(QR_RENDERER_STANDALONE)
 endif()
 
 if(QR_BUILD_TESTS)
+    add_executable(qray_host_contract_tests Tests/HostContractTests.cpp Source/HostContracts.cpp)
+    target_compile_features(qray_host_contract_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_host_contract_tests PRIVATE QR_STATIC)
+    if(WIN32)
+        target_compile_definitions(qray_host_contract_tests PRIVATE QR_USE_SURFACE_WIN32 NOMINMAX)
+    else()
+        target_compile_definitions(qray_host_contract_tests PRIVATE QR_USE_SURFACE_XLIB)
+    endif()
+    target_include_directories(qray_host_contract_tests PRIVATE Include)
+    add_test(NAME qray_host_contract_tests COMMAND qray_host_contract_tests)
+    set_tests_properties(qray_host_contract_tests PROPERTIES TIMEOUT 30)
+
+    add_executable(qray_gpu_context_tests Tests/GpuContextTests.cpp Source/GpuContext.cpp)
+    target_compile_features(qray_gpu_context_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_gpu_context_tests PRIVATE QR_STATIC)
+    if(WIN32)
+        target_compile_definitions(qray_gpu_context_tests PRIVATE QR_USE_SURFACE_WIN32 NOMINMAX)
+    else()
+        target_compile_definitions(qray_gpu_context_tests PRIVATE QR_USE_SURFACE_XLIB)
+    endif()
+    target_include_directories(qray_gpu_context_tests PRIVATE Include)
+    target_link_libraries(qray_gpu_context_tests PRIVATE Vulkan::Vulkan nvrhi)
+    add_test(NAME qray_gpu_context_tests COMMAND qray_gpu_context_tests)
+    set_tests_properties(qray_gpu_context_tests PROPERTIES TIMEOUT 30)
+
     add_executable(qray_readback_api_tests Tests/ReadbackApiTests.cpp)
     target_compile_features(qray_readback_api_tests PRIVATE cxx_std_20)
     target_include_directories(qray_readback_api_tests PRIVATE Include)
@@ -209,7 +285,7 @@ if(QR_BUILD_TESTS)
 
     add_executable(qray_swapchain_policy Tests/SwapchainPolicyTests.cpp)
     target_compile_features(qray_swapchain_policy PRIVATE cxx_std_20)
-    target_include_directories(qray_swapchain_policy PRIVATE Source ${Vulkan_INCLUDE_DIRS})
+    target_include_directories(qray_swapchain_policy PRIVATE Include Source ${Vulkan_INCLUDE_DIRS})
     add_test(NAME qray_swapchain_policy COMMAND qray_swapchain_policy)
     set_tests_properties(qray_swapchain_policy PROPERTIES TIMEOUT 30)
 
@@ -230,22 +306,72 @@ if(QR_BUILD_TESTS)
 
     add_executable(qray_spatial_twin_gpu Tests/SpatialTwinGpu.cpp)
     target_compile_features(qray_spatial_twin_gpu PRIVATE cxx_std_20)
-    target_compile_definitions(qray_spatial_twin_gpu PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
     target_include_directories(qray_spatial_twin_gpu PRIVATE Include Source)
-    target_link_libraries(qray_spatial_twin_gpu PRIVATE renderer nvrhi nvrhi_vk user32)
-    add_custom_command(TARGET qray_spatial_twin_gpu POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
-            "$<TARGET_FILE_DIR:qray_spatial_twin_gpu>/amd_fidelityfx_vk.dll"
-        VERBATIM)
+    if(WIN32)
+        target_compile_definitions(qray_spatial_twin_gpu PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+        target_link_libraries(qray_spatial_twin_gpu PRIVATE renderer nvrhi_vk nvrhi user32)
+        add_custom_command(TARGET qray_spatial_twin_gpu POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:qray_spatial_twin_gpu>/amd_fidelityfx_vk.dll"
+            VERBATIM)
+    else()
+        find_package(X11 REQUIRED)
+        target_compile_definitions(qray_spatial_twin_gpu PRIVATE QR_STATIC QR_USE_SURFACE_XLIB)
+        target_link_libraries(qray_spatial_twin_gpu PRIVATE renderer nvrhi_vk nvrhi X11::X11)
+        add_custom_command(TARGET qray_spatial_twin_gpu POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_SO}"
+                "$<TARGET_FILE_DIR:qray_spatial_twin_gpu>/libamd_fidelityfx_vk.so"
+            VERBATIM)
+    endif()
     add_test(NAME qray_spatial_twin_gpu COMMAND qray_spatial_twin_gpu
         "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${CMAKE_CURRENT_SOURCE_DIR}/../gfx/textures")
     set_tests_properties(qray_spatial_twin_gpu PROPERTIES TIMEOUT 180
         ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
-    get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
-    find_program(QR_DXC NAMES dxc HINTS "${QR_VULKAN_BIN}" REQUIRED)
+    # Prefer the Vulkan SDK's dxc. The Windows SDK also ships a dxc.exe on
+    # PATH, but it is built without SPIR-V code generation and fails the
+    # renderer probes with "SPIR-V CodeGen not available".
+    set(QR_DXC_HINTS)
+    if(DEFINED ENV{QR_DXC})
+        get_filename_component(QR_ENV_DXC_DIR "$ENV{QR_DXC}" DIRECTORY)
+        list(APPEND QR_DXC_HINTS "${QR_ENV_DXC_DIR}")
+    endif()
+    if(DEFINED ENV{VULKAN_SDK})
+        list(APPEND QR_DXC_HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+    endif()
+    if(Vulkan_GLSLC_EXECUTABLE)
+        get_filename_component(QR_VULKAN_BIN "${Vulkan_GLSLC_EXECUTABLE}" DIRECTORY)
+        list(APPEND QR_DXC_HINTS "${QR_VULKAN_BIN}")
+    endif()
+    find_program(QR_DXC NAMES dxc HINTS ${QR_DXC_HINTS} REQUIRED)
     set(QR_PROBE_DIR "${CMAKE_CURRENT_BINARY_DIR}/Tests")
+
+    set(QR_VERTEX_TRANSFORM_PROBE "${QR_PROBE_DIR}/VertexTransformProbe.comp.spv")
+    add_custom_command(OUTPUT "${QR_VERTEX_TRANSFORM_PROBE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
+        COMMAND "${QR_DXC}" -spirv -fspv-target-env=vulkan1.2 -T cs_6_2 -E main
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Shaders"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Tests/VertexTransformProbe.comp.hlsl"
+            -Fo "${QR_VERTEX_TRANSFORM_PROBE}"
+        DEPENDS
+            Tests/VertexTransformProbe.comp.hlsl
+            Source/Shaders/VertexTransform.hlsli
+            Source/Shaders/Utils.hlsli
+        VERBATIM)
+    add_executable(qray_vertex_transform_gpu Tests/VertexTransformProbe.cpp
+        "${QR_VERTEX_TRANSFORM_PROBE}")
+    target_compile_features(qray_vertex_transform_gpu PRIVATE cxx_std_20)
+    target_include_directories(qray_vertex_transform_gpu PRIVATE Source)
+    target_link_libraries(qray_vertex_transform_gpu PRIVATE renderer nvrhi_vk nvrhi)
+    if(WIN32)
+        target_link_libraries(qray_vertex_transform_gpu PRIVATE user32)
+    endif()
+    add_test(NAME qray_vertex_transform_gpu COMMAND qray_vertex_transform_gpu "${QR_VERTEX_TRANSFORM_PROBE}")
+    set_tests_properties(qray_vertex_transform_gpu PROPERTIES TIMEOUT 60
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
+
     set(QR_PROBE_DEPENDENCIES
         Tests/CloudsProbe.comp.hlsl
         Source/Shaders/SkyMotion.hlsli
@@ -268,7 +394,7 @@ if(QR_BUILD_TESTS)
         "${QR_PROBE_DIR}/CloudsProbe.comp.spv" "${QR_PROBE_DIR}/CloudsPush.comp.spv")
     target_compile_features(qray_clouds_smoke PRIVATE cxx_std_20)
     target_include_directories(qray_clouds_smoke PRIVATE Source)
-    target_link_libraries(qray_clouds_smoke PRIVATE renderer nvrhi nvrhi_vk)
+    target_link_libraries(qray_clouds_smoke PRIVATE renderer nvrhi_vk nvrhi)
     if(WIN32)
         target_link_libraries(qray_clouds_smoke PRIVATE user32)
     endif()
@@ -305,7 +431,7 @@ if(QR_BUILD_TESTS)
         "${QR_PROBE_DIR}/NearDofProbe.comp.spv")
     target_compile_features(qray_posteffects_smoke PRIVATE cxx_std_20)
     target_include_directories(qray_posteffects_smoke PRIVATE Source)
-    target_link_libraries(qray_posteffects_smoke PRIVATE renderer nvrhi nvrhi_vk)
+    target_link_libraries(qray_posteffects_smoke PRIVATE renderer nvrhi_vk nvrhi)
     if(WIN32)
         target_link_libraries(qray_posteffects_smoke PRIVATE user32)
     endif()
@@ -329,7 +455,7 @@ if(QR_BUILD_TESTS)
     add_executable(qray_dtal_perf Tests/DtalPerf.cpp "${QR_DTAL_PROBE}")
     target_compile_features(qray_dtal_perf PRIVATE cxx_std_20)
     target_include_directories(qray_dtal_perf PRIVATE Source)
-    target_link_libraries(qray_dtal_perf PRIVATE renderer nvrhi nvrhi_vk)
+    target_link_libraries(qray_dtal_perf PRIVATE renderer nvrhi_vk nvrhi)
     if(WIN32)
         target_link_libraries(qray_dtal_perf PRIVATE user32)
     endif()
@@ -373,26 +499,44 @@ target_include_directories(renderer PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
+# qray.h selects the surface declarations and the static-library calling
+# convention from these definitions. They must travel with the exported target;
+# directory-scope definitions do not reach a host in another CMake directory.
+target_compile_definitions(renderer INTERFACE QR_STATIC)
+if(WIN32)
+    target_compile_definitions(renderer INTERFACE
+        QR_USE_SURFACE_WIN32
+        $<$<COMPILE_LANGUAGE:CXX>:NOMINMAX>
+    )
+else()
+    target_compile_definitions(renderer INTERFACE QR_USE_SURFACE_XLIB)
+endif()
+
 # Vulkan (found in the parent scope or by the standalone package setup)
 target_link_libraries(renderer PUBLIC Vulkan::Vulkan)
 
 # RHI layer: NVRHI built by the root CMakeLists (target nvrhi_vk is the static
 # Vulkan backend, nvrhi holds the shared interface and the validation layer).
-target_link_libraries(renderer PRIVATE
-    $<BUILD_INTERFACE:nvrhi_vk>
-    $<BUILD_INTERFACE:nvrhi>
-)
+target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:nvrhi_vk>)
+target_link_libraries(renderer PUBLIC $<BUILD_INTERFACE:nvrhi>)
+
+if(NOT EXISTS "${QR_FFX_INCLUDE_DIR}/ffx_api/ffx_api.h")
+    message(FATAL_ERROR "FidelityFX headers were not found at ${QR_FFX_INCLUDE_DIR}")
+endif()
 
 if(WIN32)
-    set(QR_FFX_INCLUDE_DIR "${QR_FFX_SDK_ROOT}/ffx-api/include")
-    set(QR_FFX_VK_LIBRARY "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib")
-
-    if(NOT EXISTS "${QR_FFX_INCLUDE_DIR}/ffx_api/ffx_api.h" OR
-       NOT EXISTS "${QR_FFX_VK_LIBRARY}")
+    if(NOT EXISTS "${QR_FFX_VK_LIBRARY}")
         message(FATAL_ERROR
-            "FidelityFX SDK was not found at QR_FFX_SDK_ROOT=${QR_FFX_SDK_ROOT}. "
-            "Install the AMD FidelityFX SDK and set QR_FFX_SDK_ROOT, or provide "
-            "the ffx-api headers and amd_fidelityfx_vk.lib.")
+            "The source-built FidelityFX Vulkan provider was not found at "
+            "${QR_FFX_VK_LIBRARY}. Run build_win.ps1, or run "
+            "renderer/Source/FidelityFX_SDK_1.1.4/windows/build_provider.ps1 "
+            "and pass -DQR_FFX_VK_LIBRARY=<path>.")
+    endif()
+    if(NOT EXISTS "${QR_FFX_VK_RUNTIME_DLL}")
+        message(FATAL_ERROR
+            "The source-built FidelityFX Vulkan runtime DLL was not found at "
+            "${QR_FFX_VK_RUNTIME_DLL}. Set QR_FFX_VK_RUNTIME_DLL to the DLL "
+            "produced by build_provider.ps1.")
     endif()
 
     add_library(qray_ffx INTERFACE)
@@ -407,12 +551,29 @@ if(WIN32)
 
     target_sources(renderer PRIVATE "Source/FSR.cpp")
     target_link_libraries(renderer PRIVATE $<BUILD_INTERFACE:qray_ffx>)
+else()
+    if(NOT EXISTS "${QR_FFX_VK_SO}")
+        message(FATAL_ERROR
+            "The source-built FidelityFX Vulkan provider was not found at "
+            "${QR_FFX_VK_SO}. Build it with "
+            "renderer/Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh, or pass "
+            "-DQR_FFX_VK_SO=<path to libamd_fidelityfx_vk.so>.")
+    endif()
+
+    add_library(qray_ffx SHARED IMPORTED)
+    set_target_properties(qray_ffx PROPERTIES
+        IMPORTED_LOCATION "${QR_FFX_VK_SO}"
+        INTERFACE_INCLUDE_DIRECTORIES "${QR_FFX_INCLUDE_DIR}"
+    )
+
+    target_sources(renderer PRIVATE "Source/FSR.cpp")
+    target_link_libraries(renderer PRIVATE qray_ffx)
 endif()
 
 include(CMakePackageConfigHelpers)
 
 set(QRAY_RENDERER_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/qray_renderer")
-set(QRAY_RENDERER_VERSION "1.6.0")
+set(QRAY_RENDERER_VERSION "0.2.0")
 
 if(WIN32)
     install(TARGETS renderer
@@ -421,12 +582,13 @@ if(WIN32)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
+    install(FILES Include/qray/qray.h Include/qray/host_contract.h Include/qray/gpu_context.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
     install(DIRECTORY "${QR_FFX_SDK_ROOT}/ffx-api/include/ffx_api"
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffx)
-    install(FILES "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.lib"
+    install(FILES "${QR_FFX_VK_LIBRARY}"
         DESTINATION ${CMAKE_INSTALL_LIBDIR})
-    install(FILES "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+    install(FILES "${QR_FFX_VK_RUNTIME_DLL}"
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 else()
     install(TARGETS renderer
@@ -435,10 +597,30 @@ else()
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES Include/qray/qray.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
+    install(FILES Include/qray/qray.h Include/qray/host_contract.h Include/qray/gpu_context.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
 endif()
 
-install(FILES docs/spatial-contract.md docs/embedding.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES
+    docs/README.md
+    docs/api.md
+    docs/editor-parity.md
+    docs/gpu-context.md
+    docs/host-driver-contract.md
+    docs/host-contract.md
+    docs/sky-and-atmosphere.md
+    docs/sun-and-god-rays.md
+    docs/lights-and-sampling.md
+    docs/gi-and-denoiser.md
+    docs/host-feature-matrix.md
+    docs/spatial-contract.md
+    docs/embedding.md
+    cmake/nvrhi-max-binding-layouts.patch
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}
+)
+
+set(QRAY_FFX_INCLUDE_INSTALL_DIR "${CMAKE_INSTALL_INCLUDEDIR}/ffx")
+set(QRAY_FFX_LIBRARY_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}")
 
 install(EXPORT qray_rendererTargets
     FILE qray_rendererTargets.cmake
@@ -450,6 +632,7 @@ configure_package_config_file(
     cmake/qray_rendererConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/qray_rendererConfig.cmake"
     INSTALL_DESTINATION ${QRAY_RENDERER_CONFIG_INSTALL_DIR}
+    PATH_VARS QRAY_FFX_INCLUDE_INSTALL_DIR QRAY_FFX_LIBRARY_INSTALL_DIR
 )
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/qray_rendererConfigVersion.cmake"

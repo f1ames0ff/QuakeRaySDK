@@ -129,7 +129,7 @@ void main(inout ShPayloadShadow g_payloadShadow, in HitAttributes attribs)
 		   distance earns, so a far pane averages its texture instead of
 		   aliasing it into the shadow. */
 		const float hitDistance = RayTCurrent();
-		const float tintLod = clamp(log2(max(hitDistance, 1.0) / 128.0), 0.0, 4.0);
+		const float tintLod = clamp(log2(max(hitDistance, 0.025) / 3.2), 0.0, 4.0);
 
 		const float3 tint = getTextureSampleLod(tr.materials[0][MATERIAL_ALBEDO_ALPHA_INDEX], texCoord, tintLod).rgb * tr.materialColors[0].rgb;
 		const float transparency = getTextureSampleLod(tr.materials[0][MATERIAL_NORMAL_INDEX], texCoord, tintLod).a;

@@ -17,6 +17,10 @@
 
 #include "PhysicalDevice.h"
 
+#include "GpuContextInternal.h"
+#include "RHI/NvrhiRequirements.h"
+
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -24,7 +28,8 @@
 
 using namespace qray;
 
-PhysicalDevice::PhysicalDevice(VkInstance instance)
+PhysicalDevice::PhysicalDevice(VkInstance instance, VkSurfaceKHR surface,
+                               const QrayGpuRequirements *pRequirements)
     : physDevice(VK_NULL_HANDLE)
     , properties{}
     , driverProperties{}
@@ -32,6 +37,10 @@ PhysicalDevice::PhysicalDevice(VkInstance instance)
     , rtPipelineProperties{}
     , asProperties{}
 {
+    const QrayGpuRequirements defaultRequirements = {};
+    const QrayGpuRequirements &requirements =
+        pRequirements != nullptr ? *pRequirements : defaultRequirements;
+
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
 
@@ -44,6 +53,15 @@ PhysicalDevice::PhysicalDevice(VkInstance instance)
     const VkResult enumerateResult = vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
     VK_CHECKERROR(enumerateResult);
 
+    if (requirements.preferredPhysicalDevice != VK_NULL_HANDLE)
+    {
+        const auto preferred = std::find(devices.begin(), devices.end(),
+                                         requirements.preferredPhysicalDevice);
+        if (preferred != devices.end())
+            std::iter_swap(devices.begin(), preferred);
+    }
+
+    std::string lastFailure;
     for (const VkPhysicalDevice device : devices)
     {
         VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeatures{};
@@ -56,8 +74,19 @@ PhysicalDevice::PhysicalDevice(VkInstance instance)
 
         if (!rtFeatures.rayTracingPipeline)
         {
+            lastFailure = "physical device has no ray-tracing pipeline support";
             continue;
         }
+
+        const NvrhiRequirements nvrhiRequirements = QueryNvrhiRequirements(device);
+        if (!nvrhiRequirements.IsCriticalSupported())
+        {
+            lastFailure = "physical device does not satisfy critical NVRHI requirements";
+            continue;
+        }
+
+        if (!gpu::PhysicalDeviceMeetsRequirements(device, surface, requirements, &lastFailure))
+            continue;
 
         physDevice = device;
 
@@ -92,7 +121,13 @@ PhysicalDevice::PhysicalDevice(VkInstance instance)
 
     if (physDevice == VK_NULL_HANDLE)
     {
-        throw QrException(QR_CANT_FIND_PHYSICAL_DEVICE, "Can't find physical device with ray tracing support");
+        std::string message = "Can't find a physical device that satisfies SDK and host GPU requirements";
+        if (!lastFailure.empty())
+        {
+            message += ": ";
+            message += lastFailure;
+        }
+        throw QrException(QR_CANT_FIND_PHYSICAL_DEVICE, message);
     }
 }
 

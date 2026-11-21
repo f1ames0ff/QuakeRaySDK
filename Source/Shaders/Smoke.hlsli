@@ -45,7 +45,7 @@ struct SmokeLook
 
 #define SMOKE_EDGE_FIELD    0.6
 
-#define SMOKE_DEPTH_FADE    24.0
+#define SMOKE_DEPTH_FADE    0.6
 
 #define SMOKE_LIFE_POWER    1.0
 

@@ -23,8 +23,8 @@ if(WIN32)
     if(NOT TARGET qray::ffx)
         add_library(qray::ffx UNKNOWN IMPORTED)
         set_target_properties(qray::ffx PROPERTIES
-            IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/amd_fidelityfx_vk.lib"
-            INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include/ffx"
+            IMPORTED_LOCATION "@PACKAGE_QRAY_FFX_LIBRARY_INSTALL_DIR@/amd_fidelityfx_vk.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "@PACKAGE_QRAY_FFX_INCLUDE_INSTALL_DIR@"
         )
     endif()
 

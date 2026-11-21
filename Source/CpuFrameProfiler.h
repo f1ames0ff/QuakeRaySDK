@@ -40,6 +40,15 @@ public:
         }
     }
 
+    void Add(QrCpuPassIndex pass, float elapsedMs)
+    {
+        const auto index = static_cast<uint32_t>(pass);
+        if (enabled && index < QR_CPU_PASS_COUNT)
+        {
+            milliseconds[index] += elapsedMs;
+        }
+    }
+
     const std::array<float, QR_CPU_PASS_COUNT> &GetMilliseconds() const { return milliseconds; }
 
 private:

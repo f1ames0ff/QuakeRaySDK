@@ -496,13 +496,19 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         color = processDebug( pix, color );
     }
 
-    const float3 dither = float3(
-        outputDither( pix, 0u ),
-        outputDither( pix, 1u ),
-        outputDither( pix, 2u ) );
-
     color = colorLimitPreserveHue( color, 1.0 );
-    color = clamp( color + dither * OUTPUT_DITHER_CODES * outputCodeStepLinear( color ), (float3)0.0, (float3)1.0 );
+    if( globalUniform.restirParams.w != 0u )
+    {
+        const float3 dither = float3(
+            outputDither( pix, 0u ),
+            outputDither( pix, 1u ),
+            outputDither( pix, 2u ) );
+        color = clamp( color + dither * OUTPUT_DITHER_CODES * outputCodeStepLinear( color ), (float3)0.0, (float3)1.0 );
+    }
+    else
+    {
+        color = clamp( color, (float3)0.0, (float3)1.0 );
+    }
 
     framebufFinal[pix] = float4( color, 0 );
 }

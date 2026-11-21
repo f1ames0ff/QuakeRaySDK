@@ -29,6 +29,7 @@
 #include "Utils.h"
 #include "Const.h"
 #include "Generated/ShaderCommonC.h"
+#include "RHI/NvrhiContext.h"
 #include "RHI/NvrhiFrameSkeleton.h"
 #include "RHI/RhiAccelStructs.h"
 
@@ -36,6 +37,12 @@ using namespace qray;
 
 namespace
 {
+
+float ElapsedMilliseconds(std::chrono::steady_clock::time_point begin,
+                          std::chrono::steady_clock::time_point end)
+{
+    return std::chrono::duration<float, std::milli>(end - begin).count();
+}
 
 QrFloat3D SpatialPoint(const SpatialFrame &frame, const QrFloat3D &value)
 {
@@ -248,8 +255,13 @@ void VulkanDevice::LockSpatialFrame()
 
 VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
 {
+    using Clock = std::chrono::steady_clock;
+
+    const Clock::time_point beginStart = Clock::now();
+    const uint32_t previousFrameIndex = currentFrameState.GetFrameIndex();
     uint32_t frameIndex = currentFrameState.IncrementFrameIndexAndGet();
 
+    const Clock::time_point fenceWaitStart = Clock::now();
     if (!waitForOutOfFrameFence)
     {
         Utils::WaitAndResetFence(device, frameFences[frameIndex]);
@@ -258,51 +270,16 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     {
         Utils::WaitAndResetFences(device, frameFences[frameIndex], outOfFrameFences[frameIndex]);
     }
+    const Clock::time_point fenceWaitEnd = Clock::now();
 
     swapchain->RequestPresentMode(startInfo.presentMode);
     swapchain->SetMaxFrameLatency(startInfo.maxFrameLatency);
     swapchain->SetFullscreenExclusive(startInfo.wantFullscreenExclusive != 0, startInfo.hasFocus != 0);
-    swapchain->AcquireImage(imageAvailableSemaphores[frameIndex]);
+    swapchain->PrepareForFrame();
 
-    if (swapchain->IsPresentWaitActive() && !printedPresentWaitActive)
-    {
-        printedPresentWaitActive = true;
-        Print("RHI: present wait is active, the swapchain caps the frames queued for display");
-    }
-
-    {
-        const std::string presentModeName = swapchain->GetPresentModeName();
-
-        if (presentModeName != printedPresentModeName)
-        {
-            printedPresentModeName = presentModeName;
-            Print(("RHI: the swapchain present mode is " + presentModeName).c_str());
-        }
-    }
-
-    VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
-    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-
-    {
-        VkCommandBuffer preFrameCmd = currentFrameState.GetPreFrameCmdAndRemove();
-        if (preFrameCmd != VK_NULL_HANDLE)
-        {
-            cmdManager->Submit(preFrameCmd,
-                               semaphoreToWaitOnSubmit, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                               inFrameSemaphores[frameIndex],
-                               outOfFrameFences[(frameIndex + 1) % MAX_FRAMES_IN_FLIGHT]);
-
-            semaphoreToWaitOnSubmit = inFrameSemaphores[frameIndex];
-            semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-
-            waitForOutOfFrameFence = true;
-        }
-        else
-        {
-            waitForOutOfFrameFence = false;
-        }
-    }
-    currentFrameState.SetSemaphore(semaphoreToWaitOnSubmit, semaphoreWaitStage);
+    assert(pendingPreFrameCmd == VK_NULL_HANDLE);
+    pendingPreFrameCmd = currentFrameState.GetPreFrameCmdAndRemove(previousFrameIndex);
+    pendingPreFrameCmdFrameIndex = previousFrameIndex;
 
     if (startInfo.requestShaderReload)
     {
@@ -324,7 +301,82 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
 
     scene->PrepareForFrame(cmd, frameIndex);
 
+    const Clock::time_point beginEnd = Clock::now();
+    const float beginTotalMs = ElapsedMilliseconds(beginStart, beginEnd);
+    const float frameFenceWaitMs = ElapsedMilliseconds(fenceWaitStart, fenceWaitEnd);
+    pendingBeginFrameCpuTimings.frameFenceWaitMs = frameFenceWaitMs;
+    pendingBeginFrameCpuTimings.presentWaitMs = 0.0f;
+    pendingBeginFrameCpuTimings.imageAcquireMs = 0.0f;
+    pendingBeginFrameCpuTimings.beginOtherMs = std::max(0.0f, beginTotalMs - frameFenceWaitMs);
+
     return cmd;
+}
+
+void VulkanDevice::AcquireFrame()
+{
+    if (!currentFrameState.WasFrameStarted())
+    {
+        throw QrException(QR_FRAME_WASNT_STARTED);
+    }
+
+    frameAcquireGate.Acquire([this] {
+        AcquireFrameImage(false);
+    });
+}
+
+void VulkanDevice::AcquireFrameImage(bool allowRecreate)
+{
+    const uint32_t frameIndex = currentFrameState.GetFrameIndex();
+    const SwapchainAcquireTimings acquireTimings =
+        swapchain->AcquireImage(imageAvailableSemaphores[frameIndex], allowRecreate);
+    pendingBeginFrameCpuTimings.presentWaitMs += acquireTimings.presentWaitMs;
+    pendingBeginFrameCpuTimings.imageAcquireMs += acquireTimings.imageAcquireMs;
+    if (!acquireTimings.acquired)
+    {
+        return;
+    }
+
+    {
+        const std::string presentModeName =
+            std::string(swapchain->GetPresentModeName()) + ", images " + std::to_string(swapchain->GetImageCount()) +
+            (swapchain->IsPresentWaitActive() ? ", present wait on" : ", present wait off");
+
+        if (presentModeName != printedPresentModeName)
+        {
+            printedPresentModeName = presentModeName;
+            Print(("RHI: the swapchain uses " + presentModeName).c_str());
+        }
+    }
+
+    VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
+    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    waitForOutOfFrameFence = false;
+
+    if (pendingPreFrameCmd != VK_NULL_HANDLE)
+    {
+        cmdManager->SubmitForFrame(pendingPreFrameCmdFrameIndex,
+                                   pendingPreFrameCmd,
+                                   semaphoreToWaitOnSubmit, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   inFrameSemaphores[frameIndex],
+                                   outOfFrameFences[(frameIndex + 1) % MAX_FRAMES_IN_FLIGHT]);
+
+        pendingPreFrameCmd = VK_NULL_HANDLE;
+        semaphoreToWaitOnSubmit = inFrameSemaphores[frameIndex];
+        semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        waitForOutOfFrameFence = true;
+    }
+
+    currentFrameState.SetSemaphore(semaphoreToWaitOnSubmit, semaphoreWaitStage);
+}
+
+void VulkanDevice::CompleteAcquireForPresent()
+{
+    if (!swapchain->IsRecreatePending())
+    {
+        return;
+    }
+
+    AcquireFrameImage(true);
 }
 
 #define QR_SET_VEC3( dst, x, y, z ) \
@@ -394,12 +446,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->upscaledRenderWidth  = static_cast< float >( renderResolution.UpscaledWidth() );
         gu->upscaledRenderHeight = static_cast< float >( renderResolution.UpscaledHeight() );
 
-        QrFloat2D jitter = renderResolution.IsNvDlssEnabled() ? HaltonSequence::GetJitter_Halton23( frameId ) :
-                           renderResolution.IsAmdFsr3Enabled() ? FidelityFX::FSR::GetJitter( renderResolution.GetResolutionState(), frameId ) :
-                           QrFloat2D{ 0, 0 };
-
-        gu->jitterX = jitter.data[ 0 ];
-        gu->jitterY = jitter.data[ 1 ];
+        gu->jitterX = 0.0f;
+        gu->jitterY = 0.0f;
     }
 
     {
@@ -577,7 +625,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->polyLightSpotlightFactor   = std::max( 0.0f, drawInfo.pIlluminationParams->polygonalLightSpotlightFactor );
         gu->indirSecondBounce          = !!drawInfo.pIlluminationParams->enableSecondBounceForIndirect;
         gu->lightIndexIgnoreFPVShadows = scene->GetLightManager()->GetLightIndexIgnoreFPVShadows( currentFrameState.GetFrameIndex(), drawInfo.pIlluminationParams->lightUniqueIdIgnoreFirstPersonViewerShadows );
-        gu->cellWorldSize              = std::max( drawInfo.pIlluminationParams->cellWorldSize, 0.001f );
+        gu->cellWorldSize              = std::max( drawInfo.pIlluminationParams->cellWorldSize, 2.5e-5f );
         gu->gradientMultDiffuse        = std::clamp( drawInfo.pIlluminationParams->directDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultIndirect       = std::clamp( drawInfo.pIlluminationParams->indirectDiffuseSensitivityToChange, 0.0f, 1.0f );
         gu->gradientMultSpecular       = std::clamp( drawInfo.pIlluminationParams->specularSensitivityToChange, 0.0f, 1.0f );
@@ -588,7 +636,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[0]            = drawInfo.pIlluminationParams->restirEnabled != 0 ? 1u : 0u;
         gu->restirParams[1]            = std::clamp( drawInfo.pIlluminationParams->restirCandidates, 1u, 64u );
         gu->restirParams[2]            = 0u;
-        gu->restirParams[3]            = 0u;
+        gu->restirParams[3]            = renderResolution.IsUpscaleEnabled() ? 0u : 1u;
         gu->giBounceRays[0]            = std::clamp( drawInfo.pIlluminationParams->giBounceRays, 0.0f, 2.0f );
         gu->fltEnable[0]               = drawInfo.pIlluminationParams->denoiserEnabled != 0 ? 1.0f : 0.0f;
         gu->fixedAlbedo[0]             = std::max( drawInfo.pIlluminationParams->fixedAlbedo, 0.0f );
@@ -600,7 +648,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->polyLightSpotlightFactor   = 2.0f;
         gu->indirSecondBounce          = false;
         gu->lightIndexIgnoreFPVShadows = LIGHT_INDEX_NONE;
-        gu->cellWorldSize              = 1.0f;
+        gu->cellWorldSize              = 0.025f;
         gu->gradientMultDiffuse        = 0.5f;
         gu->gradientMultIndirect       = 0.2f;
         gu->gradientMultSpecular       = 0.5f;
@@ -611,11 +659,11 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[0]            = 0u;
         gu->restirParams[1]            = 8u;
         gu->restirParams[2]            = 0u;
-        gu->restirParams[3]            = 0u;
+        gu->restirParams[3]            = renderResolution.IsUpscaleEnabled() ? 0u : 1u;
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;
-        gu->sunBounce[0]               = 2000.0f;
+        gu->sunBounce[0]               = 50.0f;
         gu->sunBounce[1]               = 1.0f;
     }
 
@@ -738,8 +786,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     gu->rayCullBackFaces  = rayCullBackFacingTriangles ? 1 : 0;
-    gu->rayLength         = clamp( drawInfo.rayLength, 0.1f, ( float )MAX_RAY_LENGTH );
-    gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 0.001f, gu->rayLength );
+    gu->rayLength         = clamp( drawInfo.rayLength, 0.0025f, ( float )MAX_RAY_LENGTH );
+    gu->primaryRayMinDist = clamp( drawInfo.cameraNear, 2.5e-5f, gu->rayLength );
 
     {
         if( !smokeWindDirectionSet )
@@ -845,10 +893,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
     }
 
     {
-        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 0.001f );
+        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 2.5e-5f );
         gu->volumeCameraFar  = std::min(
             drawInfo.cameraFar,
-            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 100.0f );
+            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 2.5f );
 
         if( drawInfo.pVolumetricParams )
         {
@@ -1050,7 +1098,15 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
     CpuFrameProfiler *cpuProfiler = cpuFrameProfiler.IsEnabled() ? &cpuFrameProfiler : nullptr;
     CpuProfileScope prepareInputs(cpuProfiler, QR_CPU_PASS_PREPARE);
-    framebuffers->PrepareForSize(renderResolution.GetResolutionState());
+    const ResolutionState resolutionState = renderResolution.GetResolutionState();
+    if (framebuffers->NeedsPrepareForSize(resolutionState))
+    {
+        if (nvrhiFrameSkeleton != nullptr)
+        {
+            nvrhiFrameSkeleton->ReleaseFramebufferTargets();
+        }
+        framebuffers->PrepareForSize(resolutionState);
+    }
 
     const ShGlobalUniform *globalUniform = uniform->GetData();
     const QrFloat3D skyViewerPosition =
@@ -1095,7 +1151,6 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const auto prepare = asManager->PrepareForBuildingTLAS(
             frameIndex, *uniform->GetData(), uniform->GetData()->rayCullMaskWorld,
             allowGeometryWithSkyFlag, drawInfo.disableRayTracedGeometry);
-        asManager->BuildTLAS(currentFrameState.GetCmdBuffer(), frameIndex, prepare.first);
         preprocessing = prepare.second;
     }
 
@@ -1207,7 +1262,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
             for (int k = 0; k < 3; k++)
             {
-                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 1.0f);
+                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
                 sky.godRays.aabbMin[k] = aabbMin[k];
                 sky.godRays.aabbMax[k] = aabbMax[k];
                 sky.godRays.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
@@ -1281,8 +1336,8 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         const uint32_t cloudsQuality = drawInfo.pSkyParams != nullptr
             ? std::min(drawInfo.pSkyParams->skyCloudsQuality, uint32_t(QR_SKY_CLOUDS_MAX_QUALITY))
             : 2;
-        float cloudAltitude = 140000.0f;
-        float cloudThickness = 90000.0f;
+        float cloudAltitude = 3500.0f;
+        float cloudThickness = 2250.0f;
 
         p.cloudColor[3] = globalUniform->time;
         if (drawInfo.pSkyParams)
@@ -1393,24 +1448,82 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         sky.proceduralSkyParams = p;
     }
 
-    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    const VkSemaphore semaphoreToWait = currentFrameState.GetSemaphoreForWaitAndRemove(&semaphoreWaitStage);
-
-    assert(semaphoreToWait != VK_NULL_HANDLE);
-
     if (!pendingScreenshotPath.empty())
     {
         nvrhiFrameSkeleton->RequestScreenshot(pendingScreenshotPath);
         pendingScreenshotPath.clear();
     }
 
-    const VkSemaphore renderFinishedSemaphore =
-        swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
+    FrameSubmissionSynchronization submission;
+    const auto acquireForSubmission = [&] {
+        AcquireFrame();
+        CompleteAcquireForPresent();
+
+        submission.semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        submission.semaphoreToWait =
+            currentFrameState.GetSemaphoreForWaitAndRemove(&submission.semaphoreWaitStage);
+        submission.semaphoreToSignal =
+            swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
+
+        assert(submission.semaphoreToWait != VK_NULL_HANDLE);
+        assert(submission.semaphoreToSignal != VK_NULL_HANDLE);
+
+        if (cpuProfiler != nullptr)
+        {
+            cpuProfiler->Add(QR_CPU_PASS_FRAME_FENCE_WAIT, pendingBeginFrameCpuTimings.frameFenceWaitMs);
+            cpuProfiler->Add(QR_CPU_PASS_PRESENT_WAIT, pendingBeginFrameCpuTimings.presentWaitMs);
+            cpuProfiler->Add(QR_CPU_PASS_IMAGE_ACQUIRE, pendingBeginFrameCpuTimings.imageAcquireMs);
+            cpuProfiler->Add(QR_CPU_PASS_BEGIN_OTHER, pendingBeginFrameCpuTimings.beginOtherMs);
+        }
+    };
 
     fillInputs.Finish();
-    if (!nvrhiFrameSkeleton->Render(swapchain.get(), frameIndex, sky, semaphoreToWait, renderFinishedSemaphore))
+    if (gpuFrameHooks.pfnCallback != nullptr)
     {
-        currentFrameState.SetSemaphore(semaphoreToWait, semaphoreWaitStage);
+        acquireForSubmission();
+        sky.gpuFrameCallback = [this](QrayGpuFramePhase phase, nvrhi::ICommandList *pCommandList,
+                                      nvrhi::ITexture *pOutputColor, nvrhi::ITexture *pBackBuffer,
+                                      uint32_t frameIndex) {
+            if (inGpuFrameCallback)
+            {
+                Print("GPU frame callback re-entry is not allowed\n");
+                return;
+            }
+
+            QrayGpuFrameCallbackInfo info = {};
+            info.header = { sizeof(QrayGpuFrameCallbackInfo), kGpuContextContractVersion };
+            info.phase = phase;
+            info.frameIndex = frameIndex;
+            info.pCommandList = pCommandList;
+            info.pOutputColor = pOutputColor;
+            info.pBackBuffer = pBackBuffer;
+
+            inGpuFrameCallback = true;
+            try
+            {
+                gpuFrameHooks.pfnCallback(&info, gpuFrameHooks.pUserData);
+            }
+            catch (...)
+            {
+                Print("GPU frame callback threw an exception; the frame continues after the recorded host commands\n");
+            }
+            inGpuFrameCallback = false;
+        };
+    }
+    else
+    {
+        sky.acquireSwapchainForPresent = [&acquireForSubmission] {
+            acquireForSubmission();
+            return true;
+        };
+    }
+
+    if (!nvrhiFrameSkeleton->Render(swapchain.get(), frameIndex, sky, submission))
+    {
+        if (submission.semaphoreToWait != VK_NULL_HANDLE)
+        {
+            currentFrameState.SetSemaphore(submission.semaphoreToWait, submission.semaphoreWaitStage);
+        }
         return false;
     }
 
@@ -1427,7 +1540,12 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
     {
         CpuProfileScope present(cpuProfiler, QR_CPU_PASS_PRESENT);
-        swapchain->Present(queues, renderFinishedSemaphore);
+        const SwapchainPresentTimings presentTimings =
+            swapchain->Present(queues, submission.semaphoreToSignal);
+        if (cpuProfiler != nullptr)
+        {
+            cpuProfiler->Add(QR_CPU_PASS_PRESENT_FENCE_WAIT, presentTimings.fenceWaitMs);
+        }
     }
 
     frameId++;
@@ -1436,6 +1554,9 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
 void VulkanDevice::EndFrame(VkCommandBuffer cmd)
 {
+    AcquireFrame();
+    CompleteAcquireForPresent();
+
     CpuFrameProfiler *cpuProfiler = cpuFrameProfiler.IsEnabled() ? &cpuFrameProfiler : nullptr;
     uint32_t frameIndex = currentFrameState.GetFrameIndex();
     VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
@@ -1456,7 +1577,11 @@ void VulkanDevice::EndFrame(VkCommandBuffer cmd)
 
     {
         CpuProfileScope present(cpuProfiler, QR_CPU_PASS_PRESENT);
-        swapchain->Present(queues, renderFinishedSemaphore);
+        const SwapchainPresentTimings presentTimings = swapchain->Present(queues, renderFinishedSemaphore);
+        if (cpuProfiler != nullptr)
+        {
+            cpuProfiler->Add(QR_CPU_PASS_PRESENT_FENCE_WAIT, presentTimings.fenceWaitMs);
+        }
     }
 
     frameId++;
@@ -1480,6 +1605,7 @@ void VulkanDevice::StartFrame(const QrStartFrameInfo *startInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    frameAcquireGate.Reset();
     VkCommandBuffer newFrameCmd = BeginFrame(*startInfo);
     currentFrameState.OnBeginFrame(newFrameCmd);
 }
@@ -1652,13 +1778,20 @@ void VulkanDevice::Print(const char *pMessage) const
 
 void VulkanDevice::GetFrameStats(uint32_t *pRays, uint32_t *pFpsX10) const
 {
+    uint32_t fpsX10 = statsFpsX10;
+    uint32_t presentFpsX10 = 0;
+    if (swapchain && swapchain->GetPresentFpsX10(&presentFpsX10))
+    {
+        fpsX10 = presentFpsX10;
+    }
+
     if (pRays != nullptr)
     {
         *pRays = statsRays;
     }
     if (pFpsX10 != nullptr)
     {
-        *pFpsX10 = statsFpsX10;
+        *pFpsX10 = fpsX10;
     }
 }
 
@@ -1680,6 +1813,11 @@ void VulkanDevice::GetFrameStatsEx(QrFrameStats *pStats) const
     }
     pStats->raysParticle = statsRaysPerCategory[RAY_STATS_CATEGORY_PARTICLE];
     pStats->fpsX10 = statsFpsX10;
+    uint32_t presentFpsX10 = 0;
+    if (swapchain && swapchain->GetPresentFpsX10(&presentFpsX10))
+    {
+        pStats->fpsX10 = presentFpsX10;
+    }
 
     pStats->gpuTimingValid = statsGpuTimingValid ? 1 : 0;
     pStats->gpuFrameMs = statsGpuFrameMs;
@@ -1760,6 +1898,79 @@ void VulkanDevice::GetAdapterInfo(QrAdapterInfo *pInfo) const
     pInfo->apiVersion = properties.apiVersion;
 }
 
+QrResult VulkanDevice::GetGpuContext(QrayGpuContext *pContext) const
+{
+    if (pContext == nullptr ||
+        pContext->header.size < sizeof(QrayGpuContext) ||
+        (pContext->header.version >> 16) != kGpuContextContractMajor)
+        return QR_WRONG_ARGUMENT;
+
+    if (nvrhi == nullptr || physDevice == nullptr || queues == nullptr)
+        return QR_FEATURE_UNAVAILABLE;
+
+    nvrhi::IDevice *pDevice = nvrhi->GetDevice();
+    if (pDevice == nullptr)
+        return QR_FEATURE_UNAVAILABLE;
+
+    pContext->pDevice = pDevice;
+    pContext->pVulkanDevice = dynamic_cast<nvrhi::vulkan::IDevice *>(pDevice);
+
+    QrayGpuCapabilities &capabilities = pContext->capabilities;
+    capabilities.header = { sizeof(QrayGpuCapabilities), kGpuContextContractVersion };
+    capabilities.flags = QRAY_GPU_CAP_SHARED_NVRHI_DEVICE | QRAY_GPU_CAP_NATIVE_VULKAN;
+    if (timelineSemaphoreEnabled)
+        capabilities.flags |= QRAY_GPU_CAP_TIMELINE_SEMAPHORE;
+    if (queues->GetGraphicsQueueCount() > 1 ||
+        queues->GetComputeQueueCount() > 1 ||
+        queues->GetTransferQueueCount() > 1)
+        capabilities.flags |= QRAY_GPU_CAP_ADDITIONAL_QUEUES;
+    capabilities.framesInFlight = MAX_FRAMES_IN_FLIGHT;
+    capabilities.vulkanApiVersion = physDevice->GetProperties().apiVersion;
+    capabilities.graphicsApi = pDevice->getGraphicsAPI();
+    capabilities.graphicsQueueCount = queues->GetGraphicsQueueCount();
+    capabilities.computeQueueCount = queues->GetComputeQueueCount();
+    capabilities.transferQueueCount = queues->GetTransferQueueCount();
+
+    QrayNativeVulkanInfo &native = pContext->nativeVulkan;
+    native.header = { sizeof(QrayNativeVulkanInfo), kGpuContextContractVersion };
+    native.instance = instance;
+    native.physicalDevice = physDevice->Get();
+    native.device = device;
+    native.surface = surface;
+    native.graphicsQueue = queues->GetGraphics();
+    native.graphicsQueueFamily = queues->GetIndexGraphics();
+    native.graphicsQueueIndex = 0;
+    native.graphicsQueueCount = queues->GetGraphicsQueueCount();
+    native.computeQueue = queues->GetCompute();
+    native.computeQueueFamily = queues->GetIndexCompute();
+    native.computeQueueIndex = 0;
+    native.computeQueueCount = queues->GetComputeQueueCount();
+    native.transferQueue = queues->GetTransfer();
+    native.transferQueueFamily = queues->GetIndexTransfer();
+    native.transferQueueIndex = 0;
+    native.transferQueueCount = queues->GetTransferQueueCount();
+    native.properties = physDevice->GetProperties();
+    native.memoryProperties = physDevice->GetMemoryProperties();
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::SetGpuFrameHooks(const QrayGpuFrameHooks *pHooks)
+{
+    if (pHooks == nullptr)
+    {
+        gpuFrameHooks = {};
+        return QR_SUCCESS;
+    }
+
+    if (pHooks->header.size < sizeof(QrayGpuFrameHooks) ||
+        (pHooks->header.version >> 16) != kGpuContextContractMajor ||
+        pHooks->reserved != 0)
+        return QR_WRONG_ARGUMENT;
+
+    gpuFrameHooks = *pHooks;
+    return QR_SUCCESS;
+}
+
 static uint64_t UploadNowNs()
 {
     return static_cast<uint64_t>(
@@ -1782,21 +1993,16 @@ static thread_local uint32_t g_uploadLaneStack[8];
 static thread_local uint32_t g_uploadLaneDepth = 0;
 
 VulkanDevice::UploadLockScope::UploadLockScope(VulkanDevice &device_, uint32_t lane_)
-    : device(device_), lane(lane_), enabled(false), waitNs(0), holdStartNs(0)
+    : device(device_)
+    , lane(lane_)
+    , enabled(device_.uploadLockTracing.load(std::memory_order_relaxed) && lane_ < QR_UPLOAD_LANE_COUNT)
+    , waitNs(enabled ? UploadNowNs() : 0)
+    , lock(device_.geometryUploadMutex)
+    , holdStartNs(enabled ? UploadNowNs() : 0)
 {
-    enabled = device.uploadLockTracing.load(std::memory_order_relaxed) && lane < QR_UPLOAD_LANE_COUNT;
-
     if (enabled)
     {
-        const uint64_t t0 = UploadNowNs();
-        device.geometryUploadMutex.lock();
-        const uint64_t t1 = UploadNowNs();
-        waitNs = t1 - t0;
-        holdStartNs = t1;
-    }
-    else
-    {
-        device.geometryUploadMutex.lock();
+        waitNs = holdStartNs - waitNs;
     }
 }
 
@@ -1812,8 +2018,6 @@ VulkanDevice::UploadLockScope::~UploadLockScope()
         UploadAtomicMax(device.uploadLockHoldMaxNs[lane], holdNs);
         device.uploadLockCalls[lane].fetch_add(1, std::memory_order_relaxed);
     }
-
-    device.geometryUploadMutex.unlock();
 }
 
 void VulkanDevice::UploadLanePush(uint32_t lane)
@@ -1902,7 +2106,6 @@ void VulkanDevice::GetUploadLockStats(QrUploadLockStats *pStats) const
 void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
 {
     UploadLockScope geometryLock(*this, g_uploadLane);
-    LockSpatialFrame();
     statsApiCallsGeometry.fetch_add(1, std::memory_order_relaxed);
 
     using namespace std::string_literals;
@@ -1992,6 +2195,8 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Geometry's portal index must be in [0, 62]");
     }
 
+    LockSpatialFrame();
+
     QrGeometryUploadInfo converted = *uploadInfo;
     std::vector<uint32_t> convertedIndices;
     std::vector<QrVertex> convertedVertices;
@@ -2042,11 +2247,12 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
 void VulkanDevice::UpdateGeometryTransform(const QrUpdateTransformInfo *updateInfo)
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
-    LockSpatialFrame();
     if (updateInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrUpdateTransformInfo converted = *updateInfo;
     const bool reversesWinding = spatialFrame.ReversesWinding(updateInfo->transform);
@@ -2095,11 +2301,6 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         throw QrException(QR_WRONG_ARGUMENT, "Incorrect render type of rasterized geometry");
     }
 
-    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
-    {
-        LockSpatialFrame();
-    }
-
     if (pUploadInfo->pVertices == nullptr || pUploadInfo->vertexCount == 0)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Vertex data / count is null");
@@ -2109,6 +2310,31 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         (pUploadInfo->pIndices != nullptr && pUploadInfo->indexCount == 0))
     {
         throw QrException(QR_WRONG_ARGUMENT, "Index data / count must be both not null or null");
+    }
+
+    const uint32_t particleFlags =
+        QR_RASTERIZED_GEOMETRY_STATE_PARTICLE | QR_RASTERIZED_GEOMETRY_STATE_PARTICLE_SPRITE;
+
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT &&
+        (pUploadInfo->pipelineState &
+         (QR_RASTERIZED_GEOMETRY_STATE_SMOKE | particleFlags)) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT,
+                          "Smoke and particle states are only valid for DEFAULT rasterized geometry");
+    }
+
+    if ((pUploadInfo->pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0 &&
+        (pUploadInfo->pipelineState & particleFlags) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT,
+                          "SMOKE and PARTICLE raster states are mutually exclusive");
+    }
+
+    if (pUploadInfo->renderType == QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN &&
+        (pUploadInfo->pipelineState &
+         (QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST | QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE)) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "SWAPCHAIN rasterized geometry cannot use depth state");
     }
 
     // An upload outside a started frame cannot be drawn -- the collector is
@@ -2125,6 +2351,11 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
         return;
     }
 
+    if (pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN)
+    {
+        LockSpatialFrame();
+    }
+
     QrRasterizedGeometryUploadInfo converted = *pUploadInfo;
     float convertedViewProjection[16] = {};
     std::vector<QrVertex> convertedVertices;
@@ -2133,8 +2364,9 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
     const bool spatialRenderType =
         pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
     const bool spatialConversion = !spatialFrame.IsIdentity() && spatialRenderType;
-    const bool reversesWinding =
-        spatialRenderType && spatialFrame.ReversesWinding(pUploadInfo->transform);
+    const bool reversesWinding = spatialRenderType &&
+        ShouldReverseRasterizedWinding(
+            spatialFrame.ReversesWinding(pUploadInfo->transform), pUploadInfo->pipelineState);
 
     if (spatialConversion)
     {
@@ -2215,7 +2447,7 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
 QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 {
-    LockSpatialFrame();
+    UploadLockScope geometryLock(*this, g_uploadLane);
     statsApiCallsRasterized++;
 
     if (pUploadInfo == nullptr)
@@ -2237,6 +2469,8 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
         }
         return QR_SUCCESS;
     }
+
+    LockSpatialFrame();
 
     QrParticleUploadInfo converted = *pUploadInfo;
     std::vector<QrParticlePoint> convertedPoints;
@@ -2274,11 +2508,12 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
-    LockSpatialFrame();
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrDecalUploadInfo converted = *pUploadInfo;
     if (!spatialFrame.IsIdentity())
@@ -2293,11 +2528,12 @@ void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
 void VulkanDevice::UploadPortal(const QrPortalUploadInfo *pUploadInfo)
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
-    LockSpatialFrame();
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrPortalUploadInfo converted = *pUploadInfo;
     if (!spatialFrame.IsIdentity())
@@ -2323,13 +2559,14 @@ void VulkanDevice::StartNewStaticScene()
 
 void VulkanDevice::UploadDirectionalLight(const QrDirectionalLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrDirectionalLightUploadInfo converted = SpatialDirectionalLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2337,13 +2574,14 @@ void VulkanDevice::UploadDirectionalLight(const QrDirectionalLightUploadInfo *pL
 
 void VulkanDevice::UploadSphericalLight(const QrSphericalLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrSphericalLightUploadInfo converted = SpatialSphericalLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2366,6 +2604,8 @@ void VulkanDevice::FlushDeferredLightUploads()
 
 void VulkanDevice::SetParticleProxyGate(uint32_t gate, uint32_t glassParticles)
 {
+    std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+
     const bool hasGlass = rhiAccelStructs != nullptr && rhiAccelStructs->HasGlassInstances();
     const bool enabled = gate == 0u ? true : (gate == 2u ? false : (glassParticles != 0u && (lastReflRefrTraced || hasGlass)));
 
@@ -2384,13 +2624,14 @@ void VulkanDevice::SetParticleProxyGate(uint32_t gate, uint32_t glassParticles)
 
 void VulkanDevice::UploadSpotlight(const QrSpotLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrSpotLightUploadInfo converted = SpatialSpotLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2398,13 +2639,14 @@ void VulkanDevice::UploadSpotlight(const QrSpotLightUploadInfo *pLightInfo)
 
 void VulkanDevice::UploadPolygonalLight(const QrPolygonalLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     QrPolygonalLightUploadInfo converted = SpatialPolygonalLight(spatialFrame, *pLightInfo);
     scene->UploadLight(currentFrameState.GetFrameIndex(), converted);
@@ -2412,13 +2654,14 @@ void VulkanDevice::UploadPolygonalLight(const QrPolygonalLightUploadInfo *pLight
 
 void VulkanDevice::UploadTexturedAreaLight(const QrTexturedAreaLightUploadInfo *pLightInfo)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     const MaterialTextures textures = textureManager->GetMaterialTextures(pLightInfo->material);
     const uint32_t textureIndex = textures.indices[MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX];
@@ -2429,13 +2672,14 @@ void VulkanDevice::UploadTexturedAreaLight(const QrTexturedAreaLightUploadInfo *
 
 void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo *pLightInfos, uint32_t count)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pLightInfos == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     const uint32_t materialCacheSize = 512;
     uint32_t cachedMaterial[materialCacheSize];
@@ -2471,12 +2715,12 @@ void VulkanDevice::UploadTexturedAreaLights(const QrTexturedAreaLightUploadInfo 
 
 void VulkanDevice::UploadDtalGroups(const QrDtalGroupUploadBatch *pUploadInfo)
 {
-    LockSpatialFrame();
-
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     if (pUploadInfo->groupCount == 0 || pUploadInfo->pGroups == nullptr || pUploadInfo->pMembers == nullptr)
     {
@@ -2550,13 +2794,14 @@ void VulkanDevice::UploadClusterLightSources(const QrClusterLightSourcesUploadIn
 
 void VulkanDevice::BeginClusterLightSources(const QrClusterLightSourcesUploadInfo *pInfo, uint32_t sliceCount)
 {
-    LockSpatialFrame();
     statsApiCallsLights.fetch_add(1, std::memory_order_relaxed);
 
     if (pInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
+
+    LockSpatialFrame();
 
     std::vector<QrClusterLightSource> convertedSources;
     QrClusterLightSourcesUploadInfo converted = *pInfo;
@@ -2633,15 +2878,16 @@ void VulkanDevice::GetClusterLightTail(uint32_t cluster, uint64_t *pLightUniqueI
 
 void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
 {
-    LockSpatialFrame();
-
     if (pInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
+    LockSpatialFrame();
+
     std::vector<QrFloat3D> clusterMins;
     std::vector<QrFloat3D> clusterMaxs;
+    std::vector<QrWorldLightFace> faceRecords;
     std::vector<QrVertex> faceVertices;
     QrWorldLightsUploadInfo converted = *pInfo;
 
@@ -2689,6 +2935,23 @@ void VulkanDevice::UploadWorldLights(const QrWorldLightsUploadInfo *pInfo)
 
             converted.pFaceVertices = faceVertices.data();
         }
+    }
+
+    if (spatialFrame.IsMirrored() && pInfo->numFaces > 0)
+    {
+        if (pInfo->pFaces == nullptr || faceVertices.empty())
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Mirrored world-light faces require both face and vertex arrays");
+        }
+
+        faceRecords.assign(pInfo->pFaces, pInfo->pFaces + pInfo->numFaces);
+
+        if (!ReverseWorldLightFaceOrder(faceRecords, faceVertices))
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "World-light face range is outside the vertex array");
+        }
+
+        converted.pFaces = faceRecords.data();
     }
 
     worldLights->Upload(converted, userPrint.get());

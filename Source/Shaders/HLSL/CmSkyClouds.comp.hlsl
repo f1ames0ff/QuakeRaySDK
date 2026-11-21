@@ -54,7 +54,7 @@ float cloudPhase(float mu, float g)
     return lerp(henyeyGreenstein(mu, g), henyeyGreenstein(mu, -g * 0.35), 0.5);
 }
 
-float cloudMultiScatter(float mu, float sunDepth, float g)
+float cloudMultiScatter(float sunDepth, float3 phase)
 {
     float sum = 0.0;
     float energy = 0.5;
@@ -62,9 +62,7 @@ float cloudMultiScatter(float mu, float sunDepth, float g)
     for (int order = 1; order <= 3; order++)
     {
         float o = (float)order;
-        float gOrder = g * (1.0 - 0.3 * o);
-        float phase = lerp(henyeyGreenstein(mu, gOrder), henyeyGreenstein(mu, -gOrder), 0.5);
-        sum += energy * phase * exp(-sunDepth / (1.0 + o));
+        sum += energy * phase[order - 1] * exp(-sunDepth / (1.0 + o));
         energy *= 0.5;
     }
 
@@ -89,12 +87,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     cloudCubemapOut.GetDimensions(sizeX, sizeY, elements);
     const int2 size = int2(sizeX, sizeY);
 
-    if (ipos.x >= size.x || ipos.y >= size.y || ipos.z >= 6)
+    const int face = ipos.z + (int)(params.cloudMarch.y + 0.5);
+    if (ipos.x >= size.x || ipos.y >= size.y || face >= 6)
     {
         return;
     }
 
-    int face = ipos.z;
     float3 right   = params.faceBasis[face * 3 + 0].xyz;
     float3 up      = params.faceBasis[face * 3 + 1].xyz;
     float3 forward = params.faceBasis[face * 3 + 2].xyz;
@@ -106,13 +104,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float sunLight = params.sunDirection.w;
 
     CloudLayer layer;
-    layer.altitude  = max(params.cloudLayer.x, 1.0);
-    layer.thickness = max(params.cloudLayer.y, 1.0);
+    layer.altitude  = max(params.cloudLayer.x, 0.025);
+    layer.thickness = max(params.cloudLayer.y, 0.025);
     layer.coverage  = clamp(params.cloudParams.x, 0.0, 0.99);
     layer.density   = max(params.cloudParams.y, 0.0);
     layer.detail    = clamp(params.cloudMarch.z, 0.0, 0.9);
     layer.speed     = params.cloudParams.z;
     layer.time      = params.cloudColor.w;
+    cloudPrepareLayer(layer);
 
     int viewSteps = clamp((int)(params.cloudMarch.x + 0.5), 8, 256);
     float phaseG  = clamp(params.cloudMarch.w, 0.0, 0.95);
@@ -147,6 +146,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         float3 sunDir = normalize(params.sunDirection.xyz);
         float mu = dot(dir, sunDir);
+        float sunPhase = cloudPhase(mu, phaseG);
+        float3 multiScatterPhase;
+
+        for (int order = 1; order <= 3; order++)
+        {
+            float gOrder = phaseG * (1.0 - 0.3 * (float)order);
+            multiScatterPhase[order - 1] =
+                lerp(henyeyGreenstein(mu, gOrder), henyeyGreenstein(mu, -gOrder), 0.5);
+        }
 
         for (int i = 0; i < viewSteps; i++)
         {
@@ -184,8 +192,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                 float solid = density / max(cloudHeightProfile(h), 1.0e-3);
                 float skyShield = exp(-solid * layer.density * CLOUD_EXTINCTION * (1.0 - h));
 
-                float3 light = sunColor * (sunVisibility * cloudPhase(mu, phaseG) * rim +
-                                           cloudMultiScatter(mu, sunTau, phaseG)) +
+                float3 light = sunColor * (sunVisibility * sunPhase * rim +
+                                           cloudMultiScatter(sunTau, multiScatterPhase)) +
                                skyLight * skyShield;
 
                 float stepTransmittance = exp(-sigma * step);

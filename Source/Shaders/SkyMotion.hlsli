@@ -34,7 +34,7 @@ float2 getMotionForCloudLayer(const float3 rayDir, const float2 motionInfinite)
         return motionInfinite;
     }
     float distance = (layer.y + 0.3 * layer.z) / rayDir.z;
-    float2 wind = globalUniform.timeDelta * layer.x * float2(30.0, 12.0);
+    float2 wind = globalUniform.timeDelta * layer.x * float2(0.75, 0.30);
     float3 eyeDelta = globalUniform.cameraPosition.xyz - globalUniform.cameraPositionPrev.xyz;
     float3 dirPrev = normalize(rayDir * distance + float3(wind, 0.0) + eyeDelta);
     float4 cur = mul(globalUniform.projection, mul(globalUniform.view, float4(rayDir, 0.0)));

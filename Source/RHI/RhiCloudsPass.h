@@ -145,6 +145,7 @@ private:
     bool layerValid = false;
     bool shadowValid = false;
     uint32_t quality = 2;
+    uint32_t nextLayerFaceOffset = 0;
 };
 
 static_assert(sizeof(RhiCloudsPass::LayerParams) == 448,

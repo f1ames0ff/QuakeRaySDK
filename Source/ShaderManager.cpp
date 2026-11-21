@@ -106,11 +106,11 @@ void ShaderManager::LoadShaderModules()
         }
 
         const std::string path = shaderFolderPath + shader.filename;
-        const VkShaderModule module = LoadModule(path.c_str());
+        const VkShaderModule shaderModule = LoadModule(path.c_str());
 
-        SET_DEBUG_NAME(device, module, VK_OBJECT_TYPE_SHADER_MODULE, shader.name);
+        SET_DEBUG_NAME(device, shaderModule, VK_OBJECT_TYPE_SHADER_MODULE, shader.name);
 
-        modules[shader.name] = { module, shader.stage };
+        modules[shader.name] = { shaderModule, shader.stage };
     }
 }
 
@@ -118,7 +118,7 @@ void ShaderManager::UnloadShaderModules()
 {
     for (auto &entry : modules)
     {
-        vkDestroyShaderModule(device, entry.second.module, nullptr);
+        vkDestroyShaderModule(device, entry.second.vkModule, nullptr);
     }
 
     modules.clear();
@@ -127,7 +127,7 @@ void ShaderManager::UnloadShaderModules()
 VkShaderModule ShaderManager::GetShaderModule(const char *name) const
 {
     const auto it = modules.find(name);
-    return it != modules.end() ? it->second.module : VK_NULL_HANDLE;
+    return it != modules.end() ? it->second.vkModule : VK_NULL_HANDLE;
 }
 
 VkShaderStageFlagBits ShaderManager::GetModuleStage(const char *name) const
@@ -147,7 +147,7 @@ VkPipelineShaderStageCreateInfo ShaderManager::GetStageInfo(const char *name) co
 
     VkPipelineShaderStageCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    info.module = it->second.module;
+    info.module = it->second.vkModule;
     info.stage = it->second.shaderStage;
     info.pName = "main";
 

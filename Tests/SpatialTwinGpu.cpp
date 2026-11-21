@@ -1,6 +1,16 @@
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 
-#include <windows.h>
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <X11/Xlib.h>
+    #undef None
+    #undef Success
+    #undef Always
+    #undef Bool
+    #undef Status
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +38,48 @@ void PrintMessage(const char *message, void *)
     {
         std::fprintf(stderr, "%s\n", message);
     }
+}
+
+std::string SanitizeDumpToken(const char *raw, const char *fallback)
+{
+    static constexpr char kAllowed[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+    std::string out;
+    if (raw != nullptr)
+    {
+        out.reserve(64);
+        for (const char *p = raw; *p != '\0' && out.size() < 64; p++)
+        {
+            const char *hit = std::strchr(kAllowed, static_cast<unsigned char>(*p));
+            if (hit != nullptr)
+            {
+                out.push_back(kAllowed[hit - kAllowed]);
+            }
+        }
+    }
+    return out.empty() ? std::string(fallback) : out;
+}
+
+void WriteTwinDumpImage(const std::string &stem, const std::string &label, const char *side,
+                        uint32_t width, uint32_t height, uint32_t rowPitch, const uint8_t *pixels)
+{
+    const std::string sideToken = SanitizeDumpToken(side, "side");
+    const std::string path = stem + "_" + label + "_" + sideToken + ".raw";
+    FILE *file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr)
+    {
+        return;
+    }
+
+    const uint32_t header[3] = { width, height, rowPitch };
+    std::fwrite(header, sizeof(header), 1, file);
+
+    for (uint32_t y = 0; y < height; y++)
+    {
+        std::fwrite(pixels + size_t(y) * rowPitch, 1, size_t(width) * 4, file);
+    }
+
+    std::fclose(file);
 }
 
 void OpenFile(const char *path, void *, const void **data, uint32_t *size, void **fileHandle)
@@ -325,6 +377,8 @@ struct SceneOptions
     bool acid = false;
     bool ui = false;
     bool particles = true;
+    uint8_t particleAlpha = 128;
+    bool glassParticles = true;
     float waterWaveSpeed = 0.05f;
     float waterTextureAreaScale = 0.0025f;
     float acidDensity = 0.6f;
@@ -352,10 +406,108 @@ struct RenderResult
     uint32_t rowPitch = 0;
 };
 
+struct TestWindow
+{
+#ifdef _WIN32
+    HWND handle = nullptr;
+#else
+    Display *display = nullptr;
+    ::Window handle = 0;
+#endif
+
+    TestWindow() = default;
+    TestWindow(const TestWindow &) = delete;
+    TestWindow &operator=(const TestWindow &) = delete;
+
+    ~TestWindow()
+    {
+        Destroy();
+    }
+
+    bool Create()
+    {
+#ifdef _WIN32
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = DefWindowProcW;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        windowClass.lpszClassName = L"QuakeRaySpatialTwin";
+
+        if (RegisterClassExW(&windowClass) == 0)
+        {
+            std::fprintf(stderr, "register window class failed\n");
+            return false;
+        }
+
+        handle = CreateWindowExW(0, windowClass.lpszClassName, L"QuakeRay spatial twin",
+                                 WS_OVERLAPPEDWINDOW, 0, 0, kWidth, kHeight,
+                                 nullptr, nullptr, windowClass.hInstance, nullptr);
+        if (handle == nullptr)
+        {
+            std::fprintf(stderr, "create window failed\n");
+            return false;
+        }
+
+        ShowWindow(handle, SW_SHOWNOACTIVATE);
+        SetWindowPos(handle, nullptr, -32000, -32000, kWidth, kHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        return true;
+#else
+        display = XOpenDisplay(nullptr);
+        if (display == nullptr)
+        {
+            std::fprintf(stderr, "open X11 display failed\n");
+            return false;
+        }
+
+        XSetWindowAttributes attributes = {};
+        attributes.override_redirect = True;
+        handle = XCreateWindow(display, DefaultRootWindow(display),
+                               -32000, -32000, kWidth, kHeight, 0,
+                               CopyFromParent, InputOutput, CopyFromParent,
+                               CWOverrideRedirect, &attributes);
+        if (handle == 0)
+        {
+            std::fprintf(stderr, "create X11 window failed\n");
+            Destroy();
+            return false;
+        }
+
+        XStoreName(display, handle, "QuakeRay spatial twin");
+        XMapWindow(display, handle);
+        XSync(display, False);
+        return true;
+#endif
+    }
+
+    void Destroy()
+    {
+#ifdef _WIN32
+        if (handle != nullptr)
+        {
+            DestroyWindow(handle);
+            handle = nullptr;
+        }
+#else
+        if (display != nullptr)
+        {
+            if (handle != 0)
+            {
+                XDestroyWindow(display, handle);
+                handle = 0;
+            }
+            XCloseDisplay(display);
+            display = nullptr;
+        }
+#endif
+    }
+};
+
 class TwinRenderer
 {
 public:
-    TwinRenderer(HWND window, const char *shaderFolder, const char *blueNoisePath)
+    TwinRenderer(const TestWindow &window, const char *shaderFolder, const char *blueNoisePath)
         : window(window)
         , shaderFolder(shaderFolder)
         , blueNoisePath(blueNoisePath)
@@ -365,6 +517,9 @@ public:
     ~TwinRenderer()
     {
         if (instance != nullptr)
+            qray::qrSetGpuFrameHooks(instance, nullptr);
+        hostProbeBuffer = nullptr;
+        if (instance != nullptr)
         {
             qrDestroyInstance(instance);
         }
@@ -372,15 +527,26 @@ public:
 
     bool Create()
     {
+#ifdef _WIN32
         QrWin32SurfaceCreateInfo surface = {
             .hinstance = GetModuleHandleW(nullptr),
-            .hwnd = window,
+            .hwnd = window.handle,
         };
+#else
+        QrXlibSurfaceCreateInfo surface = {
+            .dpy = window.display,
+            .window = window.handle,
+        };
+#endif
 
         QrInstanceCreateInfo info = {};
         info.pAppName = "QuakeRay spatial twin";
         info.pAppGUID = "8aeb2a91-6d74-4d32-9a84-0c6a5e4d2a11";
+#ifdef _WIN32
         info.pWin32SurfaceInfo = &surface;
+#else
+        info.pXlibSurfaceCreateInfo = &surface;
+#endif
         info.pfnPrint = PrintMessage;
         info.pfnOpenFile = OpenFile;
         info.pfnCloseFile = CloseFile;
@@ -404,10 +570,92 @@ public:
         info.overridenRoughnessMetallicEmissionTextureIsSRGB = 0;
         info.overridenNormalTextureIsSRGB = 0;
 
-        if (!Check(qrCreateInstance(&info, &instance), "create instance"))
+        const nvrhi::Feature requiredNvrhiFeature = nvrhi::Feature::RayTracingPipeline;
+        const char *requiredInstanceExtension = VK_KHR_SURFACE_EXTENSION_NAME;
+        const char *requiredDeviceExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        qray::QrayGpuFormatRequirement requiredFormat = {};
+        requiredFormat.format = VK_FORMAT_R8G8B8A8_UNORM;
+        requiredFormat.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        requiredFormat.tiling = VK_IMAGE_TILING_OPTIMAL;
+        requiredFormat.samples = VK_SAMPLE_COUNT_1_BIT;
+        requiredFormat.requiredFormatFeatures =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+        qray::QrayGpuRequirements gpuRequirements = {};
+        gpuRequirements.header = {
+            sizeof(qray::QrayGpuRequirements),
+            qray::kGpuContextContractVersion,
+        };
+        gpuRequirements.minVulkanApiVersion = VK_API_VERSION_1_3;
+        gpuRequirements.minimumFramesInFlight = 1;
+        gpuRequirements.requiredNvrhiFeatures = { &requiredNvrhiFeature, 1 };
+        gpuRequirements.requiredInstanceExtensions = { &requiredInstanceExtension, 1 };
+        gpuRequirements.requiredDeviceExtensions = { &requiredDeviceExtension, 1 };
+        gpuRequirements.requiredFormats = { &requiredFormat, 1 };
+
+        if (!Check(qray::qrCreateInstanceWithGpuRequirements(
+                       &info, &gpuRequirements, &instance),
+                   "create instance with GPU requirements"))
         {
             return false;
         }
+
+        qray::QrayGpuContext gpuContext = {};
+        gpuContext.header = { 0, qray::kGpuContextContractVersion };
+        if (qray::qrGetGpuContext(instance, &gpuContext) != QR_WRONG_ARGUMENT)
+        {
+            std::fprintf(stderr, "invalid GPU-context header was not rejected\n");
+            return false;
+        }
+
+        gpuContext = {};
+        gpuContext.header = {
+            sizeof(qray::QrayGpuContext),
+            qray::kGpuContextContractVersion,
+        };
+        if (!Check(qray::qrGetGpuContext(instance, &gpuContext), "get shared GPU context"))
+            return false;
+
+        if (gpuContext.pDevice == nullptr || gpuContext.pVulkanDevice == nullptr ||
+            gpuContext.nativeVulkan.instance == VK_NULL_HANDLE ||
+            gpuContext.nativeVulkan.physicalDevice == VK_NULL_HANDLE ||
+            gpuContext.nativeVulkan.device == VK_NULL_HANDLE ||
+            gpuContext.nativeVulkan.graphicsQueue == VK_NULL_HANDLE ||
+            gpuContext.capabilities.graphicsQueueCount == 0 ||
+            (gpuContext.capabilities.flags & qray::QRAY_GPU_CAP_SHARED_NVRHI_DEVICE) == 0)
+        {
+            std::fprintf(stderr, "shared GPU context is incomplete\n");
+            return false;
+        }
+
+        nvrhi::BufferDesc hostBufferDesc;
+        hostBufferDesc.byteSize = 256;
+        hostBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        hostBufferDesc.debugName = "Host GPU-context contract probe";
+        hostProbeBuffer = gpuContext.pDevice->createBuffer(hostBufferDesc);
+        if (hostProbeBuffer == nullptr)
+        {
+            std::fprintf(stderr, "host NVRHI resource creation failed\n");
+            return false;
+        }
+
+        qray::QrayGpuFrameHooks hooks = {};
+        hooks.header = { sizeof(qray::QrayGpuFrameHooks), qray::kGpuContextContractVersion };
+        hooks.reserved = 1;
+        if (qray::qrSetGpuFrameHooks(instance, &hooks) != QR_WRONG_ARGUMENT)
+        {
+            std::fprintf(stderr, "invalid GPU frame hooks were not rejected\n");
+            return false;
+        }
+
+        hooks = {};
+        hooks.header = {
+            sizeof(qray::QrayGpuFrameHooks),
+            qray::kGpuContextContractVersion,
+        };
+        hooks.pfnCallback = &TwinRenderer::FrameCallback;
+        hooks.pUserData = this;
+        if (!Check(qray::qrSetGpuFrameHooks(instance, &hooks), "set GPU frame hooks"))
+            return false;
 
         return true;
     }
@@ -415,6 +663,20 @@ public:
     bool SetConvention(const QrSpatialConvention &convention)
     {
         return Check(qrSetSpatialConvention(instance, &convention), "set spatial convention");
+    }
+
+    bool CheckFailedUploadKeepsConventionMutable(const QrSpatialConvention &convention)
+    {
+        const QrResult invalid = qrUploadGeometry(instance, nullptr);
+
+        if (invalid != QR_WRONG_ARGUMENT)
+        {
+            std::fprintf(stderr, "null geometry upload returned %s instead of QR_WRONG_ARGUMENT\n",
+                         qrGetResultDescription(invalid));
+            return false;
+        }
+
+        return SetConvention(convention);
     }
 
     bool CreateMaterial()
@@ -553,7 +815,7 @@ public:
             particle.position[0] = particlePosition[0];
             particle.position[1] = particlePosition[1];
             particle.position[2] = particlePosition[2];
-            particle.packedColor = 0x80FFFFFFu;
+            particle.packedColor = (static_cast<uint32_t>(options.particleAlpha) << 24) | 0x00FFFFFFu;
             particle.size = particleSize;
             particle.cluster = 0xFFFFFFFFu;
 
@@ -666,6 +928,7 @@ public:
         reflectRefract.waterColor = options.waterColor;
         reflectRefract.acidColor = options.acidColor;
         reflectRefract.acidDensity = options.acidDensity;
+        reflectRefract.glassParticles = options.glassParticles ? QR_TRUE : QR_FALSE;
 
         QrDrawFrameLevelFogParams levelFog = {};
         levelFog.color = { 0.02f, 0.03f, 0.05f };
@@ -726,6 +989,11 @@ public:
                 return false;
             }
 
+            if (!Check(qrAcquireFrame(instance), "acquire frame"))
+            {
+                return false;
+            }
+
             if (!sized)
             {
                 if (!Check(qrGetFrameReadbackRequirements(instance, QR_FRAME_READBACK_FORMAT_RGBA8_UNORM, QR_TRUE,
@@ -772,6 +1040,29 @@ public:
                 return false;
             }
 
+            QrVertex rejectedVertex = {};
+            QrRasterizedGeometryUploadInfo rejected = {};
+            rejected.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT;
+            rejected.vertexCount = 1;
+            rejected.pVertices = &rejectedVertex;
+            rejected.pipelineState = QR_RASTERIZED_GEOMETRY_STATE_SMOKE |
+                                     QR_RASTERIZED_GEOMETRY_STATE_PARTICLE;
+
+            if (qrUploadRasterizedGeometry(instance, &rejected, nullptr, nullptr) != QR_WRONG_ARGUMENT)
+            {
+                std::fprintf(stderr, "SMOKE|PARTICLE raster state was not rejected\n");
+                return false;
+            }
+
+            rejected.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
+            rejected.pipelineState = QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST;
+
+            if (qrUploadRasterizedGeometry(instance, &rejected, nullptr, nullptr) != QR_WRONG_ARGUMENT)
+            {
+                std::fprintf(stderr, "depth-tested SWAPCHAIN raster state was not rejected\n");
+                return false;
+            }
+
             if (!Check(qrDrawFrame(instance, &draw), "draw frame"))
             {
                 return false;
@@ -782,6 +1073,11 @@ public:
 
             if (requested && Check(qrGetFrameReadbackStatus(instance, requestId, &done), "readback status") && done)
             {
+                if (beforeRenderCalls == 0 || beforePresentCalls == 0)
+                {
+                    std::fprintf(stderr, "GPU frame hooks were not invoked\n");
+                    return false;
+                }
                 return true;
             }
         }
@@ -791,11 +1087,30 @@ public:
     }
 
 private:
-    HWND window = nullptr;
+    static void QRCONV FrameCallback(const qray::QrayGpuFrameCallbackInfo *pInfo, void *pUserData)
+    {
+        auto *self = static_cast<TwinRenderer *>(pUserData);
+        if (pInfo == nullptr || self == nullptr || pInfo->pCommandList == nullptr)
+            return;
+
+        if (pInfo->phase == qray::QrayGpuFramePhase::BeforeRenderer)
+        {
+            pInfo->pCommandList->setBufferState(
+                self->hostProbeBuffer.Get(), nvrhi::ResourceStates::CopyDest);
+            self->beforeRenderCalls++;
+        }
+        else if (pInfo->phase == qray::QrayGpuFramePhase::BeforePresent)
+            self->beforePresentCalls++;
+    }
+
+    const TestWindow &window;
     std::string shaderFolder;
     std::string blueNoisePath;
     QrInstance instance = nullptr;
     QrMaterial material = QR_NO_MATERIAL;
+    nvrhi::BufferHandle hostProbeBuffer;
+    uint32_t beforeRenderCalls = 0;
+    uint32_t beforePresentCalls = 0;
 };
 
 void MakeQuad(float canonicalVertices[4][3], uint32_t indices[6])
@@ -1000,30 +1315,10 @@ bool CompareImages(const char *what, const RenderResult &a, const RenderResult &
     // opted-in dump writes both frames for offline inspection.
     if (const char *dumpPrefix = std::getenv("QRAY_TWIN_DUMP"))
     {
-        auto write = [&](const char *side, const RenderResult &image) {
-            char path[512] = {};
-            std::snprintf(path, sizeof(path), "%s_%s_%s.raw", dumpPrefix, what, side);
-            FILE *file = std::fopen(path, "wb");
-
-            if (file == nullptr)
-            {
-                return;
-            }
-
-            const uint32_t header[3] = { image.width, image.height, image.rowPitch };
-            std::fwrite(header, sizeof(header), 1, file);
-
-            for (uint32_t y = 0; y < image.height; y++)
-            {
-                std::fwrite(image.pixels.data() + size_t(y) * image.rowPitch, 1,
-                            size_t(image.width) * 4, file);
-            }
-
-            std::fclose(file);
-        };
-
-        write("a", a);
-        write("b", b);
+        const std::string stem = SanitizeDumpToken(dumpPrefix, "qray_twin");
+        const std::string label = SanitizeDumpToken(what, "frame");
+        WriteTwinDumpImage(stem, label, "a", a.width, a.height, a.rowPitch, a.pixels.data());
+        WriteTwinDumpImage(stem, label, "b", b.width, b.height, b.rowPitch, b.pixels.data());
     }
 
     std::printf("%s: max=%u mean=%.4f p99.5=%u gain=%.4f bbox=%u,%u-%u,%u changed=%u\n", what,
@@ -1092,7 +1387,7 @@ bool RequireContribution(const char *what, const RenderResult &withFeature, cons
 
 }
 
-bool RunPass(HWND window, const std::string &shaderFolder, const std::string &blueNoisePath,
+bool RunPass(const TestWindow &window, const std::string &shaderFolder, const std::string &blueNoisePath,
              const QrSpatialConvention &convention, const SceneVertices &vertices,
              const uint32_t indices[6], const SceneOptions &options, const SkyOptions &sky,
              const float view[16], const float eye[3], const float up[3], float nearPlane,
@@ -1109,7 +1404,7 @@ bool RunPass(HWND window, const std::string &shaderFolder, const std::string &bl
         return false;
     }
 
-    if (!renderer.SetConvention(convention))
+    if (!renderer.CheckFailedUploadKeepsConventionMutable(convention))
     {
         return false;
     }
@@ -1140,37 +1435,16 @@ int main(int argc, char **argv)
     std::string shaderFolder = argv[1];
     if (!shaderFolder.empty() && shaderFolder.back() != '/' && shaderFolder.back() != '\\')
     {
-        shaderFolder.push_back('\\');
+        shaderFolder.push_back('/');
     }
 
-    const std::string blueNoisePath = std::string(argv[2]) + "\\BlueNoise_LDR_RGBA_128.png";
+    const std::string blueNoisePath = std::string(argv[2]) + "/BlueNoise_LDR_RGBA_128.png";
 
-    WNDCLASSEXW windowClass = {};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = DefWindowProcW;
-    windowClass.hInstance = GetModuleHandleW(nullptr);
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-    windowClass.lpszClassName = L"QuakeRaySpatialTwin";
-
-    if (RegisterClassExW(&windowClass) == 0)
+    TestWindow window;
+    if (!window.Create())
     {
-        std::fprintf(stderr, "register window class failed\n");
         return 1;
     }
-
-    HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"QuakeRay spatial twin",
-                                  WS_OVERLAPPEDWINDOW, 0, 0, kWidth, kHeight,
-                                  nullptr, nullptr, windowClass.hInstance, nullptr);
-
-    if (window == nullptr)
-    {
-        std::fprintf(stderr, "create window failed\n");
-        return 1;
-    }
-
-    ShowWindow(window, SW_SHOWNOACTIVATE);
-    SetWindowPos(window, nullptr, -32000, -32000, kWidth, kHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 
     float canonicalPositions[4][3] = {};
     uint32_t indices[6] = {};
@@ -1398,7 +1672,7 @@ int main(int argc, char **argv)
 
     if (!runIdentity(identityOptions, identitySky, identityResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
@@ -1419,15 +1693,47 @@ int main(int argc, char **argv)
                        mirrorParticleUp, result);
     };
 
+    auto runProxyAlpha = [&](uint8_t alpha, RenderResult &result) {
+        SceneVertices proxyVertices = identityVertices;
+        const float waterPositions[4][3] = {
+            { -3.0f, 0.0f, -2.0f },
+            { 3.0f, 0.0f, -2.0f },
+            { 3.0f, 0.0f, 4.0f },
+            { -3.0f, 0.0f, 4.0f },
+        };
+        for (int vertex = 0; vertex < 4; vertex++)
+        {
+            std::memcpy(proxyVertices.water[vertex].position, waterPositions[vertex], sizeof(float) * 3);
+            proxyVertices.water[vertex].normal[0] = 0.0f;
+            proxyVertices.water[vertex].normal[1] = -1.0f;
+            proxyVertices.water[vertex].normal[2] = 0.0f;
+        }
+
+        SceneOptions proxy = identityOptions;
+        proxy.opaque = false;
+        proxy.water = true;
+        proxy.acid = false;
+        proxy.ui = false;
+        proxy.particles = true;
+        proxy.particleAlpha = alpha;
+
+        const float proxyParticlePosition[3] = { 0.0f, 1.0f, 1.0f };
+        return RunPass(window, shaderFolder, blueNoisePath, identity, proxyVertices, indices, proxy,
+                       identitySky, canonicalView, canonicalEye, canonicalUp, 0.1f, 100.0f, 100.0f,
+                       canonicalFogDensity, canonicalSun, canonicalPointPosition, canonicalPointNormal,
+                       canonicalPointRadius, canonicalPointColor, canonicalClusterMin, canonicalClusterMax,
+                       proxyParticlePosition, 0.75f, canonicalParticleRight, canonicalParticleUp, result);
+    };
+
     if (!runYUp(yUpOptions, yUpSky, yUpResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
     if (!runMirror(mirrorOptions, mirrorSky, mirrorResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
@@ -1442,6 +1748,9 @@ int main(int argc, char **argv)
 
     SceneOptions noUi = identityOptions;
     noUi.ui = false;
+
+    SceneOptions transparentParticle = identityOptions;
+    transparentParticle.particleAlpha = 0;
 
     SceneOptions emptyScene = identityOptions;
     emptyScene.opaque = false;
@@ -1458,6 +1767,9 @@ int main(int argc, char **argv)
     RenderResult noUiResult;
     RenderResult noCloudsResult;
     RenderResult emptySceneResult;
+    RenderResult transparentParticleResult;
+    RenderResult proxyParticleResult;
+    RenderResult proxyZeroAlphaResult;
 
     bool gates = true;
 
@@ -1465,9 +1777,12 @@ int main(int argc, char **argv)
         !runIdentity(noAcid, identitySky, noAcidResult) ||
         !runIdentity(noUi, identitySky, noUiResult) ||
         !runIdentity(identityOptions, noClouds, noCloudsResult) ||
+        !runIdentity(transparentParticle, identitySky, transparentParticleResult) ||
+        !runProxyAlpha(128, proxyParticleResult) ||
+        !runProxyAlpha(0, proxyZeroAlphaResult) ||
         !runIdentity(emptyScene, noClouds, emptySceneResult))
     {
-        DestroyWindow(window);
+        window.Destroy();
         return 1;
     }
 
@@ -1476,6 +1791,8 @@ int main(int argc, char **argv)
     gates = RequireContribution("acid", identityResult, noAcidResult) && gates;
     gates = RequireContribution("ui", identityResult, noUiResult) && gates;
     gates = RequireContribution("geometry", identityResult, emptySceneResult) && gates;
+    gates = RequireContribution("particle-alpha", identityResult, transparentParticleResult) && gates;
+    gates = RequireContribution("particle-proxy-alpha", proxyParticleResult, proxyZeroAlphaResult) && gates;
 
 
     const bool yUpSame = CompareImages("y-up-meters", identityResult, yUpResult);
@@ -1517,6 +1834,6 @@ int main(int argc, char **argv)
         probeMirror("mirror-geometry-only", false, false, false, false);
     }
 
-    DestroyWindow(window);
+    window.Destroy();
     return yUpSame && mirrorSame && gates ? 0 : 1;
 }

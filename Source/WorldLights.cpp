@@ -17,6 +17,7 @@
 
 #include "WorldLights.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #include "QrException.h"
@@ -24,6 +25,33 @@
 
 namespace qray
 {
+
+bool ReverseWorldLightFaceOrder(std::vector<QrWorldLightFace> &faces,
+                                std::vector<QrVertex> &vertices)
+{
+    for (const QrWorldLightFace &face : faces)
+    {
+        const size_t first = face.firstVertex;
+        const size_t count = face.numVertices;
+
+        if (first > vertices.size() || count > vertices.size() - first)
+        {
+            return false;
+        }
+    }
+
+    for (QrWorldLightFace &face : faces)
+    {
+        if (face.numVertices > 1)
+        {
+            auto first = vertices.begin() + face.firstVertex;
+            auto last = first + face.numVertices;
+            std::reverse(first, last);
+        }
+    }
+
+    return true;
+}
 
 template <typename T>
 static void CopyTable(const T *pData, uint32_t count, std::vector<T> &dst, const char *pWhatIsMissing)

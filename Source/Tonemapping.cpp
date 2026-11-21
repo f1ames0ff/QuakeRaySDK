@@ -117,7 +117,7 @@ void Tonemapping::PrepareExposureParams(uint32_t frameIndex, const std::shared_p
     // and the exposure can only depend on the histogram of this frame.
     tm->resetCurve = disableEyeAdaptation || !exposureReady || frame->restirParams[2] != 0 ||
                      frame->time < previousTime || frame->timeDelta > 1.0f ||
-                     cameraDeltaSquared > 10000.0f ? 1u : 0u;
+                     cameraDeltaSquared > 6.25f ? 1u : 0u;
 
     const float kneeStart      = tm->tmKneeStart;
     const float kneeWhitePoint = tm->tmWhitePoint;

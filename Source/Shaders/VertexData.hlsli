@@ -18,6 +18,7 @@
 
 #ifndef VERTEX_DATA_HLSLI_
 #define VERTEX_DATA_HLSLI_
+#include "VertexTransform.hlsli"
 #ifdef DESC_SET_GLOBAL_UNIFORM
 #ifdef DESC_SET_VERTEX_DATA
 
@@ -306,12 +307,18 @@ ShTriangle getTriangle(int instanceID, int instanceCustomIndex, int localGeometr
 
 
     const float3x3 model3 = (float3x3)inst.model;
+    const float modelDeterminant = determinant(model3);
+    const float3 transformedNormal0 = safeNormalize(
+        transformNormalInverseTranspose(model3, transpose(tr.normals)[0]));
+    const float3 transformedNormal1 = safeNormalize(
+        transformNormalInverseTranspose(model3, transpose(tr.normals)[1]));
+    const float3 transformedNormal2 = safeNormalize(
+        transformNormalInverseTranspose(model3, transpose(tr.normals)[2]));
+    tr.normals = transpose(float3x3(transformedNormal0, transformedNormal1, transformedNormal2));
 
-    tr.normals = transpose(float3x3(
-        mul(model3, transpose(tr.normals)[0]),
-        mul(model3, transpose(tr.normals)[1]),
-        mul(model3, transpose(tr.normals)[2])));
-    tr.tangent.xyz = mul(model3, tr.tangent.xyz);
+    const float3 transformedTangentNormal =
+        safeNormalize(transformedNormal0 + transformedNormal1 + transformedNormal2);
+    tr.tangent = transformTangentByModel(model3, transformedTangentNormal, tr.tangent);
 
 
     tr.geometryInstanceFlags = inst.flags;

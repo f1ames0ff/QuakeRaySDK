@@ -18,6 +18,7 @@
 #pragma once
 
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 
 #include <array>
 #include <atomic>
@@ -47,6 +48,7 @@
 #include "RenderResolutionHelper.h"
 #include "DecalManager.h"
 #include "FSR.h"
+#include "FrameAcquireGate.h"
 #include "FrameState.h"
 #include "LibraryConfig.h"
 #include "PortalList.h"
@@ -88,7 +90,8 @@ class RhiTextureTable;
 class VulkanDevice
 {
 public:
-    explicit VulkanDevice(const QrInstanceCreateInfo *pInfo);
+    VulkanDevice(const QrInstanceCreateInfo *pInfo,
+                 const QrayGpuRequirements *pGpuRequirements = nullptr);
     ~VulkanDevice();
 
     VulkanDevice(const VulkanDevice& other) = delete;
@@ -156,6 +159,7 @@ public:
     void DestroyCubemap(QrCubemap cubemap);
 
     void StartFrame(const QrStartFrameInfo *pStartInfo);
+    void AcquireFrame();
     void DrawFrame(const QrDrawFrameInfo *pFrameInfo);
 
     bool IsSuspended() const;
@@ -188,10 +192,13 @@ public:
         uint32_t     lane;
         bool         enabled;
         uint64_t     waitNs;
+        std::unique_lock<std::mutex> lock;
         uint64_t     holdStartNs;
     };
 
     void GetAdapterInfo(QrAdapterInfo *pInfo) const;
+    QrResult GetGpuContext(QrayGpuContext *pContext) const;
+    QrResult SetGpuFrameHooks(const QrayGpuFrameHooks *pHooks);
 
     void RequestScreenshot(const char *pFilePath);
 
@@ -204,9 +211,18 @@ public:
     void Print(const char *pMessage) const;
 
 private:
-    void CreateInstance(const QrInstanceCreateInfo &info);
-    void CreateDevice();
-    void CreateNvrhiDevice();
+    struct BeginFrameCpuTimings
+    {
+        float frameFenceWaitMs = 0.0f;
+        float presentWaitMs = 0.0f;
+        float imageAcquireMs = 0.0f;
+        float beginOtherMs = 0.0f;
+    };
+
+    void CreateInstance(const QrInstanceCreateInfo &info,
+                        const QrayGpuRequirements &gpuRequirements);
+    void CreateDevice(const QrayGpuRequirements &gpuRequirements);
+    void CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements);
     void CreateSyncPrimitives();
     static VkSurfaceKHR GetSurfaceFromUser(VkInstance instance, const QrInstanceCreateInfo &info);
     void ValidateCreateInfo(const QrInstanceCreateInfo *pInfo);
@@ -214,11 +230,14 @@ private:
     void DestroyInstance();
     void DestroyDevice();
     void DestroySyncPrimitives();
+    void Destroy() noexcept;
 
     void LockSpatialFrame();
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
+    void AcquireFrameImage(bool allowRecreate);
+    void CompleteAcquireForPresent();
     bool RenderThroughRhi(const QrDrawFrameInfo &drawInfo);
     void EndFrame(VkCommandBuffer cmd);
 
@@ -264,7 +283,6 @@ private:
     PFN_vkAcquireFullScreenExclusiveModeEXT acquireFullScreenExclusiveMode = nullptr;
     PFN_vkReleaseFullScreenExclusiveModeEXT releaseFullScreenExclusiveMode = nullptr;
     std::string                             printedPresentModeName;
-    bool                                    printedPresentWaitActive = false;
     bool                                    printedRasterUploadWithoutFrame = false;
     bool                                    printedRasterOverflow = false;
     bool                                    printedParticlePointOverflow = false;
@@ -311,6 +329,11 @@ private:
 
     std::vector<std::string>                enabledInstanceExtensions;
     std::vector<std::string>                enabledDeviceExtensions;
+    QrayGpuRequirements                     gpuRequirements = {};
+    bool                                    gpuRequirementsProvided = false;
+    bool                                    timelineSemaphoreEnabled = false;
+    QrayGpuFrameHooks                       gpuFrameHooks = {};
+    bool                                    inGpuFrameCallback = false;
 
     std::unique_ptr<NvrhiContext>           nvrhi;
     std::shared_ptr<rhi::RhiAccelStructs>   rhiAccelStructs;
@@ -375,6 +398,10 @@ private:
     std::atomic<uint64_t>                   uploadLockCalls[QR_UPLOAD_LANE_COUNT]{};
     std::atomic<bool>                       uploadLockTracing{false};
     CpuFrameProfiler                        cpuFrameProfiler;
+    BeginFrameCpuTimings                    pendingBeginFrameCpuTimings;
+    FrameAcquireGate                        frameAcquireGate;
+    VkCommandBuffer                         pendingPreFrameCmd = VK_NULL_HANDLE;
+    uint32_t                                pendingPreFrameCmdFrameIndex = 0;
     bool                                    statsCpuTimingValid = false;
     bool                                    statsRenderedUiOnly = false;
     std::atomic<uint32_t>                   statsApiCallsGeometry{0};

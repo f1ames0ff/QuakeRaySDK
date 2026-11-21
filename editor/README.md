@@ -258,9 +258,9 @@ What is left of the material table is the handful of parameters the SDK has no
 field for - `texture_overlay`, `force_rasterize`, the `luma:` colour blocks and
 the `light_*` emitter group - which need new upload fields first.
 
-PAK handling, wal textures from the game archive and sidecar persistence also
-remain. The current loader uses Quake units and Z-up. API 1.06 accepts the
-Z-up orientation, but every spatial input reaches the SDK in meters, so the
-editor converts at one boundary: `EditorSpatial.{h,cpp}` is the editor's own
-counterpart of `Quake/qr_spatial_adapter.cpp`, and no other file divides a
-length by `kEditorUnitsPerMeter` on its way to the renderer.
+PAK handling and WAL textures from the game archive also remain. The current
+loader uses Quake units and Z-up. API 1.06 accepts the Z-up orientation, but
+every spatial input reaches the SDK in meters, so the editor converts at one
+boundary: `EditorSpatial.{h,cpp}` is the editor's own counterpart of
+`Quake/qr_spatial_adapter.cpp`, and no other file divides a length by
+`kEditorUnitsPerMeter` on its way to the renderer.

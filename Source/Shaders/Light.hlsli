@@ -237,7 +237,7 @@ float calcSolidAngleForArea(float area, const float3 areaPosition, const float3 
     return safeSolidAngle(area * getGeometryFactor(areaNormal, areaLightToSurf.dir, areaLightToSurf.len));
 }
 
-#define DTAL_MIN_DISTANCE 1.0
+#define DTAL_MIN_DISTANCE 0.025
 
 float getTexturedAreaLightDw(float area, const float3 lightNormal, const float3 lightToSurf, float distance)
 {
@@ -373,7 +373,7 @@ float getDtalGroupWeight(const ShLightEncoded encoded, const float3 cellCenter, 
 
     return
         getLightColorWeight(l.color) * max(l.meanEmiss, 0.05) *
-        calcSolidAngleForSphere(max(l.boundsRadius, 1e-3), max(length(l.center - cellCenter), cellRadius));
+        calcSolidAngleForSphere(max(l.boundsRadius, 2.5e-5), max(length(l.center - cellCenter), cellRadius));
 }
 
 
@@ -535,7 +535,7 @@ LightSample sampleProjectedAreaLight(const TexturedAreaLight l, const float3 sur
         maskRadius = max(maskRadius, length(texturedAreaLightWorldPos(l, l.uvVerts[i]) - center));
     }
 
-    if (!(maskRadius > 1e-4))
+    if (!(maskRadius > 2.5e-6))
     {
         return r;
     }

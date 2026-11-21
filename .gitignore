@@ -36,6 +36,7 @@
 
 # Executables
 *.exe
+!Source/FidelityFX_SDK_1.1.4/src/sdk/tools/binary_store/*.exe
 *.out
 *.app
 
@@ -67,3 +68,5 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+__pycache__/
+*.py[cod]

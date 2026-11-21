@@ -22,10 +22,13 @@
 namespace qray
 {
 
+struct QrayGpuRequirements;
+
 class PhysicalDevice
 {
 public:
-    explicit PhysicalDevice(VkInstance instance);
+    PhysicalDevice(VkInstance instance, VkSurfaceKHR surface,
+                   const QrayGpuRequirements *pRequirements = nullptr);
     ~PhysicalDevice() = default;
 
     PhysicalDevice(const PhysicalDevice &other) = delete;

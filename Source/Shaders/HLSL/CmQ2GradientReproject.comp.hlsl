@@ -83,18 +83,41 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         {
             int2 p = pos_grad * Q2_GRAD_DWN + int2(offx, offy);
 
-            // Reproject the current pixel into the previous frame (flat space)
+            // Reproject the current pixel into the previous frame
             float4 motion = framebufMotion_Sampled.Load(int3(p, 0));
-            int2 p_flat = q2CheckerToFlat(p, width);
-            float2 pos_prev_flat = ((float2)p_flat + (float2)0.5) * float2(inv_width, inv_height) + motion.xy;
-            int2 pp_flat = int2(floor(pos_prev_flat * float2(width, height)));
-
-            if (pp_flat.x < 0 || pp_flat.x >= width || pp_flat.y < 0 || pp_flat.y >= height)
+            const bool is_checkerboarded_surface = framebufThroughput_Sampled.Load(int3(p, 0)).a > 0.5;
+            int2 pp;
+            if (!is_checkerboarded_surface)
             {
-                continue;
-            }
+                int2 p_flat = q2CheckerToFlat(p, width);
+                float2 pos_prev_flat = ((float2)p_flat + (float2)0.5) * float2(inv_width, inv_height) + motion.xy;
+                int2 pp_flat = int2(floor(pos_prev_flat * float2(width, height)));
 
-            int2 pp = q2FlatToChecker(pp_flat, width);
+                if (pp_flat.x < 0 || pp_flat.x >= width || pp_flat.y < 0 || pp_flat.y >= height)
+                {
+                    continue;
+                }
+
+                pp = q2FlatToChecker(pp_flat, width);
+            }
+            else
+            {
+                int field_left = 0;
+                int field_right = width / 2;
+                if (p.x >= field_right)
+                {
+                    field_left = field_right;
+                    field_right = width;
+                }
+
+                float2 pos_prev = ((float2(p) + (float2)0.5) * float2(inv_width * 2.0, inv_height) + motion.xy) * float2(width / 2, height);
+                pp = int2(floor(pos_prev));
+
+                if (pp.x < field_left || pp.x >= field_right || pp.y < 0 || pp.y >= height)
+                {
+                    continue;
+                }
+            }
 
             // Don't reuse the same pixel if it was a gradient sample on the
             // previous frame (carrying the same RNG forward would add bias).
@@ -108,17 +131,27 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                 continue;
             }
 
-            // Surface matching: depth and geometric normal similarity.
+            // Surface matching: cluster, depth and geometric normal similarity.
+            uint cluster_curr = framebufQ2Cluster.Load(p).x;
+            uint cluster_prev = framebufQ2Cluster_Prev_Sampled.Load(int3(pp, 0)).x;
             float depth_curr = framebufQ2ViewDepth_Sampled.Load(int3(p, 0)).r;
             float depth_prev = framebufQ2ViewDepth_Prev_Sampled.Load(int3(pp, 0)).r;
             float3 geo_normal_curr = texelFetchNormalGeometry(p);
             float3 geo_normal_prev = texelFetchNormalGeometry_Prev(pp);
 
-            float dist_depth = abs(depth_curr - depth_prev + motion.z) / abs(depth_curr);
+            const float motion_z = (depth_curr < 0.0) ? -motion.z : motion.z;
+            float dist_depth = abs(depth_curr - depth_prev + motion_z) / abs(depth_curr);
             float dot_geo_normals = dot(geo_normal_curr, geo_normal_prev);
 
-            if (dist_depth < 0.1 && dot_geo_normals > 0.9)
+            if (cluster_curr == cluster_prev && dist_depth < 0.1 && dot_geo_normals > 0.9)
             {
+                const float3 albedo_curr = framebufAlbedo_Sampled.Load(int3(getRegularPixFromCheckerboardPix(p), 0)).rgb;
+                const float3 albedo_prev = framebufAlbedo_Prev_Sampled.Load(int3(getRegularPixFromCheckerboardPix(pp), 0)).rgb;
+                if (any(abs(albedo_curr - albedo_prev) > 0.01))
+                {
+                    continue;
+                }
+
                 float3 prev_hf = q2UnpackRGBE(framebufQ2ColorHF_Prev_Sampled.Load(int3(pp, 0)).r);
                 float3 prev_spec = q2UnpackRGBE(framebufQ2ColorSpec_Prev_Sampled.Load(int3(pp, 0)).r);
                 float2 prev_lum = float2(getLuminance(prev_hf), getLuminance(prev_spec));
@@ -160,6 +193,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     framebufQ2RngSeed[ipos] =
                framebufQ2RngSeed_Prev_Sampled.Load(int3(found_pos_prev, 0));
 
+    // Preserve current-frame shading normal & MR across direct/indirect gradient tracing,
+    // then restore them in CmQ2GradientImg before temporal filtering & compositing.
+    const uint curr_normal_enc = framebufNormal[ipos].r;
+    const float2 curr_mr = framebufMetallicRoughness[ipos].xy;
+    framebufQ2BaseColor[ipos] = float4(
+        (float)(curr_normal_enc & 0xFFu),
+        (float)((curr_normal_enc >> 8) & 0xFFu),
+        (float)((curr_normal_enc >> 16) & 0xFFu),
+        (float)((curr_normal_enc >> 24) & 0xFFu));
+    framebufQ2Metallic[ipos] = float4(curr_mr, 0.0, 0.0);
+
     framebufNormal[ipos] =
                framebufNormal_Prev_Sampled.Load(int3(found_pos_prev, 0));
     framebufMetallicRoughness[ipos] =
@@ -168,18 +212,5 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                framebufSurfacePosition_Prev_Sampled.Load(int3(found_pos_prev, 0));
 
     float4 view_direction = framebufViewDirection_Prev_Sampled.Load(int3(found_pos_prev, 0));
-    if (wasOnlyPrimary(framebufThroughput_Sampled.Load(int3(ipos, 0)).a))
-    {
-        const float3 surface_pos = framebufSurfacePosition_Prev_Sampled.Load(int3(found_pos_prev, 0)).xyz;
-        view_direction.xyz = normalize(surface_pos - globalUniform.cameraPosition.xyz);
-    }
     framebufViewDirection[ipos] = view_direction;
-
-    framebufQ2BaseColor[ipos] =
-               framebufQ2BaseColor_Prev_Sampled.Load(int3(found_pos_prev, 0));
-    framebufQ2Metallic[ipos] =
-               framebufQ2Metallic_Prev_Sampled.Load(int3(found_pos_prev, 0));
-
-    framebufAlbedo[getRegularPixFromCheckerboardPix(ipos)] =
-               framebufAlbedo_Prev_Sampled.Load(int3(getRegularPixFromCheckerboardPix(found_pos_prev), 0));
 }

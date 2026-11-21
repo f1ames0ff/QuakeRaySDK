@@ -34,7 +34,7 @@ set(QR_EDITOR_DEPLOY_COMMANDS
         "${QR_EDITOR_IMGUI_DIR}/fonts/Roboto-Regular.ttf"
         "$<TARGET_FILE_DIR:quakerayeditor>/fonts/Roboto-Regular.ttf"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${QR_FFX_SDK_ROOT}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+        "${QR_FFX_VK_RUNTIME_DLL}"
         "$<TARGET_FILE_DIR:quakerayeditor>/amd_fidelityfx_vk.dll")
 
 if(QR_EDITOR_SHADER_DIR AND EXISTS "${QR_EDITOR_SHADER_DIR}")

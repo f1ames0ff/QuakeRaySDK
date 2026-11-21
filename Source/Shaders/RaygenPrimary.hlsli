@@ -262,7 +262,7 @@ float3 getPortalNormal(const float3 baseNormal, const float3 inWorldOffset)
 
     float phase = sin(phaseScale * sqrt(distance) + angle + tm) + 1.0;
     phase *= waveScale;
-    phase *= clamp(distance / 20, 0, 1);
+    phase *= clamp(distance / 0.5, 0, 1);
 
     float3 localN = { phase, phase, 1.0 };
 
@@ -344,8 +344,8 @@ void main()
         if (globalUniform.coreQ2RTX != 0)
         {
             uint4 q2SkyFog1, q2SkyFog2;
-            q2FindFogVolumes(cameraOrigin, cameraRayDir, 0.0, 1e6, q2SkyFog1, q2SkyFog2);
-            q2FogAccum = q2SegmentFog(q2SkyFog1, q2SkyFog2, 1e6);
+            q2FindFogVolumes(cameraOrigin, cameraRayDir, 0.0, 25000.0, q2SkyFog1, q2SkyFog2);
+            q2FogAccum = q2SegmentFog(q2SkyFog1, q2SkyFog2, 25000.0);
         }
 
         storeSky(pix, cameraRayDir, globalUniform.skyType != SKY_TYPE_RASTERIZED_GEOMETRY, throughput, globalUniform.rayLength * 2.0, q2FogAccum);
@@ -630,8 +630,8 @@ void main()
             throughput *= getMediaTransmittance(currentRayMedia, pow(abs(dot(rayDir, globalUniform.worldUpVector.xyz)), -3));
 
             uint4 q2SegFog1, q2SegFog2;
-            q2FindFogVolumes(rayOrigin, rayDir, 0.0, 1e6, q2SegFog1, q2SegFog2);
-            q2FogAccum = q2AlphaBlendPremultiplied(q2FogAccum, q2SegmentFog(q2SegFog1, q2SegFog2, 1e6));
+            q2FindFogVolumes(rayOrigin, rayDir, 0.0, 25000.0, q2SegFog1, q2SegFog2);
+            q2FogAccum = q2AlphaBlendPremultiplied(q2FogAccum, q2SegmentFog(q2SegFog1, q2SegFog2, 25000.0));
 
             storeSky(pix, rayDir, true, throughput, wasSplit, q2FogAccum);
             return;
@@ -1040,8 +1040,8 @@ void main()
             q2BlendParticleProxies(rayOrigin, rayDir, globalUniform.rayLength * 2.0, throughput, pix);
 
             uint4 q2SegFog1, q2SegFog2;
-            q2FindFogVolumes(rayOrigin, rayDir, 0.0, 1e6, q2SegFog1, q2SegFog2);
-            q2FogAccum = q2AlphaBlendPremultiplied(q2SegmentFog(q2SegFog1, q2SegFog2, 1e6), q2FogAccum);
+            q2FindFogVolumes(rayOrigin, rayDir, 0.0, 25000.0, q2SegFog1, q2SegFog2);
+            q2FogAccum = q2AlphaBlendPremultiplied(q2SegmentFog(q2SegFog1, q2SegFog2, 25000.0), q2FogAccum);
 
             if (correctMotionVector == 2 && isPixOdd)
             {

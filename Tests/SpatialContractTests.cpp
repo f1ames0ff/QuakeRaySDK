@@ -1,8 +1,10 @@
 #include <qray/qray.h>
 
+#include "ClusterCandidateRanking.h"
 #include "SpatialFrame.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
@@ -81,18 +83,25 @@ int main()
         return 1;
     }
 
+    qray::SpatialFrame defaultIdentity;
+    if (!Check(defaultIdentity.IsIdentity(), "default spatial frame is not identity") ||
+        !Check(NearlyEqual(defaultIdentity.Scale(), 1.0f), "default spatial frame is not metric"))
+    {
+        return 1;
+    }
+
     qray::SpatialFrame identity;
     if (!Check(identity.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Y, QR_AXIS_POSITIVE_Z)),
                "identity convention rejected") ||
-        !Check(!identity.IsIdentity(), "meter convention skipped internal scene scaling") ||
-        !Check(NearlyEqual(identity.Scale(), 40.0f), "meter convention did not map to internal scene units"))
+        !Check(identity.IsIdentity(), "identity convention did not stay identity") ||
+        !Check(NearlyEqual(identity.Scale(), 1.0f), "identity convention did not stay metric"))
     {
         return 1;
     }
 
     const QrFloat3D identityPoint = identity.Point({ { 1.0f, 2.0f, 3.0f } });
-    if (!Check(identityPoint.data[0] == 40.0f && identityPoint.data[1] == 80.0f &&
-               identityPoint.data[2] == 120.0f, "meter point conversion failed"))
+    if (!Check(identityPoint.data[0] == 1.0f && identityPoint.data[1] == 2.0f &&
+               identityPoint.data[2] == 3.0f, "identity point conversion failed"))
     {
         return 1;
     }
@@ -101,17 +110,17 @@ int main()
     if (!Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_NEGATIVE_Z, QR_AXIS_POSITIVE_Y)),
                "Y-up convention rejected") ||
         !Check(!upY.IsIdentity(), "Y-up convention marked identity") ||
-        !Check(NearlyEqual(upY.Scale(), 40.0f), "unexpected scale"))
+        !Check(NearlyEqual(upY.Scale(), 1.0f), "unexpected scale"))
     {
         return 1;
     }
 
     const QrFloat3D point = upY.Point({ { 1.0f, 2.0f, 3.0f } });
-    if (!Check(NearlyEqual(point.data[0], 40.0f) &&
-               NearlyEqual(point.data[1], -120.0f) &&
-               NearlyEqual(point.data[2], 80.0f),
+    if (!Check(NearlyEqual(point.data[0], 1.0f) &&
+               NearlyEqual(point.data[1], -3.0f) &&
+               NearlyEqual(point.data[2], 2.0f),
                "Y-up point conversion failed") ||
-        !Check(NearlyEqual(upY.Area(2.0f), 3200.0f), "area conversion failed") ||
+        !Check(NearlyEqual(upY.Area(2.0f), 2.0f), "area conversion failed") ||
         !Check(upY.SoftFace(5) == 3, "softface conversion failed"))
     {
         return 1;
@@ -119,7 +128,7 @@ int main()
 
     const QrFloat3D fogA = upY.Point({ { 0.0f, 0.0f, 1.0f } });
     const QrFloat3D fogB = upY.Point({ { 0.0f, 0.0f, 0.0f } });
-    if (!Check(NearlyEqual(fogA.data[1], -40.0f) &&
+    if (!Check(NearlyEqual(fogA.data[1], -1.0f) &&
                NearlyEqual(fogB.data[1], 0.0f) &&
                upY.SoftFace(5) == 3,
                "fog conversion failed"))
@@ -130,9 +139,9 @@ int main()
     QrFloat3D aabbMin = {};
     QrFloat3D aabbMax = {};
     upY.Aabb({ { -1.0f, -2.0f, -3.0f } }, { { 4.0f, 5.0f, 6.0f } }, aabbMin, aabbMax);
-    if (!Check(NearlyEqual(aabbMin.data[0], -40.0f) && NearlyEqual(aabbMax.data[0], 160.0f) &&
-               NearlyEqual(aabbMin.data[1], -240.0f) && NearlyEqual(aabbMax.data[1], 120.0f) &&
-               NearlyEqual(aabbMin.data[2], -80.0f) && NearlyEqual(aabbMax.data[2], 200.0f),
+    if (!Check(NearlyEqual(aabbMin.data[0], -1.0f) && NearlyEqual(aabbMax.data[0], 4.0f) &&
+               NearlyEqual(aabbMin.data[1], -6.0f) && NearlyEqual(aabbMax.data[1], 3.0f) &&
+               NearlyEqual(aabbMin.data[2], -2.0f) && NearlyEqual(aabbMax.data[2], 5.0f),
                "AABB conversion failed"))
     {
         return 1;
@@ -147,9 +156,9 @@ int main()
     transform.matrix[2][3] = 3.0f;
 
     const QrTransform convertedTransform = upY.Transform(transform);
-    if (!Check(NearlyEqual(convertedTransform.matrix[0][3], 40.0f) &&
-               NearlyEqual(convertedTransform.matrix[1][3], -120.0f) &&
-               NearlyEqual(convertedTransform.matrix[2][3], 80.0f),
+    if (!Check(NearlyEqual(convertedTransform.matrix[0][3], 1.0f) &&
+               NearlyEqual(convertedTransform.matrix[1][3], -3.0f) &&
+               NearlyEqual(convertedTransform.matrix[2][3], 2.0f),
                "transform conversion failed"))
     {
         return 1;
@@ -162,8 +171,8 @@ int main()
     glassGeometry.layerColors[2].data[1] = 0.25f;
     const QrGeometryUploadInfo convertedGlass = upY.Geometry(glassGeometry);
     if (!Check(NearlyEqual(convertedGlass.layerColors[2].data[0], 1.5f) &&
-               NearlyEqual(convertedGlass.layerColors[2].data[1], 10.0f) &&
-               NearlyEqual(convertedGlass.transform.matrix[0][3], 40.0f),
+               NearlyEqual(convertedGlass.layerColors[2].data[1], 0.25f) &&
+               NearlyEqual(convertedGlass.transform.matrix[0][3], 1.0f),
                "glass thickness conversion failed"))
     {
         return 1;
@@ -189,11 +198,11 @@ int main()
                                                      0.0f, 0.0f, 1.0f);
     const QrTransform convertedRotation = upY.Transform(rotation);
 
-    if (!Check(NearlyEqual(convertedRotation.matrix[0][0], 40.0f * cosAngle) &&
-               NearlyEqual(convertedRotation.matrix[0][1], -40.0f * sinAngle) &&
-               NearlyEqual(convertedRotation.matrix[1][2], -40.0f) &&
-               NearlyEqual(convertedRotation.matrix[2][0], 40.0f * sinAngle) &&
-               NearlyEqual(convertedRotation.matrix[2][1], 40.0f * cosAngle),
+    if (!Check(NearlyEqual(convertedRotation.matrix[0][0], cosAngle) &&
+               NearlyEqual(convertedRotation.matrix[0][1], -sinAngle) &&
+               NearlyEqual(convertedRotation.matrix[1][2], -1.0f) &&
+               NearlyEqual(convertedRotation.matrix[2][0], sinAngle) &&
+               NearlyEqual(convertedRotation.matrix[2][1], cosAngle),
                "arbitrary rotation conversion failed"))
     {
         return 1;
@@ -204,9 +213,9 @@ int main()
                                                             0.0f, 0.0f, 4.0f);
     const QrTransform convertedNonUniformScale = upY.Transform(nonUniformScale);
 
-    if (!Check(NearlyEqual(convertedNonUniformScale.matrix[0][0], 80.0f) &&
-               NearlyEqual(convertedNonUniformScale.matrix[1][2], -160.0f) &&
-               NearlyEqual(convertedNonUniformScale.matrix[2][1], 120.0f),
+    if (!Check(NearlyEqual(convertedNonUniformScale.matrix[0][0], 2.0f) &&
+               NearlyEqual(convertedNonUniformScale.matrix[1][2], -4.0f) &&
+               NearlyEqual(convertedNonUniformScale.matrix[2][1], 3.0f),
                "non-uniform scale conversion failed"))
     {
         return 1;
@@ -230,7 +239,7 @@ int main()
 
     if (!Check(NearlyEqual(convertedView[12], 0.0f) &&
                NearlyEqual(convertedView[13], 0.0f) &&
-               NearlyEqual(convertedView[14], 400.0f),
+               NearlyEqual(convertedView[14], 10.0f),
                "view conversion failed"))
     {
         return 1;
@@ -245,9 +254,9 @@ int main()
     float convertedProjection[16] = {};
     upY.ViewProjection(identityProjection, convertedProjection);
 
-    if (!Check(NearlyEqual(convertedProjection[0], 0.025f) &&
+    if (!Check(NearlyEqual(convertedProjection[0], 1.0f) &&
                NearlyEqual(convertedProjection[5], 0.0f) &&
-               NearlyEqual(convertedProjection[6], -0.025f),
+               NearlyEqual(convertedProjection[6], -1.0f),
                "view-projection conversion failed"))
     {
         return 1;
@@ -289,18 +298,18 @@ int main()
     const float *convertedCloudSettings = &storage.sky.skyCubemapRotationTransform.matrix[0][0];
 
     if (!Check(NearlyEqual(cloudSettings[7], 100.0f), "source cloud settings changed") ||
-        !Check(NearlyEqual(storage.info.cameraFar, 4000.0f), "near/far conversion failed") ||
-        !Check(NearlyEqual(storage.info.rayLength, 8000.0f), "ray length conversion failed") ||
+        !Check(NearlyEqual(storage.info.cameraFar, 100.0f), "near/far conversion failed") ||
+        !Check(NearlyEqual(storage.info.rayLength, 200.0f), "ray length conversion failed") ||
         !Check(storage.info.pSkyParams != nullptr, "sky params missing") ||
         !Check(storage.info.pReflectRefractParams != nullptr, "reflect params missing") ||
-        !Check(NearlyEqual(storage.reflectRefract.waterWaveSpeed, 80.0f), "water wave speed conversion failed") ||
-        !Check(NearlyEqual(storage.reflectRefract.waterTextureAreaScale, 120.0f),
+        !Check(NearlyEqual(storage.reflectRefract.waterWaveSpeed, 2.0f), "water wave speed conversion failed") ||
+        !Check(NearlyEqual(storage.reflectRefract.waterTextureAreaScale, 3.0f),
                "water texture area conversion failed") ||
-        !Check(NearlyEqual(storage.reflectRefract.waterColor.data[0], std::pow(0.25f, 0.025f)),
+        !Check(NearlyEqual(storage.reflectRefract.waterColor.data[0], 0.25f),
                "water transmittance conversion failed") ||
         !Check(NearlyEqual(storage.reflectRefract.acidDensity, 25.0f), "acid density changed") ||
-        !Check(NearlyEqual(convertedCloudSettings[7], 4000.0f) &&
-               NearlyEqual(convertedCloudSettings[8], 2000.0f),
+        !Check(NearlyEqual(convertedCloudSettings[7], 100.0f) &&
+               NearlyEqual(convertedCloudSettings[8], 50.0f),
                "cloud altitude conversion failed"))
     {
         return 1;
@@ -315,8 +324,10 @@ int main()
 
     if (!Check(NearlyEqual(upY.Transmittance(0.0f), 0.000001f),
                "zero transmittance did not remain opaque") ||
-        !Check(NearlyEqual(upY.Transmittance(0.000001f), std::pow(0.000001f, 0.025f)),
+        !Check(NearlyEqual(upY.Transmittance(0.000001f), 0.000001f),
                "small meter transmittance was clamped before unit conversion") ||
+        !Check(NearlyEqual(upY.Transmittance(0.25f), 0.25f),
+               "meter transmittance was not pass-through") ||
         !Check(upY.Configure(MakeConvention(QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_X, QR_AXIS_POSITIVE_Z)) == false,
                "duplicate axes accepted") ||
         !Check(!upY.Configure(invalidReserved), "nonzero reserved field accepted") ||
@@ -359,9 +370,9 @@ int main()
     }
 
     const QrFloat3D mirroredPoint = mirroredFrame.Point({ { 1.0f, 2.0f, 3.0f } });
-    if (!Check(NearlyEqual(mirroredPoint.data[0], 40.0f) &&
-               NearlyEqual(mirroredPoint.data[1], -80.0f) &&
-               NearlyEqual(mirroredPoint.data[2], 120.0f),
+    if (!Check(NearlyEqual(mirroredPoint.data[0], 1.0f) &&
+               NearlyEqual(mirroredPoint.data[1], -2.0f) &&
+               NearlyEqual(mirroredPoint.data[2], 3.0f),
                "left-handed point conversion failed"))
     {
         return 1;
@@ -412,6 +423,17 @@ int main()
         return 1;
     }
 
+    if (!Check(!qray::ShouldReverseRasterizedWinding(
+                   true, QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST),
+               "line-list topology was treated as triangle winding") ||
+        !Check(qray::ShouldReverseRasterizedWinding(true, 0),
+               "mirrored triangle winding was not reversed") ||
+        !Check(!qray::ShouldReverseRasterizedWinding(false, 0),
+               "unflipped triangle winding was reversed"))
+    {
+        return 1;
+    }
+
     if (!Check(!upY.ReversesWinding(rotation), "rotation reversed an authored order") ||
         !Check(!upY.ReversesWinding(nonUniformScale),
                "orientation-preserving non-uniform scale reversed an authored order") ||
@@ -429,6 +451,34 @@ int main()
                LinearDeterminant(mirroredFrame.Transform(nonUniformScale)) < 0.0f &&
                NearlyEqual(LinearDeterminant(convertedNonUniformScale) / expectedDet, 1.0f, 0.0001f),
                "composed determinant did not scale with the frame"))
+    {
+        return 1;
+    }
+
+    const struct
+    {
+        double radius;
+        double expectedScore;
+    } radiusCases[] = {
+        { 0.0, 1600.0 },
+        { 0.001, 1600.0 },
+        { 0.025, 1600.0 },
+        { 0.1, 100.0 },
+        { 1.0, 1.0 },
+    };
+
+    for (const auto &test : radiusCases)
+    {
+        const double score = qray::ClusterCandidateScore(1.0, test.radius, 0.0);
+        if (!Check(std::fabs(score - test.expectedScore) <= 0.0001,
+                   "cluster candidate radius floor is not metric"))
+        {
+            return 1;
+        }
+    }
+
+    if (!Check(std::fabs(qray::ClusterCandidateScore(1.0, 0.0, 0.01) - 100.0) <= 0.0001,
+               "cluster candidate distance was clamped to the legacy square unit"))
     {
         return 1;
     }

@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <list>
 #include <vector>
@@ -29,8 +30,25 @@
 #include "ISwapchainDependency.h"
 #include "SwapchainPolicy.h"
 
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+typedef VkResult(VKAPI_PTR *PFN_vkAcquireFullScreenExclusiveModeEXT)(VkDevice device, VkSwapchainKHR swapchain);
+typedef VkResult(VKAPI_PTR *PFN_vkReleaseFullScreenExclusiveModeEXT)(VkDevice device, VkSwapchainKHR swapchain);
+#endif
+
 namespace qray
 {
+
+struct SwapchainAcquireTimings
+{
+    float presentWaitMs = 0.0f;
+    float imageAcquireMs = 0.0f;
+    bool acquired = false;
+};
+
+struct SwapchainPresentTimings
+{
+    float fenceWaitMs = 0.0f;
+};
 
 class Swapchain
 {
@@ -60,9 +78,13 @@ public:
     void SetFullscreenExclusive(bool want, bool focus);
     void SetPrintFunction(PrintFunction pfnPrint);
     bool IsPresentWaitActive() const;
+    bool GetPresentFpsX10(uint32_t *pFpsX10) const;
 
-    void AcquireImage(VkSemaphore imageAvailableSemaphore);
-    void Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
+    bool PrepareForFrame();
+    bool IsRecreatePending() const;
+
+    SwapchainAcquireTimings AcquireImage(VkSemaphore imageAvailableSemaphore, bool allowRecreate = true);
+    SwapchainPresentTimings Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore);
 
     void Subscribe(std::shared_ptr<ISwapchainDependency> subscriber);
     void Unsubscribe(const ISwapchainDependency *subscriber);
@@ -95,6 +117,7 @@ private:
     bool IsWaitablePresentMode(QrPresentMode mode) const;
     bool WantFullscreenExclusive() const;
 
+    bool RecreateIfNeeded(bool allowRecreate);
     bool TryRecreate(const VkExtent2D &newExtent, QrPresentMode mode, bool force = false);
 
     void Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
@@ -102,6 +125,8 @@ private:
     VkSwapchainKHR DestroyWithoutSwapchain();
 
     void WaitPresentFences();
+    void PollPresentFences();
+    void ObservePresentCompletion();
 
     void CallCreateSubscribers();
     void CallDestroySubscribers();
@@ -113,10 +138,7 @@ private:
     std::shared_ptr<CommandBufferManager> cmdManager;
 
     VkSurfaceFormatKHR surfaceFormat;
-    VkPresentModeKHR presentModeVsync;
-    VkPresentModeKHR presentModeAdaptive;
-    VkPresentModeKHR presentModeMailbox;
-    VkPresentModeKHR presentModeImmediate;
+    std::vector<VkPresentModeKHR> supportedPresentModes;
 
     bool fullScreenExclusiveSupported = false;
     void *exclusiveWin32Hwnd = nullptr;
@@ -149,8 +171,12 @@ private:
     uint64_t currentPresentId;
     uint64_t waitablePresentId;
     uint64_t maxFrameLatency;
+    uint64_t presentSampleStartUs;
+    uint32_t presentSampleFrames;
+    std::atomic<uint32_t> presentFpsX10;
 
     SwapchainRecreateState recreateState;
+    bool recreatePending;
 
     uint32_t currentSwapchainIndex;
 

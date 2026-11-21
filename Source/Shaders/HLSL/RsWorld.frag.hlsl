@@ -63,7 +63,7 @@ RsWorldFragOutput main( [[vk::location(0)]] float4 vertColor    : TEXCOORD0,
         const int2 cbPix = getCheckerboardPix(int2(fragCoord.xy));
         const float4 glassMask = framebufQ2GlassFilter_Sampled.Load(int3(cbPix, 0));
         const float viewDepth = 1.0 / max(fragCoord.w, 1e-6);
-        if (abs(glassMask.a) >= 4.0 && viewDepth > glassMask.z + max(0.01, glassMask.z * 1e-4))
+        if (abs(glassMask.a) >= 4.0 && viewDepth > glassMask.z + max(2.5e-4, glassMask.z * 1e-4))
         {
             discard;
         }

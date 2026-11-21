@@ -41,16 +41,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     CloudLayer layer;
     layer.altitude  = params.sunDirection.w;
-    layer.thickness = max(params.cloudLayer.x, 1.0);
+    layer.thickness = max(params.cloudLayer.x, 0.025);
     layer.coverage  = clamp(params.cloudLayer.y, 0.0, 0.99);
     layer.density   = max(params.cloudLayer.z, 0.0);
     layer.detail    = clamp(params.cloudLayer.w, 0.0, 0.9);
     layer.time      = params.cloudMarch.x;
     layer.speed     = params.cloudMarch.y;
+    cloudPrepareLayer(layer);
 
     int steps = CLOUD_SHADOW_STEPS;
 
-    float extent = max(params.mapProjection.z, 1.0);
+    float extent = max(params.mapProjection.z, 0.025);
     float2 flatPos = params.mapProjection.xy + ((float2)ipos + 0.5) / (float)size * extent;
 
     float3 sunDir = normalize(params.sunDirection.xyz);
@@ -59,11 +60,24 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float dt = layer.thickness / max(sunDir.z, 1.0e-3) / (float)steps;
     float stepColumn[CLOUD_SHADOW_STEPS];
+    float stepSuffix[CLOUD_SHADOW_STEPS + 1];
+    float3 tangent;
+    float3 bitangent;
+    float sampleStep;
+    cloudSunSampleBasis(sunDir, dt, tangent, bitangent, sampleStep);
 
     for (int i = 0; i < steps; i++)
     {
         float at = ((float)i + 0.5) * dt;
-        stepColumn[i] = cloudDensity(layer, cloudSunSample(origin, sunDir, at, dt), false) * dt;
+        stepColumn[i] = cloudDensity(
+            layer, cloudSunSample(origin, sunDir, at, tangent, bitangent, sampleStep, i),
+            false) * dt;
+    }
+
+    stepSuffix[steps] = 0.0;
+    for (int i = steps - 1; i >= 0; i--)
+    {
+        stepSuffix[i] = stepSuffix[i + 1] + stepColumn[i];
     }
 
     uint sizeX, sizeY, slices;
@@ -72,13 +86,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (int k = 0; k < (int)slices; k++)
     {
         float height = (float)k / (float)max((int)slices - 1, 1);
-        float above = 0.0;
-
-        for (int i = 0; i < steps; i++)
-        {
-            float fraction = clamp((float)(i + 1) - height * (float)steps, 0.0, 1.0);
-            above += stepColumn[i] * fraction;
-        }
+        float partial = clamp(height * (float)steps, 0.0, (float)steps);
+        int first = min((int)floor(partial), steps);
+        float above = first < steps
+            ? stepSuffix[first + 1] + stepColumn[first] * ((float)(first + 1) - partial)
+            : 0.0;
 
         cloudShadowOut[int3(ipos, k)] = cloudOpticalDepth(layer, above);
     }

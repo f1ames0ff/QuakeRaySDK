@@ -15,6 +15,31 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //
 
+#ifdef QR_USE_SURFACE_XLIB
+#include <X11/Xlib.h>
+#ifdef None
+#undef None
+#endif
+#ifdef Status
+#undef Status
+#endif
+#ifdef Bool
+#undef Bool
+#endif
+#ifdef Success
+#undef Success
+#endif
+#ifdef Always
+#undef Always
+#endif
+#ifdef Complex
+#undef Complex
+#endif
+#ifdef TileShape
+#undef TileShape
+#endif
+#endif
+
 #include "VulkanDevice.h"
 
 #include <algorithm>
@@ -23,6 +48,7 @@
 
 #include "QrException.h"
 #include "Const.h"
+#include "GpuContextInternal.h"
 #include "Generated/ShaderCommonC.h"
 #include "LibraryConfig.h"
 #include "SwapchainPolicy.h"
@@ -54,7 +80,8 @@
 
 using namespace qray;
 
-VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
+VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
+                            const QrayGpuRequirements* pGpuRequirements )
     : instance( VK_NULL_HANDLE )
     , device( VK_NULL_HANDLE )
     , surface( VK_NULL_HANDLE )
@@ -72,26 +99,39 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
     , previousFrameTime( -1.0 / 60.0 )
     , currentFrameTime( 0 )
 {
+    try
+    {
     ValidateCreateInfo( info );
+    const QrayGpuRequirements defaultGpuRequirements = {};
+    gpuRequirements = pGpuRequirements != nullptr ? *pGpuRequirements : defaultGpuRequirements;
+    gpuRequirementsProvided = pGpuRequirements != nullptr;
+    const QrResult gpuRequirementsResult =
+        gpu::ValidateRequirements(gpuRequirementsProvided ? &gpuRequirements : nullptr, nullptr);
+    if (gpuRequirementsResult != QR_SUCCESS)
+        throw QrException(gpuRequirementsResult, "Invalid host GPU requirements");
 
     rhi::setShaderFileLoader( userFileLoad );
 
-    CreateInstance( *info );
+    CreateInstance( *info, gpuRequirements );
 
     surface = GetSurfaceFromUser( instance, *info );
 
+#ifdef QR_USE_SURFACE_WIN32
     win32Hwnd = info->pWin32SurfaceInfo != nullptr ? info->pWin32SurfaceInfo->hwnd : nullptr;
+#endif
 
-    physDevice = std::make_shared< PhysicalDevice >( instance );
-    queues     = std::make_shared< Queues >( physDevice->Get(), surface );
+    physDevice = std::make_shared< PhysicalDevice >( instance, surface,
+        gpuRequirementsProvided ? &gpuRequirements : nullptr );
+    queues     = std::make_shared< Queues >( physDevice->Get(), surface,
+        gpuRequirementsProvided ? &gpuRequirements : nullptr );
 
-    CreateDevice();
+    CreateDevice( gpuRequirements );
 
     CreateSyncPrimitives();
 
     queues->SetDevice( device );
 
-    CreateNvrhiDevice();
+    CreateNvrhiDevice( gpuRequirements );
 
     {
         const uint32_t maxTextureCount =
@@ -122,8 +162,9 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
 
     uniform             = std::make_shared<GlobalUniform>(device, memAllocator);
 
-    swapchain           = std::make_shared<Swapchain>(device, surface, physDevice->Get(), cmdManager, presentWait2Enabled, swapchainMaintenance1Enabled,
-                                                       fullScreenExclusiveSupported, win32Hwnd, acquireFullScreenExclusiveMode, releaseFullScreenExclusiveMode);
+    swapchain           = std::make_shared<Swapchain>(device, surface, physDevice->Get(), cmdManager, presentWait2Enabled,
+                                                       swapchainMaintenance1Enabled, fullScreenExclusiveSupported, win32Hwnd,
+                                                       acquireFullScreenExclusiveMode, releaseFullScreenExclusiveMode);
     swapchain->SetPrintFunction([this](const char *message) { Print(message); });
 
     worldSamplerManager     = std::make_shared<SamplerManager>(device, 8, info->textureSamplerForceMinificationFilterLinear,
@@ -546,11 +587,23 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info )
             }
         }
     }
+    }
+    catch (...)
+    {
+        Destroy();
+        throw;
+    }
 }
 
 VulkanDevice::~VulkanDevice()
 {
-    vkDeviceWaitIdle(device);
+    Destroy();
+}
+
+void VulkanDevice::Destroy() noexcept
+{
+    if (device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(device);
 
     rhi::setShaderFileLoader( nullptr );
 
@@ -604,11 +657,21 @@ VulkanDevice::~VulkanDevice()
 
     memAllocator.reset();
 
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    DestroySyncPrimitives();
+    if (instance != VK_NULL_HANDLE && surface != VK_NULL_HANDLE)
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+    surface = VK_NULL_HANDLE;
 
-    DestroyDevice();
-    DestroyInstance();
+    if (device != VK_NULL_HANDLE)
+    {
+        DestroySyncPrimitives();
+        DestroyDevice();
+        device = VK_NULL_HANDLE;
+    }
+    if (instance != VK_NULL_HANDLE)
+    {
+        DestroyInstance();
+        instance = VK_NULL_HANDLE;
+    }
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
@@ -659,7 +722,8 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
     return VK_FALSE;
 }
 
-void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
+void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info,
+                                  const QrayGpuRequirements &gpuRequirements)
 {
     std::vector<const char *> layerNames;
 
@@ -692,7 +756,12 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
     {
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
         VK_KHR_SURFACE_EXTENSION_NAME,
+#ifdef QR_USE_SURFACE_WIN32
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#endif
+#ifdef QR_USE_SURFACE_XLIB
+        VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
+#endif
     };
 
     if (surfaceCapabilities2Supported)
@@ -706,6 +775,23 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
     {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+    }
+
+    std::string requirementError;
+    if (!gpu::HasRequiredInstanceExtensions(gpuRequirements, &requirementError))
+    {
+        throw QrException(QR_GRAPHICS_API_ERROR, requirementError);
+    }
+
+    for (uint32_t i = 0; i < gpuRequirements.requiredInstanceExtensions.count; ++i)
+    {
+        const char *required = gpuRequirements.requiredInstanceExtensions.pData[i];
+        if (std::find_if(extensions.begin(), extensions.end(), [required](const char *extension) {
+                return std::strcmp(extension, required) == 0;
+            }) == extensions.end())
+        {
+            extensions.push_back(required);
+        }
     }
 
     for (const char *n : DLSS::GetDlssVulkanInstanceExtensions())
@@ -732,7 +818,7 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
     }
 
     VkApplicationInfo appInfo = {};
-    appInfo.apiVersion = VK_API_VERSION_1_3;
+    appInfo.apiVersion = std::max(VK_API_VERSION_1_3, gpuRequirements.minVulkanApiVersion);
     appInfo.pApplicationName = info.pAppName;
 
     VkInstanceCreateInfo instanceInfo = {};
@@ -770,7 +856,7 @@ void VulkanDevice::CreateInstance(const QrInstanceCreateInfo &info)
     }
 }
 
-void VulkanDevice::CreateDevice()
+void VulkanDevice::CreateDevice(const QrayGpuRequirements &gpuRequirements)
 {
     VkPhysicalDeviceFeatures features = {};
     features.robustBufferAccess = 1;
@@ -855,6 +941,7 @@ void VulkanDevice::CreateDevice()
     }
 
     ApplyNvrhiRequirements(nvrhiRequirements, vulkan12Features);
+    timelineSemaphoreEnabled = nvrhiRequirements.timelineSemaphore;
 
     if (!unsupportedNvrhiFeatures.empty())
     {
@@ -916,11 +1003,15 @@ void VulkanDevice::CreateDevice()
             return !std::strcmp(ext.extensionName, VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME);
         });
 
+#ifdef _WIN32
     const bool fullScreenExclusiveExtensionSupported = std::any_of(supportedDeviceExtensions.cbegin(), supportedDeviceExtensions.cend(),
         [](const VkExtensionProperties& ext)
         {
             return !std::strcmp(ext.extensionName, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
         });
+#else
+    const bool fullScreenExclusiveExtensionSupported = false;
+#endif
 
     VkPhysicalDevicePresentId2FeaturesKHR presentId2Features = {};
     presentId2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR;
@@ -1037,9 +1128,22 @@ void VulkanDevice::CreateDevice()
         deviceExtensions.push_back(swapchainMaintenance1ExtensionName);
     }
 
+#ifdef _WIN32
     if (fullScreenExclusiveExtensionSupported)
     {
         deviceExtensions.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
+    }
+#endif
+
+    for (uint32_t i = 0; i < gpuRequirements.requiredDeviceExtensions.count; ++i)
+    {
+        const char *required = gpuRequirements.requiredDeviceExtensions.pData[i];
+        if (std::find_if(deviceExtensions.begin(), deviceExtensions.end(), [required](const char *extension) {
+                return std::strcmp(extension, required) == 0;
+            }) == deviceExtensions.end())
+        {
+            deviceExtensions.push_back(required);
+        }
     }
 
     enabledDeviceExtensions.clear();
@@ -1060,6 +1164,14 @@ void VulkanDevice::CreateDevice()
     deviceCreateInfo.enabledExtensionCount = (uint32_t) deviceExtensions.size();
     deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
+    std::string featureChainError;
+    const QrResult featureChainResult = gpu::AppendVulkanFeatureChain(
+        physDevice->Get(), &physicalDeviceFeatures2, gpuRequirements, &featureChainError);
+    if (featureChainResult != QR_SUCCESS)
+    {
+        throw QrException(featureChainResult, featureChainError);
+    }
+
     VkResult r = vkCreateDevice(physDevice->Get(), &deviceCreateInfo, nullptr, &device);
     VK_CHECKERROR(r);
 
@@ -1069,6 +1181,7 @@ void VulkanDevice::CreateDevice()
     swapchainMaintenance1Enabled = swapchainMaintenance1Supported;
 
     fullScreenExclusiveSupported = fullScreenExclusiveExtensionSupported;
+#ifdef _WIN32
     if (fullScreenExclusiveSupported)
     {
         acquireFullScreenExclusiveMode = reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(
@@ -1078,6 +1191,7 @@ void VulkanDevice::CreateDevice()
 
         fullScreenExclusiveSupported = acquireFullScreenExclusiveMode != nullptr && releaseFullScreenExclusiveMode != nullptr;
     }
+#endif
 
     if (libconfig.vulkanValidation)
     {
@@ -1085,7 +1199,7 @@ void VulkanDevice::CreateDevice()
     }
 }
 
-void VulkanDevice::CreateNvrhiDevice()
+void VulkanDevice::CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements)
 {
     const NvrhiRequirements requirements = QueryNvrhiRequirements(physDevice->Get());
 
@@ -1132,6 +1246,15 @@ void VulkanDevice::CreateNvrhiDevice()
         throw QrException(QR_GRAPHICS_API_ERROR, errorMessage);
     }
 
+    std::string featureError;
+    const QrResult featureResult =
+        gpu::CheckNvrhiFeatures(nvrhi->GetDevice(), gpuRequirements, &featureError);
+    if (featureResult != QR_SUCCESS)
+    {
+        nvrhi.reset();
+        throw QrException(featureResult, featureError);
+    }
+
     nvrhi->LogCapabilities();
 }
 
@@ -1173,6 +1296,7 @@ VkSurfaceKHR VulkanDevice::GetSurfaceFromUser(VkInstance instance, const QrInsta
     VkSurfaceKHR surface;
     VkResult r;
 
+#ifdef QR_USE_SURFACE_WIN32
     if (info.pWin32SurfaceInfo != nullptr)
     {
         VkWin32SurfaceCreateInfoKHR win32Info = {};
@@ -1185,6 +1309,32 @@ VkSurfaceKHR VulkanDevice::GetSurfaceFromUser(VkInstance instance, const QrInsta
 
         return surface;
     }
+#else
+    if (info.pWin32SurfaceInfo != nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "pWin32SurfaceInfo is specified, but the library wasn't built with QR_USE_SURFACE_WIN32");
+    }
+#endif
+
+#ifdef QR_USE_SURFACE_XLIB
+    if (info.pXlibSurfaceCreateInfo != nullptr)
+    {
+        VkXlibSurfaceCreateInfoKHR xlibInfo = {};
+        xlibInfo.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+        xlibInfo.dpy = (Display *)info.pXlibSurfaceCreateInfo->dpy;
+        xlibInfo.window = (Window)info.pXlibSurfaceCreateInfo->window;
+
+        r = vkCreateXlibSurfaceKHR(instance, &xlibInfo, nullptr, &surface);
+        VK_CHECKERROR(r);
+
+        return surface;
+    }
+#else
+    if (info.pXlibSurfaceCreateInfo != nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "pXlibSurfaceCreateInfo is specified, but the library wasn't built with QR_USE_SURFACE_XLIB");
+    }
+#endif
 
     throw QrException(QR_WRONG_ARGUMENT, "Surface info wasn't specified");
 }
@@ -1226,9 +1376,17 @@ void VulkanDevice::ValidateCreateInfo(const QrInstanceCreateInfo *pInfo)
     }
 
     {
-        if (pInfo->pWin32SurfaceInfo == nullptr)
+        int count = 0;
+#ifdef QR_USE_SURFACE_WIN32
+        count += pInfo->pWin32SurfaceInfo != nullptr ? 1 : 0;
+#endif
+#ifdef QR_USE_SURFACE_XLIB
+        count += pInfo->pXlibSurfaceCreateInfo != nullptr ? 1 : 0;
+#endif
+
+        if (count != 1)
         {
-            throw QrException(QR_WRONG_ARGUMENT, "The Win32 surface info must not be null");
+            throw QrException(QR_WRONG_ARGUMENT, "Exactly one of the supported surface infos must be not null");
         }
     }
 

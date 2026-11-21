@@ -26,6 +26,7 @@
 #include <nvrhi/vulkan.h>
 
 #include <qray/qray.h>
+#include <qray/gpu_context.h>
 
 #include "../Common.h"
 #include "../CpuFrameProfiler.h"
@@ -65,6 +66,13 @@ class RhiAccelStructs;
 class RhiFrameContext;
 class RhiTextureTable;
 }
+
+struct FrameSubmissionSynchronization
+{
+    VkSemaphore semaphoreToWait = VK_NULL_HANDLE;
+    VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkSemaphore semaphoreToSignal = VK_NULL_HANDLE;
+};
 
 // The RHI frame skeleton: the frame is recorded and submitted through the RHI
 // layer instead of the Vulkan command buffers of the renderer. It drives the
@@ -182,6 +190,9 @@ public:
         bool disableRasterization = false;
         bool renderUiOnly = false;
         CpuFrameProfiler *cpuProfiler = nullptr;
+        std::function<bool()> acquireSwapchainForPresent;
+        std::function<void(QrayGpuFramePhase, nvrhi::ICommandList *, nvrhi::ITexture *,
+                           nvrhi::ITexture *, uint32_t)> gpuFrameCallback;
 
         // -- the god rays and their shadow map (A5.2) --
         // The host block of the legacy frame (VulkanDevice.cpp:908-1007) precomputed: the final
@@ -414,6 +425,7 @@ public:
     // Called by the swapchain when its images are (re)created or destroyed.
     void OnSwapchainCreate(const Swapchain *pSwapchain) override;
     void OnSwapchainDestroy() override;
+    void ReleaseFramebufferTargets();
 
     // Records the frame for the image the swapchain acquired into the frame context's slot
     // 'frameIndex' and submits it on the RHI graphics queue; the context owns that slot's command
@@ -434,10 +446,8 @@ public:
     // The raster world sub-pass is not recorded in the two traced modes; the raster sky's ALBEDO
     // half is, for the SKY_TYPE_RASTERIZED_GEOMETRY frame only, together with the raster sky pass's
     // cube half right before the primary (see Render's implementation).
-    // 'semaphoreToWait' is the semaphore the swapchain signals on acquire, 'semaphoreToSignal' is
-    // the one the presentation engine waits on. Returns false if the pass is unavailable.
     bool Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
-                VkSemaphore semaphoreToWait, VkSemaphore semaphoreToSignal);
+                FrameSubmissionSynchronization &submission);
 
     // True if the pass cannot be used at all, so that the caller can avoid
     // taking the frame apart on every frame.
@@ -507,6 +517,7 @@ private:
     void DestroySwapchainResources();
     void CompleteFrameReadback(uint32_t frameIndex);
     void DestroyFrameReadback();
+    void LogFallbackSlotsIfNeeded();
 
     nvrhi::vulkan::IDevice *device;
     PrintFunction print;

@@ -119,6 +119,9 @@ namespace qray
         static void     GetParticleVertexLayout( VkVertexInputAttributeDescription* outAttrs,
                                                  uint32_t*                          outAttrsCount );
 
+        // These lists preserve upload order and are never sorted by the
+        // collector. The host owns opaque/alpha-test/blended ordering; see
+        // the raster draw ordering contract in qray.h.
         const std::vector< DrawInfo >& GetRasterDrawInfos() const;
         const std::vector< DrawInfo >& GetSwapchainDrawInfos() const;
         const std::vector< DrawInfo >& GetSkyDrawInfos() const;

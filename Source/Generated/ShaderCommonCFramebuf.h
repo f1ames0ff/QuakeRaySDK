@@ -161,7 +161,7 @@ enum FramebufferImageFlagBits
 };
 typedef uint32_t FramebufferImageFlags;
 
-extern const uint32_t ShFramebuffers_Count;
+inline constexpr uint32_t ShFramebuffers_Count = 132;
 extern const VkFormat ShFramebuffers_Formats[];
 extern const FramebufferImageFlags ShFramebuffers_Flags[];
 extern const uint32_t ShFramebuffers_Bindings[];

@@ -52,7 +52,7 @@ float globalLightSolidAngleProxy(const ShLightEncoded encoded, const float3 p)
         const float radius = (length(l.position[0] - center) +
                               length(l.position[1] - center) +
                               length(l.position[2] - center)) / 3.0;
-        const float r = max(radius, 1e-4);
+        const float r = max(radius, 2.5e-6);
 
         return calcSolidAngleForSphere(r, max(distance(center, p), r));
     }
@@ -67,7 +67,7 @@ float globalLightSolidAngleProxy(const ShLightEncoded encoded, const float3 p)
             radius = max(radius, length(texturedAreaLightWorldPos(l, l.uvVerts[i]) - center));
         }
 
-        const float r = max(radius, 1e-4);
+        const float r = max(radius, 2.5e-6);
 
         return calcSolidAngleForSphere(r, max(distance(center, p), r));
     }

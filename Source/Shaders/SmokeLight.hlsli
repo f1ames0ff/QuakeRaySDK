@@ -78,7 +78,7 @@ void smokeRayStatsAdd(const uint count)
     }
 }
 
-#define SMOKE_SHADOW_RAY_EPS 0.01
+#define SMOKE_SHADOW_RAY_EPS 2.5e-4
 
 #define SMOKE_CLUSTER_SCAN 16
 
@@ -113,11 +113,11 @@ float smokeSafeSolidAngle(float a)
 
 float3 smokeLightCenter(const ShLightEncoded e, out float radius)
 {
-    radius = 1.0;
+    radius = 0.025;
 
     if (e.lightType == LIGHT_TYPE_SPHERE || e.lightType == LIGHT_TYPE_SPOT)
     {
-        radius = max(e.data_0.w, 1.0);
+        radius = max(e.data_0.w, 0.025);
         return e.data_0.xyz;
     }
 
@@ -146,7 +146,7 @@ float3 smokeLightCenter(const ShLightEncoded e, out float radius)
         }
         uvCenter /= max(float(numVerts), 1.0);
 
-        radius = max(1.0, 0.5 * (length(e.data_0.xyz) + length(e.data_1.xyz)));
+        radius = max(0.025, 0.5 * (length(e.data_0.xyz) + length(e.data_1.xyz)));
         return e.data_2.xyz + e.data_0.xyz * uvCenter.x + e.data_1.xyz * uvCenter.y;
     }
 
@@ -172,7 +172,7 @@ float smokeLightWeight(const ShLightEncoded e, const float3 p)
         intensity *= max(e.data_1.w, 0.0);
     }
 
-    return intensity * radius2 / (dist2 + radius2 + 1.0);
+    return intensity * radius2 / (dist2 + radius2 + 6.25e-4);
 }
 
 float3 smokeLightAt(const float3 worldPos, const uint cluster, const float seed, const float strength, const float minLight)

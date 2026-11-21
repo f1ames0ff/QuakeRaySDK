@@ -42,9 +42,17 @@ public:
     VkCommandBuffer StartGraphicsCmd();
     VkCommandBuffer StartComputeCmd();
     VkCommandBuffer StartTransferCmd();
+    VkCommandBuffer StartMaintenanceCmd();
 
     void Submit(VkCommandBuffer cmd, VkFence fence = VK_NULL_HANDLE);
+    void SubmitMaintenance(VkCommandBuffer cmd);
     void Submit(VkCommandBuffer cmd, VkSemaphore waitSemaphore, VkPipelineStageFlags waitStages, VkSemaphore signalSemaphore, VkFence fence);
+    void SubmitForFrame(uint32_t frameIndex,
+                        VkCommandBuffer cmd,
+                        VkSemaphore waitSemaphore,
+                        VkPipelineStageFlags waitStages,
+                        VkSemaphore signalSemaphore,
+                        VkFence fence);
 
     void WaitGraphicsIdle();
     void WaitComputeIdle();
@@ -72,6 +80,8 @@ private:
     AllocatedCmds graphicsCmds[MAX_FRAMES_IN_FLIGHT];
     AllocatedCmds computeCmds[MAX_FRAMES_IN_FLIGHT];
     AllocatedCmds transferCmds[MAX_FRAMES_IN_FLIGHT];
+    VkCommandPool maintenancePool = VK_NULL_HANDLE;
+    VkCommandBuffer maintenanceCmd = VK_NULL_HANDLE;
 
     std::weak_ptr<Queues> queues;
     rgl::unordered_map<VkCommandBuffer, VkQueue> cmdQueues[MAX_FRAMES_IN_FLIGHT];

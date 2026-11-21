@@ -51,9 +51,9 @@
 [43] offset 808 float32
 [44] offset 812 uint32
 [45] offset 816 uint32
-[46] offset 820 uint32
-[47] offset 824 uint32
-[48] offset 828 uint32
+[46] offset 820 float32
+[47] offset 824 float32
+[48] offset 828 float32
 [49] offset 832 float32
 [50] offset 836 float32
 [51] offset 840 float32
@@ -127,6 +127,10 @@
 [119] offset 3360 uint32
 [120] offset 3364 uint32
 [121] offset 3368 uint32
+[122] offset 3372 float32
+[123] offset 3376 uint32
+[124] offset 3380 uint32
+[125] offset 3384 uint32
 === block set 3 binding 0
 
 [0] offset 0 v4(float32)
@@ -240,13 +244,13 @@ UniformConstant
 image:2D:0:0:0:2:R32ui
 === descriptor set 1 binding 123: storage class
 UniformConstant
-=== descriptor set 1 binding 124
+=== descriptor set 1 binding 125
 image:2D:0:0:0:2:Rgba16f
-=== descriptor set 1 binding 124: storage class
+=== descriptor set 1 binding 125: storage class
 UniformConstant
-=== descriptor set 1 binding 126
+=== descriptor set 1 binding 127
 image:2D:0:0:0:2:Rgba16f
-=== descriptor set 1 binding 126: storage class
+=== descriptor set 1 binding 127: storage class
 UniformConstant
 === descriptor set 1 binding 12: storage class
 UniformConstant
@@ -327,7 +331,7 @@ image:2D:0:0:0:2:Rgba16f
 === descriptor set 1 binding 89: storage class
 UniformConstant
 === descriptor set 1 binding 9
-image:2D:0:0:0:2:R16f
+image:2D:0:0:0:2:R32f
 === descriptor set 1 binding 90
 image:2D:0:0:0:2:Rgba16f
 === descriptor set 1 binding 90: storage class

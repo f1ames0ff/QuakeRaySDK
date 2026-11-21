@@ -20,16 +20,26 @@
 
 #include <stdint.h>
 
-#if !defined(QR_STATIC)
+#if defined(_WIN32) && !defined(QR_STATIC)
     #ifdef QR_LIBRARY_EXPORTS
         #define QRAPI __declspec(dllexport)
     #else
         #define QRAPI __declspec(dllimport)
     #endif
-    #define QRCONV __cdecl
 #else
     #define QRAPI
+#endif
+
+#ifdef _WIN32
+    #define QRCONV __cdecl
+#else
     #define QRCONV
+#endif
+
+#ifdef __cplusplus
+    #define QR_ENUM_UINT32 : uint32_t
+#else
+    #define QR_ENUM_UINT32
 #endif
 
 #define QR_API_VERSION "1.06.0000"
@@ -122,6 +132,7 @@ typedef void (*PFN_qrOpenFile)(const char *pFilePath, void *pUserData, const voi
 typedef void (*PFN_qrCloseFile)(void *pFileUserHandle, void *pUserData);
 
 typedef struct QrWin32SurfaceCreateInfo QrWin32SurfaceCreateInfo;
+typedef struct QrXlibSurfaceCreateInfo QrXlibSurfaceCreateInfo;
 
 #ifdef QR_USE_SURFACE_WIN32
 typedef struct QrWin32SurfaceCreateInfo
@@ -129,6 +140,14 @@ typedef struct QrWin32SurfaceCreateInfo
     HINSTANCE           hinstance;
     HWND                hwnd;
 } QrWin32SurfaceCreateInfo;
+#endif
+
+#ifdef QR_USE_SURFACE_XLIB
+typedef struct QrXlibSurfaceCreateInfo
+{
+    void                *dpy;
+    unsigned long        window;
+} QrXlibSurfaceCreateInfo;
 #endif
 
 typedef enum QrTextureSwizzling
@@ -147,6 +166,7 @@ typedef struct QrInstanceCreateInfo
     const char                  *pAppGUID;
 
     QrWin32SurfaceCreateInfo    *pWin32SurfaceInfo;
+    QrXlibSurfaceCreateInfo     *pXlibSurfaceCreateInfo;
 
     const char                  *pConfigPath;
 
@@ -220,6 +240,8 @@ QRAPI QrResult QRCONV qrSetSpatialConvention(
     QrInstance                          qrInstance,
     const QrSpatialConvention           *pConvention);
 
+/* pConvention->size and pConvention->version must be initialized by the caller;
+   the function treats them as an in/out ABI header. */
 QRAPI QrResult QRCONV qrGetSpatialConvention(
     QrInstance                          qrInstance,
     QrSpatialConvention                 *pConvention);
@@ -275,6 +297,9 @@ typedef struct QrTransform
 
 typedef struct QrMatrix3D
 {
+    /* Row-major 3x3. A cubemap rotation maps host-world directions to cubemap
+       lookup directions: the renderer composes it as R_host * H^T, where H maps
+       host-world directions into the canonical scene frame. */
     float       matrix[3][3];
 } QrMatrix3D;
 
@@ -309,6 +334,8 @@ typedef struct QrVertex
     float       texCoordLayer1[2];
     float       texCoordLayer2[2];
 
+    /* RGBA8, little-endian. Its alpha is straight coverage and multiplies
+       the draw color alpha and sampled texture alpha; it does not scale RGB. */
     uint32_t    packedColor;
     uint32_t    cluster;
     uint32_t    lightStyles;
@@ -366,6 +393,9 @@ typedef struct QrGeometryUploadInfo
 
     QrFloat4D                       layerColors[3];
     QrGeometryMaterialBlendType     layerBlendingTypes[3];
+
+    /* Glass reflect/refract uses layerColors[2].data[1] as the pane thickness
+       in meters. The slot is unused for other pass-through types. */
 
     float                           texCoordScale[2];
     float                           texCoordOffset[2];
@@ -513,12 +543,57 @@ typedef struct QrRect2D
     uint32_t    height;
 } QrRect2D;
 
+/* Raster draw ordering contract
+   -----------------------------
+   Raster draws preserve relative upload order within each emitted category,
+   separately for DEFAULT world, lit particle, point-particle, smoke,
+   SWAPCHAIN and SKY streams. The SDK does not infer a depth key or sort
+   geometry. The host owns the order:
+     - In the DEFAULT world list, upload opaque and alpha-tested cutouts
+       before blended draws.
+     - Upload blended draws from far to near for the current view.
+     - Keep different views (main, portals, reflections, viewmodel) in
+       separate ordered ranges; depths from different view-projections are
+       not comparable.
+     - If overlapping vertices or points inside one upload need a specific
+       blend order, sort them on the host before calling the SDK. Draw-level
+       order cannot fix compositing inside one batch, such as the points of
+       qrUploadParticles or the puffs of one smoke upload.
+     - For SWAPCHAIN, upload in painter's order; the SDK does not sort the
+       2D overlay.
+     - Calls from different host threads have no relative order guarantee.
+       Serialize uploads themselves when their blend order matters; the
+       collector lock only makes concurrent calls safe, not deterministic.
+
+   A blended draw should not set DEPTH_WRITE unless it intentionally
+   occludes later transparent draws. Alpha-tested cutouts that write depth
+   are order-independent and belong to the opaque group.
+
+   The raster overlay records DEFAULT world entries first, then DEFAULT
+   entries carrying QR_RASTERIZED_GEOMETRY_STATE_PARTICLE, then the
+   qrUploadParticles points, then DEFAULT entries carrying
+   QR_RASTERIZED_GEOMETRY_STATE_SMOKE. QR_RASTERIZED_GEOMETRY_STATE_PARTICLE
+   selects the lit particle pipeline; QR_RASTERIZED_GEOMETRY_STATE_PARTICLE_SPRITE
+   alone does not move an unlit sprite out of the world list. If a dedicated
+   particle or smoke pass is unavailable, its entries stay in the world list
+   and keep their upload order. SWAPCHAIN and SKY are recorded by their own
+   passes. Blending is applied in this record order; interleaving uploads
+   across these categories does not survive.
+
+   Supported blending is a source/destination pair from QrBlendFactor with
+   an add operation. DST_ALPHA, ONE_MINUS_DST_ALPHA, subtract/min/max and
+   separate alpha equations are not part of this revision. A host that
+   needs a legacy mode outside this set must approximate it with the
+   supported factors or keep that effect out of the SDK raster path. */
+
 typedef enum QrRasterizedGeometryStateFlagBits
 {
     QR_RASTERIZED_GEOMETRY_STATE_ALPHA_TEST         = 1,
     QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE       = 2,
     QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST         = 4,
     QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE        = 8,
+    /* Consecutive vertex/index pairs form line segments; triangle winding
+       reversal does not apply to this topology. */
     QR_RASTERIZED_GEOMETRY_STATE_FORCE_LINE_LIST    = 16,
     QR_RASTERIZED_GEOMETRY_STATE_SMOKE              = 32,
     QR_RASTERIZED_GEOMETRY_STATE_PARTICLE           = 64,
@@ -552,6 +627,8 @@ typedef struct QrRasterizedGeometryUploadInfo
     QrBlendFactor                           blendFuncSrc;
     QrBlendFactor                           blendFuncDst;
 
+    /* Smoke only: xyz are spatial noise frequencies in inverse meters and w is
+       the wind/advection rate in meters per second. */
     QrFloat4D                               smokeNoise;
     QrFloat4D                               smokeLook;
 
@@ -590,6 +667,14 @@ QRAPI QrResult QRCONV qrUploadRasterizedGeometry(
     const float                             *pViewProjection,
     const QrViewport                        *pViewport);
 
+/* packedColor is RGBA8, little-endian: R in bits 0..7, G in 8..15, B in
+   16..23 and A in 24..31. In the lit and unlit particle paths the output
+   alpha is drawColor.a * vertexColor.a * texture.a, so lowering either
+   alpha fades the sprite. Alpha does not scale RGB; for premultiplied or
+   additive modes whose source factor does not use alpha, premultiply the
+   color on the host if the fade must affect the additive contribution.
+   The smoke path derives its alpha from smokeLook and age, not from
+   packedColor.a. */
 typedef struct QrParticlePoint
 {
     float       position[3];
@@ -1156,17 +1241,21 @@ QRAPI QrResult QRCONV qrDestroyCubemap(
     QrInstance                          qrInstance,
     QrCubemap                           cubemap);
 
-typedef enum QrPresentMode
+typedef enum QrPresentMode QR_ENUM_UINT32
 {
-    QR_PRESENT_MODE_MAILBOX = 0,
-    QR_PRESENT_MODE_VSYNC,
-    QR_PRESENT_MODE_ADAPTIVE,
-    QR_PRESENT_MODE_IMMEDIATE,
+    QR_PRESENT_MODE_MAILBOX = 0,   // Uncapped rendering using native Mailbox presentation.
+    QR_PRESENT_MODE_VSYNC,         // Display-paced FIFO presentation.
+    QR_PRESENT_MODE_ADAPTIVE,      // Display-paced unless a frame is late.
+    QR_PRESENT_MODE_IMMEDIATE,     // Unsynchronised presentation; tearing is expected.
 } QrPresentMode;
 
 typedef struct QrStartFrameInfo
 {
+    // FIFO with maxFrameLatency=1 is the recommended paced presentation path.
+    // The other modes are explicit host choices for tearing, diagnostics or benchmarks.
     QrPresentMode   presentMode;
+    // 0 leaves presentation uncapped, allowing submitted FPS to outrun displayed
+    // frames. 1 waits for the previous waitable FIFO present and is the smooth default.
     uint32_t        maxFrameLatency;
     QrBool32        requestShaderReload;
     QrBool32        wantFullscreenExclusive;
@@ -1176,6 +1265,9 @@ typedef struct QrStartFrameInfo
 QRAPI QrResult QRCONV qrStartFrame(
     QrInstance                          qrInstance,
     const QrStartFrameInfo              *pStartInfo);
+
+QRAPI QrResult QRCONV qrAcquireFrame(
+    QrInstance                          qrInstance);
 
 typedef enum QrSkyType
 {
@@ -1258,6 +1350,8 @@ typedef struct QrDrawFrameSkyParams
 
     uint32_t    skyCloudsQuality;
     uint32_t    godRaysQuality;
+
+    /* Multiplier for the baseline 0.025-radian sun-disc angular radius. */
     float       sunDiscSize;
 } QrDrawFrameSkyParams;
 
@@ -1487,7 +1581,7 @@ typedef struct QrPostEffectsNearDofParams
 {
     float       strength;
     float       focusDistance; /* meters */
-    float       maxRadius;
+    float       maxRadius;      /* screen-space pixels */
 } QrPostEffectsNearDofParams;
 
 typedef struct QrPostEffectsSharpenParams
@@ -1685,7 +1779,7 @@ QRAPI QrBool32 QRCONV qrIsSuspended(
 
 #define QR_RAY_STATS_CATEGORY_COUNT 5
 
-typedef enum QrCpuPassIndex
+typedef enum QrCpuPassIndex QR_ENUM_UINT32
 {
     QR_CPU_PASS_PREPARE = 0,
     QR_CPU_PASS_HOT_RELOAD,
@@ -1706,6 +1800,11 @@ typedef enum QrCpuPassIndex
     QR_CPU_PASS_RHI_SUBMIT,
     QR_CPU_PASS_LEGACY_SUBMIT,
     QR_CPU_PASS_PRESENT,
+    QR_CPU_PASS_FRAME_FENCE_WAIT,
+    QR_CPU_PASS_PRESENT_WAIT,
+    QR_CPU_PASS_IMAGE_ACQUIRE,
+    QR_CPU_PASS_BEGIN_OTHER,
+    QR_CPU_PASS_PRESENT_FENCE_WAIT,
     QR_CPU_PASS_COUNT,
 } QrCpuPassIndex;
 
@@ -1734,7 +1833,7 @@ typedef struct QrFrameStats
 {
     uint32_t    raysTotal;
     uint32_t    raysPerCategory[QR_RAY_STATS_CATEGORY_COUNT];
-    uint32_t    fpsX10;
+    uint32_t    fpsX10; // completed-presentation FPS when fences are available; render FPS otherwise
     QrBool32    gpuTimingValid;
     float       gpuFrameMs;
     float       gpuPassMs[QR_GPU_PASS_COUNT];
