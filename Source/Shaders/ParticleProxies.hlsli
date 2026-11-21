@@ -287,10 +287,8 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
     if (proxy.gain < 0.0)
     {
         const float3 gamma = pow(vertexColor.rgb, (float3)2.2);
-        const float adaptedLum = max(0.0, particleTonemapping[0].adaptedLuminance);
-        const float exposure = adaptedLum > 0.0
-            ? adaptedLum * exp2(2.0 - particleTonemapping[0].tmExposureBias)
-            : 1.0;
+        const float lumAverage = max(0.0, particleTonemapping[0].avgLuminance);
+        const float exposure = lumAverage > 0.0 ? 1.0 / (9.6 * lumAverage) : 0.0;
         rgb = gamma * texel.rgb * exposure;
     }
     else
