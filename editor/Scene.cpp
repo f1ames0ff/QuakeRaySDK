@@ -1043,6 +1043,135 @@ uint32_t ResolveSurfaceCluster(const EditorScene &scene, const float centroid[3]
     return 0;
 }
 
+bool IsHiddenBspFaceTexture(const std::string &name)
+{
+    return name == "trigger" || name == "clip" || name == "skip" || name == "hint";
+}
+
+// `trigger_*` submodels carry invisible gameplay brush faces (`trigger` and occasionally switches
+// merged into the trigger brush) that the game engine never draws in the scene.
+std::vector<uint8_t> BuildHiddenBspFaceMask(const std::vector<uint8_t> &bytes,
+                                            const BspLump &modelLump,
+                                            const std::vector<BspEntity> &entities, size_t faceCount)
+{
+    std::vector<uint8_t> hidden(faceCount, 0);
+
+    if (!LumpFits(modelLump, bytes.size(), 64))
+    {
+        return hidden;
+    }
+
+    const size_t modelCount = modelLump.length / 64;
+
+    for (const BspEntity &entity : entities)
+    {
+        if (entity.Value("classname").compare(0, 8, "trigger_") != 0)
+        {
+            continue;
+        }
+
+        const std::string &modelName = entity.Value("model");
+
+        if (modelName.size() < 2 || modelName[0] != '*')
+        {
+            continue;
+        }
+
+        const int modelIndex = std::atoi(modelName.c_str() + 1);
+
+        if (modelIndex <= 0 || size_t(modelIndex) >= modelCount)
+        {
+            continue;
+        }
+
+        const size_t modelOffset = modelLump.offset + size_t(modelIndex) * 64;
+        const int32_t firstFace = ReadLittleEndian<int32_t>(bytes, modelOffset + 56);
+        const int32_t numFaces = ReadLittleEndian<int32_t>(bytes, modelOffset + 60);
+
+        if (numFaces <= 0)
+        {
+            continue;
+        }
+
+        const int64_t startFace = std::max<int64_t>(firstFace, 0);
+        const int64_t endFace = std::min<int64_t>(int64_t(firstFace) + numFaces, int64_t(faceCount));
+
+        for (int64_t face = startFace; face < endFace; face++)
+        {
+            hidden[size_t(face)] = 1;
+        }
+    }
+
+    return hidden;
+}
+
+bool ResolveBspFaceTexture(const BspTexInfo *texInfo, const std::vector<EditorTexture> &textures,
+                           const std::vector<MipTexture> &mipTextures, int32_t &outTextureIndex,
+                           std::string &outTextureName)
+{
+    outTextureIndex = -1;
+    outTextureName = "notex";
+
+    if (texInfo != nullptr && texInfo->miptex >= 0)
+    {
+        const size_t miptex = size_t(texInfo->miptex);
+
+        if (miptex < textures.size() && textures[miptex].width > 0)
+        {
+            outTextureIndex = texInfo->miptex;
+            outTextureName = textures[miptex].name;
+        }
+        else if (miptex < mipTextures.size() && !mipTextures[miptex].name.empty())
+        {
+            outTextureName = mipTextures[miptex].name;
+        }
+    }
+
+    return !IsHiddenBspFaceTexture(outTextureName);
+}
+
+// Matches BuildSurfaceDisplayList in Quake/r_brush.c: normal BSP surfaces divide by the miptex's
+// own pixel dimensions, while liquid/teleport warp surfaces omit texInfo offsets and divide by 128.
+QrFloat2D ComputeBspTexCoord(const float position[3], const BspTexInfo *texInfo,
+                             EditorSurfaceKind surfaceKind,
+                             const std::vector<EditorTexture> &textures, int32_t textureIndex)
+{
+    if (texInfo == nullptr)
+    {
+        return { { 0.0f, 0.0f } };
+    }
+
+    const bool isWarp = surfaceKind == EditorSurfaceKind::Water ||
+                        surfaceKind == EditorSurfaceKind::Slime ||
+                        surfaceKind == EditorSurfaceKind::Lava ||
+                        surfaceKind == EditorSurfaceKind::Teleport;
+
+    if (isWarp)
+    {
+        const float u = position[0] * texInfo->u[0] + position[1] * texInfo->u[1] +
+                        position[2] * texInfo->u[2];
+        const float v = position[0] * texInfo->v[0] + position[1] * texInfo->v[1] +
+                        position[2] * texInfo->v[2];
+        return { { u / 128.0f, v / 128.0f } };
+    }
+
+    float width = 64.0f;
+    float height = 64.0f;
+
+    if (textureIndex >= 0 && size_t(textureIndex) < textures.size())
+    {
+        const EditorTexture &texture = textures[size_t(textureIndex)];
+
+        if (texture.width > 0 && texture.height > 0)
+        {
+            width = float(texture.width);
+            height = float(texture.height);
+        }
+    }
+
+    return { { Dot(position, texInfo->u) / width, Dot(position, texInfo->v) / height } };
+}
+
 }
 
 void SetEditorLightIntensity(EditorLight &light, float intensity)
@@ -1292,6 +1421,9 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         faces[i].texInfo = ReadLittleEndian<int16_t>(bytes, offset + 10);
     }
 
+    const std::vector<uint8_t> hiddenFaces =
+        BuildHiddenBspFaceMask(bytes, lumps[14], entities, faceCount);
+
     for (size_t i = 0; i < edgeCount; i++)
     {
         const size_t offset = lumps[12].offset + i * 4;
@@ -1386,7 +1518,7 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
     {
         const BspFace &face = faces[faceIndex];
 
-        if (face.edgeCount < 3 || face.firstEdge < 0)
+        if (face.edgeCount < 3 || face.firstEdge < 0 || hiddenFaces[faceIndex] != 0)
         {
             continue;
         }
@@ -1459,8 +1591,9 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
 
             for (int axis = 0; axis < 3; axis++)
             {
-                edge0[axis] = polygon[3 + axis] - polygon[axis];
-                edge1[axis] = polygon[6 + axis] - polygon[axis];
+                // Reverse winding matches vkquake-rt so edge0 x edge1 points along the front normal.
+                edge0[axis] = polygon[6 + axis] - polygon[axis];
+                edge1[axis] = polygon[3 + axis] - polygon[axis];
             }
 
             faceNormal[0] = edge0[1] * edge1[2] - edge0[2] * edge1[1];
@@ -1482,20 +1615,11 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         }
 
         int32_t textureIndex = -1;
-        std::string textureName = "notex";
+        std::string textureName;
 
-        if (texInfo != nullptr && texInfo->miptex >= 0 &&
-            size_t(texInfo->miptex) < scene.textures.size() &&
-            scene.textures[size_t(texInfo->miptex)].width > 0)
+        if (!ResolveBspFaceTexture(texInfo, scene.textures, mipTextures, textureIndex, textureName))
         {
-            textureIndex = texInfo->miptex;
-            textureName = scene.textures[size_t(textureIndex)].name;
-        }
-        else if (texInfo != nullptr && texInfo->miptex >= 0 &&
-                 size_t(texInfo->miptex) < mipTextures.size() &&
-                 !mipTextures[size_t(texInfo->miptex)].name.empty())
-        {
-            textureName = mipTextures[size_t(texInfo->miptex)].name;
+            continue;
         }
 
         EditorSurface &surface = surfaceForTexture(textureName, textureIndex);
@@ -1530,13 +1654,8 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
         for (size_t corner = 0; corner + 2 < polygon.size(); corner += 3)
         {
             QrFloat3D position = { polygon[corner + 0], polygon[corner + 1], polygon[corner + 2] };
-            QrFloat2D texCoord = { 0.0f, 0.0f };
-
-            if (texInfo != nullptr)
-            {
-                texCoord.data[0] = Dot(&polygon[corner], texInfo->u) / 32.0f;
-                texCoord.data[1] = Dot(&polygon[corner], texInfo->v) / 32.0f;
-            }
+            const QrFloat2D texCoord = ComputeBspTexCoord(&polygon[corner], texInfo, surface.kind,
+                                                          scene.textures, textureIndex);
 
             lightFace.positions.push_back(position);
             lightFace.texCoords.push_back(texCoord);
@@ -1546,11 +1665,15 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
 
         for (size_t corner = 1; corner + 1 < polygon.size() / 3; corner++)
         {
-            const size_t sourceCorners[3] = { 0, corner, corner + 1 };
+            // Quake BSP face polygons wind clockwise from the front; reverse the fan to match
+            // vkquake-rt's RT_WriteFanIndices (i, i - 1, 0) so cross(v1 - v0, v2 - v0) faces outward.
+            const size_t sourceCorners[3] = { corner + 1, corner, 0 };
 
             for (size_t i = 0; i < 3; i++)
             {
                 const float *position = &polygon[sourceCorners[i] * 3];
+                const QrFloat2D texCoord = ComputeBspTexCoord(position, texInfo, surface.kind,
+                                                              scene.textures, textureIndex);
                 QrVertex vertex = {};
                 vertex.position[0] = position[0];
                 vertex.position[1] = position[1];
@@ -1558,12 +1681,8 @@ bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, Edit
                 vertex.normal[0] = faceNormal[0];
                 vertex.normal[1] = faceNormal[1];
                 vertex.normal[2] = faceNormal[2];
-
-                if (texInfo != nullptr)
-                {
-                    vertex.texCoord[0] = Dot(position, texInfo->u) / 32.0f;
-                    vertex.texCoord[1] = Dot(position, texInfo->v) / 32.0f;
-                }
+                vertex.texCoord[0] = texCoord.data[0];
+                vertex.texCoord[1] = texCoord.data[1];
 
                 vertex.packedColor = 0xFFFFFFFFu;
                 vertex.cluster = surfaceCluster;

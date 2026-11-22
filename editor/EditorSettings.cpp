@@ -292,5 +292,5 @@ float EditorFovYRadians(const EditorRenderSettings &settings, float width, float
 
     // CalcFovy.
     const float x = width / std::tan(fovX * 0.5f * kDegToRad);
-    return 2.0f * (std::atan(height / x) * kDegToRad);
+    return 2.0f * std::atan(height / x);
 }
