@@ -24,6 +24,7 @@
 #include "RhiPostEffectPass.h"
 #include "RhiRtComposePass.h"
 #include "RhiRtDirectPass.h"
+#include "RhiLightShaftVolumePass.h"
 #include "RhiRtGodRaysPass.h"
 #include "RhiRtIndirectPass.h"
 #include "RhiRtPrimaryPass.h"
@@ -84,6 +85,93 @@ const RhiPresentParams PRESENT_PARAMS =
 // The constant buffer is written every frame, and up to two frames (the engine's pacing) plus the
 // swapchain's images can be in flight, so NVRHI keeps this many versions of it.
 const uint32_t PRESENT_PARAMS_VERSIONS = 4;
+
+constexpr uint32_t kLightShaftVolumeSizes[3][3] = {
+    { 256u, 144u,  80u },
+    { 384u, 216u,  96u },
+    { 448u, 256u, 128u },
+};
+
+constexpr float kLightShaftTeleportDistMeters = 6.4f;
+
+struct GodRaysFrameModes
+{
+    bool froxelSunActive = false;
+    bool sunShadowMapNeeded = false;
+    bool lightShaftsActive = false;
+    bool traceReflections = false;
+};
+
+GodRaysFrameModes EvaluateGodRaysFrameModes(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &godRays,
+                                            const ShGlobalUniform *pUniform)
+{
+    const bool debugGodRays =
+        pUniform != nullptr && (pUniform->debugShowFlags & DEBUG_SHOW_FLAG_GOD_RAYS) != 0u;
+    const bool hasSunColor = (godRays.sunColor[0] + godRays.sunColor[1] + godRays.sunColor[2]) > 0.0f;
+
+    GodRaysFrameModes modes;
+    modes.froxelSunActive = godRays.lightShaftSun && hasSunColor;
+    modes.sunShadowMapNeeded = hasSunColor && (!godRays.lightShaftSun || debugGodRays);
+    modes.lightShaftsActive = godRays.lightShaftCount > 0u || modes.froxelSunActive;
+    modes.traceReflections =
+        pUniform != nullptr && pUniform->reflectRefractMaxDepth > 0u && modes.sunShadowMapNeeded;
+    return modes;
+}
+
+template <typename DstShaft>
+void CopySkyLightShafts(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &src, DstShaft *dst)
+{
+    const uint32_t count = std::min(src.lightShaftCount, RhiRtGodRaysPass::MAX_LIGHT_SHAFTS);
+    for (uint32_t i = 0; i < count; i++)
+    {
+        memcpy(dst[i].position, src.lightShafts[i].position, sizeof(dst[i].position));
+        memcpy(dst[i].direction, src.lightShafts[i].direction, sizeof(dst[i].direction));
+        memcpy(dst[i].color, src.lightShafts[i].color, sizeof(dst[i].color));
+        memcpy(dst[i].cone, src.lightShafts[i].cone, sizeof(dst[i].cone));
+        memcpy(dst[i].tangentU, src.lightShafts[i].tangentU, sizeof(dst[i].tangentU));
+        memcpy(dst[i].tangentV, src.lightShafts[i].tangentV, sizeof(dst[i].tangentV));
+        memcpy(dst[i].surface, src.lightShafts[i].surface, sizeof(dst[i].surface));
+        memcpy(dst[i].emission, src.lightShafts[i].emission, sizeof(dst[i].emission));
+        memcpy(dst[i].source, src.lightShafts[i].source, sizeof(dst[i].source));
+    }
+}
+
+void CopyVec3ToVec4(float (&dst)[4], const float (&src)[3])
+{
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = 0.0f;
+}
+
+void PopulateGodRaysParams(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &src,
+                           const float shadowMapVP[16],
+                           float shadowMapDepthScale,
+                           const GodRaysFrameModes &modes,
+                           RhiRtGodRaysPass::Params &dst)
+{
+    memcpy(dst.sunDirection, src.sunDirection, sizeof(dst.sunDirection));
+    memcpy(dst.sunColor, src.sunColor, sizeof(dst.sunColor));
+    CopyVec3ToVec4(dst.worldCenter, src.worldCenter);
+    CopyVec3ToVec4(dst.worldHalfSizeInv, src.worldHalfSizeInv);
+    memcpy(dst.shadowMapVP, shadowMapVP, sizeof(dst.shadowMapVP));
+    dst.shadowMapDepthScale = shadowMapDepthScale;
+    dst.godRaysIntensity = modes.sunShadowMapNeeded ? src.intensity : 0.0f;
+    dst.godRaysEccentricity = src.eccentricity;
+    dst.sunStepScale = src.sunStepScale;
+    dst.godRaysEnabled = 1;
+    dst.lightShaftCount = modes.lightShaftsActive ? std::max(1u, src.lightShaftCount) : 0u;
+    dst.lightShaftIntensity = src.lightShaftIntensity;
+    dst.lightShaftSteps = src.lightShaftSteps;
+
+    const uint32_t quality = std::max(1u, std::min(src.lightShaftSamples, 3u)) - 1u;
+    dst.accumVolumeSizeX = kLightShaftVolumeSizes[quality][0];
+    dst.accumVolumeSizeY = kLightShaftVolumeSizes[quality][1];
+    dst.accumVolumeSizeZ = kLightShaftVolumeSizes[quality][2];
+    dst.accumDebugMode = src.lightShaftDebug;
+
+    CopySkyLightShafts(src, dst.lightShafts);
+}
 
 }
 
@@ -1361,59 +1449,13 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         // with the raygen gate off it already filtered, so the second call is not due then.
         bool godRaysReflectionsPending = false;
         RhiRtGodRaysPass::Params godRaysParams = {};
-
-        if (godRaysPass != nullptr && godRaysPass->IsCreated() && sky.godRays.hasAabb)
-        {
-            if (!sky.godRays.enabled)
-            {
-                godRaysParams.godRaysIntensity = sky.godRays.intensity;
-                godRaysParams.godRaysEccentricity = sky.godRays.eccentricity;
-                godRaysParams.godRaysEnabled = 0;
-
-                BeginGpuPass(commandList, frameIndex, GPU_PASS_GODRAYS);
-                godRaysPass->RenderInput(commandList, frameIndex, sky.framebuffers, sky.width, sky.height,
-                                         worldUniformBuffer.Get(), godRaysParams, false);
-                EndGpuPass(commandList, frameIndex, GPU_PASS_GODRAYS);
-            }
-            else if (shadowMapPass != nullptr && shadowMapPass->IsCreated())
-            {
-                BeginGpuPass(commandList, frameIndex, GPU_PASS_GODRAYS);
-                RhiShadowMapPass::GeometryBuffers geometry;
-                geometry.staticVertices = vertexData.staticVertices;
-                geometry.staticIndices = vertexData.staticIndices;
-                geometry.dynamicVertices = vertexData.dynamicVertices;
-                geometry.dynamicIndices = vertexData.dynamicIndices;
-
-                float shadowMapVP[16];
-                float shadowMapDepthScale = 0.0f;
-
-                if (shadowMapPass->Render(commandList, sky.godRays.shadowLightDirection,
-                                          sky.godRays.aabbMin, sky.godRays.aabbMax,
-                                          sky.godRays.staticCollector, sky.godRays.dynamicCollector,
-                                          geometry, shadowMapVP, &shadowMapDepthScale))
-                {
-                    memcpy(godRaysParams.sunDirection, sky.godRays.sunDirection,
-                           sizeof(godRaysParams.sunDirection));
-                    memcpy(godRaysParams.sunColor, sky.godRays.sunColor, sizeof(godRaysParams.sunColor));
-                    memcpy(godRaysParams.worldCenter, sky.godRays.worldCenter,
-                           sizeof(godRaysParams.worldCenter));
-                    memcpy(godRaysParams.worldHalfSizeInv, sky.godRays.worldHalfSizeInv,
-                           sizeof(godRaysParams.worldHalfSizeInv));
-                    memcpy(godRaysParams.shadowMapVP, shadowMapVP, sizeof(godRaysParams.shadowMapVP));
-                    godRaysParams.shadowMapDepthScale = shadowMapDepthScale;
-                    godRaysParams.godRaysIntensity = sky.godRays.intensity;
-                    godRaysParams.godRaysEccentricity = sky.godRays.eccentricity;
-                    godRaysParams.godRaysEnabled = 1;
-
-                    godRaysReflectionsPending = godRaysPass->RenderInput(
-                        commandList, frameIndex, sky.framebuffers, sky.width, sky.height,
-                        worldUniformBuffer.Get(), godRaysParams,
-                        uniform != nullptr && uniform->reflectRefractMaxDepth > 0);
-                }
-
-                EndGpuPass(commandList, frameIndex, GPU_PASS_GODRAYS);
-            }
-        }
+        RhiShadowMapPass::GeometryBuffers shadowGeometry;
+        shadowGeometry.staticVertices = vertexData.staticVertices;
+        shadowGeometry.staticIndices = vertexData.staticIndices;
+        shadowGeometry.dynamicVertices = vertexData.dynamicVertices;
+        shadowGeometry.dynamicIndices = vertexData.dynamicIndices;
+        godRaysReflectionsPending = RecordGodRaysAndLightShafts(
+            commandList, frameIndex, sky, uniform, shadowGeometry, godRaysParams);
 
         // The Q2 reflect/refract pass (A5.3), on the same list after the primary and the god-rays
         // input trace and before the reproject - the legacy order (VulkanDevice.cpp:901 -> :909-1028
@@ -2768,4 +2810,185 @@ void NvrhiFrameSkeleton::DestroySwapchainResources()
 
     swapchainFramebuffers.clear();
     swapchainTextures.clear();
+}
+
+bool NvrhiFrameSkeleton::UpdateLightShaftHistoryValid(const ShGlobalUniform *pUniform,
+                                                      bool temporalEnabled,
+                                                      float outPrevCamera[4])
+{
+    memset(outPrevCamera, 0, sizeof(float) * 4);
+    const bool passReset =
+        lightShaftVolumePass != nullptr && lightShaftVolumePass->ConsumeHistoryReset();
+    if (pUniform == nullptr)
+    {
+        return false;
+    }
+
+    const float *previousCamera =
+        lightShaftPrevCameraValid ? lightShaftPrevCamera : pUniform->cameraPosition;
+    memcpy(outPrevCamera, previousCamera, sizeof(lightShaftPrevCamera));
+
+    const float dx = pUniform->cameraPosition[0] - lightShaftPrevCamera[0];
+    const float dy = pUniform->cameraPosition[1] - lightShaftPrevCamera[1];
+    const float dz = pUniform->cameraPosition[2] - lightShaftPrevCamera[2];
+    const bool withinJumpLimit = (dx * dx + dy * dy + dz * dz) <
+                                 (kLightShaftTeleportDistMeters * kLightShaftTeleportDistMeters);
+    const bool valid =
+        temporalEnabled && lightShaftPrevCameraValid && !passReset && withinJumpLimit;
+
+    memcpy(lightShaftPrevCamera, pUniform->cameraPosition, sizeof(lightShaftPrevCamera));
+    lightShaftPrevCameraValid = true;
+    return valid;
+}
+
+bool NvrhiFrameSkeleton::TryRenderGodRaysShadowMap(nvrhi::ICommandList *pCommandList,
+                                                   const SkyFrameInputs::GodRays &godRays,
+                                                   const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
+                                                   float shadowMapVP[16],
+                                                   float &shadowMapDepthScale) const
+{
+    if (shadowMapPass == nullptr || !shadowMapPass->IsCreated())
+    {
+        return false;
+    }
+
+    return shadowMapPass->Render(
+        pCommandList, godRays.shadowLightDirection,
+        godRays.aabbMin, godRays.aabbMax,
+        godRays.staticCollector, godRays.dynamicCollector,
+        shadowGeometry, shadowMapVP, &shadowMapDepthScale);
+}
+
+bool NvrhiFrameSkeleton::PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *pCommandList,
+                                                            uint32_t frameIndex,
+                                                            const SkyFrameInputs::GodRays &godRays,
+                                                            const ShGlobalUniform *pUniform,
+                                                            bool froxelSunActive,
+                                                            RhiRtGodRaysPass::Params &godRaysParams)
+{
+    const bool lightShaftsActive = godRaysParams.lightShaftCount > 0u;
+    if (!lightShaftsActive || lightShaftVolumePass == nullptr || !lightShaftVolumePass->IsCreated())
+    {
+        godRaysPass->SetLightShaftVolume(nullptr, nullptr, nullptr);
+        godRaysParams.lightShaftCount = 0u;
+        return false;
+    }
+
+    const uint32_t quality = std::max(1u, std::min(godRays.lightShaftSamples, 3u)) - 1u;
+    RhiLightShaftVolumePass::Params volumeParams = {};
+    volumeParams.lightShaftCount = godRays.lightShaftCount;
+    volumeParams.lightShaftSamples = godRays.lightShaftSamples;
+    volumeParams.volumeSizeX = kLightShaftVolumeSizes[quality][0];
+    volumeParams.volumeSizeY = kLightShaftVolumeSizes[quality][1];
+    volumeParams.volumeSizeZ = kLightShaftVolumeSizes[quality][2];
+    volumeParams.debugMode = godRays.lightShaftDebug;
+    volumeParams.rayBudget = godRays.lightShaftRayBudget;
+    volumeParams.lightListCapacity = RhiLightShaftVolumePass::LIGHT_LIST_CAPACITY;
+    volumeParams.tilesX =
+        (volumeParams.volumeSizeX + RhiLightShaftVolumePass::LIGHT_LIST_TILE - 1u) /
+        RhiLightShaftVolumePass::LIGHT_LIST_TILE;
+    volumeParams.tilesY =
+        (volumeParams.volumeSizeY + RhiLightShaftVolumePass::LIGHT_LIST_TILE - 1u) /
+        RhiLightShaftVolumePass::LIGHT_LIST_TILE;
+    volumeParams.zBins = RhiLightShaftVolumePass::LIGHT_LIST_Z_BINS;
+    volumeParams.lightListClusterCount = volumeParams.tilesX * volumeParams.tilesY * volumeParams.zBins;
+    volumeParams.mediumSigma = godRays.lightShaftDensity;
+    volumeParams.mediumAlbedo = godRays.lightShaftAlbedo;
+    volumeParams.mediumLocalScale = godRays.lightShaftLocalFogScale;
+    volumeParams.mediumHistoryWeight = godRays.lightShaftHistoryWeight;
+    volumeParams.sunEnabled = froxelSunActive ? 1u : 0u;
+    volumeParams.temporalEnabled = godRays.lightShaftTemporal ? 1u : 0u;
+    CopyVec3ToVec4(volumeParams.worldCenter, godRays.worldCenter);
+    CopyVec3ToVec4(volumeParams.worldHalfSizeInv, godRays.worldHalfSizeInv);
+    memcpy(volumeParams.sunDirection, godRays.sunDirection, sizeof(volumeParams.sunDirection));
+    memcpy(volumeParams.sunColor, godRays.sunColor, sizeof(volumeParams.sunColor));
+    CopyVec3ToVec4(volumeParams.mediumEmissive, godRays.lightShaftEmissive);
+    volumeParams.historyValid = UpdateLightShaftHistoryValid(
+        pUniform, godRays.lightShaftTemporal, volumeParams.prevCameraPosition) ? 1u : 0u;
+    CopySkyLightShafts(godRays, volumeParams.lightShafts);
+
+    nvrhi::BindingSetHandle volumeLightSet =
+        rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex) : nullptr;
+    if (lightShaftVolumePass->Render(
+            pCommandList, frameIndex, worldUniformBuffer.Get(),
+            accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
+            volumeLightSet.Get(), volumeParams))
+    {
+        godRaysPass->SetLightShaftVolume(lightShaftVolumePass->GetTexture(frameIndex),
+                                         lightShaftVolumePass->GetInjectionTexture(frameIndex),
+                                         lightShaftVolumePass->GetSampler());
+        return true;
+    }
+
+    godRaysPass->SetLightShaftVolume(nullptr, nullptr, nullptr);
+    godRaysParams.lightShaftCount = 0u;
+    return false;
+}
+
+bool NvrhiFrameSkeleton::RecordGodRaysAndLightShafts(nvrhi::ICommandList *pCommandList,
+                                                      uint32_t frameIndex,
+                                                      const SkyFrameInputs &sky,
+                                                      const ShGlobalUniform *pUniform,
+                                                      const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
+                                                      RhiRtGodRaysPass::Params &godRaysParams)
+{
+    if (godRaysPass == nullptr || !godRaysPass->IsCreated() || !sky.godRays.hasAabb)
+    {
+        return false;
+    }
+
+    if (!sky.godRays.enabled)
+    {
+        godRaysPass->SetLightShaftVolume(nullptr, nullptr, nullptr);
+        godRaysParams.godRaysIntensity = sky.godRays.intensity;
+        godRaysParams.godRaysEccentricity = sky.godRays.eccentricity;
+        godRaysParams.godRaysEnabled = 0;
+
+        BeginGpuPass(pCommandList, frameIndex, GPU_PASS_GODRAYS);
+        godRaysPass->RenderInput(pCommandList, frameIndex, sky.framebuffers, sky.width, sky.height,
+                                 worldUniformBuffer.Get(), godRaysParams, false);
+        EndGpuPass(pCommandList, frameIndex, GPU_PASS_GODRAYS);
+        return false;
+    }
+
+    const GodRaysFrameModes modes = EvaluateGodRaysFrameModes(sky.godRays, pUniform);
+    if (modes.lightShaftsActive && rtDirectPass != nullptr && pUniform != nullptr)
+    {
+        rtDirectPass->EnsureLightSet(pCommandList, frameIndex, pUniform->frameId,
+                                     pUniform->q2LightStatsMode);
+    }
+
+    BeginGpuPass(pCommandList, frameIndex, GPU_PASS_GODRAYS);
+
+    float shadowMapVP[16] = {};
+    float shadowMapDepthScale = 0.0f;
+    const bool shadowRendered = modes.sunShadowMapNeeded &&
+                                TryRenderGodRaysShadowMap(pCommandList, sky.godRays, shadowGeometry,
+                                                          shadowMapVP, shadowMapDepthScale);
+
+    bool reflectionsPending = false;
+    if (!shadowRendered && !modes.lightShaftsActive)
+    {
+        godRaysPass->SetLightShaftVolume(nullptr, nullptr, nullptr);
+        godRaysParams.godRaysIntensity = 0.0f;
+        godRaysParams.godRaysEccentricity = sky.godRays.eccentricity;
+        godRaysParams.godRaysEnabled = 0;
+        godRaysPass->RenderInput(pCommandList, frameIndex, sky.framebuffers, sky.width, sky.height,
+                                 worldUniformBuffer.Get(), godRaysParams, false);
+    }
+    else
+    {
+        GodRaysFrameModes effectiveModes = modes;
+        effectiveModes.sunShadowMapNeeded = shadowRendered;
+        effectiveModes.traceReflections = modes.traceReflections && shadowRendered;
+        PopulateGodRaysParams(sky.godRays, shadowMapVP, shadowMapDepthScale, effectiveModes, godRaysParams);
+        PrepareLightShaftVolumeForGodRays(pCommandList, frameIndex, sky.godRays, pUniform,
+                                          effectiveModes.froxelSunActive, godRaysParams);
+        reflectionsPending = godRaysPass->RenderInput(
+            pCommandList, frameIndex, sky.framebuffers, sky.width, sky.height,
+            worldUniformBuffer.Get(), godRaysParams, effectiveModes.traceReflections);
+    }
+
+    EndGpuPass(pCommandList, frameIndex, GPU_PASS_GODRAYS);
+    return reflectionsPending;
 }

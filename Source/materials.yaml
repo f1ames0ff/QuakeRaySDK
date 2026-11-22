@@ -89,6 +89,16 @@
 #             light_focus_soft: 8
 #             light_projector: true
 #
+# `light_shafts: true` draws this surface's light as volumetric shafts in the air.
+# It needs `is_light`; the shafts follow the light's colour, its whole emitting
+# area and its cone (`light_focus`, or a hemisphere when the material authors
+# none), and a light without the key stays invisible in the air.
+# `light_shafts_power` (default 1) scales the transparency/brightness of this
+# material's shafts without shrinking their length (`0` turns them off).
+# `light_shafts_distance` (default 0 = auto, or `0.5..25` m) overrides how far
+# the shafts extend; `light_shafts_falloff` (`0..4`, default `1`) shapes how
+# quickly they fade with distance (`0` holds nearly steady until the end fade).
+#
 # `texture_overlay: textures/foo_grunge.png` paints over the base texture:
 # its RGB lands where its alpha is set, while `base_factor` still dims or
 # lifts the base underneath. The overlay's alpha is only the paint's

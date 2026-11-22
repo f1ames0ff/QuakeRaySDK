@@ -72,6 +72,7 @@ class RhiRasterOverlayPass;
 class RhiRasterSkyPass;
 class RhiRtComposePass;
 class RhiRtDirectPass;
+class RhiLightShaftVolumePass;
 class RhiRtGodRaysPass;
 class RhiRtIndirectPass;
 class RhiRtPrimaryPass;
@@ -223,6 +224,7 @@ private:
                         const QrayGpuRequirements &gpuRequirements);
     void CreateDevice(const QrayGpuRequirements &gpuRequirements);
     void CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements);
+    void InitGodRaysAndLightShaftPasses(const QrInstanceCreateInfo *info);
     void CreateSyncPrimitives();
     static VkSurfaceKHR GetSurfaceFromUser(VkInstance instance, const QrInstanceCreateInfo &info);
     void ValidateCreateInfo(const QrInstanceCreateInfo *pInfo);
@@ -344,6 +346,7 @@ private:
     std::shared_ptr<RhiBloomPass>           rhiBloomPass;
     std::shared_ptr<RhiShadowMapPass>       rhiShadowMapPass;
     std::shared_ptr<RhiRtGodRaysPass>       rhiRtGodRaysPass;
+    std::shared_ptr<RhiLightShaftVolumePass> rhiLightShaftVolumePass;
 
     std::shared_ptr<RhiRtReflRefrPass>      rhiRtReflRefrPass;
 

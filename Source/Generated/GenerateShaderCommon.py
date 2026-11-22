@@ -902,7 +902,7 @@ FRAMEBUFFERS = {
     "ScreenEmisRT"                      : (PACKED_11, CHANNELS_RGB,  0),
     "ScreenEmission"                    : (PACKED_11, CHANNELS_RGB,  FRAMEBUF_FLAGS_IS_ATTACHMENT),
     "GodRays"                           : (PACKED_11, CHANNELS_RGB,  FRAMEBUF_FLAGS_FORCE_SIZE_1_2),
-    "GodRaysFiltered"                   : (PACKED_11, CHANNELS_RGB,  0),
+    "GodRaysFiltered"                   : (FLOAT16,   CHANNELS_RGBA, 0),
     "BloomInput"                        : (PACKED_11, CHANNELS_RGB,  0),
     "Bloom_Mip1"                        : (PACKED_11, CHANNELS_RGB,  FRAMEBUF_FLAGS_FORCE_SIZE_1_2  | FRAMEBUF_FLAGS_BILINEAR_SAMPLER),
     "Bloom_Mip2"                        : (PACKED_11, CHANNELS_RGB,  FRAMEBUF_FLAGS_FORCE_SIZE_1_4  | FRAMEBUF_FLAGS_BILINEAR_SAMPLER),

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -34,6 +34,8 @@
 #include "../RasterizedDataCollector.h"
 #include "RhiCloudsPass.h"
 #include "RhiProceduralSkyPass.h"
+#include "RhiRtGodRaysPass.h"
+#include "RhiShadowMapPass.h"
 
 namespace qray
 {
@@ -49,6 +51,7 @@ class RhiRasterOverlayPass;
 class RhiRasterSkyPass;
 class RhiRtComposePass;
 class RhiRtDirectPass;
+class RhiLightShaftVolumePass;
 class RhiRtGodRaysPass;
 class RhiRtIndirectPass;
 class RhiRtPrimaryPass;
@@ -59,6 +62,7 @@ class RhiUiPass;
 class Swapchain;
 class Tonemapping;
 class VertexCollector;
+struct ShGlobalUniform;
 
 namespace rhi
 {
@@ -202,12 +206,40 @@ public:
         // takes it from the shadow pass's render of the same frame. Everything runs only under
         // 'hasAabb' (the legacy guard); with 'enabled' false the skeleton still records the clear
         // path so image 64 is never stale.
+        struct GodRaysLightShaft
+        {
+            float position[4] = {};
+            float direction[4] = {};
+            float color[4] = {};
+            float cone[4] = {};
+            float tangentU[4] = {};
+            float tangentV[4] = {};
+            float surface[4] = {};
+            float emission[4] = {};
+            float source[4] = {};
+        };
+
         struct GodRays
         {
             bool enabled = false;                   // godRaysOn: the final switch, not the cvar
             bool hasAabb = false;                   // scene->HasAABB()
             float intensity = 0.0f;
             float eccentricity = 0.75f;
+            float sunStepScale = 1.0f;
+            float lightShaftIntensity = 0.0f;
+            float lightShaftDensity = 0.002f;
+            float lightShaftAlbedo = 1.0f;
+            float lightShaftLocalFogScale = 1.0f;
+            float lightShaftEmissive[3] = {};
+            float lightShaftHistoryWeight = 0.85f;
+            bool lightShaftTemporal = true;
+            bool lightShaftSun = false;
+            uint32_t lightShaftDebug = 0;
+            uint32_t lightShaftRayBudget = 1048576;
+            uint32_t lightShaftSteps = 8;
+            uint32_t lightShaftSamples = 1;
+            uint32_t lightShaftCount = 0;
+            GodRaysLightShaft lightShafts[64] = {};
             float aabbMin[3] = {};
             float aabbMax[3] = {};
             float shadowLightDirection[3] = {};     // the shadow map's from-sun light direction
@@ -417,6 +449,8 @@ public:
                                 PrintFunction pfnPrint);
     ~NvrhiFrameSkeleton() override;
 
+    void SetLightShaftVolumePass(RhiLightShaftVolumePass *pPass) { lightShaftVolumePass = pPass; }
+
     NvrhiFrameSkeleton(const NvrhiFrameSkeleton &other) = delete;
     NvrhiFrameSkeleton(NvrhiFrameSkeleton &&other) noexcept = delete;
     NvrhiFrameSkeleton &operator=(const NvrhiFrameSkeleton &other) = delete;
@@ -518,6 +552,25 @@ private:
     void CompleteFrameReadback(uint32_t frameIndex);
     void DestroyFrameReadback();
     void LogFallbackSlotsIfNeeded();
+
+    bool UpdateLightShaftHistoryValid(const ShGlobalUniform *pUniform, bool temporalEnabled, float outPrevCamera[4]);
+    bool TryRenderGodRaysShadowMap(nvrhi::ICommandList *pCommandList,
+                                   const SkyFrameInputs::GodRays &godRays,
+                                   const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
+                                   float shadowMapVP[16],
+                                   float &shadowMapDepthScale) const;
+    bool PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *pCommandList,
+                                           uint32_t frameIndex,
+                                           const SkyFrameInputs::GodRays &godRays,
+                                           const ShGlobalUniform *pUniform,
+                                           bool froxelSunActive,
+                                           RhiRtGodRaysPass::Params &godRaysParams);
+    bool RecordGodRaysAndLightShafts(nvrhi::ICommandList *pCommandList,
+                                     uint32_t frameIndex,
+                                     const SkyFrameInputs &sky,
+                                     const ShGlobalUniform *pUniform,
+                                     const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
+                                     RhiRtGodRaysPass::Params &godRaysParams);
 
     nvrhi::vulkan::IDevice *device;
     PrintFunction print;
@@ -655,6 +708,7 @@ private:
     // is drawn without shafts.
     RhiShadowMapPass *shadowMapPass = nullptr;
     RhiRtGodRaysPass *godRaysPass = nullptr;
+    RhiLightShaftVolumePass *lightShaftVolumePass = nullptr;
 
     // The 2D-UI pass (RhiUiPass, RHI/RhiUiPass.h), driven in the traced chain once the compose ran:
     // it draws the frame's SWAPCHAIN overlay into the compose's upscaled image. Not owned; null
@@ -787,6 +841,8 @@ private:
     float gpuFrameMs = 0.0f;
     float gpuPassMs[GPU_PASS_COUNT] = {};
     bool gpuTimingValid = false;
+    float lightShaftPrevCamera[3] = {};
+    bool lightShaftPrevCameraValid = false;
 
     // Set after the one-time warning that there is no ALBEDO wrap to present.
     bool warnedMissingAlbedo = false;
