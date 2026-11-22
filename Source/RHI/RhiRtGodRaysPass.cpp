@@ -344,8 +344,7 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
     }
 
     if (!LoadShader(TRACE_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, traceShader) ||
-        !LoadShader(FILTER_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, filterShader) ||
-        !LoadShader(ACCUM_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, accumShader))
+        !LoadShader(FILTER_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, filterShader))
     {
         return false;
     }
@@ -379,8 +378,6 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         device, TRACE_FRAMEBUFFER_BINDINGS, TRACE_FRAMEBUFFER_BINDING_COUNT);
     filterFramebufferLayout = CreateFramebufferLayout(
         device, FILTER_FRAMEBUFFER_BINDINGS, FILTER_FRAMEBUFFER_BINDING_COUNT);
-    accumFramebufferLayout = CreateFramebufferLayout(
-        device, ACCUM_FRAMEBUFFER_BINDINGS, ACCUM_FRAMEBUFFER_BINDING_COUNT);
 
     // Set 3: the engine's global uniform at raw binding 0
     // (ShaderCommonHLSL.hlsli:22 spells it with BINDING_GLOBAL_UNIFORM and DESC_SET_GLOBAL_UNIFORM).
@@ -401,44 +398,6 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(BINDING_BLUE_NOISE));
 
         blueNoiseLayout = device->createBindingLayout(desc);
-    }
-
-    // Set 6: the froxel light-shaft volume and its sampler.
-    {
-        nvrhi::BindingLayoutDesc desc;
-        desc.visibility = nvrhi::ShaderType::Compute;
-        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
-                                   .setShaderResourceOffset(0)
-                                   .setSamplerOffset(0));
-        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
-        desc.addItem(nvrhi::BindingLayoutItem::Sampler(1));
-        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2));
-
-        lightShaftVolumeLayout = device->createBindingLayout(desc);
-    }
-
-    // Set 7: the screen-space shaft history (previous SRV, current UAV and sampler).
-    {
-        nvrhi::BindingLayoutDesc desc;
-        desc.visibility = nvrhi::ShaderType::Compute;
-        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
-                                   .setShaderResourceOffset(0)
-                                   .setUnorderedAccessViewOffset(0)
-                                   .setSamplerOffset(0));
-        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
-        desc.addItem(nvrhi::BindingLayoutItem::Texture_UAV(1));
-        desc.addItem(nvrhi::BindingLayoutItem::Sampler(2));
-
-        lightShaftHistoryLayout = device->createBindingLayout(desc);
-    }
-
-    {
-        nvrhi::BindingLayoutDesc desc;
-        desc.visibility = nvrhi::ShaderType::Compute;
-        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setShaderResourceOffset(0));
-        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
-
-        lightShaftFilterLayout = device->createBindingLayout(desc);
     }
 
     // The trace's push constant. The pinned backend skips a PushConstants item when it builds the
@@ -465,50 +424,37 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
     }
 
     if (shadowLayout == nullptr || paramsLayout == nullptr || traceFramebufferLayout == nullptr ||
-        filterFramebufferLayout == nullptr || accumFramebufferLayout == nullptr ||
-        uniformLayout == nullptr || blueNoiseLayout == nullptr ||
-        lightShaftVolumeLayout == nullptr || lightShaftHistoryLayout == nullptr ||
-        lightShaftFilterLayout == nullptr ||
+        filterFramebufferLayout == nullptr || uniformLayout == nullptr || blueNoiseLayout == nullptr ||
         pushConstantLayout == nullptr || emptyLayout == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a god-rays pass binding layout");
         return false;
     }
 
+    if (!CreateLightShaftLayoutsAndFallback() || !CreateTraceAndFilterPipelines() || !CreateLightShaftPipelines())
     {
-        nvrhi::TextureDesc desc;
-        desc.dimension = nvrhi::TextureDimension::Texture3D;
-        desc.format = nvrhi::Format::RGBA16_FLOAT;
-        desc.width = 1;
-        desc.height = 1;
-        desc.depth = 1;
-        desc.mipLevels = 1;
-        desc.isUAV = true;
-        desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
-        desc.keepInitialState = true;
-        lightShaftVolumeFallback = rhi::createTexture(device, desc, "RhiRtGodRaysPass light-shaft volume fallback");
-        lightShaftVolumeFallbackSampler = rhi::createSampler(
-            device, nvrhi::SamplerDesc()
-                        .setMinFilter(true)
-                        .setMagFilter(true)
-                        .setMipFilter(true)
-                        .setAllAddressModes(nvrhi::SamplerAddressMode::Clamp),
-            "RhiRtGodRaysPass light-shaft volume sampler");
-        lightShaftHistorySampler = rhi::createSampler(
-            device, nvrhi::SamplerDesc()
-                        .setMinFilter(true)
-                        .setMagFilter(true)
-                        .setMipFilter(true)
-                        .setAllAddressModes(nvrhi::SamplerAddressMode::Clamp),
-            "RhiRtGodRaysPass light-shaft history sampler");
-        if (lightShaftVolumeFallback == nullptr || lightShaftVolumeFallbackSampler == nullptr ||
-            lightShaftHistorySampler == nullptr)
-        {
-            LogMessage(print, "Warning: RHI: failed to create the god-rays light-shaft volume fallback");
-            return false;
-        }
+        return false;
     }
 
+    // The one empty set the filter binds at its placeholder position.
+    emptySet = device->createBindingSet(nvrhi::BindingSetDesc(), emptyLayout);
+    if (emptySet == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the god-rays pass empty binding set");
+        return false;
+    }
+
+    if (!CreateParamsBuffers())
+    {
+        return false;
+    }
+
+    created = true;
+    return true;
+}
+
+bool RhiRtGodRaysPass::CreateTraceAndFilterPipelines()
+{
     // The trace pipeline, in the engine's set order: 0 shadow, 1 params, 2 framebuffers, 3 uniform,
     // 4 blue noise, 5 the cloud-shadow set, 6 the light-shaft volume, 7 the shaft history. The list
     // order is also the shader's set numbering.
@@ -529,19 +475,6 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         tracePipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass trace");
     }
 
-    {
-        nvrhi::ComputePipelineDesc desc;
-        desc.setComputeShader(accumShader);
-        desc.addBindingLayout(lightShaftVolumeLayout);
-        desc.addBindingLayout(lightShaftHistoryLayout);
-        desc.addBindingLayout(accumFramebufferLayout);
-        desc.addBindingLayout(uniformLayout);
-        desc.addBindingLayout(blueNoiseLayout);
-        desc.addBindingLayout(paramsLayout);
-
-        accumPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass light-shaft accumulation");
-    }
-
     // The filter pipeline: the leading placeholder position (engine set 0, which the blob does not
     // use), params at 1, the framebuffer set at 2, the uniform at 3 and the full-resolution shaft
     // scatter at 4.
@@ -557,31 +490,112 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         filterPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass filter");
     }
 
-    if (tracePipeline == nullptr || filterPipeline == nullptr || accumPipeline == nullptr)
+    if (tracePipeline == nullptr || filterPipeline == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create a god-rays pass compute pipeline");
         return false;
     }
 
-    if (!CreateLightShaftBlurResources())
+    return true;
+}
+
+bool RhiRtGodRaysPass::CreateLightShaftPipelines()
+{
+    if (!LoadShader(ACCUM_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, accumShader))
     {
         return false;
     }
 
-    // The one empty set the filter binds at its placeholder position.
-    emptySet = device->createBindingSet(nvrhi::BindingSetDesc(), emptyLayout);
-    if (emptySet == nullptr)
+    nvrhi::ComputePipelineDesc desc;
+    desc.setComputeShader(accumShader);
+    desc.addBindingLayout(lightShaftVolumeLayout);
+    desc.addBindingLayout(lightShaftHistoryLayout);
+    desc.addBindingLayout(accumFramebufferLayout);
+    desc.addBindingLayout(uniformLayout);
+    desc.addBindingLayout(blueNoiseLayout);
+    desc.addBindingLayout(paramsLayout);
+
+    accumPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass light-shaft accumulation");
+    if (accumPipeline == nullptr)
     {
-        LogMessage(print, "Warning: RHI: failed to create the god-rays pass empty binding set");
+        LogMessage(print, "Warning: RHI: failed to create the light-shaft accumulation pipeline");
         return false;
     }
 
-    if (!CreateParamsBuffers())
+    return CreateLightShaftBlurResources();
+}
+
+bool RhiRtGodRaysPass::CreateLightShaftLayoutsAndFallback()
+{
+    accumFramebufferLayout = CreateFramebufferLayout(
+        device, ACCUM_FRAMEBUFFER_BINDINGS, ACCUM_FRAMEBUFFER_BINDING_COUNT);
+
     {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setSamplerOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Sampler(1));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2));
+        lightShaftVolumeLayout = device->createBindingLayout(desc);
+    }
+
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0)
+                                   .setSamplerOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_UAV(1));
+        desc.addItem(nvrhi::BindingLayoutItem::Sampler(2));
+        lightShaftHistoryLayout = device->createBindingLayout(desc);
+    }
+
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setShaderResourceOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        lightShaftFilterLayout = device->createBindingLayout(desc);
+    }
+
+    if (accumFramebufferLayout == nullptr || lightShaftVolumeLayout == nullptr ||
+        lightShaftHistoryLayout == nullptr || lightShaftFilterLayout == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create a god-rays light-shaft layout");
         return false;
     }
 
-    created = true;
+    nvrhi::TextureDesc desc;
+    desc.dimension = nvrhi::TextureDimension::Texture3D;
+    desc.format = nvrhi::Format::RGBA16_FLOAT;
+    desc.width = 1;
+    desc.height = 1;
+    desc.depth = 1;
+    desc.mipLevels = 1;
+    desc.isUAV = true;
+    desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    desc.keepInitialState = true;
+    lightShaftVolumeFallback = rhi::createTexture(device, desc, "RhiRtGodRaysPass light-shaft volume fallback");
+
+    const nvrhi::SamplerDesc clampLinearDesc = nvrhi::SamplerDesc()
+                                                   .setMinFilter(true)
+                                                   .setMagFilter(true)
+                                                   .setMipFilter(true)
+                                                   .setAllAddressModes(nvrhi::SamplerAddressMode::Clamp);
+    lightShaftVolumeFallbackSampler = rhi::createSampler(device, clampLinearDesc, "RhiRtGodRaysPass light-shaft volume sampler");
+    lightShaftHistorySampler = rhi::createSampler(device, clampLinearDesc, "RhiRtGodRaysPass light-shaft history sampler");
+    if (lightShaftVolumeFallback == nullptr || lightShaftVolumeFallbackSampler == nullptr ||
+        lightShaftHistorySampler == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the god-rays light-shaft volume fallback");
+        return false;
+    }
+
     return true;
 }
 
@@ -1051,6 +1065,16 @@ void RhiRtGodRaysPass::ReleaseLightShaftHistory()
     lightShaftHistoryCleared = false;
 }
 
+bool RhiRtGodRaysPass::PrepareFrameBindings(Target &target,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            nvrhi::IBuffer *pUniformBuffer)
+{
+    return PrepareFramebufferSets(target) &&
+           PrepareUniformSet(target, pUniformBuffer) &&
+           PrepareLightShaftHistory(width, height);
+}
+
 RhiRtGodRaysPass::Target *RhiRtGodRaysPass::PrepareFrame(uint32_t frameIndex,
                                                          const Framebuffers *pFramebuffers,
                                                          uint32_t width,
@@ -1163,8 +1187,7 @@ RhiRtGodRaysPass::Target *RhiRtGodRaysPass::PrepareFrame(uint32_t frameIndex,
         target.height = height;
     }
 
-    if (!PrepareFramebufferSets(target) || !PrepareUniformSet(target, pUniformBuffer) ||
-        !PrepareLightShaftHistory(width, height))
+    if (!PrepareFrameBindings(target, width, height, pUniformBuffer))
     {
         return nullptr;
     }

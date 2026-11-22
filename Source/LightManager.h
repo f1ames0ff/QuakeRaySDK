@@ -181,6 +181,8 @@ private:
     void IncrementCount(const ShLightEncoded &encodedLight);
     void AddLight(uint32_t frameIndex, uint64_t uniqueId, const ShLightEncoded &encodedLight);
     void AddLightShaft(const LightShaft &shaft);
+    void AddDtalGroupLightShafts(const QrDtalGroupUploadInfo &info, const QrDtalMemberUpload *pMembers,
+                                 uint32_t textureIndex);
 
     void FillMatchPrev(uint32_t curFrameIndex, LightArrayIndex lightIndexInCurFrame, UniqueLightID uniqueID, uint32_t ordinal);
 

@@ -501,6 +501,7 @@ private:
     // false when the buffer is not the static constant-buffer wrap the shader's
     // `ConstantBuffer<ShGlobalUniform>` requires.
     bool PrepareUniformSet(Target &target, nvrhi::IBuffer *pUniformBuffer);
+    bool PrepareFrameBindings(Target &target, uint32_t width, uint32_t height, nvrhi::IBuffer *pUniformBuffer);
 
     // Set 6: builds (or rebuilds, when the slot's TLAS changed) the acceleration-structure set.
     bool PrepareLightShaftVolumeSet(Target &target, nvrhi::ICommandList *pCommandList);
@@ -508,6 +509,9 @@ private:
     bool PrepareLightShaftHistory(uint32_t width, uint32_t height);
     bool CreateBlurTargets(uint32_t width, uint32_t height);
     void ReleaseLightShaftHistory();
+    bool CreateLightShaftLayoutsAndFallback();
+    bool CreateTraceAndFilterPipelines();
+    bool CreateLightShaftPipelines();
     bool CreateLightShaftBlurResources();
     bool CreateParamsBuffers();
     void ClearLightShaftScratch(nvrhi::ICommandList *pCommandList);

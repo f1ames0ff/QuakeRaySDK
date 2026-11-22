@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -271,6 +271,175 @@ void FillVolumetricCameraUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &dra
         Matrix::Multiply(gu->volumeViewProj, gu->view, volumeproj);
         Matrix::Inverse(gu->volumeViewProjInv, gu->volumeViewProj);
     }
+}
+
+void PopulateLightShaftSkySettings(const QrDrawFrameSkyParams *pSkyParams,
+                                   NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    out.lightShaftIntensity = 1.0f;
+    out.lightShaftSteps = 12u;
+    out.lightShaftSamples = 1u;
+    out.lightShaftDensity = 0.002f;
+    out.lightShaftAlbedo = 1.0f;
+    out.lightShaftLocalFogScale = 1.0f;
+    out.lightShaftTemporal = false;
+    out.lightShaftSun = false;
+    out.lightShaftDebug = 0u;
+    out.lightShaftRayBudget = 1048576u;
+    if (pSkyParams == nullptr)
+    {
+        return;
+    }
+
+    out.lightShaftIntensity = std::max(pSkyParams->lightShaftsIntensity, 0.0f);
+    const uint32_t res = std::min(pSkyParams->lightShaftsResolution, 2u);
+    out.lightShaftSteps = std::min(16u, 8u + res * 4u);
+    out.lightShaftSamples = 1u + res;
+    out.lightShaftDensity = std::max(pSkyParams->lightShaftsDensity, 0.0f);
+    out.lightShaftAlbedo = std::clamp(pSkyParams->lightShaftsAlbedo, 0.0f, 1.0f);
+    out.lightShaftLocalFogScale = std::max(pSkyParams->lightShaftsLocalFogScale, 0.0f);
+    out.lightShaftTemporal = pSkyParams->lightShaftsTemporal != 0;
+    out.lightShaftSun = pSkyParams->lightShaftsSun != 0;
+    out.lightShaftDebug = std::min(pSkyParams->lightShaftsDebug, 5u);
+    out.lightShaftRayBudget = pSkyParams->lightShaftsRayBudget;
+    for (int k = 0; k < 3; k++)
+    {
+        out.lightShaftEmissive[k] = pSkyParams->lightShaftsEmissive.data[k];
+    }
+}
+
+void CopyLightShaftSources(const LightManager::LightShaft *src,
+                           uint32_t count,
+                           NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        memcpy(out.lightShafts[i].position, src[i].position, sizeof(src[i].position));
+        memcpy(out.lightShafts[i].direction, src[i].direction, sizeof(src[i].direction));
+        memcpy(out.lightShafts[i].color, src[i].color, sizeof(src[i].color));
+        memcpy(out.lightShafts[i].cone, src[i].cone, sizeof(src[i].cone));
+        memcpy(out.lightShafts[i].tangentU, src[i].tangentU, sizeof(src[i].tangentU));
+        memcpy(out.lightShafts[i].tangentV, src[i].tangentV, sizeof(src[i].tangentV));
+        memcpy(out.lightShafts[i].surface, src[i].surface, sizeof(src[i].surface));
+        memcpy(out.lightShafts[i].emission, src[i].emission, sizeof(src[i].emission));
+        memcpy(out.lightShafts[i].source, src[i].source, sizeof(src[i].source));
+    }
+}
+
+void PopulateGodRaysWorldBounds(Scene &scene,
+                                uint32_t frameIndex,
+                                NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    out.hasAabb = scene.HasAABB();
+    if (!out.hasAabb)
+    {
+        return;
+    }
+
+    float aabbMin[3], aabbMax[3];
+    scene.GetAABB(aabbMin, aabbMax);
+    for (int k = 0; k < 3; k++)
+    {
+        const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
+        out.aabbMin[k] = aabbMin[k];
+        out.aabbMax[k] = aabbMax[k];
+        out.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
+        out.worldHalfSizeInv[k] = 1.0f / halfSize;
+    }
+
+    out.staticCollector = scene.GetASManager()->GetStaticCollector().get();
+    out.dynamicCollector = scene.GetASManager()->GetDynamicCollector(frameIndex).get();
+}
+
+void PopulateGodRaysSunDirections(const QrDrawFrameSkyParams *pSkyParams,
+                                  bool sunShaftsOn,
+                                  bool useSkyBrightest,
+                                  const float sunDir[3],
+                                  const float sunColor[3],
+                                  NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    if (!sunShaftsOn)
+    {
+        return;
+    }
+
+    for (int k = 0; k < 3; k++)
+    {
+        if (useSkyBrightest)
+        {
+            out.shadowLightDirection[k] = -pSkyParams->godRaysSkyDirection.data[k];
+            out.sunDirection[k] = pSkyParams->godRaysSkyDirection.data[k];
+            out.sunColor[k] = pSkyParams->godRaysSkyColor.data[k];
+        }
+        else
+        {
+            out.shadowLightDirection[k] = sunDir[k];
+            out.sunDirection[k] = -sunDir[k];
+            out.sunColor[k] = sunColor[k];
+        }
+    }
+}
+
+void PopulateFallbackShaftDirection(const LightManager::LightShaft &firstShaft,
+                                    NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    const float lenSq = firstShaft.direction[0] * firstShaft.direction[0] +
+                        firstShaft.direction[1] * firstShaft.direction[1] +
+                        firstShaft.direction[2] * firstShaft.direction[2];
+    const bool validDirection = lenSq > 0.0001f;
+    for (int k = 0; k < 3; k++)
+    {
+        out.shadowLightDirection[k] = validDirection ? firstShaft.direction[k] : (k == 2 ? 1.0f : 0.0f);
+    }
+}
+
+void PopulateGodRaysInputs(const QrDrawFrameInfo &drawInfo,
+                           uint32_t frameIndex,
+                           const ShGlobalUniform *globalUniform,
+                           Scene &scene,
+                           NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    static constexpr float kGodRaysRadianceScale = 500.0f;
+    static constexpr float kStepScales[5] = { 2.0f, 1.5f, 1.0f, 0.75f, 0.5f };
+
+    const float godRaysIntensity =
+        (drawInfo.pSkyParams == nullptr) ? 1.0f : std::max(drawInfo.pSkyParams->godRaysIntensity, 0.0f);
+    const bool godRaysEnabled =
+        ((drawInfo.pSkyParams == nullptr) || (drawInfo.pSkyParams->godRaysEnabled != 0)) &&
+        (godRaysIntensity > 0.0f);
+
+    float sunColor[3] = {}, sunDir[3] = {}, sunAngularRadius = 0.0047f;
+    const bool sunExists = scene.GetLightManager()->GetLastDirectionalLight(sunColor, sunDir, &sunAngularRadius);
+    const bool useSkyBrightest =
+        (drawInfo.pSkyParams != nullptr) &&
+        (drawInfo.pSkyParams->skyType == QR_SKY_TYPE_RASTERIZED_GEOMETRY) &&
+        (drawInfo.pSkyParams->godRaysFromSkyTexture != 0);
+    const bool sunShaftsOn = godRaysEnabled && (sunExists || useSkyBrightest);
+
+    const bool lightShaftsEnabled = drawInfo.pSkyParams != nullptr && drawInfo.pSkyParams->lightShaftsEnabled != 0;
+    LightManager::LightShaft lightShafts[LightManager::MAX_LIGHT_SHAFTS] = {};
+    const uint32_t lightShaftCount = lightShaftsEnabled
+        ? scene.GetLightManager()->CollectLightShafts(
+              lightShafts, LightManager::MAX_LIGHT_SHAFTS,
+              globalUniform->cameraPosition, globalUniform->volumeCameraFar)
+        : 0;
+    const bool lightShaftsOn = lightShaftCount > 0;
+
+    out.enabled = sunShaftsOn || lightShaftsOn;
+    out.intensity = kGodRaysRadianceScale * godRaysIntensity;
+    out.eccentricity = 0.75f;
+    const uint32_t quality = (drawInfo.pSkyParams != nullptr) ? std::min(drawInfo.pSkyParams->godRaysQuality, 4u) : 2u;
+    out.sunStepScale = kStepScales[quality];
+    out.lightShaftCount = lightShaftCount;
+
+    PopulateLightShaftSkySettings(drawInfo.pSkyParams, out);
+    PopulateGodRaysSunDirections(drawInfo.pSkyParams, sunShaftsOn, useSkyBrightest, sunDir, sunColor, out);
+    if (!sunShaftsOn && lightShaftsOn)
+    {
+        PopulateFallbackShaftDirection(lightShafts[0], out);
+    }
+    CopyLightShaftSources(lightShafts, lightShaftCount, out);
+    PopulateGodRaysWorldBounds(scene, frameIndex, out);
 }
 
 }
@@ -1226,137 +1395,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
     if (!drawInfo.renderUiOnly)
     {
-        const float godRaysIntensity = (drawInfo.pSkyParams == nullptr)
-            ? 1.0f : std::max(drawInfo.pSkyParams->godRaysIntensity, 0.0f);
-        const bool godRaysEnabled =
-            ((drawInfo.pSkyParams == nullptr) || (drawInfo.pSkyParams->godRaysEnabled != 0)) &&
-            (godRaysIntensity > 0.0f);
-
-        float sunColor[3] = {}, sunDir[3] = {}, sunAngularRadius = 0.0047f;
-        const bool sunExists =
-            scene->GetLightManager()->GetLastDirectionalLight(sunColor, sunDir, &sunAngularRadius);
-
-        const bool useSkyBrightest =
-            (drawInfo.pSkyParams != nullptr) &&
-            (drawInfo.pSkyParams->skyType == QR_SKY_TYPE_RASTERIZED_GEOMETRY) &&
-            (drawInfo.pSkyParams->godRaysFromSkyTexture != 0);
-
-        const bool sunShaftsOn = godRaysEnabled && (sunExists || useSkyBrightest);
-        const bool lightShaftsEnabled = drawInfo.pSkyParams != nullptr &&
-                                        drawInfo.pSkyParams->lightShaftsEnabled != 0;
-        LightManager::LightShaft lightShafts[LightManager::MAX_LIGHT_SHAFTS] = {};
-        const uint32_t lightShaftCount = lightShaftsEnabled
-            ? scene->GetLightManager()->CollectLightShafts(lightShafts, LightManager::MAX_LIGHT_SHAFTS,
-                                                           globalUniform->cameraPosition, globalUniform->volumeCameraFar)
-            : 0;
-        const bool lightShaftsOn = lightShaftCount > 0;
-        const bool godRaysOn = sunShaftsOn || lightShaftsOn;
-
-        static constexpr float kGodRaysRadianceScale = 500.0f;
-        const float lightShaftIntensity = (drawInfo.pSkyParams != nullptr)
-            ? std::max(drawInfo.pSkyParams->lightShaftsIntensity, 0.0f) : 1.0f;
-
-        sky.godRays.enabled = godRaysOn;
-        sky.godRays.intensity = kGodRaysRadianceScale * godRaysIntensity;
-        sky.godRays.eccentricity = 0.75f;
-        {
-            static constexpr float stepScales[5] = {2.0f, 1.5f, 1.0f, 0.75f, 0.5f};
-            const uint32_t quality = (drawInfo.pSkyParams != nullptr)
-                ? std::min(drawInfo.pSkyParams->godRaysQuality, 4u) : 2u;
-            sky.godRays.sunStepScale = stepScales[quality];
-        }
-        sky.godRays.lightShaftCount = lightShaftCount;
-        sky.godRays.lightShaftIntensity = lightShaftIntensity;
-        sky.godRays.lightShaftSteps = (drawInfo.pSkyParams != nullptr)
-            ? std::min(16u, 8u + std::min(drawInfo.pSkyParams->lightShaftsResolution, 2u) * 4u) : 12u;
-        sky.godRays.lightShaftSamples = (drawInfo.pSkyParams != nullptr)
-            ? 1u + std::min(drawInfo.pSkyParams->lightShaftsResolution, 2u) : 1u;
-        sky.godRays.lightShaftDensity = (drawInfo.pSkyParams != nullptr)
-            ? std::max(drawInfo.pSkyParams->lightShaftsDensity, 0.0f) : 0.002f;
-        sky.godRays.lightShaftAlbedo = (drawInfo.pSkyParams != nullptr)
-            ? std::clamp(drawInfo.pSkyParams->lightShaftsAlbedo, 0.0f, 1.0f) : 1.0f;
-        sky.godRays.lightShaftLocalFogScale = (drawInfo.pSkyParams != nullptr)
-            ? std::max(drawInfo.pSkyParams->lightShaftsLocalFogScale, 0.0f) : 1.0f;
-        sky.godRays.lightShaftTemporal = drawInfo.pSkyParams != nullptr &&
-            drawInfo.pSkyParams->lightShaftsTemporal != 0;
-        sky.godRays.lightShaftSun = drawInfo.pSkyParams != nullptr &&
-            drawInfo.pSkyParams->lightShaftsSun != 0;
-        sky.godRays.lightShaftDebug = drawInfo.pSkyParams != nullptr
-            ? std::min(drawInfo.pSkyParams->lightShaftsDebug, 5u) : 0u;
-        sky.godRays.lightShaftRayBudget = drawInfo.pSkyParams != nullptr
-            ? drawInfo.pSkyParams->lightShaftsRayBudget : 1048576u;
-        if (drawInfo.pSkyParams != nullptr)
-        {
-            for (int k = 0; k < 3; k++)
-            {
-                sky.godRays.lightShaftEmissive[k] = drawInfo.pSkyParams->lightShaftsEmissive.data[k];
-            }
-        }
-
-        if (godRaysOn)
-        {
-            for (int k = 0; k < 3; k++)
-            {
-                if (sunShaftsOn && useSkyBrightest)
-                {
-                    sky.godRays.shadowLightDirection[k] = -drawInfo.pSkyParams->godRaysSkyDirection.data[k];
-                    sky.godRays.sunDirection[k] = drawInfo.pSkyParams->godRaysSkyDirection.data[k];
-                    sky.godRays.sunColor[k] = drawInfo.pSkyParams->godRaysSkyColor.data[k];
-                }
-                else if (sunShaftsOn)
-                {
-                    sky.godRays.shadowLightDirection[k] = sunDir[k];
-                    sky.godRays.sunDirection[k] = -sunDir[k];
-                    sky.godRays.sunColor[k] = sunColor[k];
-                }
-            }
-        }
-
-        if (!sunShaftsOn && lightShaftsOn)
-        {
-            const bool validDirection =
-                lightShafts[0].direction[0] * lightShafts[0].direction[0] +
-                lightShafts[0].direction[1] * lightShafts[0].direction[1] +
-                lightShafts[0].direction[2] * lightShafts[0].direction[2] > 0.0001f;
-
-            for (int k = 0; k < 3; k++)
-            {
-                sky.godRays.shadowLightDirection[k] =
-                    validDirection ? lightShafts[0].direction[k] : (k == 2 ? 1.0f : 0.0f);
-            }
-        }
-
-        for (uint32_t i = 0; i < lightShaftCount; i++)
-        {
-            memcpy (sky.godRays.lightShafts[i].position, lightShafts[i].position, sizeof (lightShafts[i].position));
-            memcpy (sky.godRays.lightShafts[i].direction, lightShafts[i].direction, sizeof (lightShafts[i].direction));
-            memcpy (sky.godRays.lightShafts[i].color, lightShafts[i].color, sizeof (lightShafts[i].color));
-            memcpy (sky.godRays.lightShafts[i].cone, lightShafts[i].cone, sizeof (lightShafts[i].cone));
-            memcpy (sky.godRays.lightShafts[i].tangentU, lightShafts[i].tangentU, sizeof (lightShafts[i].tangentU));
-            memcpy (sky.godRays.lightShafts[i].tangentV, lightShafts[i].tangentV, sizeof (lightShafts[i].tangentV));
-            memcpy (sky.godRays.lightShafts[i].surface, lightShafts[i].surface, sizeof (lightShafts[i].surface));
-            memcpy (sky.godRays.lightShafts[i].emission, lightShafts[i].emission, sizeof (lightShafts[i].emission));
-            memcpy (sky.godRays.lightShafts[i].source, lightShafts[i].source, sizeof (lightShafts[i].source));
-        }
-
-        sky.godRays.hasAabb = scene->HasAABB();
-        if (sky.godRays.hasAabb)
-        {
-            float aabbMin[3], aabbMax[3];
-            scene->GetAABB(aabbMin, aabbMax);
-
-            for (int k = 0; k < 3; k++)
-            {
-                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
-                sky.godRays.aabbMin[k] = aabbMin[k];
-                sky.godRays.aabbMax[k] = aabbMax[k];
-                sky.godRays.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
-                sky.godRays.worldHalfSizeInv[k] = 1.0f / halfSize;
-            }
-
-            sky.godRays.staticCollector = scene->GetASManager()->GetStaticCollector().get();
-            sky.godRays.dynamicCollector = scene->GetASManager()->GetDynamicCollector(frameIndex).get();
-        }
+        PopulateGodRaysInputs(drawInfo, frameIndex, globalUniform, *scene, sky.godRays);
     }
 
     sky.portalStaging = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(portalList->GetStagingBuffer(frameIndex)));

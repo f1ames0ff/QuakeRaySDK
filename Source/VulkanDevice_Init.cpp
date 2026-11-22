@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -80,6 +80,36 @@
 #include "RHI/RhiUiPass.h"
 
 using namespace qray;
+
+void VulkanDevice::InitGodRaysAndLightShaftPasses(const QrInstanceCreateInfo *info)
+{
+    rhiRtGodRaysPass = std::make_shared<RhiRtGodRaysPass>();
+    if (!rhiRtGodRaysPass->Create(nvrhi->GetDevice(), rhiFrameContext.get(),
+                                  info->pShaderFolderPath,
+                                  [this](const char *pMessage) { Print(pMessage); }))
+    {
+        rhiRtGodRaysPass.reset();
+        Print("Warning: RHI: the god-rays pass is unavailable, the frame is drawn without shafts");
+        return;
+    }
+
+    if (rhiShadowMapPass != nullptr && rhiShadowMapPass->IsCreated())
+    {
+        rhiRtGodRaysPass->SetShadowMap(rhiShadowMapPass->GetTexture(),
+                                       rhiShadowMapPass->GetSampler());
+    }
+
+    rhiLightShaftVolumePass = std::make_shared<RhiLightShaftVolumePass>();
+    if (!rhiLightShaftVolumePass->Create(
+            nvrhi->GetDevice(), rhiFrameContext.get(), rhiTextureTable.get(),
+            rhiRtDirectPass != nullptr ? rhiRtDirectPass->GetLightLayout() : nullptr,
+            info->pShaderFolderPath,
+            [this](const char *pMessage) { Print(pMessage); }))
+    {
+        rhiLightShaftVolumePass.reset();
+        Print("Warning: RHI: the light-shaft volume pass is unavailable, the frame is drawn without light shafts");
+    }
+}
 
 VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                             const QrayGpuRequirements* pGpuRequirements )
@@ -420,34 +450,10 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                         else
                         {
                             rhiRtIndirectPass->SetBlueNoiseTexture(blueNoiseTexture);
-
-                            rhiRtGodRaysPass = std::make_shared<RhiRtGodRaysPass>();
-                            if (!rhiRtGodRaysPass->Create(nvrhi->GetDevice(), rhiFrameContext.get(),
-                                                          info->pShaderFolderPath,
-                                                          [this](const char *pMessage) { Print(pMessage); }))
-                            {
-                                rhiRtGodRaysPass.reset();
-                                Print("Warning: RHI: the god-rays pass is unavailable, the frame is drawn without shafts");
-                            }
-                            else
+                            InitGodRaysAndLightShaftPasses(info);
+                            if (rhiRtGodRaysPass != nullptr)
                             {
                                 rhiRtGodRaysPass->SetBlueNoiseTexture(blueNoiseTexture);
-                                if (rhiShadowMapPass != nullptr && rhiShadowMapPass->IsCreated())
-                                {
-                                    rhiRtGodRaysPass->SetShadowMap(rhiShadowMapPass->GetTexture(),
-                                                                   rhiShadowMapPass->GetSampler());
-                                }
-
-                                rhiLightShaftVolumePass = std::make_shared<RhiLightShaftVolumePass>();
-                                if (!rhiLightShaftVolumePass->Create(
-                                        nvrhi->GetDevice(), rhiFrameContext.get(), rhiTextureTable.get(),
-                                        rhiRtDirectPass != nullptr ? rhiRtDirectPass->GetLightLayout() : nullptr,
-                                        info->pShaderFolderPath,
-                                        [this](const char *pMessage) { Print(pMessage); }))
-                                {
-                                    rhiLightShaftVolumePass.reset();
-                                    Print("Warning: RHI: the light-shaft volume pass is unavailable, the frame is drawn without light shafts");
-                                }
                             }
                         }
                     }
@@ -548,11 +554,11 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                 rhiBloomPass.get(),
                 rhiShadowMapPass.get(),
                 rhiRtGodRaysPass.get(),
-                rhiLightShaftVolumePass.get(),
                 rhiUiPass.get(),
                 frameMode,
                 [this](const char *pMessage) { Print(pMessage); });
 
+            nvrhiFrameSkeleton->SetLightShaftVolumePass(rhiLightShaftVolumePass.get());
             swapchain->Subscribe(nvrhiFrameSkeleton);
 
             if (RhiSkyPass *skyPass = nvrhiFrameSkeleton->GetSkyPass())

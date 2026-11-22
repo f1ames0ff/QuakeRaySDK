@@ -154,7 +154,15 @@ private:
         nvrhi::rt::IAccelStruct *topLevel = nullptr;
     };
 
+    bool LoadShaders();
+    bool CreateBindingLayouts();
+    bool CreatePipelines();
+    void RetireTarget(Target &target);
+    bool AllocateTargetResources(uint32_t slotIndex, uint32_t lightListEntries);
+    bool CreateTargetBindingSets(uint32_t slotIndex);
     bool CreateVolumeTargets();
+    bool EnsureVolumeSize(const Params &params);
+    bool IsTargetReady(const Target &target) const;
     bool PrepareUniformSet(Target &target, nvrhi::IBuffer *pUniformBuffer);
     bool PrepareTlasSet(Target &target, nvrhi::rt::IAccelStruct *pTopLevel);
 

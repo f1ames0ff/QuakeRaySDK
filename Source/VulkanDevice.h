@@ -224,6 +224,7 @@ private:
                         const QrayGpuRequirements &gpuRequirements);
     void CreateDevice(const QrayGpuRequirements &gpuRequirements);
     void CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements);
+    void InitGodRaysAndLightShaftPasses(const QrInstanceCreateInfo *info);
     void CreateSyncPrimitives();
     static VkSurfaceKHR GetSurfaceFromUser(VkInstance instance, const QrInstanceCreateInfo &info);
     void ValidateCreateInfo(const QrInstanceCreateInfo *pInfo);

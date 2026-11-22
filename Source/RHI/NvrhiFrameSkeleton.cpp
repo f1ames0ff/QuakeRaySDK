@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -189,7 +189,6 @@ NvrhiFrameSkeleton::NvrhiFrameSkeleton(nvrhi::IDevice *pDevice,
                                        RhiBloomPass *pBloomPass,
                                        RhiShadowMapPass *pShadowMapPass,
                                        RhiRtGodRaysPass *pGodRaysPass,
-                                       RhiLightShaftVolumePass *pLightShaftVolumePass,
                                        RhiUiPass *pUiPass,
                                        FrameMode mode,
                                        PrintFunction pfnPrint)
@@ -212,7 +211,6 @@ NvrhiFrameSkeleton::NvrhiFrameSkeleton(nvrhi::IDevice *pDevice,
     , bloomPass(pBloomPass)
     , shadowMapPass(pShadowMapPass)
     , godRaysPass(pGodRaysPass)
-    , lightShaftVolumePass(pLightShaftVolumePass)
     , uiPass(pUiPass)
     , frameMode(mode)
     , textureTable(pTextureTable)

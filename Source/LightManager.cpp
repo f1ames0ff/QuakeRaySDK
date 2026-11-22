@@ -464,7 +464,7 @@ namespace
                                       uint32_t textureIndex,
                                       LightManager::LightShaft &shaft)
     {
-        const int vertCount = static_cast<int>(member.numVerts + 0.5f);
+        const int vertCount = static_cast<int>(std::lround(member.numVerts));
         const float power = SafePositiveFloat(info.lightShaftsPower);
         if (!info.lightShafts || vertCount <= 0 || !(power > 0.0f))
         {
@@ -1138,6 +1138,26 @@ void qray::LightManager::AddTexturedAreaLight(uint32_t frameIndex, const QrTextu
     }
 }
 
+void qray::LightManager::AddDtalGroupLightShafts(const QrDtalGroupUploadInfo &info,
+                                                  const QrDtalMemberUpload *pMembers,
+                                                  uint32_t textureIndex)
+{
+    if (!info.lightShafts || pMembers == nullptr)
+    {
+        return;
+    }
+
+    for (uint32_t mIdx = 0; mIdx < info.memberCount; mIdx++)
+    {
+        const uint32_t memberIndex = info.memberBase + mIdx;
+        LightShaft shaft = {};
+        if (TryBuildDtalMemberLightShaft(info, pMembers[memberIndex], memberIndex, textureIndex, shaft))
+        {
+            AddLightShaft(shaft);
+        }
+    }
+}
+
 bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUploadBatch &batch,
                                        const uint32_t *pTextureIndices)
 {
@@ -1176,20 +1196,7 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
         const ShLightEncoded encoded = EncodeAsDtalGroup(info, pTextureIndices[i]);
         AddLight(frameIndex, info.uniqueID, encoded);
         published++;
-
-        if (info.lightShafts && batch.pMembers != nullptr)
-        {
-            for (uint32_t mIdx = 0; mIdx < info.memberCount; mIdx++)
-            {
-                const uint32_t memberIndex = info.memberBase + mIdx;
-                LightShaft shaft = {};
-                if (TryBuildDtalMemberLightShaft(info, batch.pMembers[memberIndex], memberIndex,
-                                                 pTextureIndices[i], shaft))
-                {
-                    AddLightShaft(shaft);
-                }
-            }
-        }
+        AddDtalGroupLightShafts(info, batch.pMembers, pTextureIndices[i]);
     }
 
     if (published == 0 && invalid)

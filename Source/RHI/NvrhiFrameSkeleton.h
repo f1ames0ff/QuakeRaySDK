@@ -444,11 +444,12 @@ public:
                                 RhiBloomPass *pBloomPass,
                                 RhiShadowMapPass *pShadowMapPass,
                                 RhiRtGodRaysPass *pGodRaysPass,
-                                RhiLightShaftVolumePass *pLightShaftVolumePass,
                                 RhiUiPass *pUiPass,
                                 FrameMode mode,
                                 PrintFunction pfnPrint);
     ~NvrhiFrameSkeleton() override;
+
+    void SetLightShaftVolumePass(RhiLightShaftVolumePass *pPass) { lightShaftVolumePass = pPass; }
 
     NvrhiFrameSkeleton(const NvrhiFrameSkeleton &other) = delete;
     NvrhiFrameSkeleton(NvrhiFrameSkeleton &&other) noexcept = delete;
