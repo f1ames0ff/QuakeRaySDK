@@ -124,17 +124,58 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint i = 0; i < shaftCount; i++)
     {
         const LightShaft_BT shaft = params.lightShafts[i];
-        const float influenceRadius = shaft.source.z;
-        if (influenceRadius > 0.0 &&
-            distance(clusterCenter, shaft.positionRadius.xyz) > clusterRadius + influenceRadius)
+        const float3 dir = shaft.direction.xyz;
+        const float dirLen2 = dot(dir, dir);
+        if (dirLen2 > 0.000001 && shaft.cone.y >= -0.0001)
         {
-            continue;
+            const float3 normal = dir * rsqrt(dirLen2);
+            const float3 supportMax = float3(
+                normal.x >= 0.0 ? clusterMax.x : clusterMin.x,
+                normal.y >= 0.0 ? clusterMax.y : clusterMin.y,
+                normal.z >= 0.0 ? clusterMax.z : clusterMin.z);
+            if (dot(normal, supportMax - shaft.positionRadius.xyz) <= 0.0001)
+            {
+                continue;
+            }
         }
 
-        const float boundsRadius = max(shaft.source.w, shaft.positionRadius.w);
-        if (!shaftConeAllows(shaft, clusterCenter, clusterRadius + boundsRadius))
+        const bool isRectArea = shaft.tangentU.w > 0.0 && shaft.tangentV.w > 0.0 &&
+                                dot(shaft.tangentU.xyz, shaft.tangentU.xyz) > 0.000001 &&
+                                dot(shaft.tangentV.xyz, shaft.tangentV.xyz) > 0.000001;
+        if (isRectArea)
         {
-            continue;
+            const float3 rel = clusterCenter - shaft.positionRadius.xyz;
+            const float3 uAxis = normalize(shaft.tangentU.xyz);
+            const float3 vAxis = normalize(shaft.tangentV.xyz);
+            const float projU = clamp(dot(rel, uAxis), -shaft.tangentU.w, shaft.tangentU.w);
+            const float projV = clamp(dot(rel, vAxis), -shaft.tangentV.w, shaft.tangentV.w);
+            const float3 closestPt = shaft.positionRadius.xyz + uAxis * projU + vAxis * projV;
+
+            const float reach = shaft.emission.y;
+            if (reach > 0.0 && distance(clusterCenter, closestPt) > clusterRadius + reach)
+            {
+                continue;
+            }
+
+            if (!shaftDirectionConeAllows(closestPt, dir, shaft.cone.y, clusterCenter, clusterRadius))
+            {
+                continue;
+            }
+        }
+        else
+        {
+            const float influenceRadius = shaft.source.z;
+            if (influenceRadius > 0.0 &&
+                distance(clusterCenter, shaft.positionRadius.xyz) > clusterRadius + influenceRadius)
+            {
+                continue;
+            }
+
+            const float boundsRadius = max(shaft.source.w, shaft.positionRadius.w);
+            if (!shaftConeAllows(shaft, clusterCenter, clusterRadius + boundsRadius))
+            {
+                continue;
+            }
         }
 
         if (count < params.lightListCapacity)

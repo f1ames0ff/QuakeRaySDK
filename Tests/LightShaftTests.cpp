@@ -60,40 +60,85 @@ void TestShaftReach()
     const float dim[3] = { 0.01f, 0.01f, 0.01f };
     const float dimReach = qray::ComputeFluxShaftReach(dim, 1.0f);
     CHECK(NearlyEqual(dimReach, qray::kLightShaftMinReachMeters),
-          "dim light clamps at 1.6m minimum rather than 64m pre-metric floor");
+          "dim light clamps at 3.2m minimum so low-intensity lamps keep visible beams");
 
-    const float bright[3] = { 100.0f, 100.0f, 100.0f };
+    const float bright[3] = { 20.0f, 20.0f, 20.0f };
     const float huge[3] = { 1e6f, 1e6f, 1e6f };
+    const float midReachLow = qray::ComputeFluxShaftReach(bright, 0.1f);
     const float midReach1 = qray::ComputeFluxShaftReach(bright, 1.0f);
     const float midReach4 = qray::ComputeFluxShaftReach(bright, 4.0f);
     const float maxReach = qray::ComputeFluxShaftReach(huge, 100.0f);
-    CHECK(midReach1 > qray::kLightShaftMinReachMeters && midReach1 < qray::kLightShaftMaxReachMeters,
-          "typical flux reach stays strictly inside bounds");
-    CHECK(midReach4 > midReach1 && NearlyEqual(midReach4, midReach1 * 2.0f, 1e-4f),
-          "flux reach scales as sqrt(power)");
-    CHECK(NearlyEqual(maxReach, qray::kLightShaftMaxReachMeters), "huge light caps at 204.8m");
+    const float expectedMid1 = std::sqrt(20.0f / (static_cast<float>(qray::kLightShaftPi) * 0.25f));
+    CHECK(NearlyEqual(midReach1, expectedMid1, 1e-4f) &&
+              midReach1 > qray::kLightShaftMinReachMeters && midReach1 < qray::kLightShaftAutoMaxReachMeters,
+          "typical flux reach matches 0.25 lux threshold and stays strictly inside bounds");
+    CHECK(NearlyEqual(midReachLow, midReach1, 1e-5f) && NearlyEqual(midReach4, midReach1, 1e-5f),
+          "flux reach is independent of light_shafts_power so low power makes dimmer/more transparent shafts");
+    CHECK(NearlyEqual(maxReach, qray::kLightShaftAutoMaxReachMeters), "huge auto light caps at 19.2m");
 
     CHECK(qray::ComputeFluxShaftReach(nullptr, 1.0f) == 0.0f, "null flux color returns 0");
     CHECK(qray::ComputeFluxShaftReach(bright, 0.0f) == 0.0f, "zero power returns 0");
     CHECK(qray::ComputeFluxShaftReach(bright, std::numeric_limits<float>::quiet_NaN()) == 0.0f,
           "NaN power returns 0");
 
-    const float rad[3] = { 2.0f, 1.0f, 0.5f };
+    const float rad[3] = { 12.0f, 6.0f, 3.0f };
+    const float area1Low = qray::ComputeRadianceShaftReach(rad, 1.0f, 1.0f, 0.1f);
     const float area1 = qray::ComputeRadianceShaftReach(rad, 1.0f, 1.0f, 1.0f);
     const float area4 = qray::ComputeRadianceShaftReach(rad, 4.0f, 1.0f, 1.0f);
     const float emiss4 = qray::ComputeRadianceShaftReach(rad, 1.0f, 4.0f, 1.0f);
+    CHECK(qray::ComputeRadianceShaftReach(rad, 1.0f, 1.0f, 0.0f) == 0.0f,
+          "zero power radiance reach returns 0");
+    CHECK(NearlyEqual(area1Low, area1, 1e-5f), "radiance reach is independent of light_shafts_power");
     CHECK(NearlyEqual(area4, area1 * 2.0f, 1e-4f), "radiance reach scales with sqrt(area)");
     CHECK(NearlyEqual(emiss4, area1 * 2.0f, 1e-4f), "radiance reach scales with sqrt(meanEmiss)");
+
+    CHECK(NearlyEqual(qray::ResolveLightShaftReach(6.0f, 0.0f), 6.0f),
+          "unset explicit distance preserves auto reach");
+    CHECK(NearlyEqual(qray::ResolveLightShaftReach(6.0f, 0.1f), qray::kLightShaftMinExplicitReachMeters),
+          "explicit distance clamps to 0.5m minimum");
+    CHECK(NearlyEqual(qray::ResolveLightShaftReach(6.0f, 12.5f), 12.5f),
+          "explicit distance overrides auto reach");
+    CHECK(NearlyEqual(qray::ResolveLightShaftReach(6.0f, 100.0f), qray::kLightShaftMaxReachMeters),
+          "explicit distance clamps to 25.0m maximum");
+
+    CHECK(NearlyEqual(qray::SanitizeLightShaftFalloff(0.0f), qray::kLightShaftDefaultFalloff),
+          "zero falloff defaults to 1.0");
+    CHECK(NearlyEqual(qray::SanitizeLightShaftFalloff(-2.0f), qray::kLightShaftDefaultFalloff),
+          "negative falloff defaults to 1.0");
+    CHECK(NearlyEqual(qray::SanitizeLightShaftFalloff(1e-4f), qray::kLightShaftMinFalloff),
+          "tiny positive falloff clamps to 0.01");
+    CHECK(NearlyEqual(qray::SanitizeLightShaftFalloff(9.0f), qray::kLightShaftMaxFalloff),
+          "huge falloff clamps to 4.0");
+
+    const float reach = 10.0f;
+    CHECK(qray::ShaftDistanceAttenuation(10.0f, reach, 1.0f) == 0.0f &&
+              qray::ShaftDistanceAttenuation(12.0f, reach, 1.0f) == 0.0f,
+          "attenuation is zero at and beyond reach");
+    const float attenNearSoft = qray::ShaftDistanceAttenuation(0.2f, reach, 0.2f);
+    const float attenNearSteep = qray::ShaftDistanceAttenuation(0.2f, reach, 3.0f);
+    const float attenMid = qray::ShaftDistanceAttenuation(3.0f, reach, 1.0f);
+    const float attenFarFlat = qray::ShaftDistanceAttenuation(6.0f, reach, 0.01f);
+    const float attenFarDefault = qray::ShaftDistanceAttenuation(6.0f, reach, 1.0f);
+    const float attenFarSteep = qray::ShaftDistanceAttenuation(6.0f, reach, 3.0f);
+    CHECK(attenNearSoft < attenNearSteep && attenMid > attenFarDefault,
+          "attenuation decays smoothly without near-lamp blowout");
+    CHECK(attenFarFlat > attenFarDefault && attenFarDefault > attenFarSteep,
+          "lower falloff keeps beam stronger farther down range");
 }
 
 void TestVolumetricCameraFar()
 {
     CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 2.5f, 0.01f, 500.0f, true),
+                      qray::kLightShaftMinVolumeFarMeters),
+          "legacy off + shafts on clamps small explicit far up to 16m floor");
+    CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 25.0f, 0.01f, 500.0f, true), 25.0f),
+          "explicit 25m volumetricFar is preserved");
+    CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 0.0f, 0.01f, 500.0f, true),
                       qray::kLightShaftDefaultVolumeFarMeters),
-          "legacy off + shafts on raises far plane to 64m");
+          "legacy off + shafts on without explicit far uses 25m default");
     CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 120.0f, 0.01f, 500.0f, true), 120.0f),
           "explicit large volumetricFar is preserved");
-    CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 2.5f, 0.01f, 20.0f, true), 20.0f),
+    CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 2.5f, 0.01f, 10.0f, true), 10.0f),
           "cameraFar still caps volumetric far plane");
     CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(false, 0.0f, 0.01f, 500.0f, false), 2.5f),
           "legacy off + shafts off preserves 2.5m fallback");
@@ -101,7 +146,7 @@ void TestVolumetricCameraFar()
           "legacy on respects explicit volumetricFar");
     CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(true, 0.0f, 0.01f, 500.0f, true),
                       qray::kLightShaftDefaultVolumeFarMeters),
-          "legacy on without explicit far uses 64m when shafts active");
+          "legacy on without explicit far uses 25m when shafts active");
     CHECK(NearlyEqual(qray::ResolveVolumetricCameraFar(true, 0.0f, 0.01f, 500.0f, false), 2.5f),
           "legacy on without explicit far or shafts keeps 2.5m");
     CHECK(qray::ResolveVolumetricCameraFar(false, 2.5f, 0.05f, 0.01f, true) > 0.05f,

@@ -46,15 +46,18 @@ public:
     static constexpr uint32_t VOLUME_SIZE_X = 384;
     static constexpr uint32_t VOLUME_SIZE_Y = 216;
     static constexpr uint32_t VOLUME_SIZE_Z = 96;
+    static constexpr uint32_t MAX_VOLUME_SIZE_X = 448;
+    static constexpr uint32_t MAX_VOLUME_SIZE_Y = 256;
+    static constexpr uint32_t MAX_VOLUME_SIZE_Z = 128;
     static constexpr uint32_t GROUP_SIZE_X = 4;
     static constexpr uint32_t GROUP_SIZE_Y = 4;
     static constexpr uint32_t LIGHT_LIST_CAPACITY = 32;
     static constexpr uint32_t LIGHT_LIST_TILE = 8;
     static constexpr uint32_t LIGHT_LIST_Z_BINS = 8;
     static constexpr uint32_t LIGHT_LIST_MAX_TILES_X =
-        (VOLUME_SIZE_X + LIGHT_LIST_TILE - 1) / LIGHT_LIST_TILE;
+        (MAX_VOLUME_SIZE_X + LIGHT_LIST_TILE - 1) / LIGHT_LIST_TILE;
     static constexpr uint32_t LIGHT_LIST_MAX_TILES_Y =
-        (VOLUME_SIZE_Y + LIGHT_LIST_TILE - 1) / LIGHT_LIST_TILE;
+        (MAX_VOLUME_SIZE_Y + LIGHT_LIST_TILE - 1) / LIGHT_LIST_TILE;
     static constexpr uint32_t LIGHT_LIST_MAX_CLUSTERS =
         LIGHT_LIST_MAX_TILES_X * LIGHT_LIST_MAX_TILES_Y * LIGHT_LIST_Z_BINS;
 

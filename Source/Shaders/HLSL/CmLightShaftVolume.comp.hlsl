@@ -34,10 +34,12 @@
 [[vk::binding(2, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<uint> lightList;
 [[vk::binding(3, DESC_SET_LIGHT_SHAFT_PARAMS)]] RWStructuredBuffer<uint> rayCounter;
 [[vk::binding(4, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<float> sunVisibility;
+[[vk::binding(5, DESC_SET_LIGHT_SHAFT_PARAMS)]] SamplerState historySampler;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
 
 static const float PI = 3.1415926535;
 static const float QUAKES_PER_METER = 40.0;
+static const float LOCAL_SHAFT_PHASE_G = 0.2;
 
 float shaftPhase(float cosTheta, float asymmetry)
 {
@@ -46,21 +48,27 @@ float shaftPhase(float cosTheta, float asymmetry)
     return (1.0 - k * k) / (4.0 * PI * denominator * denominator);
 }
 
-float shaftRangeAttenuation(float distance, float reach)
+float shaftDistanceAttenuation(float distance, float reach, float falloff)
 {
-    if (!(reach > 0.0))
-    {
-        return 1.0;
-    }
-
-    if (distance >= reach)
+    if (reach > 0.0 && distance >= reach)
     {
         return 0.0;
     }
 
-    const float ratio = distance / reach;
-    const float window = saturate(1.0 - ratio * ratio);
-    return window * window;
+    const float rCore = 0.75;
+    const float r2 = rCore * rCore;
+    const float f = clamp(falloff > 0.0 ? falloff : 1.0, 0.01, 4.0);
+    const float radial = pow((1.0 + r2) / (distance * distance + r2), 0.5 * f);
+
+    float window = 1.0;
+    if (reach > 0.0)
+    {
+        const float ratio = distance / reach;
+        const float w = saturate(1.0 - ratio * ratio);
+        window = w * w;
+    }
+
+    return radial * window;
 }
 
 float shaftWorldMask(float3 p)
@@ -105,15 +113,41 @@ float3 volumeRayDirection(float2 cellUv)
     return normalize(farPoint.xyz - globalUniform.cameraPosition.xyz);
 }
 
-float3 volumeGetCenter(int3 cell)
+float3 volumeFroxelJitter(int3 cell)
 {
-    const float2 cellUv = ((float2)cell.xy + 0.5) /
-                          float2((float)params.volumeSizeX, (float)params.volumeSizeY);
+    if (params.temporalEnabled == 0u || params.historyValid == 0u)
+    {
+        return float3(0.5, 0.5, 0.5);
+    }
+
+    const uint frameSlot = globalUniform.frameId & 63u;
+    const float3 base = frac(float3(0.5, 0.5, 0.5) +
+                             (float)frameSlot * float3(0.8191725134, 0.6710436067, 0.5497004779));
+    const float3 spatial = float3(
+        frac((float)cell.x * 0.3819660113 + (float)cell.y * 0.6180339887 + (float)cell.z * 0.2360679775),
+        frac((float)cell.x * 0.7182818285 + (float)cell.y * 0.3141592654 + (float)cell.z * 0.5772156649),
+        frac((float)cell.x * 0.5284271247 + (float)cell.y * 0.8660254038 + (float)cell.z * 0.4142135624));
+    return lerp(0.08, 0.92, frac(base + spatial));
+}
+
+void volumeCellSegment(int3 cell, float3 jitter,
+                       out float3 segStart, out float3 segEnd, out float3 center)
+{
+    const float2 volSize = float2((float)params.volumeSizeX, (float)params.volumeSizeY);
+    const float2 centerUv = ((float2)cell.xy + 0.5) / volSize;
+    const float2 jitterUv = ((float2)cell.xy + jitter.xy) / volSize;
+    const float3 centerDir = volumeRayDirection(centerUv);
+    const float3 rayDir = volumeRayDirection(jitterUv);
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
-    const float t = saturate((cell.z + 0.5) / (float)params.volumeSizeZ);
-    const float distance = nearPlane + (farPlane - nearPlane) * t * t;
-    return globalUniform.cameraPosition.xyz + volumeRayDirection(cellUv) * distance;
+    const float invZ = 1.0 / (float)params.volumeSizeZ;
+    const float t0 = saturate((float)cell.z * invZ);
+    const float t1 = saturate((float)(cell.z + 1) * invZ);
+    const float tm = saturate(((float)cell.z + 0.5) * invZ);
+    const float3 camPos = globalUniform.cameraPosition.xyz;
+    segStart = camPos + rayDir * (nearPlane + (farPlane - nearPlane) * t0 * t0);
+    segEnd = camPos + rayDir * (nearPlane + (farPlane - nearPlane) * t1 * t1);
+    center = camPos + centerDir * (nearPlane + (farPlane - nearPlane) * tm * tm);
 }
 
 uint volumeClusterIndex(int3 cell)
@@ -129,16 +163,6 @@ uint volumeClusterIndex(int3 cell)
     return (zBin * tilesY + tileY) * tilesX + tileX;
 }
 
-float hash1(uint value)
-{
-    value ^= value >> 16;
-    value *= 0x7feb352du;
-    value ^= value >> 15;
-    value *= 0x846ca68bu;
-    value ^= value >> 16;
-    return (float)(value & 0x00ffffffu) / 16777215.0;
-}
-
 bool lightShaftVisible(float3 origin, float3 target)
 {
     const float3 delta = target - origin;
@@ -147,13 +171,6 @@ bool lightShaftVisible(float3 origin, float3 target)
     if (distance <= 0.001)
     {
         return true;
-    }
-
-    uint slot;
-    InterlockedAdd(rayCounter[0], 1u, slot);
-    if (params.rayBudget != 0u && slot >= params.rayBudget)
-    {
-        return false;
     }
 
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
@@ -175,9 +192,10 @@ bool lightShaftVisible(float3 origin, float3 target)
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
 
-bool sampleVolumeHistory(int3 cell, float3 center, out float4 history)
+bool sampleVolumeHistory(int3 cell, float3 center, out float4 history, out float edgeFade)
 {
     history = (float4)0;
+    edgeFade = 0.0;
     if (params.temporalEnabled == 0u || params.historyValid == 0u)
     {
         return false;
@@ -204,94 +222,46 @@ bool sampleVolumeHistory(int3 cell, float3 center, out float4 history)
         return false;
     }
 
-    const int2 previousXY = int2(clamp(uv, 0.0, 1.0) *
-                                 float2((float)params.volumeSizeX, (float)params.volumeSizeY));
-    const int previousZ = int(clamp(sqrt(normalizedDepth), 0.0, 1.0) * (float)(params.volumeSizeZ - 1u) + 0.5);
-    history = historyVolume.Load(int4(min(previousXY.x, (int)params.volumeSizeX - 1),
-                                      min(previousXY.y, (int)params.volumeSizeY - 1),
-                                      clamp(previousZ, 0, (int)params.volumeSizeZ - 1), 0));
+    const float3 prevUvw = float3(uv, sqrt(normalizedDepth));
+    history = historyVolume.SampleLevel(historySampler, prevUvw, 0.0);
+    if (any(!isfinite(history)))
+    {
+        history = (float4)0;
+        return false;
+    }
+
+    edgeFade = saturate(min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) * 32.0);
     return true;
 }
 
-float3 evaluateProjectedAreaLightShaft(const TexturedAreaLight tal, float3 center, float3 toViewer,
-                                      float reach, float powerScale)
+bool evaluateRectAreaShaft(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
+                           float reach, uint samples,
+                           out float3 outRadiance, out float3 outVisTarget)
 {
-    const LightSample ls = sampleProjectedAreaLight(tal, center, float2(0.5, 0.5));
-    if (!(ls.dw > 0.0))
-    {
-        return (float3)0;
-    }
+    outRadiance = (float3)0;
+    outVisTarget = shaft.positionRadius.xyz;
 
-    const float3 emitted = ls.color * (ls.dw * powerScale);
-    if (max(emitted.r, max(emitted.g, emitted.b)) <= 1e-6)
-    {
-        return (float3)0;
-    }
-
-    const float3 fromLight = center - ls.position;
-    const float distToLight = length(fromLight);
-    if (distToLight < 0.001 || (reach > 0.0 && distToLight >= reach))
-    {
-        return (float3)0;
-    }
-
-    if (!lightShaftVisible(center, ls.position))
-    {
-        return (float3)0;
-    }
-
-    const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), 0.5);
-    return emitted * (shaftRangeAttenuation(distToLight, reach) * phase);
-}
-
-float3 evaluateTexturedAreaLightShaft(const TexturedAreaLight tal, float3 center, float3 toViewer,
-                                     float reach, float powerScale, uint samples, uint baseSeed)
-{
-    if (tal.projector > 0.5)
-    {
-        return evaluateProjectedAreaLightShaft(tal, center, toViewer, reach, powerScale);
-    }
-
-    const int vertCount = clamp(tal.numVerts, 1, MAX_TEXTURED_AREA_LIGHT_VERTS);
-    float2 uvMin = tal.uvVerts[0];
-    float2 uvMax = tal.uvVerts[0];
-    for (int i = 1; i < MAX_TEXTURED_AREA_LIGHT_VERTS; i++)
-    {
-        if (i >= vertCount)
-        {
-            break;
-        }
-        uvMin = min(uvMin, tal.uvVerts[i]);
-        uvMax = max(uvMax, tal.uvVerts[i]);
-    }
-
-    const float2 uvMid = 0.5 * (uvMin + uvMax);
-    const float3 polyCenter = texturedAreaLightWorldPos(tal, uvMid);
-    const float h = dot(tal.normal, center - polyCenter);
+    const float3 origin = shaft.positionRadius.xyz;
+    const float3 N = normalize(shaft.direction.xyz);
+    const float h = dot(N, evalPos - origin);
     if (h <= 1e-4 || (reach > 0.0 && h >= reach))
     {
-        return (float3)0;
+        return false;
     }
 
-    const float a11 = dot(tal.A, tal.A);
-    const float a12 = dot(tal.A, tal.B);
-    const float a22 = dot(tal.B, tal.B);
-    const float det = a11 * a22 - a12 * a12;
-    if (!(det > 1e-12))
-    {
-        return (float3)0;
-    }
+    const float3 U = normalize(shaft.tangentU.xyz);
+    const float3 V = normalize(shaft.tangentV.xyz);
+    const float halfU = shaft.tangentU.w;
+    const float halfV = shaft.tangentV.w;
 
-    const float3 pPerp = center - tal.normal * h;
-    const float3 rel = pPerp - tal.C;
-    const float b1 = dot(tal.A, rel);
-    const float b2 = dot(tal.B, rel);
-    const float2 uvPerp = float2(b1 * a22 - b2 * a12, b2 * a11 - b1 * a12) / det;
+    const float3 rel = evalPos - origin;
+    const float uPerp = dot(rel, U);
+    const float vPerp = dot(rel, V);
 
-    float uLo = uvMin.x;
-    float uHi = uvMax.x;
-    float vLo = uvMin.y;
-    float vHi = uvMax.y;
+    float uLo = -halfU;
+    float uHi = halfU;
+    float vLo = -halfV;
+    float vHi = halfV;
 
     bool hasRMax = false;
     float rMax = 0.0;
@@ -300,60 +270,48 @@ float3 evaluateTexturedAreaLightShaft(const TexturedAreaLight tal, float3 center
         rMax = sqrt(max(reach * reach - h * h, 0.0));
         hasRMax = true;
     }
-    if (tal.coneCosOuter > 0.0)
+    if (shaft.cone.y > 0.0)
     {
-        const float rCone = h * sqrt(max(1.0 - tal.coneCosOuter * tal.coneCosOuter, 0.0)) /
-                            max(tal.coneCosOuter, 0.05);
+        const float rCone = h * sqrt(max(1.0 - shaft.cone.y * shaft.cone.y, 0.0)) /
+                            max(shaft.cone.y, 0.05);
         rMax = hasRMax ? min(rMax, rCone) : rCone;
         hasRMax = true;
     }
 
     if (hasRMax)
     {
-        const float du = rMax * sqrt(max(a22 / det, 0.0));
-        const float dv = rMax * sqrt(max(a11 / det, 0.0));
-        uLo = max(uLo, uvPerp.x - du);
-        uHi = min(uHi, uvPerp.x + du);
-        vLo = max(vLo, uvPerp.y - dv);
-        vHi = min(vHi, uvPerp.y + dv);
+        uLo = max(uLo, uPerp - rMax);
+        uHi = min(uHi, uPerp + rMax);
+        vLo = max(vLo, vPerp - rMax);
+        vHi = min(vHi, vPerp + rMax);
     }
 
     if (!(uLo < uHi && vLo < vHi))
     {
-        return (float3)0;
+        return false;
     }
 
-    float2 uvClosest = clamp(uvPerp, float2(uLo, vLo), float2(uHi, vHi));
-    if (abs(a12) > 1e-6 * sqrt(max(a11 * a22, 0.0)))
-    {
-        const float vOpt = clamp(uvPerp.y - (a12 / max(a22, 1e-12)) * (uvClosest.x - uvPerp.x), vLo, vHi);
-        const float uOpt = clamp(uvPerp.x - (a12 / max(a11, 1e-12)) * (uvClosest.y - uvPerp.y), uLo, uHi);
-        const float3 c1 = center - texturedAreaLightWorldPos(tal, float2(uvClosest.x, vOpt));
-        const float3 c2 = center - texturedAreaLightWorldPos(tal, float2(uOpt, uvClosest.y));
-        uvClosest = dot(c1, c1) < dot(c2, c2) ? float2(uvClosest.x, vOpt) : float2(uOpt, uvClosest.y);
-    }
-
-    const float3 closestPos = texturedAreaLightWorldPos(tal, uvClosest);
-    const DirectionAndLength closestToCell = calcDirectionAndLength(closestPos, center);
+    const float2 uvClosest = clamp(float2(uPerp, vPerp), float2(uLo, vLo), float2(uHi, vHi));
+    const float3 closestPos = origin + U * uvClosest.x + V * uvClosest.y;
+    const DirectionAndLength closestToCell = calcDirectionAndLength(closestPos, evalPos);
     if ((reach > 0.0 && closestToCell.len >= reach) ||
-        (tal.coneCosOuter > 0.0 && dot(tal.normal, closestToCell.dir) <= tal.coneCosOuter))
+        (shaft.cone.y > 0.0 && dot(N, closestToCell.dir) <= shaft.cone.y))
     {
-        return (float3)0;
+        return false;
     }
 
-    float polyUvArea = 0.0;
-    for (int t = 0; t < vertCount - 2; t++)
+    const float rectArea = max(4.0 * halfU * halfV, 1e-8);
+    const float polyArea = shaft.positionRadius.w > 0.0
+        ? (PI * shaft.positionRadius.w * shaft.positionRadius.w)
+        : rectArea;
+    const float windowArea = polyArea * (((uHi - uLo) * (vHi - vLo)) / rectArea);
+    const float meanEmiss = max(shaft.surface.w, 0.0);
+    if (!(windowArea > 0.0) || !(meanEmiss > 0.0))
     {
-        const float2 e1 = tal.uvVerts[t + 1] - tal.uvVerts[0];
-        const float2 e2 = tal.uvVerts[t + 2] - tal.uvVerts[0];
-        polyUvArea += 0.5 * abs(e1.x * e2.y - e1.y * e2.x);
+        return false;
     }
-    const float bboxUvArea = max((uvMax.x - uvMin.x) * (uvMax.y - uvMin.y), 1e-8);
-    const float refUvArea = (vertCount >= 3 && polyUvArea > 1e-8) ? polyUvArea : bboxUvArea;
-    const float windowUvArea = (uHi - uLo) * (vHi - vLo);
-    const float windowArea = tal.area * (windowUvArea / refUvArea);
 
-    const uint textureIndex = asuint(tal.textureIndex);
+    const float falloff = shaft.emission.z > 0.0 ? shaft.emission.z : 1.0;
     float3 sampleSum = (float3)0;
     float3 visTargetSum = (float3)0;
     float visWeightSum = 0.0;
@@ -361,60 +319,37 @@ float3 evaluateTexturedAreaLightShaft(const TexturedAreaLight tal, float3 center
 
     for (uint sy = 0; sy < samples; sy++)
     {
+        const float vSample = lerp(vLo, vHi, ((float)sy + 0.5) * invSamples);
         for (uint sx = 0; sx < samples; sx++)
         {
-            const uint sampleIndex = sy * samples + sx;
-            const uint seed = baseSeed + sampleIndex * 131u;
-            const float2 rnd = float2(hash1(seed), hash1(seed + 0x9e3779b9u));
-            const float2 uv = float2(
-                lerp(uLo, uHi, ((float)sx + rnd.x) * invSamples),
-                lerp(vLo, vHi, ((float)sy + rnd.y) * invSamples));
-
-            if (vertCount >= 3 && !isUvInsideConvexPolygon(tal.uvVerts, vertCount, uv))
+            const float uSample = lerp(uLo, uHi, ((float)sx + 0.5) * invSamples);
+            const float3 pos = origin + U * uSample + V * vSample;
+            const DirectionAndLength lightToCell = calcDirectionAndLength(pos, evalPos);
+            if (lightToCell.len < 0.001 || (reach > 0.0 && lightToCell.len >= reach))
             {
                 continue;
             }
 
-            float mask = 1.0;
-            float emiss = tal.meanEmiss;
-            if (textureIndex != 0u)
-            {
-                mask = getTextureSampleLod(textureIndex, uv, 0.0).b;
-                emiss = 1.0;
-            }
-
-            if (!(mask > 0.0) || !(emiss > 0.0))
-            {
-                continue;
-            }
-
-            const float3 pos = texturedAreaLightWorldPos(tal, uv);
-            const DirectionAndLength lightToSurf = calcDirectionAndLength(pos, center);
-            if (lightToSurf.len < 0.001 || (reach > 0.0 && lightToSurf.len >= reach))
-            {
-                continue;
-            }
-
-            const float cosNL = max(dot(tal.normal, lightToSurf.dir), 0.0);
-            const float spotlight = (tal.coneCosOuter > 0.0)
-                ? getSpotFactor(cosNL, tal.coneCosInner, tal.coneCosOuter)
+            const float cosNL = max(dot(N, lightToCell.dir), 0.0);
+            const float spotlight = (shaft.cone.y > 0.0)
+                ? getSpotFactor(cosNL, shaft.cone.x, shaft.cone.y)
                 : sqrt(cosNL);
             if (!(spotlight > 0.0))
             {
                 continue;
             }
 
-            const float dw = safeSolidAngle(emiss * getTexturedAreaLightDw(windowArea, tal.normal, lightToSurf.dir, lightToSurf.len));
+            const float atten = shaftDistanceAttenuation(lightToCell.len, reach, falloff);
+            const float dw = safeSolidAngle(meanEmiss * windowArea * cosNL * atten);
             if (!(dw > 0.0))
             {
                 continue;
             }
 
-            const float3 emitted = tal.color * (mask * spotlight * dw * powerScale);
-            const float phase = shaftPhase(dot(-lightToSurf.dir, toViewer), 0.5);
-            const float3 contrib = emitted * (shaftRangeAttenuation(lightToSurf.len, reach) * phase);
+            const float phase = shaftPhase(dot(-lightToCell.dir, toViewer), LOCAL_SHAFT_PHASE_G);
+            const float3 contrib = shaft.color.rgb * (spotlight * dw * phase);
             const float lum = max(contrib.r, max(contrib.g, contrib.b));
-            if (lum <= 1e-7)
+            if (lum <= 1e-8)
             {
                 continue;
             }
@@ -425,185 +360,291 @@ float3 evaluateTexturedAreaLightShaft(const TexturedAreaLight tal, float3 center
         }
     }
 
-    if (max(sampleSum.r, max(sampleSum.g, sampleSum.b)) <= 1e-6 || !(visWeightSum > 0.0))
+    if (!(visWeightSum > 0.0))
     {
-        return (float3)0;
+        return false;
     }
 
-    const float3 visTarget = visWeightSum > 0.0 ? (visTargetSum / visWeightSum) : closestPos;
-    if (!lightShaftVisible(center, visTarget))
-    {
-        return (float3)0;
-    }
-
-    return sampleSum / (float)(samples * samples);
+    outRadiance = sampleSum / (float)(samples * samples);
+    outVisTarget = (visTargetSum / visWeightSum) + N * 0.002;
+    return max(outRadiance.r, max(outRadiance.g, outRadiance.b)) > 1e-7;
 }
 
-float3 accumulateShaft(const LightShaft_BT shaft, float3 center, float3 toViewer, uint3 cell,
-                       uint shaftIndex)
+bool evaluateProjectedAreaCandidate(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
+                                    float reach, out float3 outRadiance, out float3 outVisTarget)
 {
-    const float reach = shaft.emission.y;
-    const float boundsRadius = max(shaft.source.w, shaft.positionRadius.w);
-    const float cellDistance = length(center - shaft.positionRadius.xyz);
+    outRadiance = (float3)0;
+    outVisTarget = shaft.positionRadius.xyz;
 
-    if (reach > 0.0 && cellDistance - boundsRadius > reach)
+    TexturedAreaLight tal;
+    float powerScale = 1.0;
+
+    if ((uint)shaft.surface.y > 0u)
     {
-        return (float3)0;
-    }
-
-    if (!shaftConeAllows(shaft, center, boundsRadius))
-    {
-        return (float3)0;
-    }
-
-    const uint samples = max(1u, min(params.lightShaftSamples, 3u));
-    const uint baseSeed = cell.x * 1973u + cell.y * 9277u + cell.z * 4391u +
-                          shaftIndex * 65537u + globalUniform.frameId * 7919u;
-    const uint memberCount = (uint)shaft.surface.y;
-
-    if (memberCount > 0u)
-    {
-        const uint memberBase = (uint)shaft.surface.x;
-        const uint textureIndex = (uint)shaft.surface.z;
-        const float meanEmiss = shaft.surface.w;
-        const bool projector = shaft.emission.x > 0.5;
-        float3 groupSum = (float3)0;
-
-        for (uint mIdx = 0u; mIdx < memberCount; mIdx++)
+        const ShDtalMember m = dtalMembers[(uint)shaft.surface.x];
+        tal.A = m.A;
+        tal.B = m.B;
+        tal.C = m.C;
+        tal.normal = m.normal;
+        tal.area = m.area;
+        tal.textureIndex = asfloat((uint)shaft.surface.z);
+        tal.meanEmiss = shaft.surface.w;
+        tal.coneCosInner = shaft.cone.x;
+        tal.coneCosOuter = shaft.cone.y;
+        tal.projector = 1.0;
+        tal.numVerts = clamp((int)m.numVerts, 0, MAX_TEXTURED_AREA_LIGHT_VERTS);
+        tal.color = shaft.color.rgb;
+        for (int v = 0; v < MAX_TEXTURED_AREA_LIGHT_VERTS; v++)
         {
-            const ShDtalMember m = dtalMembers[memberBase + mIdx];
-
-            TexturedAreaLight tal;
-            tal.A = m.A;
-            tal.B = m.B;
-            tal.C = m.C;
-            tal.normal = m.normal;
-            tal.area = m.area;
-            tal.textureIndex = asfloat(textureIndex);
-            tal.meanEmiss = meanEmiss;
-            tal.coneCosInner = shaft.cone.x;
-            tal.coneCosOuter = shaft.cone.y;
-            tal.projector = projector ? 1.0 : 0.0;
-            tal.numVerts = clamp((int)m.numVerts, 0, MAX_TEXTURED_AREA_LIGHT_VERTS);
-            tal.color = shaft.color.rgb;
-
-            for (int v = 0; v < MAX_TEXTURED_AREA_LIGHT_VERTS; v++)
-            {
-                tal.uvVerts[v] = m.uv[v];
-            }
-
-            groupSum += evaluateTexturedAreaLightShaft(tal, center, toViewer, reach, 1.0, samples,
-                                                      baseSeed + mIdx * 4099u);
+            tal.uvVerts[v] = m.uv[v];
         }
-
-        return groupSum;
     }
-
-    if (shaft.source.x > 0.5)
+    else if (shaft.source.x > 0.5)
     {
         const uint lightIndex = (uint)shaft.source.x - 1u;
         const ShLightEncoded encoded = lightSources[lightIndex];
-        const float powerScale = max(shaft.source.y, 0.0);
-
-        if (encoded.lightType == LIGHT_TYPE_TEXTURED_AREA)
+        if (encoded.lightType != LIGHT_TYPE_TEXTURED_AREA)
         {
-            const TexturedAreaLight tal = decodeAsTexturedAreaLight(encoded);
-            return evaluateTexturedAreaLightShaft(tal, center, toViewer, reach, powerScale, samples, baseSeed);
+            return false;
         }
-
-        float3 sampleSum = (float3)0;
-        float3 visTargetSum = (float3)0;
-        float visWeightSum = 0.0;
-
-        for (uint sy = 0; sy < samples; sy++)
-        {
-            for (uint sx = 0; sx < samples; sx++)
-            {
-                const uint sampleIndex = sy * samples + sx;
-                const uint seed = baseSeed + sampleIndex * 131u;
-                const float2 rnd = float2(hash1(seed), hash1(seed + 0x9e3779b9u));
-                const LightSample ls = sampleLight(encoded, center, rnd);
-                if (!(ls.dw > 0.0))
-                {
-                    continue;
-                }
-
-                const float3 emitted = ls.color * (ls.dw * powerScale);
-                if (max(emitted.r, max(emitted.g, emitted.b)) <= 1e-6)
-                {
-                    continue;
-                }
-
-                const float3 fromLight = center - ls.position;
-                const float distToLight = length(fromLight);
-                if (distToLight < 0.001 || (reach > 0.0 && distToLight >= reach))
-                {
-                    continue;
-                }
-
-                const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), 0.5);
-                const float3 contrib = emitted * (shaftRangeAttenuation(distToLight, reach) * phase);
-                const float lum = max(contrib.r, max(contrib.g, contrib.b));
-                if (lum <= 1e-7)
-                {
-                    continue;
-                }
-
-                sampleSum += contrib;
-                visTargetSum += ls.position * lum;
-                visWeightSum += lum;
-            }
-        }
-
-        if (max(sampleSum.r, max(sampleSum.g, sampleSum.b)) <= 1e-6 || !(visWeightSum > 0.0))
-        {
-            return (float3)0;
-        }
-
-        const float3 visTarget = visTargetSum / visWeightSum;
-        if (!lightShaftVisible(center, visTarget))
-        {
-            return (float3)0;
-        }
-
-        return sampleSum / (float)(samples * samples);
+        tal = decodeAsTexturedAreaLight(encoded);
+        powerScale = max(shaft.source.y, 0.0);
+    }
+    else
+    {
+        return false;
     }
 
+    const LightSample ls = sampleProjectedAreaLight(tal, evalPos, float2(0.5, 0.5));
+    if (!(ls.dw > 0.0))
+    {
+        return false;
+    }
+
+    const float3 fromLight = evalPos - ls.position;
+    const float distToLight = length(fromLight);
+    if (distToLight < 0.001 || (reach > 0.0 && distToLight >= reach))
+    {
+        return false;
+    }
+
+    const float falloff = shaft.emission.z > 0.0 ? shaft.emission.z : 1.0;
+    const float shapedDw = safeSolidAngle(
+        ls.dw * (distToLight * distToLight) * shaftDistanceAttenuation(distToLight, reach, falloff));
+    const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), LOCAL_SHAFT_PHASE_G);
+    outRadiance = ls.color * (shapedDw * powerScale * phase);
+    outVisTarget = ls.position + normalize(tal.normal) * 0.002;
+    return max(outRadiance.r, max(outRadiance.g, outRadiance.b)) > 1e-7;
+}
+
+bool evaluateSourceLightCandidate(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
+                                  float reach, uint samples,
+                                  out float3 outRadiance, out float3 outVisTarget)
+{
+    outRadiance = (float3)0;
+    outVisTarget = shaft.positionRadius.xyz;
+
+    const uint lightIndex = (uint)shaft.source.x - 1u;
+    const ShLightEncoded encoded = lightSources[lightIndex];
+    const float powerScale = max(shaft.source.y, 0.0);
+    const float falloff = shaft.emission.z > 0.0 ? shaft.emission.z : 1.0;
+
+    float3 sampleSum = (float3)0;
+    float3 visTargetSum = (float3)0;
+    float visWeightSum = 0.0;
+    const float invSamples = 1.0 / (float)samples;
+
+    for (uint sy = 0; sy < samples; sy++)
+    {
+        for (uint sx = 0; sx < samples; sx++)
+        {
+            const float2 rnd = float2(((float)sx + 0.5) * invSamples, ((float)sy + 0.5) * invSamples);
+            const LightSample ls = sampleLight(encoded, evalPos, rnd);
+            if (!(ls.dw > 0.0))
+            {
+                continue;
+            }
+
+            const float3 fromLight = evalPos - ls.position;
+            const float distToLight = length(fromLight);
+            if (distToLight < 0.001 || (reach > 0.0 && distToLight >= reach))
+            {
+                continue;
+            }
+
+            const float shapedDw = safeSolidAngle(
+                ls.dw * (distToLight * distToLight) * shaftDistanceAttenuation(distToLight, reach, falloff));
+            if (!(shapedDw > 0.0))
+            {
+                continue;
+            }
+
+            const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), LOCAL_SHAFT_PHASE_G);
+            const float3 contrib = ls.color * (shapedDw * powerScale * phase);
+            const float lum = max(contrib.r, max(contrib.g, contrib.b));
+            if (lum <= 1e-8)
+            {
+                continue;
+            }
+
+            sampleSum += contrib;
+            visTargetSum += ls.position * lum;
+            visWeightSum += lum;
+        }
+    }
+
+    if (!(visWeightSum > 0.0))
+    {
+        return false;
+    }
+
+    outRadiance = sampleSum / (float)(samples * samples);
+    const float3 dir = shaft.direction.xyz;
+    const float3 normalOffset = dot(dir, dir) > 1e-6 ? normalize(dir) * 0.002 : (float3)0;
+    outVisTarget = (visTargetSum / visWeightSum) + normalOffset;
+    return max(outRadiance.r, max(outRadiance.g, outRadiance.b)) > 1e-7;
+}
+
+bool evaluateAnalyticShaftCandidate(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
+                                   float reach, out float3 outRadiance, out float3 outVisTarget)
+{
+    outRadiance = (float3)0;
     const float3 emitter = shaft.positionRadius.xyz;
-    const float3 fromLight = center - emitter;
+    const float3 direction = shaft.direction.xyz;
+    const bool hasDir = dot(direction, direction) > 1e-6;
+    outVisTarget = emitter + (hasDir ? normalize(direction) * 0.002 : (float3)0);
+
+    const float3 fromLight = evalPos - emitter;
     const float distToLight = length(fromLight);
     if (distToLight <= 0.001 || (reach > 0.0 && distToLight >= reach))
     {
-        return (float3)0;
+        return false;
     }
 
-    const float3 direction = shaft.direction.xyz;
     float cone = 1.0;
-    if (dot(direction, direction) > 0.000001)
+    if (hasDir)
     {
         const float cosAngle = dot(fromLight / distToLight, normalize(direction));
         cone = smoothstep(shaft.cone.y, max(shaft.cone.x, shaft.cone.y + 1e-4), cosAngle);
     }
     if (!(cone > 0.0))
     {
-        return (float3)0;
+        return false;
     }
 
     const float radius = max(shaft.positionRadius.w, 0.001);
-    const float attenuation = radius * radius / (distToLight * distToLight + radius * radius);
-    const float3 emitted = shaft.color.rgb * (cone * attenuation * shaftRangeAttenuation(distToLight, reach));
-    if (max(emitted.r, max(emitted.g, emitted.b)) <= 1e-6)
+    const float falloff = shaft.emission.z > 0.0 ? shaft.emission.z : 1.0;
+    const float attenuation = (radius * radius) * shaftDistanceAttenuation(distToLight, reach, falloff);
+    const float3 emitted = shaft.color.rgb * (cone * attenuation);
+    if (max(emitted.r, max(emitted.g, emitted.b)) <= 1e-7)
+    {
+        return false;
+    }
+
+    const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), LOCAL_SHAFT_PHASE_G);
+    outRadiance = emitted * phase;
+    return true;
+}
+
+float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd,
+                       float evalT, float3 toViewer)
+{
+    float3 pa = segStart;
+    float3 pb = segEnd;
+    float segWeight = 1.0;
+
+    const float3 dir = shaft.direction.xyz;
+    const float dirLen2 = dot(dir, dir);
+    if (dirLen2 > 1e-6 && shaft.cone.y >= -1e-4)
+    {
+        const float3 N = dir * rsqrt(dirLen2);
+        const float minH = 0.01;
+        const float h0 = dot(N, segStart - shaft.positionRadius.xyz);
+        const float h1 = dot(N, segEnd - shaft.positionRadius.xyz);
+        if (h0 < minH && h1 < minH)
+        {
+            return (float3)0;
+        }
+
+        float s0 = 0.0;
+        float s1 = 1.0;
+        if (h0 < minH || h1 < minH)
+        {
+            const float split = clamp((minH - h0) / (h1 - h0), 0.0, 1.0);
+            if (h0 < minH)
+            {
+                s0 = split;
+            }
+            else
+            {
+                s1 = split;
+            }
+        }
+
+        segWeight = saturate(s1 - s0);
+        if (segWeight <= 1e-4)
+        {
+            return (float3)0;
+        }
+
+        pa = lerp(segStart, segEnd, s0);
+        pb = lerp(segStart, segEnd, s1);
+    }
+
+    const float3 evalPos = lerp(pa, pb, evalT);
+
+    const float reach = shaft.emission.y;
+    const float boundsRadius = max(shaft.source.w, shaft.positionRadius.w);
+    if (reach > 0.0 && length(evalPos - shaft.positionRadius.xyz) - boundsRadius > reach)
     {
         return (float3)0;
     }
 
-    if (!lightShaftVisible(center, emitter))
+    if (!shaftConeAllows(shaft, evalPos, boundsRadius))
     {
         return (float3)0;
     }
 
-    const float phase = shaftPhase(dot(-fromLight / distToLight, toViewer), 0.5);
-    return emitted * phase;
+    const uint samples = max(1u, min(params.lightShaftSamples, 2u));
+    float3 radiance = (float3)0;
+    float3 visTarget = shaft.positionRadius.xyz;
+    bool hasCandidate = false;
+
+    if (shaft.emission.x <= 0.5 &&
+        shaft.tangentU.w > 0.0 && shaft.tangentV.w > 0.0 &&
+        dot(shaft.tangentU.xyz, shaft.tangentU.xyz) > 1e-6 &&
+        dot(shaft.tangentV.xyz, shaft.tangentV.xyz) > 1e-6)
+    {
+        hasCandidate = evaluateRectAreaShaft(shaft, evalPos, toViewer, reach, samples,
+                                             radiance, visTarget);
+    }
+    else if (shaft.emission.x > 0.5 && (shaft.surface.y > 0.5 || shaft.source.x > 0.5))
+    {
+        hasCandidate = evaluateProjectedAreaCandidate(shaft, evalPos, toViewer, reach,
+                                                      radiance, visTarget);
+    }
+    else if (shaft.source.x > 0.5)
+    {
+        hasCandidate = evaluateSourceLightCandidate(shaft, evalPos, toViewer, reach, samples,
+                                                    radiance, visTarget);
+    }
+    else
+    {
+        hasCandidate = evaluateAnalyticShaftCandidate(shaft, evalPos, toViewer, reach,
+                                                      radiance, visTarget);
+    }
+
+    if (!hasCandidate || max(radiance.r, max(radiance.g, radiance.b)) <= 1e-7)
+    {
+        return (float3)0;
+    }
+
+    if (!lightShaftVisible(evalPos, visTarget))
+    {
+        return (float3)0;
+    }
+
+    return radiance * segWeight;
 }
 
 [numthreads(4, 4, 1)]
@@ -616,7 +657,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    const float3 center = volumeGetCenter(cell);
+    if (params.debugMode == 99u)
+    {
+        rayCounter[0] = 0u;
+    }
+
+    const float3 jitter = volumeFroxelJitter(cell);
+    float3 segStart;
+    float3 segEnd;
+    float3 center;
+    volumeCellSegment(cell, jitter, segStart, segEnd, center);
     const float3 toViewer = normalize(globalUniform.cameraPosition.xyz - center);
     float scatteringSigma = 0.0;
     float extinctionSigma = 0.0;
@@ -635,26 +685,18 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint shaftCount = min(params.lightShaftCount, (uint)MAX_LIGHT_SHAFTS);
     const uint clusterCount = params.lightListClusterCount;
     const uint clusterIndex = volumeClusterIndex(cell);
+    const uint listBase = clusterIndex * (1u + params.lightListCapacity);
+    const uint loopCount = clusterCount > 0u
+        ? min(lightList[listBase], params.lightListCapacity)
+        : shaftCount;
 
-    if (clusterCount > 0u)
+    for (uint i = 0; i < loopCount; i++)
     {
-        const uint listBase = clusterIndex * (1u + params.lightListCapacity);
-        const uint listCount = min(lightList[listBase], params.lightListCapacity);
-        for (uint i = 0; i < listCount; i++)
+        const uint shaftIndex = clusterCount > 0u ? lightList[listBase + 1u + i] : i;
+        if (shaftIndex < shaftCount)
         {
-            const uint shaftIndex = lightList[listBase + 1u + i];
-            if (shaftIndex < shaftCount)
-            {
-                radiance += accumulateShaft(params.lightShafts[shaftIndex], center, toViewer, cell,
-                                            shaftIndex);
-            }
-        }
-    }
-    else
-    {
-        for (uint i = 0; i < shaftCount; i++)
-        {
-            radiance += accumulateShaft(params.lightShafts[i], center, toViewer, cell, i);
+            radiance += accumulateShaft(params.lightShafts[shaftIndex], segStart, segEnd,
+                                        jitter.z, toViewer);
         }
     }
 
@@ -685,7 +727,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (params.debugMode == 4u)
     {
         float4 history = (float4)0;
-        sampleVolumeHistory(cell, center, history);
+        float edgeFade = 0.0;
+        sampleVolumeHistory(cell, center, history, edgeFade);
         lightShaftVolume[cell] = history;
         return;
     }
@@ -693,13 +736,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (params.temporalEnabled != 0u && params.historyValid != 0u && params.mediumHistoryWeight > 0.0)
     {
         float4 history = (float4)0;
-        if (sampleVolumeHistory(cell, center, history))
+        float edgeFade = 0.0;
+        if (sampleVolumeHistory(cell, center, history, edgeFade))
         {
-            const float weight = saturate(params.mediumHistoryWeight);
-            const float3 clampedHistory = clamp(history.rgb, current.rgb * 0.25,
-                                                max(current.rgb * 4.0, history.rgb * 0.75) + 1e-3);
-            current.rgb = lerp(current.rgb, clampedHistory, weight);
-            current.a = lerp(current.a, clamp(history.a, current.a * 0.5, current.a * 2.0 + 1e-6), weight);
+            const float weight = saturate(params.mediumHistoryWeight) * edgeFade;
+            current.rgb = lerp(current.rgb, max(history.rgb, (float3)0.0), weight);
+            current.a = lerp(current.a, max(history.a, 0.0), weight);
         }
     }
 

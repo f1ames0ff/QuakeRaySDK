@@ -26,6 +26,7 @@ namespace
 const char *const TRACE_SHADER_FILE_NAME = "CmGodRays.comp.spv";
 const char *const FILTER_SHADER_FILE_NAME = "CmGodRaysFilter.comp.spv";
 const char *const ACCUM_SHADER_FILE_NAME = "CmLightShaftAccum.comp.spv";
+const char *const BLUR_SHADER_FILE_NAME = "CmLightShaftBlur.comp.spv";
 
 // The engine's framebuffer binding block: the storage images sit at raw binding = image index, the
 // sampled views at raw binding = 124 + image index (Generated/ShaderCommonCFramebuf.cpp's
@@ -98,6 +99,12 @@ constexpr GodRaysFramebufferBinding ACCUM_FRAMEBUFFER_BINDINGS[ACCUM_FRAMEBUFFER
     { RhiRtGodRaysPass::IMAGE_NORMAL_PREV,      false },
     { RhiRtGodRaysPass::IMAGE_DEPTH_WORLD_PREV, false },
     { RhiRtGodRaysPass::IMAGE_MOTION,           false },
+};
+
+constexpr uint32_t BLUR_FRAMEBUFFER_BINDING_COUNT = 1;
+constexpr GodRaysFramebufferBinding BLUR_FRAMEBUFFER_BINDINGS[BLUR_FRAMEBUFFER_BINDING_COUNT] =
+{
+    { RhiRtGodRaysPass::IMAGE_Q2_VIEW_DEPTH,    false },
 };
 
 // The images whose last use in an entry point is a sampled read: the trace reads 9/19/23/26/81/89
@@ -240,6 +247,7 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
         target.traceFramebufferSet = nullptr;
         target.filterFramebufferSet = nullptr;
         target.accumFramebufferSet = nullptr;
+        target.blurFramebufferSet = nullptr;
 
         for (nvrhi::TextureHandle &texture : target.engineTextures)
         {
@@ -276,7 +284,10 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         lightShaftHistoryTextures[i] = nullptr;
+        lightShaftBlurTextures[i] = nullptr;
         lightShaftHistorySets[i] = nullptr;
+        lightShaftBlurSets[i] = nullptr;
+        lightShaftFilterSets[i] = nullptr;
     }
     lightShaftHistoryWidth = 0;
     lightShaftHistoryHeight = 0;
@@ -289,16 +300,20 @@ RhiRtGodRaysPass::~RhiRtGodRaysPass()
     uniformLayout = nullptr;
     filterFramebufferLayout = nullptr;
     accumFramebufferLayout = nullptr;
+    blurFramebufferLayout = nullptr;
     traceFramebufferLayout = nullptr;
     lightShaftFilterLayout = nullptr;
+    lightShaftBlurLayout = nullptr;
     paramsLayout = nullptr;
     shadowLayout = nullptr;
     filterShader = nullptr;
     traceShader = nullptr;
     accumShader = nullptr;
+    blurShader = nullptr;
     filterPipeline = nullptr;
     tracePipeline = nullptr;
     accumPipeline = nullptr;
+    blurPipeline = nullptr;
 }
 
 bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
@@ -527,13 +542,14 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         accumPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass light-shaft accumulation");
     }
 
-    // The filter pipeline: the two placeholder positions (engine sets 0/1, which the blob does not
-    // use), the framebuffer set at 2, the uniform at 3 and the full-resolution shaft scatter at 4.
+    // The filter pipeline: the leading placeholder position (engine set 0, which the blob does not
+    // use), params at 1, the framebuffer set at 2, the uniform at 3 and the full-resolution shaft
+    // scatter at 4.
     {
         nvrhi::ComputePipelineDesc desc;
         desc.setComputeShader(filterShader);
         desc.addBindingLayout(emptyLayout);
-        desc.addBindingLayout(emptyLayout);
+        desc.addBindingLayout(paramsLayout);
         desc.addBindingLayout(filterFramebufferLayout);
         desc.addBindingLayout(uniformLayout);
         desc.addBindingLayout(lightShaftFilterLayout);
@@ -547,9 +563,12 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
-    // The one empty set the filter binds at both placeholder positions. One set bound at two
-    // positions is legal Vulkan; the layouts are the same object (RhiRtComposePass uses the same
-    // mechanism for its descriptor-set holes).
+    if (!CreateLightShaftBlurResources())
+    {
+        return false;
+    }
+
+    // The one empty set the filter binds at its placeholder position.
     emptySet = device->createBindingSet(nvrhi::BindingSetDesc(), emptyLayout);
     if (emptySet == nullptr)
     {
@@ -557,10 +576,65 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
+    if (!CreateParamsBuffers())
+    {
+        return false;
+    }
+
+    created = true;
+    return true;
+}
+
+bool RhiRtGodRaysPass::CreateLightShaftBlurResources()
+{
+    if (!LoadShader(BLUR_SHADER_FILE_NAME, nvrhi::ShaderType::Compute, blurShader))
+    {
+        return false;
+    }
+
+    blurFramebufferLayout = CreateFramebufferLayout(
+        device, BLUR_FRAMEBUFFER_BINDINGS, BLUR_FRAMEBUFFER_BINDING_COUNT);
+
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_UAV(1));
+        lightShaftBlurLayout = device->createBindingLayout(desc);
+    }
+
+    if (blurFramebufferLayout == nullptr || lightShaftBlurLayout == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the light-shaft blur binding layout");
+        return false;
+    }
+
+    nvrhi::ComputePipelineDesc desc;
+    desc.setComputeShader(blurShader);
+    desc.addBindingLayout(lightShaftBlurLayout);
+    desc.addBindingLayout(paramsLayout);
+    desc.addBindingLayout(blurFramebufferLayout);
+    desc.addBindingLayout(uniformLayout);
+
+    blurPipeline = rhi::createComputePipeline(device, desc, "RhiRtGodRaysPass light-shaft blur");
+    if (blurPipeline == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: failed to create the light-shaft blur compute pipeline");
+        return false;
+    }
+
+    return true;
+}
+
+bool RhiRtGodRaysPass::CreateParamsBuffers()
+{
     // The per-slot params buffers and the sets over them. The buffer is created with the shader's
-    // measured element stride 6304, not a reduced CPU size, and with the write helper's state
-    // contract: keepInitialState = true and initialState = CopyDest, which `writeBuffer` requires
-    // and the SRV binding then transitions out of before the dispatch (RhiResources.h:25-33).
+    // measured element stride, not a reduced CPU size, and with the write helper's state contract:
+    // keepInitialState = true and initialState = CopyDest, which `writeBuffer` requires and the
+    // SRV binding then transitions out of before the dispatch (RhiResources.h:25-33).
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         nvrhi::BufferDesc desc;
@@ -587,7 +661,6 @@ bool RhiRtGodRaysPass::Create(nvrhi::IDevice *pDevice,
         }
     }
 
-    created = true;
     return true;
 }
 
@@ -841,6 +914,46 @@ bool RhiRtGodRaysPass::PrepareBlueNoiseSet(nvrhi::ICommandList *pCommandList)
     return true;
 }
 
+bool RhiRtGodRaysPass::CreateBlurTargets(uint32_t width, uint32_t height)
+{
+    nvrhi::TextureDesc desc;
+    desc.dimension = nvrhi::TextureDimension::Texture2D;
+    desc.format = nvrhi::Format::RGBA16_FLOAT;
+    desc.width = width;
+    desc.height = height;
+    desc.mipLevels = 1;
+    desc.isUAV = true;
+    desc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    desc.keepInitialState = true;
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        lightShaftBlurTextures[i] = rhi::createTexture(
+            device, desc, "RhiRtGodRaysPass light-shaft blur " + std::to_string(i));
+        if (lightShaftBlurTextures[i] == nullptr)
+        {
+            return false;
+        }
+
+        nvrhi::BindingSetDesc blurSetDesc;
+        blurSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, lightShaftHistoryTextures[i]));
+        blurSetDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
+            1, lightShaftBlurTextures[i], nvrhi::Format::RGBA16_FLOAT,
+            nvrhi::TextureSubresourceSet(), nvrhi::TextureDimension::Texture2D));
+        lightShaftBlurSets[i] = device->createBindingSet(blurSetDesc, lightShaftBlurLayout);
+
+        nvrhi::BindingSetDesc filterSetDesc;
+        filterSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, lightShaftBlurTextures[i]));
+        lightShaftFilterSets[i] = device->createBindingSet(filterSetDesc, lightShaftFilterLayout);
+        if (lightShaftBlurSets[i] == nullptr || lightShaftFilterSets[i] == nullptr)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool RhiRtGodRaysPass::PrepareLightShaftHistory(uint32_t width, uint32_t height)
 {
     if (lightShaftHistoryTextures[0] != nullptr && lightShaftHistoryWidth == width &&
@@ -887,15 +1000,12 @@ bool RhiRtGodRaysPass::PrepareLightShaftHistory(uint32_t width, uint32_t height)
             ReleaseLightShaftHistory();
             return false;
         }
+    }
 
-        nvrhi::BindingSetDesc filterSetDesc;
-        filterSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, lightShaftHistoryTextures[i]));
-        lightShaftFilterSets[i] = device->createBindingSet(filterSetDesc, lightShaftFilterLayout);
-        if (lightShaftFilterSets[i] == nullptr)
-        {
-            ReleaseLightShaftHistory();
-            return false;
-        }
+    if (!CreateBlurTargets(width, height))
+    {
+        ReleaseLightShaftHistory();
+        return false;
     }
 
     lightShaftHistoryWidth = width;
@@ -912,6 +1022,10 @@ void RhiRtGodRaysPass::ReleaseLightShaftHistory()
         {
             frameContext->Retire(lightShaftHistorySets[i]);
         }
+        if (frameContext != nullptr && lightShaftBlurSets[i] != nullptr)
+        {
+            frameContext->Retire(lightShaftBlurSets[i]);
+        }
         if (frameContext != nullptr && lightShaftFilterSets[i] != nullptr)
         {
             frameContext->Retire(lightShaftFilterSets[i]);
@@ -920,10 +1034,16 @@ void RhiRtGodRaysPass::ReleaseLightShaftHistory()
         {
             frameContext->Retire(lightShaftHistoryTextures[i]);
         }
+        if (frameContext != nullptr && lightShaftBlurTextures[i] != nullptr)
+        {
+            frameContext->Retire(lightShaftBlurTextures[i]);
+        }
 
         lightShaftHistorySets[i] = nullptr;
+        lightShaftBlurSets[i] = nullptr;
         lightShaftFilterSets[i] = nullptr;
         lightShaftHistoryTextures[i] = nullptr;
+        lightShaftBlurTextures[i] = nullptr;
     }
 
     lightShaftHistoryWidth = 0;
@@ -1131,6 +1251,24 @@ bool RhiRtGodRaysPass::PrepareFramebufferSets(Target &target)
         }
     }
 
+    if (target.blurFramebufferSet == nullptr)
+    {
+        target.blurFramebufferSet = CreateFramebufferSet(device, target.engineTextures,
+                                                         BLUR_FRAMEBUFFER_BINDINGS,
+                                                         BLUR_FRAMEBUFFER_BINDING_COUNT,
+                                                         blurFramebufferLayout);
+
+        if (target.blurFramebufferSet == nullptr)
+        {
+            if (!warnedBadTable)
+            {
+                warnedBadTable = true;
+                LogMessage(print, "Warning: RHI: failed to create the god-rays pass blur binding set");
+            }
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1205,6 +1343,52 @@ void RhiRtGodRaysPass::RecordDispatch(nvrhi::ICommandList *pCommandList,
     pCommandList->dispatch(groupsX, groupsY, groupsZ);
 }
 
+void RhiRtGodRaysPass::ClearLightShaftScratch(nvrhi::ICommandList *pCommandList)
+{
+    if (lightShaftHistoryCleared)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        pCommandList->clearTextureFloat(lightShaftHistoryTextures[i], nvrhi::AllSubresources,
+                                        nvrhi::Color(0.f, 0.f, 0.f, 1.f));
+        pCommandList->clearTextureFloat(lightShaftBlurTextures[i], nvrhi::AllSubresources,
+                                        nvrhi::Color(0.f, 0.f, 0.f, 1.f));
+        pCommandList->setTextureState(lightShaftHistoryTextures[i], nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::NonPixelShaderResource);
+        pCommandList->setTextureState(lightShaftBlurTextures[i], nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::NonPixelShaderResource);
+    }
+
+    lightShaftHistoryCleared = true;
+}
+
+void RhiRtGodRaysPass::RecordLightShaftBlur(nvrhi::ICommandList *pCommandList,
+                                            uint32_t frameIndex,
+                                            const Target &target,
+                                            uint32_t groupsX,
+                                            uint32_t groupsY,
+                                            uint32_t lightShaftCount)
+{
+    if (lightShaftCount == 0u)
+    {
+        return;
+    }
+
+    pCommandList->setTextureState(lightShaftHistoryTextures[frameIndex], nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::NonPixelShaderResource);
+    pCommandList->setTextureState(lightShaftBlurTextures[frameIndex], nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::UnorderedAccess);
+    RecordDispatch(pCommandList, blurPipeline,
+                   { lightShaftBlurSets[frameIndex], paramsSets[frameIndex],
+                     target.blurFramebufferSet, target.uniformSet },
+                   groupsX, groupsY, 1, nullptr);
+    pCommandList->setTextureState(lightShaftBlurTextures[frameIndex], nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::NonPixelShaderResource);
+}
+
 bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
                                    uint32_t frameIndex,
                                    const Framebuffers *pFramebuffers,
@@ -1260,19 +1444,7 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
     rhi::writeBuffer(pCommandList, paramsBuffers[frameIndex], paramsBytes, sizeof(paramsBytes));
 
     AnnounceFrameImages(pCommandList, target);
-
-    if (!lightShaftHistoryCleared)
-    {
-        pCommandList->clearTextureFloat(lightShaftHistoryTextures[0], nvrhi::AllSubresources,
-                                        nvrhi::Color(0.f, 0.f, 0.f, 0.f));
-        pCommandList->clearTextureFloat(lightShaftHistoryTextures[1], nvrhi::AllSubresources,
-                                        nvrhi::Color(0.f, 0.f, 0.f, 0.f));
-        pCommandList->setTextureState(lightShaftHistoryTextures[0], nvrhi::AllSubresources,
-                                      nvrhi::ResourceStates::NonPixelShaderResource);
-        pCommandList->setTextureState(lightShaftHistoryTextures[1], nvrhi::AllSubresources,
-                                      nvrhi::ResourceStates::NonPixelShaderResource);
-        lightShaftHistoryCleared = true;
-    }
+    ClearLightShaftScratch(pCommandList);
 
     const uint32_t historyPrevious = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
     pCommandList->setTextureState(lightShaftHistoryTextures[frameIndex], nvrhi::AllSubresources,
@@ -1296,6 +1468,8 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
                      target.accumFramebufferSet, target.uniformSet, blueNoiseSet,
                      paramsSets[frameIndex] },
                    accumGroupsX, accumGroupsY, 1, nullptr);
+    RecordLightShaftBlur(pCommandList, frameIndex, target, accumGroupsX, accumGroupsY,
+                         params.lightShaftCount);
 
     // The primary march (passIndex 0). On the clear path the shader writes zeros to every
     // half-resolution pixel and the filter then zeroes image 64 (the legacy shape,
@@ -1321,12 +1495,12 @@ bool RhiRtGodRaysPass::RenderInput(nvrhi::ICommandList *pCommandList,
         const uint32_t filterGroupsX = Utils::GetWorkGroupCount(width, GOD_RAYS_GROUP_SIZE);
         const uint32_t filterGroupsY = Utils::GetWorkGroupCount(height, GOD_RAYS_GROUP_SIZE);
 
-        // The full-resolution bilateral upscale. The blob's framebuffer and uniform bindings live in
-        // engine sets 2 and 3, so the two leading placeholder positions are filled with the empty
-        // set.
+        // The full-resolution bilateral upscale. The blob's params, framebuffer and uniform
+        // bindings live in engine sets 1, 2 and 3, so the leading placeholder position is filled
+        // with the empty set.
         RecordDispatch(pCommandList, filterPipeline,
-                       { emptySet, emptySet, target.filterFramebufferSet, target.uniformSet,
-                         lightShaftFilterSets[frameIndex] },
+                       { emptySet, paramsSets[frameIndex], target.filterFramebufferSet,
+                         target.uniformSet, lightShaftFilterSets[frameIndex] },
                        filterGroupsX, filterGroupsY, 1, nullptr);
     }
 
@@ -1427,7 +1601,7 @@ void RhiRtGodRaysPass::RenderReflections(nvrhi::ICommandList *pCommandList,
     const uint32_t filterGroupsX = Utils::GetWorkGroupCount(width, GOD_RAYS_GROUP_SIZE);
     const uint32_t filterGroupsY = Utils::GetWorkGroupCount(height, GOD_RAYS_GROUP_SIZE);
     RecordDispatch(pCommandList, filterPipeline,
-                   { emptySet, emptySet, target.filterFramebufferSet, target.uniformSet,
+                   { emptySet, paramsSets[frameIndex], target.filterFramebufferSet, target.uniformSet,
                      lightShaftFilterSets[frameIndex] },
                    filterGroupsX, filterGroupsY, 1, nullptr);
 
@@ -1469,11 +1643,16 @@ void RhiRtGodRaysPass::ReleaseFramebufferSets(Target &target)
         {
             frameContext->Retire(target.accumFramebufferSet);
         }
+        if (target.blurFramebufferSet != nullptr)
+        {
+            frameContext->Retire(target.blurFramebufferSet);
+        }
     }
 
     target.traceFramebufferSet = nullptr;
     target.filterFramebufferSet = nullptr;
     target.accumFramebufferSet = nullptr;
+    target.blurFramebufferSet = nullptr;
 }
 
 void RhiRtGodRaysPass::ReleaseFramebufferTarget(Target &target)

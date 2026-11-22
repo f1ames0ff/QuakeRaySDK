@@ -452,6 +452,7 @@ private:
         nvrhi::BindingSetHandle traceFramebufferSet;
         nvrhi::BindingSetHandle filterFramebufferSet;
         nvrhi::BindingSetHandle accumFramebufferSet;
+        nvrhi::BindingSetHandle blurFramebufferSet;
         nvrhi::IBuffer *uniformBuffer = nullptr;
         nvrhi::BindingSetHandle uniformSet;
         nvrhi::BindingSetHandle lightShaftVolumeSet;
@@ -505,7 +506,17 @@ private:
     bool PrepareLightShaftVolumeSet(Target &target, nvrhi::ICommandList *pCommandList);
 
     bool PrepareLightShaftHistory(uint32_t width, uint32_t height);
+    bool CreateBlurTargets(uint32_t width, uint32_t height);
     void ReleaseLightShaftHistory();
+    bool CreateLightShaftBlurResources();
+    bool CreateParamsBuffers();
+    void ClearLightShaftScratch(nvrhi::ICommandList *pCommandList);
+    void RecordLightShaftBlur(nvrhi::ICommandList *pCommandList,
+                              uint32_t frameIndex,
+                              const Target &target,
+                              uint32_t groupsX,
+                              uint32_t groupsY,
+                              uint32_t lightShaftCount);
 
     // Set 0: builds (or rebuilds, when either pointer changed) the shadow map set. Returns false
     // when no valid shadow map was set.
@@ -539,21 +550,24 @@ private:
     // Not owned: the host's frame model, which outlives this object.
     rhi::RhiFrameContext *frameContext = nullptr;
 
-    // The two engine blobs.
+    // The engine blobs.
     nvrhi::ShaderHandle traceShader;
     nvrhi::ShaderHandle filterShader;
     nvrhi::ShaderHandle accumShader;
+    nvrhi::ShaderHandle blurShader;
 
-    // The eight layouts this module owns. The trace's mirror the engine's descriptor set numbers
+    // The layouts this module owns. The trace's mirror the engine's descriptor set numbers
     // (0 shadow, 1 params, 2 framebuffers, 3 uniform, 4 blue noise, 5 the descriptor-less
-    // push-constant layout); the filter's lead with two placeholder positions because its blob
-    // declares its framebuffer and uniform bindings in engine sets 2 and 3.
+    // push-constant layout); the filter's lead with placeholder positions because its blob
+    // declares its params, framebuffer, and uniform bindings in engine sets 1, 2 and 3.
     nvrhi::BindingLayoutHandle shadowLayout;
     nvrhi::BindingLayoutHandle paramsLayout;
     nvrhi::BindingLayoutHandle traceFramebufferLayout;
     nvrhi::BindingLayoutHandle filterFramebufferLayout;
     nvrhi::BindingLayoutHandle accumFramebufferLayout;
+    nvrhi::BindingLayoutHandle blurFramebufferLayout;
     nvrhi::BindingLayoutHandle lightShaftFilterLayout;
+    nvrhi::BindingLayoutHandle lightShaftBlurLayout;
     nvrhi::BindingLayoutHandle uniformLayout;
     nvrhi::BindingLayoutHandle blueNoiseLayout;
     nvrhi::BindingLayoutHandle lightShaftVolumeLayout;
@@ -561,11 +575,12 @@ private:
     nvrhi::BindingLayoutHandle pushConstantLayout;
     nvrhi::BindingLayoutHandle emptyLayout;
 
-    // The two compute pipelines. The filter carries no push-constant layout: its blob declares no
+    // The compute pipelines. The filter carries no push-constant layout: its blob declares no
     // push constant (measured).
     nvrhi::ComputePipelineHandle tracePipeline;
     nvrhi::ComputePipelineHandle filterPipeline;
     nvrhi::ComputePipelineHandle accumPipeline;
+    nvrhi::ComputePipelineHandle blurPipeline;
 
     // The empty set of the filter's two leading placeholder positions. One set bound at two
     // positions is legal Vulkan; the layouts are the same object (the compose module does the same
@@ -600,7 +615,9 @@ private:
 
     nvrhi::SamplerHandle lightShaftHistorySampler;
     nvrhi::TextureHandle lightShaftHistoryTextures[MAX_FRAMES_IN_FLIGHT];
+    nvrhi::TextureHandle lightShaftBlurTextures[MAX_FRAMES_IN_FLIGHT];
     nvrhi::BindingSetHandle lightShaftHistorySets[MAX_FRAMES_IN_FLIGHT];
+    nvrhi::BindingSetHandle lightShaftBlurSets[MAX_FRAMES_IN_FLIGHT];
     nvrhi::BindingSetHandle lightShaftFilterSets[MAX_FRAMES_IN_FLIGHT];
     uint32_t lightShaftHistoryWidth = 0;
     uint32_t lightShaftHistoryHeight = 0;

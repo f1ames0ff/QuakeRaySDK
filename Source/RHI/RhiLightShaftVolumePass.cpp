@@ -99,12 +99,14 @@ bool RhiLightShaftVolumePass::Create(nvrhi::IDevice *pDevice,
         desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
                                    .setConstantBufferOffset(0)
                                    .setShaderResourceOffset(0)
+                                   .setSamplerOffset(0)
                                    .setUnorderedAccessViewOffset(0));
         desc.addItem(nvrhi::BindingLayoutItem::ConstantBuffer(0));
         desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1));
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(2));
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(3));
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4));
+        desc.addItem(nvrhi::BindingLayoutItem::Sampler(5));
         paramsLayout = device->createBindingLayout(desc);
     }
 
@@ -354,6 +356,7 @@ bool RhiLightShaftVolumePass::CreateVolumeTargets()
         paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(2, target.lightListBuffer));
         paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, target.rayCounterBuffer));
         paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(4, target.sunVisibilityBuffer));
+        paramsSetDesc.addItem(nvrhi::BindingSetItem::Sampler(5, sampler));
         target.paramsSet = device->createBindingSet(paramsSetDesc, paramsLayout);
 
         nvrhi::BindingSetDesc assignSetDesc;

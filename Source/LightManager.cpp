@@ -276,13 +276,29 @@ namespace
         return true;
     }
 
+    float SafePositiveFloat(float value)
+    {
+        return (std::isfinite(value) && value > 0.0f) ? value : 0.0f;
+    }
+
     bool TryBuildSphereLightShaft(const QrSphericalLightUploadInfo &info,
                                   uint32_t lightIndex,
                                   LightManager::LightShaft &shaft)
     {
-        const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
+        if (!info.lightShafts)
+        {
+            return false;
+        }
+
+        const float power = SafePositiveFloat(info.lightShaftsPower);
+        if (!(power > 0.0f))
+        {
+            return false;
+        }
+
         const float radius = std::max(info.radius, 0.001f);
-        const float reach = ComputeFluxShaftReach(info.color.data, power);
+        const float autoReach = ComputeFluxShaftReach(info.color.data, power);
+        const float reach = ResolveLightShaftReach(autoReach, info.lightShaftsDistance);
 
         shaft = {};
         shaft.position[0] = info.position.data[0];
@@ -293,11 +309,109 @@ namespace
         shaft.color[1] = info.color.data[1] * power;
         shaft.color[2] = info.color.data[2] * power;
         shaft.emission[1] = reach;
+        shaft.emission[2] = SanitizeLightShaftFalloff(info.lightShaftsFalloff);
         shaft.source[0] = static_cast<float>(lightIndex + 1);
         shaft.source[1] = power;
         shaft.source[2] = reach > 0.0f ? reach + radius : 0.0f;
         shaft.source[3] = radius;
         return true;
+    }
+
+    void BuildPlaneOrthonormalBasis(const float axisHint[3],
+                                    const float normal[3],
+                                    float outU[3],
+                                    float outV[3])
+    {
+        const float dotAN = Utils::Dot(axisHint, normal);
+        outU[0] = axisHint[0] - dotAN * normal[0];
+        outU[1] = axisHint[1] - dotAN * normal[1];
+        outU[2] = axisHint[2] - dotAN * normal[2];
+
+        if (Utils::Dot(outU, outU) <= 1e-10f)
+        {
+            const float fallback[3] = {
+                std::abs(normal[2]) < 0.9f ? 0.0f : 1.0f,
+                0.0f,
+                std::abs(normal[2]) < 0.9f ? 1.0f : 0.0f,
+            };
+            const float dotFN = Utils::Dot(fallback, normal);
+            outU[0] = fallback[0] - dotFN * normal[0];
+            outU[1] = fallback[1] - dotFN * normal[1];
+            outU[2] = fallback[2] - dotFN * normal[2];
+        }
+
+        Utils::Normalize(outU);
+        Utils::Cross(normal, outU, outV);
+        Utils::Normalize(outV);
+    }
+
+    float PopulatePolygonLightShaftGeometry(const QrFloat3D &A,
+                                            const QrFloat3D &B,
+                                            const QrFloat3D &C,
+                                            const float direction[3],
+                                            const QrFloat2D *uvVerts,
+                                            int vertCount,
+                                            LightManager::LightShaft &shaft)
+    {
+        float uAxis[3] = {};
+        float vAxis[3] = {};
+        BuildPlaneOrthonormalBasis(A.data, direction, uAxis, vAxis);
+
+        const int count = (uvVerts != nullptr) ? std::min(std::max(vertCount, 0), MAX_TEXTURED_AREA_LIGHT_VERTS) : 0;
+        if (count <= 0)
+        {
+            return 0.0f;
+        }
+
+        float uMin = 0.0f;
+        float uMax = 0.0f;
+        float vMin = 0.0f;
+        float vMax = 0.0f;
+        float hSum = 0.0f;
+
+        for (int i = 0; i < count; i++)
+        {
+            const float u = uvVerts[i].data[0];
+            const float v = uvVerts[i].data[1];
+            const float rel[3] = {
+                A.data[0] * u + B.data[0] * v,
+                A.data[1] * u + B.data[1] * v,
+                A.data[2] * u + B.data[2] * v,
+            };
+            const float pu = Utils::Dot(rel, uAxis);
+            const float pv = Utils::Dot(rel, vAxis);
+            const float ph = Utils::Dot(rel, direction);
+
+            if (i == 0)
+            {
+                uMin = uMax = pu;
+                vMin = vMax = pv;
+            }
+            else
+            {
+                uMin = std::min(uMin, pu);
+                uMax = std::max(uMax, pu);
+                vMin = std::min(vMin, pv);
+                vMax = std::max(vMax, pv);
+            }
+            hSum += ph;
+        }
+
+        const float midU = 0.5f * (uMin + uMax);
+        const float midV = 0.5f * (vMin + vMax);
+        const float midH = hSum / static_cast<float>(count);
+        const float halfU = std::max(0.5f * (uMax - uMin), 1e-3f);
+        const float halfV = std::max(0.5f * (vMax - vMin), 1e-3f);
+
+        for (int k = 0; k < 3; k++)
+        {
+            shaft.position[k] = C.data[k] + midU * uAxis[k] + midV * vAxis[k] + midH * direction[k];
+            shaft.tangentU[k] = uAxis[k];
+            shaft.tangentV[k] = vAxis[k];
+        }
+        shaft.tangentU[3] = halfU;
+        shaft.tangentV[3] = halfV;
+        return std::sqrt(halfU * halfU + halfV * halfV);
     }
 
     bool TryBuildTexturedAreaLightShaft(const QrTexturedAreaLightUploadInfo &info,
@@ -306,7 +420,8 @@ namespace
                                         uint32_t areaLightIndex,
                                         LightManager::LightShaft &shaft)
     {
-        if (!info.lightShafts || info.numVerts <= 0)
+        const float power = SafePositiveFloat(info.lightShaftsPower);
+        if (!info.lightShafts || info.numVerts <= 0 || !(power > 0.0f))
         {
             return false;
         }
@@ -317,26 +432,12 @@ namespace
             return false;
         }
 
-        const int vertCount = std::min(info.numVerts, MAX_TEXTURED_AREA_LIGHT_VERTS);
-        float s = 0.0f;
-        float t = 0.0f;
-        for (int i = 0; i < vertCount; i++)
-        {
-            s += info.uvVerts[i].data[0];
-            t += info.uvVerts[i].data[1];
-        }
-        const float inv = 1.0f / static_cast<float>(vertCount);
-        s *= inv;
-        t *= inv;
-
         shaft = {};
-        shaft.position[0] = info.C.data[0] + info.A.data[0] * s + info.B.data[0] * t;
-        shaft.position[1] = info.C.data[1] + info.A.data[1] * s + info.B.data[1] * t;
-        shaft.position[2] = info.C.data[2] + info.A.data[2] * s + info.B.data[2] * t;
+        const float boundsRadius = PopulatePolygonLightShaftGeometry(
+            info.A, info.B, info.C, direction, info.uvVerts, info.numVerts, shaft);
         shaft.position[3] = std::sqrt(std::max(info.area, 0.0f) / static_cast<float>(kPi));
         memcpy(shaft.direction, direction, sizeof(direction));
 
-        const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
         shaft.color[0] = info.color.data[0] * power;
         shaft.color[1] = info.color.data[1] * power;
         shaft.color[2] = info.color.data[2] * power;
@@ -346,129 +447,69 @@ namespace
         shaft.surface[3] = info.meanEmiss;
         shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
 
-        float maxDu = 0.0f;
-        float maxDv = 0.0f;
-        float boundsRadius = 0.0f;
-        for (int i = 0; i < vertCount; i++)
-        {
-            const float u = info.uvVerts[i].data[0];
-            const float v = info.uvVerts[i].data[1];
-            maxDu = std::max(maxDu, std::abs(u - s));
-            maxDv = std::max(maxDv, std::abs(v - t));
-            const float wx = info.C.data[0] + info.A.data[0] * u + info.B.data[0] * v - shaft.position[0];
-            const float wy = info.C.data[1] + info.A.data[1] * u + info.B.data[1] * v - shaft.position[1];
-            const float wz = info.C.data[2] + info.A.data[2] * u + info.B.data[2] * v - shaft.position[2];
-            boundsRadius = std::max(boundsRadius, std::sqrt(wx * wx + wy * wy + wz * wz));
-        }
-
-        const float reach = ComputeRadianceShaftReach(info.color.data, info.area, info.meanEmiss, power);
+        const float autoReach = ComputeRadianceShaftReach(info.color.data, info.area, info.meanEmiss, power);
+        const float reach = ResolveLightShaftReach(autoReach, info.lightShaftsDistance);
         shaft.emission[1] = reach;
+        shaft.emission[2] = SanitizeLightShaftFalloff(info.lightShaftsFalloff);
         shaft.source[0] = areaLightRegistered ? static_cast<float>(areaLightIndex + 1) : 0.0f;
         shaft.source[1] = power;
         shaft.source[2] = reach > 0.0f ? reach + boundsRadius : 0.0f;
         shaft.source[3] = boundsRadius;
-
-        const float lengthA = std::sqrt(Utils::Dot(info.A.data, info.A.data));
-        const float lengthB = std::sqrt(Utils::Dot(info.B.data, info.B.data));
-        if (lengthA > 0.0001f && lengthB > 0.0001f)
-        {
-            for (int k = 0; k < 3; k++)
-            {
-                shaft.tangentU[k] = info.A.data[k] / lengthA;
-                shaft.tangentV[k] = info.B.data[k] / lengthB;
-            }
-            shaft.tangentU[3] = std::max(maxDu * lengthA, 1e-3f);
-            shaft.tangentV[3] = std::max(maxDv * lengthB, 1e-3f);
-        }
         return true;
     }
 
-    float SafePositiveFloat(float value)
+    bool TryBuildDtalMemberLightShaft(const QrDtalGroupUploadInfo &info,
+                                      const QrDtalMemberUpload &member,
+                                      uint32_t memberIndex,
+                                      uint32_t textureIndex,
+                                      LightManager::LightShaft &shaft)
     {
-        return (std::isfinite(value) && value > 0.0f) ? value : 0.0f;
-    }
-
-    void PopulateDtalTangents(const QrDtalGroupUploadInfo &info,
-                              const QrDtalMemberUpload *pMember,
-                              LightManager::LightShaft &shaft)
-    {
-        if (pMember == nullptr)
-        {
-            return;
-        }
-
-        const float lengthA = std::sqrt(Utils::Dot(pMember->A.data, pMember->A.data));
-        const float lengthB = std::sqrt(Utils::Dot(pMember->B.data, pMember->B.data));
-        if (lengthA <= 0.0001f || lengthB <= 0.0001f)
-        {
-            return;
-        }
-
-        for (int k = 0; k < 3; k++)
-        {
-            shaft.tangentU[k] = pMember->A.data[k] / lengthA;
-            shaft.tangentV[k] = pMember->B.data[k] / lengthB;
-        }
-        float halfU = 0.0f;
-        float halfV = 0.0f;
-        for (int k = 0; k < 3; k++)
-        {
-            const float extent = std::abs(info.boundsMax.data[k] - info.boundsMin.data[k]);
-            halfU += extent * std::abs(shaft.tangentU[k]);
-            halfV += extent * std::abs(shaft.tangentV[k]);
-        }
-        shaft.tangentU[3] = std::max(0.5f * halfU, 1e-3f);
-        shaft.tangentV[3] = std::max(0.5f * halfV, 1e-3f);
-    }
-
-    bool TryBuildDtalGroupLightShaft(const QrDtalGroupUploadInfo &info,
-                                     uint32_t textureIndex,
-                                     const QrDtalMemberUpload *pMember,
-                                     LightManager::LightShaft &shaft)
-    {
-        if (!info.lightShafts)
+        const int vertCount = static_cast<int>(member.numVerts + 0.5f);
+        const float power = SafePositiveFloat(info.lightShaftsPower);
+        if (!info.lightShafts || vertCount <= 0 || !(power > 0.0f))
         {
             return false;
         }
 
         float direction[3] = {};
-        if (!TryNormalizeDirection(info.normal, direction))
+        if (!TryNormalizeDirection(member.normal, direction) &&
+            !TryNormalizeDirection(info.normal, direction))
         {
             return false;
         }
 
         shaft = {};
-        shaft.position[0] = info.center.data[0];
-        shaft.position[1] = info.center.data[1];
-        shaft.position[2] = info.center.data[2];
-        shaft.position[3] = std::sqrt(std::max(info.area, 0.0f) / static_cast<float>(kPi));
+        const float boundsRadius = PopulatePolygonLightShaftGeometry(
+            member.A, member.B, member.C, direction, member.uv, vertCount, shaft);
+        const float memberArea = SafePositiveFloat(member.area) > 0.0f
+            ? member.area
+            : (info.area / static_cast<float>(std::max(info.memberCount, 1u)));
+        shaft.position[3] = std::sqrt(std::max(memberArea, 0.0f) / static_cast<float>(kPi));
         memcpy(shaft.direction, direction, sizeof(direction));
 
-        const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
         shaft.color[0] = info.color.data[0] * power;
         shaft.color[1] = info.color.data[1] * power;
         shaft.color[2] = info.color.data[2] * power;
         EncodeLightShaftCone(info.angleInner, info.angleOuter, info.projector > 0.5f, false, shaft.cone);
 
-        const float boundsRadius = SafePositiveFloat(info.boundsRadius);
         const float explicitReach = SafePositiveFloat(info.reach);
-        const float memberArea = info.area / static_cast<float>(std::max(info.memberCount, 1u));
         const float radianceReach = ComputeRadianceShaftReach(info.color.data, memberArea, info.meanEmiss, power);
-        const float reach = (explicitReach > 0.0f && radianceReach > 0.0f)
+        const float autoReach = (explicitReach > 0.0f && radianceReach > 0.0f)
             ? std::min(radianceReach, explicitReach)
-            : (radianceReach > 0.0f ? radianceReach : std::min(explicitReach, kLightShaftMaxReachMeters));
+            : (radianceReach > 0.0f ? radianceReach : std::min(explicitReach, kLightShaftAutoMaxReachMeters));
+        const float reach = ResolveLightShaftReach(autoReach, info.lightShaftsDistance);
 
-        shaft.surface[0] = static_cast<float>(info.memberBase);
-        shaft.surface[1] = static_cast<float>(info.memberCount);
+        shaft.surface[0] = static_cast<float>(memberIndex);
+        shaft.surface[1] = 1.0f;
         shaft.surface[2] = static_cast<float>(textureIndex);
         shaft.surface[3] = info.meanEmiss;
         shaft.emission[0] = info.projector > 0.5f ? 1.0f : 0.0f;
         shaft.emission[1] = reach;
+        shaft.emission[2] = SanitizeLightShaftFalloff(info.lightShaftsFalloff);
+        shaft.source[0] = 0.0f;
         shaft.source[1] = power;
         shaft.source[2] = reach > 0.0f ? reach + boundsRadius : 0.0f;
         shaft.source[3] = boundsRadius;
-
-        PopulateDtalTangents(info, pMember, shaft);
         return true;
     }
 
@@ -478,7 +519,8 @@ namespace
                                 LightManager::LightShaft &shaft)
     {
         float direction[3] = {};
-        if (!info.lightShafts || !TryNormalizeDirection(info.direction, direction))
+        const float power = SafePositiveFloat(info.lightShaftsPower);
+        if (!info.lightShafts || !(power > 0.0f) || !TryNormalizeDirection(info.direction, direction))
         {
             return false;
         }
@@ -489,9 +531,9 @@ namespace
             return false;
         }
 
-        const float power = info.lightShaftsPower > 0.0f ? info.lightShaftsPower : 1.0f;
         const float radius = std::max(info.radius, 0.001f);
-        const float reach = ComputeFluxShaftReach(info.color.data, power);
+        const float autoReach = ComputeFluxShaftReach(info.color.data, power);
+        const float reach = ResolveLightShaftReach(autoReach, info.lightShaftsDistance);
 
         shaft = {};
         shaft.position[0] = info.position.data[0];
@@ -505,6 +547,7 @@ namespace
         shaft.cone[0] = cone[0];
         shaft.cone[1] = cone[1];
         shaft.emission[1] = reach;
+        shaft.emission[2] = SanitizeLightShaftFalloff(info.lightShaftsFalloff);
         shaft.source[0] = registered ? static_cast<float>(lightIndex + 1) : 0.0f;
         shaft.source[1] = power;
         shaft.source[2] = reach > 0.0f ? reach + radius : 0.0f;
@@ -1134,12 +1177,18 @@ bool qray::LightManager::AddDtalGroups(uint32_t frameIndex, const QrDtalGroupUpl
         AddLight(frameIndex, info.uniqueID, encoded);
         published++;
 
-        const QrDtalMemberUpload *pMember = batch.pMembers != nullptr
-            ? &batch.pMembers[info.memberBase] : nullptr;
-        LightShaft shaft = {};
-        if (TryBuildDtalGroupLightShaft(info, pTextureIndices[i], pMember, shaft))
+        if (info.lightShafts && batch.pMembers != nullptr)
         {
-            AddLightShaft(shaft);
+            for (uint32_t mIdx = 0; mIdx < info.memberCount; mIdx++)
+            {
+                const uint32_t memberIndex = info.memberBase + mIdx;
+                LightShaft shaft = {};
+                if (TryBuildDtalMemberLightShaft(info, batch.pMembers[memberIndex], memberIndex,
+                                                 pTextureIndices[i], shaft))
+                {
+                    AddLightShaft(shaft);
+                }
+            }
         }
     }
 

@@ -87,9 +87,9 @@ const RhiPresentParams PRESENT_PARAMS =
 const uint32_t PRESENT_PARAMS_VERSIONS = 4;
 
 constexpr uint32_t kLightShaftVolumeSizes[3][3] = {
-    { 256u, 144u, 64u },
-    { 320u, 176u, 80u },
-    { 384u, 216u, 96u },
+    { 256u, 144u,  80u },
+    { 384u, 216u,  96u },
+    { 448u, 256u, 128u },
 };
 
 constexpr float kLightShaftTeleportDistMeters = 6.4f;

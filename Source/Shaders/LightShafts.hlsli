@@ -32,6 +32,28 @@ struct LightShaft_BT
     float4 source;
 };
 
+struct LightShaftParams_BT
+{
+    float4 sunDirection;
+    float4 sunColor;
+    float4 worldCenter;
+    float4 worldHalfSizeInv;
+    float4x4 shadowMapVP;
+    float shadowMapDepthScale;
+    float godRaysIntensity;
+    float godRaysEccentricity;
+    uint godRaysEnabled;
+    float sunStepScale;
+    uint lightShaftCount;
+    float lightShaftIntensity;
+    uint lightShaftSteps;
+    LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
+    uint accumVolumeSizeX;
+    uint accumVolumeSizeY;
+    uint accumVolumeSizeZ;
+    uint accumDebugMode;
+};
+
 struct LightShaftVolumeParams_BT
 {
     uint lightShaftCount;
@@ -63,9 +85,8 @@ struct LightShaftVolumeParams_BT
     LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
 };
 
-bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadius)
+bool shaftDirectionConeAllows(float3 origin, float3 direction, float outerCos, float3 center, float boundsRadius)
 {
-    const float3 direction = shaft.direction.xyz;
     const float directionLength2 = dot(direction, direction);
     if (directionLength2 <= 0.000001)
     {
@@ -73,7 +94,7 @@ bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadiu
     }
 
     const float safeBounds = max(boundsRadius, 0.0);
-    const float3 toCell = center - shaft.positionRadius.xyz;
+    const float3 toCell = center - origin;
     const float cellDistance = length(toCell);
     if (cellDistance <= safeBounds + 0.001)
     {
@@ -84,8 +105,13 @@ bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadiu
     const float cosAngle = clamp(dot(toCell / cellDistance, normalizedDirection), -1.0, 1.0);
     const float angle = acos(cosAngle);
     const float boundsAngle = asin(saturate(safeBounds / cellDistance));
-    const float outerAngle = acos(clamp(shaft.cone.y, -1.0, 1.0));
+    const float outerAngle = acos(clamp(outerCos, -1.0, 1.0));
     return angle <= outerAngle + boundsAngle + 0.05;
+}
+
+bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadius)
+{
+    return shaftDirectionConeAllows(shaft.positionRadius.xyz, shaft.direction.xyz, shaft.cone.y, center, boundsRadius);
 }
 
 #endif

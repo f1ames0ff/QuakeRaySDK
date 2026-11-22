@@ -56,11 +56,15 @@
 // the accumulation into result and fallbackResult, the weightSum branch (division by weightSum
 // against the fixed / 16.0 of the fallback), and the final store of result.rgb with a zero alpha.
 
+#define DESC_SET_LIGHT_SHAFT_PARAMS 1
 #define DESC_SET_FRAMEBUFFERS 2
 #define DESC_SET_GLOBAL_UNIFORM 3
 #define DESC_SET_LIGHT_SHAFT_SCATTER 4
 #include "ShaderCommonHLSLFunc.hlsli"
+#include "LightShafts.hlsli"
+#include "LightShaftBlur.hlsli"
 
+[[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<LightShaftParams_BT> lightShaftParams;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_SCATTER)]] Texture2D<float4> lightShaftScatter;
 
 [numthreads(16, 16, 1)]
@@ -117,39 +121,30 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         result.rgba = fallbackResult.rgba / 16.0;
     }
 
-    float3 shaftSum = (float3)0.0;
-    float shaftTransmittanceSum = 0.0;
-    float shaftWeightSum = 0.0;
+    float3 lightShafts = (float3)0.0;
+    float shaftTransmittance = 1.0;
 
-    for (int shaftY = -1; shaftY <= 1; shaftY++)
+    if (lightShaftParams[0].lightShaftCount > 0u)
     {
-        for (int shaftX = -1; shaftX <= 1; shaftX++)
+        float4 filteredShaft;
+        if (lightShaftParams[0].accumDebugMode != 0u)
         {
-            const int2 shaftPos = iPosition + int2(shaftX, shaftY);
-            if (any(shaftPos < (int2)0) ||
-                any(shaftPos >= int2(globalUniform.renderWidth, globalUniform.renderHeight)))
-            {
-                continue;
-            }
-
-            const float shaftDepth =
-                abs(framebufQ2ViewDepth_Sampled.Load(int3(getCheckerboardPix(shaftPos), 0)).r);
-            const float shaftWeight =
-                clamp(1.0 - 10.0 * abs(shaftDepth - referenceViewDepth) /
-                            max(abs(referenceViewDepth), 1e-6), 0.0, 1.0);
-
-            const float4 shaftSample = lightShaftScatter.Load(int3(shaftPos, 0));
-            shaftSum += shaftSample.rgb * shaftWeight;
-            shaftTransmittanceSum += shaftSample.a * shaftWeight;
-            shaftWeightSum += shaftWeight;
+            filteredShaft = lightShaftScatter.Load(int3(iPosition, 0));
         }
+        else
+        {
+            const int2 renderSize = int2(globalUniform.renderWidth, globalUniform.renderHeight);
+            const float froxelPxY = clamp(
+                (float)renderSize.y / max((float)lightShaftParams[0].accumVolumeSizeY, 1.0), 1.0, 12.0);
+            filteredShaft = filterLightShaft1D(
+                lightShaftScatter, framebufQ2ViewDepth_Sampled, iPosition, renderSize,
+                int2(0, 1), froxelPxY);
+        }
+
+        lightShafts = filteredShaft.rgb;
+        shaftTransmittance = saturate(filteredShaft.a);
     }
 
-    const float4 centerShaft = lightShaftScatter.Load(int3(iPosition, 0));
-    const float3 lightShafts = shaftWeightSum > 0.0 ? shaftSum / shaftWeightSum : centerShaft.rgb;
-    const float shaftTransmittance = shaftWeightSum > 0.0
-        ? saturate(shaftTransmittanceSum / shaftWeightSum)
-        : saturate(centerShaft.a);
     const float shaftExtinction = saturate(1.0 - shaftTransmittance);
     framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, shaftExtinction);
 }
