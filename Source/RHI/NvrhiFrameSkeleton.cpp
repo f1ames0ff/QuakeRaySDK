@@ -2949,7 +2949,7 @@ bool NvrhiFrameSkeleton::RecordGodRaysAndLightShafts(nvrhi::ICommandList *pComma
     if (modes.lightShaftsActive && rtDirectPass != nullptr && pUniform != nullptr)
     {
         rtDirectPass->EnsureLightSet(pCommandList, frameIndex, pUniform->frameId,
-                                     pUniform->q2LightStatsMode, worldUniformBuffer.Get());
+                                     pUniform->q2LightStatsMode);
     }
 
     BeginGpuPass(pCommandList, frameIndex, GPU_PASS_GODRAYS);
