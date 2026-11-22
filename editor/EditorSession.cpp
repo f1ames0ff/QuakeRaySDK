@@ -6,7 +6,9 @@
 #include <cstdlib>
 #include <string_view>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include "Assets.h"
 
@@ -1534,11 +1536,36 @@ std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<st
     return text;
 }
 
-bool ReadFileText(const std::string &path, std::string &text)
+FILE *OpenFilePortable(const std::string &path, const char *mode)
 {
+#if defined(_WIN32)
     FILE *file = nullptr;
 
-    if (fopen_s(&file, path.c_str(), "rb") != 0 || file == nullptr)
+    if (fopen_s(&file, path.c_str(), mode) != 0)
+    {
+        return nullptr;
+    }
+
+    return file;
+#else
+    return std::fopen(path.c_str(), mode);
+#endif
+}
+
+bool ReplaceFilePortable(const std::string &temporary, const std::string &path)
+{
+#if defined(_WIN32)
+    return MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    return std::rename(temporary.c_str(), path.c_str()) == 0;
+#endif
+}
+
+bool ReadFileText(const std::string &path, std::string &text)
+{
+    FILE *file = OpenFilePortable(path, "rb");
+
+    if (file == nullptr)
     {
         return false;
     }
@@ -1571,7 +1598,7 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
     else
     {
         paths.materials = sceneDirectory.empty() ? "qray.materials.yaml"
-                                                 : sceneDirectory + "\\qray.materials.yaml";
+                                                 : sceneDirectory + "/qray.materials.yaml";
     }
 
     if (!lightsOverride.empty())
@@ -1581,16 +1608,16 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
     else
     {
         paths.lights = sceneDirectory.empty() ? "qray.lights.yaml"
-                                              : sceneDirectory + "\\qray.lights.yaml";
+                                              : sceneDirectory + "/qray.lights.yaml";
     }
 
     const std::string materialsDirectory = EditorDirectoryOf(paths.materials);
     paths.materialsBackup = (materialsDirectory.empty() ? std::string(".") : materialsDirectory) +
-                            "\\qray.backup_materials.yaml";
+                            "/qray.backup_materials.yaml";
 
     const std::string lightsDirectory = EditorDirectoryOf(paths.lights);
     paths.lightsBackup = (lightsDirectory.empty() ? std::string(".") : lightsDirectory) +
-                         "\\qray.backup_lights.yaml";
+                         "/qray.backup_lights.yaml";
 
     paths.level = LevelKeyOf(scenePath);
     return paths;
@@ -1601,9 +1628,9 @@ bool EditorMaterialsDocument::Load(const std::string &path, std::string &error)
     m_text.clear();
     m_exists = false;
 
-    FILE *probe = nullptr;
+    FILE *probe = OpenFilePortable(path, "rb");
 
-    if (fopen_s(&probe, path.c_str(), "rb") != 0 || probe == nullptr)
+    if (probe == nullptr)
     {
         return true; // a target that does not exist yet: the writer emits the header
     }
@@ -2325,9 +2352,9 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
 bool WriteEditorFile(const std::string &path, const std::string &text, std::string &error)
 {
     const std::string temporary = path + ".tmp";
-    FILE *file = nullptr;
+    FILE *file = OpenFilePortable(temporary, "wb");
 
-    if (fopen_s(&file, temporary.c_str(), "wb") != 0 || file == nullptr)
+    if (file == nullptr)
     {
         error = "cannot write " + temporary;
         return false;
@@ -2343,7 +2370,7 @@ bool WriteEditorFile(const std::string &path, const std::string &text, std::stri
         return false;
     }
 
-    if (!MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+    if (!ReplaceFilePortable(temporary, path))
     {
         remove(temporary.c_str());
         error = "cannot replace " + path;

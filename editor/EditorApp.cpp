@@ -5,15 +5,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cwchar>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <windowsx.h>
 
 #include <imgui.h>
 
@@ -216,29 +214,48 @@ struct FileBlob
     std::vector<uint8_t> bytes;
 };
 
-std::string Utf8FromWide(const wchar_t *text)
+std::string ResolveDefaultAssetPath(const std::string &relativePath)
 {
-    if (text == nullptr)
+    std::error_code ec;
+
+    if (std::filesystem::exists(relativePath, ec))
     {
-        return {};
+        return relativePath;
     }
 
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    const std::string exeDir = EditorExecutableDirectory();
 
-    if (length <= 1)
+    if (!exeDir.empty())
     {
-        return {};
+        const std::filesystem::path candidate = std::filesystem::path(exeDir) / relativePath;
+
+        if (std::filesystem::exists(candidate, ec))
+        {
+            return candidate.string();
+        }
     }
 
-    std::string result(size_t(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), length, nullptr, nullptr);
+    return relativePath;
+}
 
-    if (!result.empty() && result.back() == '\0')
+void AddPaksFromDirectory(EditorAssetSource &assets, const std::string &directory)
+{
+    if (directory.empty())
     {
-        result.pop_back();
+        return;
     }
 
-    return result;
+    static constexpr const char *kPakNames[] = {
+        "pak0.pak",
+        "PAK0.PAK",
+        "pak1.pak",
+        "PAK1.PAK",
+    };
+
+    for (const char *pakName : kPakNames)
+    {
+        assets.AddArchiveOrDirectory(directory + "/" + pakName);
+    }
 }
 
 void NormalizeFolder(std::string &folder)
@@ -249,7 +266,7 @@ void NormalizeFolder(std::string &folder)
 
         if (last != '/' && last != '\\')
         {
-            folder.push_back('\\');
+            folder.push_back('/');
         }
     }
 }
@@ -311,8 +328,8 @@ void LookAt(const float eye[3], const float target[3], const float up[3], float 
 
 }
 
-EditorApp::EditorApp(HINSTANCE instance)
-    : m_instanceHandle(instance)
+EditorApp::EditorApp(void *nativeInstance)
+    : m_nativeInstance(nativeInstance)
 {
 }
 
@@ -325,8 +342,7 @@ void EditorApp::PrintMessage(const char *message, void *)
 {
     if (message != nullptr)
     {
-        OutputDebugStringA(message);
-        OutputDebugStringA("\n");
+        EditorDebugLog(message);
 
         if (FILE *file = std::fopen("editor.log", "a"))
         {
@@ -383,87 +399,19 @@ void EditorApp::CloseFile(void *fileHandle, void *)
     delete static_cast<FileBlob *>(fileHandle);
 }
 
-LRESULT CALLBACK EditorApp::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    EditorApp *app = reinterpret_cast<EditorApp *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-
-    if (app != nullptr && message != WM_CLOSE && message != WM_DESTROY && message != WM_PAINT)
-    {
-        app->HandleWindowMessage(message, wParam, lParam);
-    }
-
-    switch (message)
-    {
-        case WM_CLOSE:
-            if (app != nullptr)
-            {
-                app->RequestExit();
-            }
-            return 0;
-
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-
-        case WM_PAINT:
-        {
-            PAINTSTRUCT paint = {};
-            HDC dc = BeginPaint(hwnd, &paint);
-            RECT rect = {};
-            GetClientRect(hwnd, &rect);
-            FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-            EndPaint(hwnd, &paint);
-            return 0;
-        }
-
-        default:
-            return DefWindowProcW(hwnd, message, wParam, lParam);
-    }
-}
-
 bool EditorApp::CreateWindowInstance(int showCommand)
 {
-    WNDCLASSEXW windowClass = {};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.style = CS_HREDRAW | CS_VREDRAW;
-    windowClass.lpfnWndProc = WindowProc;
-    windowClass.hInstance = m_instanceHandle;
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-    windowClass.lpszClassName = L"QuakeRayEditorWindow";
-
-    if (RegisterClassExW(&windowClass) == 0)
-    {
-        return false;
-    }
-
-    m_window = CreateWindowExW(
-        0, windowClass.lpszClassName, L"QuakeRay Editor", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
-        nullptr, nullptr, m_instanceHandle, nullptr);
-
-    if (m_window == nullptr)
-    {
-        return false;
-    }
-
-    SetWindowLongPtrW(m_window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-    ShowWindow(m_window, showCommand);
-    UpdateWindow(m_window);
-    return true;
+    return m_window.Create("QuakeRay Editor", 1280, 720, m_nativeInstance, showCommand);
 }
 
 bool EditorApp::CreateRenderer()
 {
-    QrWin32SurfaceCreateInfo surfaceInfo = {
-        .hinstance = m_instanceHandle,
-        .hwnd = m_window,
-    };
+    EditorSurfaceStorage surfaceStorage = {};
 
     QrInstanceCreateInfo createInfo = {};
     createInfo.pAppName = "QuakeRay Editor";
     createInfo.pAppGUID = "5a7f79c2-38a2-4f3d-9a34-9b0c4f2a9c71";
-    createInfo.pWin32SurfaceInfo = &surfaceInfo;
+    m_window.BindSurface(createInfo, surfaceStorage);
     createInfo.pfnPrint = PrintMessage;
     createInfo.pfnOpenFile = OpenFile;
     createInfo.pfnCloseFile = CloseFile;
@@ -493,7 +441,7 @@ bool EditorApp::CreateRenderer()
 
     if (result != QR_SUCCESS)
     {
-        MessageBoxA(m_window, qrGetResultDescription(result), "QuakeRay Editor", MB_ICONERROR);
+        EditorShowError(&m_window, "QuakeRay Editor", qrGetResultDescription(result));
         return false;
     }
 
@@ -690,8 +638,8 @@ bool EditorApp::LoadScene()
     for (int level = 0; level < 6; level++)
     {
         candidates.push_back(directory);
-        candidates.push_back(directory + "\\id1");
-        candidates.push_back(directory + "\\Debug\\id1");
+        candidates.push_back(directory + "/id1");
+        candidates.push_back(directory + "/Debug/id1");
 
         const size_t slash = directory.find_last_of("\\/");
 
@@ -706,15 +654,13 @@ bool EditorApp::LoadScene()
     if (!m_gamePath.empty())
     {
         m_assets.AddDirectory(m_gamePath);
-        m_assets.AddArchiveOrDirectory(m_gamePath + "\\PAK0.PAK");
-        m_assets.AddArchiveOrDirectory(m_gamePath + "\\PAK1.PAK");
+        AddPaksFromDirectory(m_assets, m_gamePath);
     }
 
     for (const std::string &candidate : candidates)
     {
         m_assets.AddDirectory(candidate);
-        m_assets.AddArchiveOrDirectory(candidate + "\\PAK0.PAK");
-        m_assets.AddArchiveOrDirectory(candidate + "\\PAK1.PAK");
+        AddPaksFromDirectory(m_assets, candidate);
     }
 
     std::vector<uint8_t> palette;
@@ -733,7 +679,7 @@ bool EditorApp::LoadScene()
     if (!LoadEditorScene(m_scenePath, m_palette.empty() ? nullptr : m_palette.data(), m_scene,
                          error))
     {
-        MessageBoxA(m_window, error.c_str(), "QuakeRay Editor", MB_ICONERROR);
+        EditorShowError(&m_window, "QuakeRay Editor", error.c_str());
         return false;
     }
 
@@ -1003,10 +949,12 @@ void EditorApp::Frame()
         }
     }
 
-    RECT client = {};
-    GetClientRect(m_window, &client);
-    m_clientWidth = uint32_t(std::max<LONG>(0, client.right - client.left));
-    m_clientHeight = uint32_t(std::max<LONG>(0, client.bottom - client.top));
+    m_window.GetClientSize(m_clientWidth, m_clientHeight);
+
+    if (m_clientWidth == 0 || m_clientHeight == 0)
+    {
+        return;
+    }
 
     QrStartFrameInfo startInfo = {
         .presentMode = QR_PRESENT_MODE_VSYNC,
@@ -1045,7 +993,11 @@ void EditorApp::Frame()
     // so the hint block already knows whether a toast shares its corner.
     DrawViewportOverlay();
     m_ui.EndFrame(m_instance, m_clientWidth, m_clientHeight);
+    SubmitSceneFrame();
+}
 
+void EditorApp::SubmitSceneFrame()
+{
     const float cosPitch = std::cos(m_cameraPitch);
     const float eye[3] = { m_cameraPosition[0], m_cameraPosition[1], m_cameraPosition[2] };
     const float forward[3] = {
@@ -1099,17 +1051,14 @@ void EditorApp::Frame()
     // The render size the game derives in ResolutionToQray: rt_renderscale is a custom size and
     // the SDK's blit is the upscale, because the editor asks for no device-level upscaler. The
     // pixelized size stays null, as it does on the game's own path.
-    if (m_clientWidth > 0 && m_clientHeight > 0)
-    {
-        const float scale = std::clamp(m_settings.renderScale / 100.0f, 0.2f, 1.0f);
+    const float scale = std::clamp(m_settings.renderScale / 100.0f, 0.2f, 1.0f);
 
-        m_frameParams.resolution.upscaleTechnique = QR_RENDER_UPSCALE_TECHNIQUE_LINEAR;
-        m_frameParams.resolution.sharpenTechnique = QR_RENDER_SHARPEN_TECHNIQUE_NONE;
-        m_frameParams.resolution.resolutionMode = QR_RENDER_RESOLUTION_MODE_CUSTOM;
-        m_frameParams.resolution.customRenderSize.width = uint32_t(float(m_clientWidth) * scale);
-        m_frameParams.resolution.customRenderSize.height = uint32_t(float(m_clientHeight) * scale);
-        m_frameParams.resolution.pPixelizedRenderSize = nullptr;
-    }
+    m_frameParams.resolution.upscaleTechnique = QR_RENDER_UPSCALE_TECHNIQUE_LINEAR;
+    m_frameParams.resolution.sharpenTechnique = QR_RENDER_SHARPEN_TECHNIQUE_NONE;
+    m_frameParams.resolution.resolutionMode = QR_RENDER_RESOLUTION_MODE_CUSTOM;
+    m_frameParams.resolution.customRenderSize.width = uint32_t(float(m_clientWidth) * scale);
+    m_frameParams.resolution.customRenderSize.height = uint32_t(float(m_clientHeight) * scale);
+    m_frameParams.resolution.pPixelizedRenderSize = nullptr;
 
     draw.pSkyParams = &m_frameParams.sky;
     draw.pTonemappingParams = &m_frameParams.tonemap;
@@ -1146,6 +1095,13 @@ void EditorApp::Frame()
         }
     }
 
+    m_renderedFrames++;
+
+    if (m_maxFrames > 0 && m_renderedFrames >= m_maxFrames)
+    {
+        m_running = false;
+    }
+
     if (!m_lightStatsLogged && ++m_framesSinceSceneLoad == 120)
     {
         m_lightStatsLogged = true;
@@ -1167,50 +1123,40 @@ void EditorApp::Frame()
     }
 }
 
-LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam)
+void EditorApp::HandleMouseMoveEvent(const EditorEvent &event)
 {
-    m_ui.HandleMessage(message, wParam, lParam);
+    const int32_t x = int32_t(std::lround(event.x));
+    const int32_t y = int32_t(std::lround(event.y));
 
-    switch (message)
+    if (m_looking)
     {
-    case WM_MOUSEMOVE:
-    {
-        const LONG x = GET_X_LPARAM(lParam);
-        const LONG y = GET_Y_LPARAM(lParam);
-
-        if (m_looking)
+        if (x == m_lastMouseX && y == m_lastMouseY)
         {
-            const float dx = float(x - m_lastMouse.x);
-            const float dy = float(y - m_lastMouse.y);
-
-            m_cameraYaw -= dx * m_cameraSensitivity;
-            m_cameraPitch = std::clamp(m_cameraPitch - dy * m_cameraSensitivity, -1.55f, 1.55f);
-
-            RECT client = {};
-            GetClientRect(m_window, &client);
-
-            POINT center = { (client.right - client.left) / 2, (client.bottom - client.top) / 2 };
-            ClientToScreen(m_window, &center);
-            SetCursorPos(center.x, center.y);
-
-            m_lastMouse.x = (client.right - client.left) / 2;
-            m_lastMouse.y = (client.bottom - client.top) / 2;
-        }
-        else
-        {
-            m_lastMouse.x = x;
-            m_lastMouse.y = y;
-
-            UpdateGizmoDrag(float(x), float(y));
-            UpdateLightGrab();
+            return;
         }
 
-        break;
+        const float dx = float(x - m_lastMouseX);
+        const float dy = float(y - m_lastMouseY);
+
+        m_cameraYaw -= dx * m_cameraSensitivity;
+        m_cameraPitch = std::clamp(m_cameraPitch - dy * m_cameraSensitivity, -1.55f, 1.55f);
+
+        m_window.WarpCursorToCenter(m_lastMouseX, m_lastMouseY);
+        return;
     }
 
-    case WM_LBUTTONDOWN:
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+
+    UpdateGizmoDrag(event.x, event.y);
+    UpdateLightGrab();
+}
+
+void EditorApp::HandleMouseButtonEvent(const EditorEvent &event)
+{
+    if (event.button == 0)
     {
-        if (!m_ui.WantsMouse())
+        if (event.down && !m_ui.WantsMouse())
         {
             // Three presses share the left button: on an axis arrow the gizmo slides the light
             // along that axis, on the light itself the light flies with the ray, and anywhere
@@ -1228,102 +1174,122 @@ LRESULT EditorApp::HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lPara
                 Pick();
             }
         }
+        else if (!event.down)
+        {
+            FinishGizmoDrag(true);
+            FinishLightGrab(true);
+        }
 
-        break;
+        return;
     }
 
-    case WM_LBUTTONUP:
+    if (event.button == 1)
     {
-        FinishGizmoDrag(true);
-        FinishLightGrab(true);
-        break;
-    }
-
-    case WM_RBUTTONDOWN:
-    {
-        if (!m_ui.WantsMouse())
+        if (event.down && !m_ui.WantsMouse())
         {
             m_looking = true;
             m_ui.SetCursorVisible(false);
-
-            RECT client = {};
-            GetClientRect(m_window, &client);
-            POINT center = { (client.right - client.left) / 2, (client.bottom - client.top) / 2 };
-            ClientToScreen(m_window, &center);
-            SetCursorPos(center.x, center.y);
-            ScreenToClient(m_window, &center);
-            m_lastMouse = center;
+            m_window.WarpCursorToCenter(m_lastMouseX, m_lastMouseY);
         }
+        else if (!event.down)
+        {
+            m_looking = false;
+            m_ui.SetCursorVisible(true);
+        }
+    }
+}
 
-        break;
+void EditorApp::HandleKeyEvent(const EditorEvent &event)
+{
+    const size_t keyIndex = size_t(event.key);
+
+    if (keyIndex < size_t(EditorKey::Count))
+    {
+        m_keys[keyIndex] = event.down;
     }
 
-    case WM_RBUTTONUP:
-        m_looking = false;
-        m_ui.SetCursorVisible(true);
-        break;
+    if (!event.down || event.repeat)
+    {
+        return;
+    }
 
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-        if (wParam < 256)
-        {
-            m_keys[wParam] = true;
-        }
-
-        if (wParam == VK_F1)
-        {
-            m_showPanel = !m_showPanel;
-        }
-        else if (wParam == VK_ESCAPE)
-        {
-            // The game's cancel: a drag in flight goes back to where it started instead of
-            // committing a position the author pulled it to by accident.
-            FinishGizmoDrag(false);
-            FinishLightGrab(false);
-        }
-        else if (wParam == 'O' && (m_keys[VK_CONTROL] || (GetKeyState(VK_CONTROL) & 0x8000) != 0))
-        {
-            ResetCameraToScene();
-        }
-        break;
-
-    case WM_KEYUP:
-    case WM_SYSKEYUP:
-        if (wParam < 256)
-        {
-            m_keys[wParam] = false;
-        }
-        break;
-
-    case WM_KILLFOCUS:
-        for (bool &pressed : m_keys)
-        {
-            pressed = false;
-        }
-
-        m_looking = false;
-        m_ui.SetCursorVisible(true);
-
-        // A drag cannot survive the focus: the mouse-up that would commit it is delivered to
-        // another window, so the light would stay glued to the last position the cursor had.
+    if (event.key == EditorKey::F1)
+    {
+        m_showPanel = !m_showPanel;
+    }
+    else if (event.key == EditorKey::Escape)
+    {
+        // The game's cancel: a drag in flight goes back to where it started instead of
+        // committing a position the author pulled it to by accident.
         FinishGizmoDrag(false);
         FinishLightGrab(false);
+    }
+    else if (event.key == EditorKey::O &&
+             (event.modifiers.ctrl || m_keys[size_t(EditorKey::Ctrl)]))
+    {
+        ResetCameraToScene();
+    }
+}
+
+void EditorApp::HandleFocusLost()
+{
+    for (bool &pressed : m_keys)
+    {
+        pressed = false;
+    }
+
+    m_looking = false;
+    m_ui.SetCursorVisible(true);
+
+    // A drag cannot survive the focus: the mouse-up that would commit it is delivered to
+    // another window, so the light would stay glued to the last position the cursor had.
+    FinishGizmoDrag(false);
+    FinishLightGrab(false);
+}
+
+void EditorApp::HandleEvent(const EditorEvent &event)
+{
+    if (event.type == EditorEventType::Close)
+    {
+        RequestExit();
+        return;
+    }
+
+    m_ui.HandleEvent(event);
+
+    switch (event.type)
+    {
+    case EditorEventType::MouseMove:
+        HandleMouseMoveEvent(event);
+        break;
+
+    case EditorEventType::MouseButton:
+        HandleMouseButtonEvent(event);
+        break;
+
+    case EditorEventType::Key:
+        HandleKeyEvent(event);
+        break;
+
+    case EditorEventType::Focus:
+        if (!event.down)
+        {
+            HandleFocusLost();
+        }
         break;
 
     default:
         break;
     }
-
-    return 0;
 }
 
 bool EditorApp::CreateUi()
 {
     std::string error;
 
-    m_fontPath = "fonts/Roboto-Regular.ttf";
+    m_fontPath = ResolveDefaultAssetPath("fonts/Roboto-Regular.ttf");
 
-    if (!m_ui.Initialize(m_window, m_instance, m_fontPath, error))
+    if (!m_ui.Initialize(&m_window, m_instance, m_fontPath, error))
     {
         PrintMessage(("ui: " + error).c_str(), this);
         return false;
@@ -1395,15 +1361,15 @@ void EditorApp::UpdateCamera(float deltaSeconds)
 
     float speed = m_cameraSpeed * deltaSeconds;
 
-    if (m_keys[VK_SHIFT])
+    if (m_keys[size_t(EditorKey::Shift)])
     {
         speed *= 4.0f;
     }
 
     float movement[3] = { 0.0f, 0.0f, 0.0f };
 
-    const auto addAxis = [&](int key, const float *axis, float scale) {
-        if (key < 256 && m_keys[key])
+    const auto addAxis = [&](EditorKey key, const float *axis, float scale) {
+        if (m_keys[size_t(key)])
         {
             movement[0] += axis[0] * scale;
             movement[1] += axis[1] * scale;
@@ -1411,17 +1377,17 @@ void EditorApp::UpdateCamera(float deltaSeconds)
         }
     };
 
-    addAxis('W', forward, speed);
-    addAxis('S', forward, -speed);
-    addAxis('D', right, speed);
-    addAxis('A', right, -speed);
+    addAxis(EditorKey::W, forward, speed);
+    addAxis(EditorKey::S, forward, -speed);
+    addAxis(EditorKey::D, right, speed);
+    addAxis(EditorKey::A, right, -speed);
 
-    if (m_keys['E'] || m_keys[VK_SPACE])
+    if (m_keys[size_t(EditorKey::E)] || m_keys[size_t(EditorKey::Space)])
     {
         movement[2] += speed;
     }
 
-    if (m_keys['Q'] || m_keys[VK_CONTROL])
+    if (m_keys[size_t(EditorKey::Q)] || m_keys[size_t(EditorKey::Ctrl)])
     {
         movement[2] -= speed;
     }
@@ -6802,54 +6768,96 @@ void EditorApp::Notify(const std::string &text)
     m_notifyActive = true;
 }
 
-int EditorApp::Run(int showCommand)
+namespace
 {
-    m_startTime = std::chrono::steady_clock::now();
-    m_scenePath = "editor_scene.obj";
-    m_shaderFolder = "shaders";
-    m_blueNoisePath = "textures/BlueNoise_LDR_RGBA_128.png";
 
-    int argc = 0;
-    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+struct EditorLaunchConfig
+{
+    std::string scenePath = "editor_scene.obj";
+    std::string shaderFolder = "shaders";
+    std::string blueNoisePath = "textures/BlueNoise_LDR_RGBA_128.png";
+    std::string gamePath;
+    std::string initialTab;
+    std::string materialsOverride;
+    std::string lightsOverride;
+    uint32_t maxFrames = 0;
+    bool hasScene = false;
+    bool hasShaders = false;
+    bool hasBlueNoise = false;
+};
 
-    if (argv != nullptr)
+struct StringFlagBinding
+{
+    const char *flag;
+    std::string *target;
+    bool *seenFlag;
+};
+
+void ParseEditorCliArgs(const std::vector<std::string> &args, EditorLaunchConfig &config)
+{
+    const StringFlagBinding bindings[] = {
+        { "--scene", &config.scenePath, &config.hasScene },
+        { "--shaders", &config.shaderFolder, &config.hasShaders },
+        { "--blue-noise", &config.blueNoisePath, &config.hasBlueNoise },
+        { "--gamedir", &config.gamePath, nullptr },
+        { "--tab", &config.initialTab, nullptr },
+        { "--materials", &config.materialsOverride, nullptr },
+        { "--lights", &config.lightsOverride, nullptr },
+    };
+
+    for (size_t i = 1; i + 1 < args.size(); i++)
     {
-        for (int i = 1; i < argc; i++)
-        {
-            const std::wstring argument = argv[i];
+        const std::string &argument = args[i];
 
-            if (i + 1 < argc && argument == L"--scene")
+        if (argument == "--max-frames")
+        {
+            char *end = nullptr;
+            const unsigned long parsed = std::strtoul(args[++i].c_str(), &end, 10);
+
+            if (end != nullptr && *end == '\0')
             {
-                m_scenePath = Utf8FromWide(argv[++i]);
+                config.maxFrames = uint32_t(parsed);
             }
-            else if (i + 1 < argc && argument == L"--shaders")
-            {
-                m_shaderFolder = Utf8FromWide(argv[++i]);
-            }
-            else if (i + 1 < argc && argument == L"--blue-noise")
-            {
-                m_blueNoisePath = Utf8FromWide(argv[++i]);
-            }
-            else if (i + 1 < argc && argument == L"--gamedir")
-            {
-                m_gamePath = Utf8FromWide(argv[++i]);
-            }
-            else if (i + 1 < argc && argument == L"--tab")
-            {
-                m_initialTab = Utf8FromWide(argv[++i]);
-            }
-            else if (i + 1 < argc && argument == L"--materials")
-            {
-                m_materialsOverride = Utf8FromWide(argv[++i]);
-            }
-            else if (i + 1 < argc && argument == L"--lights")
-            {
-                m_lightsOverride = Utf8FromWide(argv[++i]);
-            }
+
+            continue;
         }
 
-        LocalFree(argv);
+        for (const StringFlagBinding &binding : bindings)
+        {
+            if (argument == binding.flag)
+            {
+                *binding.target = args[++i];
+
+                if (binding.seenFlag != nullptr)
+                {
+                    *binding.seenFlag = true;
+                }
+
+                break;
+            }
+        }
     }
+}
+
+} // namespace
+
+int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
+{
+    m_startTime = std::chrono::steady_clock::now();
+
+    EditorLaunchConfig config;
+    ParseEditorCliArgs(args, config);
+
+    m_scenePath = config.hasScene ? config.scenePath : ResolveDefaultAssetPath(config.scenePath);
+    m_shaderFolder =
+        config.hasShaders ? config.shaderFolder : ResolveDefaultAssetPath(config.shaderFolder);
+    m_blueNoisePath =
+        config.hasBlueNoise ? config.blueNoisePath : ResolveDefaultAssetPath(config.blueNoisePath);
+    m_gamePath = config.gamePath;
+    m_initialTab = config.initialTab;
+    m_materialsOverride = config.materialsOverride;
+    m_lightsOverride = config.lightsOverride;
+    m_maxFrames = config.maxFrames;
 
     NormalizeFolder(m_shaderFolder);
     m_sessionPaths = BuildEditorSessionPaths(m_materialsOverride, m_lightsOverride, m_scenePath);
@@ -6861,6 +6869,7 @@ int EditorApp::Run(int showCommand)
 
     if (!CreateRenderer())
     {
+        m_window.Destroy();
         return 1;
     }
 
@@ -6868,16 +6877,22 @@ int EditorApp::Run(int showCommand)
 
     if (!LoadScene())
     {
+        Shutdown();
+        m_window.Destroy();
         return 1;
     }
 
     if (!UploadScene())
     {
+        Shutdown();
+        m_window.Destroy();
         return 1;
     }
 
     if (!UploadWorldClusters())
     {
+        Shutdown();
+        m_window.Destroy();
         return 1;
     }
 
@@ -6886,23 +6901,11 @@ int EditorApp::Run(int showCommand)
 
     m_lastFrameTime = std::chrono::steady_clock::now();
 
-    MSG message = {};
-
-    while (m_running)
+    while (m_running && !m_window.QuitRequested())
     {
-        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
-        {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
+        m_window.PollEvents([this](const EditorEvent &event) { HandleEvent(event); });
 
-            if (message.message == WM_QUIT)
-            {
-                m_running = false;
-                break;
-            }
-        }
-
-        if (!m_running)
+        if (!m_running || m_window.QuitRequested())
         {
             break;
         }
@@ -6911,13 +6914,8 @@ int EditorApp::Run(int showCommand)
     }
 
     Shutdown();
-
-    if (IsWindow(m_window))
-    {
-        DestroyWindow(m_window);
-    }
-
-    return int(message.wParam);
+    m_window.Destroy();
+    return m_window.ExitCode();
 }
 
 void EditorApp::Shutdown()

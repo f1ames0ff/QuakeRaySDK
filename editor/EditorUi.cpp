@@ -1,8 +1,7 @@
 #include "EditorUi.h"
 
-#include <windowsx.h>
-
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <imgui.h>
@@ -12,50 +11,65 @@ namespace
 
 constexpr float Pi = 3.14159265358979323846f;
 
-ImGuiKey MapVirtualKey(uint32_t key)
+struct EditorKeyToImGui
 {
-    if (key >= 'A' && key <= 'Z')
+    EditorKey editorKey;
+    ImGuiKey imguiKey;
+};
+
+constexpr std::array<EditorKeyToImGui, 29> kImGuiKeyTable = { {
+    { EditorKey::Tab, ImGuiKey_Tab },
+    { EditorKey::Left, ImGuiKey_LeftArrow },
+    { EditorKey::Right, ImGuiKey_RightArrow },
+    { EditorKey::Up, ImGuiKey_UpArrow },
+    { EditorKey::Down, ImGuiKey_DownArrow },
+    { EditorKey::PageUp, ImGuiKey_PageUp },
+    { EditorKey::PageDown, ImGuiKey_PageDown },
+    { EditorKey::Home, ImGuiKey_Home },
+    { EditorKey::End, ImGuiKey_End },
+    { EditorKey::Insert, ImGuiKey_Insert },
+    { EditorKey::Delete, ImGuiKey_Delete },
+    { EditorKey::Backspace, ImGuiKey_Backspace },
+    { EditorKey::Space, ImGuiKey_Space },
+    { EditorKey::Enter, ImGuiKey_Enter },
+    { EditorKey::Escape, ImGuiKey_Escape },
+    { EditorKey::F1, ImGuiKey_F1 },
+    { EditorKey::Minus, ImGuiKey_Minus },
+    { EditorKey::Equal, ImGuiKey_Equal },
+    { EditorKey::LeftBracket, ImGuiKey_LeftBracket },
+    { EditorKey::RightBracket, ImGuiKey_RightBracket },
+    { EditorKey::Backslash, ImGuiKey_Backslash },
+    { EditorKey::Semicolon, ImGuiKey_Semicolon },
+    { EditorKey::Apostrophe, ImGuiKey_Apostrophe },
+    { EditorKey::Comma, ImGuiKey_Comma },
+    { EditorKey::Period, ImGuiKey_Period },
+    { EditorKey::Slash, ImGuiKey_Slash },
+    { EditorKey::Shift, ImGuiMod_Shift },
+    { EditorKey::Ctrl, ImGuiMod_Ctrl },
+    { EditorKey::Alt, ImGuiMod_Alt },
+} };
+
+ImGuiKey MapEditorKey(EditorKey key)
+{
+    if (key >= EditorKey::A && key <= EditorKey::Z)
     {
-        return ImGuiKey(ImGuiKey_A + int(key - 'A'));
+        return ImGuiKey(ImGuiKey_A + int(uint16_t(key) - uint16_t(EditorKey::A)));
     }
 
-    if (key >= '0' && key <= '9')
+    if (key >= EditorKey::Num0 && key <= EditorKey::Num9)
     {
-        return ImGuiKey(ImGuiKey_0 + int(key - '0'));
+        return ImGuiKey(ImGuiKey_0 + int(uint16_t(key) - uint16_t(EditorKey::Num0)));
     }
 
-    switch (key)
+    for (const EditorKeyToImGui &entry : kImGuiKeyTable)
     {
-    case VK_TAB: return ImGuiKey_Tab;
-    case VK_LEFT: return ImGuiKey_LeftArrow;
-    case VK_RIGHT: return ImGuiKey_RightArrow;
-    case VK_UP: return ImGuiKey_UpArrow;
-    case VK_DOWN: return ImGuiKey_DownArrow;
-    case VK_PRIOR: return ImGuiKey_PageUp;
-    case VK_NEXT: return ImGuiKey_PageDown;
-    case VK_HOME: return ImGuiKey_Home;
-    case VK_END: return ImGuiKey_End;
-    case VK_INSERT: return ImGuiKey_Insert;
-    case VK_DELETE: return ImGuiKey_Delete;
-    case VK_BACK: return ImGuiKey_Backspace;
-    case VK_SPACE: return ImGuiKey_Space;
-    case VK_RETURN: return ImGuiKey_Enter;
-    case VK_ESCAPE: return ImGuiKey_Escape;
-    case VK_OEM_MINUS: return ImGuiKey_Minus;
-    case VK_OEM_PLUS: return ImGuiKey_Equal;
-    case VK_OEM_4: return ImGuiKey_LeftBracket;
-    case VK_OEM_6: return ImGuiKey_RightBracket;
-    case VK_OEM_5: return ImGuiKey_Backslash;
-    case VK_OEM_1: return ImGuiKey_Semicolon;
-    case VK_OEM_7: return ImGuiKey_Apostrophe;
-    case VK_OEM_COMMA: return ImGuiKey_Comma;
-    case VK_OEM_PERIOD: return ImGuiKey_Period;
-    case VK_OEM_2: return ImGuiKey_Slash;
-    case VK_SHIFT: return ImGuiMod_Shift;
-    case VK_CONTROL: return ImGuiMod_Ctrl;
-    case VK_MENU: return ImGuiMod_Alt;
-    default: return ImGuiKey_None;
+        if (entry.editorKey == key)
+        {
+            return entry.imguiKey;
+        }
     }
+
+    return ImGuiKey_None;
 }
 
 void ApplyEditorStyle()
@@ -86,7 +100,7 @@ void ApplyEditorStyle()
 
 } // namespace
 
-bool EditorUi::Initialize(HWND window, QrInstance instance, const std::string &fontPath,
+bool EditorUi::Initialize(EditorWindow *window, QrInstance instance, const std::string &fontPath,
                           std::string &error)
 {
     if (m_ready)
@@ -153,7 +167,11 @@ bool EditorUi::Initialize(HWND window, QrInstance instance, const std::string &f
 
     io.Fonts->SetTexID(ImTextureID(uintptr_t(m_fontMaterial)));
 
-    TrackMouse(window);
+    if (m_window != nullptr)
+    {
+        m_window->GetCursorPosition(m_mouseX, m_mouseY);
+    }
+
     m_ready = true;
     return true;
 }
@@ -173,20 +191,6 @@ void EditorUi::Shutdown()
 
     ImGui::DestroyContext();
     m_ready = false;
-}
-
-void EditorUi::TrackMouse(HWND window)
-{
-    if (window == nullptr)
-    {
-        return;
-    }
-
-    POINT point = {};
-    GetCursorPos(&point);
-    ScreenToClient(window, &point);
-    m_mouseX = float(point.x);
-    m_mouseY = float(point.y);
 }
 
 bool EditorUi::WantsMouse() const
@@ -219,26 +223,32 @@ void EditorUi::SetCursorVisible(bool visible)
     }
 
     m_cursorVisible = visible;
-    ShowCursor(visible ? TRUE : FALSE);
+
+    if (m_window != nullptr)
+    {
+        m_window->SetCursorVisible(visible);
+    }
 }
 
-void EditorUi::UpdateModifiers()
+void EditorUi::UpdateModifiers(const EditorModifiers &modifiers)
 {
     ImGuiIO &io = ImGui::GetIO();
-    io.AddKeyEvent(ImGuiMod_Shift, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
-    io.AddKeyEvent(ImGuiMod_Ctrl, (GetKeyState(VK_CONTROL) & 0x8000) != 0);
-    io.AddKeyEvent(ImGuiMod_Alt, (GetKeyState(VK_MENU) & 0x8000) != 0);
+    io.AddKeyEvent(ImGuiMod_Shift, modifiers.shift);
+    io.AddKeyEvent(ImGuiMod_Ctrl, modifiers.ctrl);
+    io.AddKeyEvent(ImGuiMod_Alt, modifiers.alt);
 }
 
-void EditorUi::AddKey(uint32_t virtualKey, bool down)
+void EditorUi::AddKey(EditorKey editorKey, bool down, const EditorModifiers &modifiers)
 {
-    if (virtualKey == VK_SHIFT || virtualKey == VK_CONTROL || virtualKey == VK_MENU)
+    UpdateModifiers(modifiers);
+
+    if (editorKey == EditorKey::Shift || editorKey == EditorKey::Ctrl ||
+        editorKey == EditorKey::Alt)
     {
-        UpdateModifiers();
         return;
     }
 
-    const ImGuiKey key = MapVirtualKey(virtualKey);
+    const ImGuiKey key = MapEditorKey(editorKey);
 
     if (key == ImGuiKey_None)
     {
@@ -249,7 +259,7 @@ void EditorUi::AddKey(uint32_t virtualKey, bool down)
     io.AddKeyEvent(key, down);
 }
 
-bool EditorUi::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
+bool EditorUi::HandleEvent(const EditorEvent &event)
 {
     if (!m_ready)
     {
@@ -258,82 +268,57 @@ bool EditorUi::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 
     ImGuiIO &io = ImGui::GetIO();
 
-    switch (message)
+    switch (event.type)
     {
-    case WM_MOUSEMOVE:
-        m_mouseX = float(GET_X_LPARAM(lParam));
-        m_mouseY = float(GET_Y_LPARAM(lParam));
+    case EditorEventType::MouseMove:
+        m_mouseX = event.x;
+        m_mouseY = event.y;
         io.AddMousePosEvent(m_mouseX, m_mouseY);
         return false;
 
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
+    case EditorEventType::MouseButton:
     {
-        const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN ||
-                          message == WM_MBUTTONDOWN;
-        const int button = (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) ? 0
-                         : (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) ? 1
-                                                                                 : 2;
-        SetCapture(m_window);
-        io.AddMouseButtonEvent(button, down);
-
-        if (down)
+        if (m_window != nullptr && event.down && m_mouseButtons == 0)
         {
-            m_mouseButtons |= 1u << button;
+            m_window->SetMouseCapture(true);
+        }
+
+        io.AddMouseButtonEvent(event.button, event.down);
+
+        if (event.down)
+        {
+            m_mouseButtons |= 1u << uint32_t(event.button);
         }
         else
         {
-            m_mouseButtons &= ~(1u << button);
+            m_mouseButtons &= ~(1u << uint32_t(event.button));
 
-            if (m_mouseButtons == 0)
+            if (m_mouseButtons == 0 && m_window != nullptr)
             {
-                ReleaseCapture();
+                m_window->SetMouseCapture(false);
             }
         }
 
         return false;
     }
 
-    case WM_MOUSEWHEEL:
-        io.AddMouseWheelEvent(0.0f, float(GET_WHEEL_DELTA_WPARAM(wParam)) / float(WHEEL_DELTA));
+    case EditorEventType::MouseWheel:
+        io.AddMouseWheelEvent(0.0f, event.wheelY);
         return false;
 
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-        AddKey(uint32_t(wParam), true);
+    case EditorEventType::Key:
+        AddKey(event.key, event.down, event.modifiers);
         return false;
 
-    case WM_KEYUP:
-    case WM_SYSKEYUP:
-        AddKey(uint32_t(wParam), false);
-        return false;
-
-    case WM_CHAR:
-    {
-        const wchar_t character = wchar_t(wParam);
-        char utf8[8] = {};
-        const int length = WideCharToMultiByte(CP_UTF8, 0, &character, 1, utf8, sizeof(utf8), nullptr,
-                                               nullptr);
-
-        if (length > 0)
+    case EditorEventType::Text:
+        if (event.text[0] != '\0')
         {
-            utf8[length] = '\0';
-            io.AddInputCharactersUTF8(utf8);
+            io.AddInputCharactersUTF8(event.text);
         }
-
-        return false;
-    }
-
-    case WM_KILLFOCUS:
-        io.AddFocusEvent(false);
         return false;
 
-    case WM_SETFOCUS:
-        io.AddFocusEvent(true);
+    case EditorEventType::Focus:
+        io.AddFocusEvent(event.down);
         return false;
 
     default:

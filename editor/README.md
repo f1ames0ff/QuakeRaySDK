@@ -5,10 +5,10 @@ Standalone QuakeRay editor executable. It is a host application around
 
 ## Current stage
 
-The application creates its own Win32 window, creates a `QrInstance`, loads a
-Wavefront OBJ or a Quake BSP29 scene, uploads it as a static scene, adds a
-directional light and renders the scene through the SDK. The default asset is
-`assets/editor_scene.obj`.
+The application creates its own platform window (Win32 on Windows, X11/Xlib on
+Linux), creates a `QrInstance`, loads a Wavefront OBJ or a Quake BSP29 scene,
+uploads it as a static scene, adds a directional light and renders the scene
+through the SDK. The default asset is `assets/editor_scene.obj`.
 
 For a BSP29 map, the loader reads the world geometry, computes per-face UVs from
 the BSP texinfo data, decodes the miptex entries of the texture lump into RGBA
@@ -187,6 +187,8 @@ state and the remaining gap are listed in
 
 ## Build
 
+### Windows
+
 ```powershell
 cmake -S . -B build `
     -DQR_BUILD_EDITOR=ON `
@@ -196,14 +198,33 @@ cmake -S . -B build `
 cmake --build build --config Debug --target quakerayeditor
 ```
 
+### Linux (X11/Xlib)
+
+First build the FidelityFX Vulkan provider (`libamd_fidelityfx_vk.so`), then
+configure and build `quakerayeditor`:
+
+```bash
+Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh
+cmake -S . -B build/linux-editor -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DQR_BUILD_EDITOR=ON \
+    -DQR_NVRHI_SOURCE_DIR=/path/to/nvrhi \
+    -DQR_FFX_VK_SO="$PWD/build/ffx/libamd_fidelityfx_vk.so" \
+    -DQR_EDITOR_SHADER_DIR=/path/to/shaders \
+    -DQR_EDITOR_TEXTURE_DIR=/path/to/gfx/textures
+cmake --build build/linux-editor --target quakerayeditor --parallel
+```
+
 The NVRHI source tree needs the pinned QuakeRay patch
-`third_party/nvrhi-max-binding-layouts.patch` for the ray-tracing pipeline.
+`cmake/nvrhi-max-binding-layouts.patch` for the ray-tracing pipeline.
 `build_win.ps1` applies it automatically; a standalone editor build must apply
 it before configuring or building NVRHI.
 
-The executable is `quakerayeditor.exe`. The FSR provider DLL, the default OBJ,
-the shader directory and the blue-noise texture are copied next to it by the
-build when the corresponding source directories are configured.
+The executable is `quakerayeditor.exe` on Windows and `quakerayeditor` on Linux.
+The FSR provider (`amd_fidelityfx_vk.dll` / `libamd_fidelityfx_vk.so`), the
+default OBJ, the fonts, the shader directory and the blue-noise texture are
+copied next to it by the build when the corresponding source directories are
+configured.
 
 ## Run
 
@@ -212,9 +233,14 @@ build when the corresponding source directories are configured.
     --scene C:\path\to\e1m1.bsp
 ```
 
+```bash
+./quakerayeditor --scene /path/to/e1m1.bsp
+```
+
 The editor defaults to `editor_scene.obj`, `shaders/` and
-`textures/BlueNoise_LDR_RGBA_128.png` next to the executable. The explicit
-options remain available for a different deployment layout:
+`textures/BlueNoise_LDR_RGBA_128.png` in the working directory or next to the
+executable. The explicit options remain available for a different deployment
+layout:
 
 ```powershell
 .\quakerayeditor.exe `
@@ -223,7 +249,8 @@ options remain available for a different deployment layout:
     --scene C:\path\to\e1m1.bsp `
     --materials C:\path\to\qray.materials.yaml `
     --lights C:\path\to\qray.lights.yaml `
-    --tab Entities
+    --tab Entities `
+    --max-frames 10
 ```
 
 `--materials` names the material document the session reads on start and writes
@@ -240,6 +267,9 @@ click the tab bar. It takes the tab label, not a pixel position, because the tab
 rectangles move with the panel; the panel logs them as `panel tabs:` on the
 first frame, next to the `light list rect:`, `panel rect:` and `style items:`
 lines that let a script find the widgets without reading pixels.
+
+`--max-frames <N>` exits cleanly after rendering `N` frames, useful for
+automated smoke checks.
 
 The BSP loader currently accepts Quake BSP29 files directly. Extracting a map
 from a PAK remains an adapter step.

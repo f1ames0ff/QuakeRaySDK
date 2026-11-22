@@ -3,12 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
-
-#if defined(_WIN32)
-#include <filesystem>
-#endif
 
 namespace
 {
@@ -71,6 +68,78 @@ uint32_t ReadUint32(const uint8_t *bytes)
            (uint32_t(bytes[3]) << 24);
 }
 
+bool PathsMatch(const std::string &left, const std::string &right)
+{
+#if defined(_WIN32)
+    return EqualsIgnoreCase(left, right);
+#else
+    return left == right;
+#endif
+}
+
+#if !defined(_WIN32)
+bool FindEntryIgnoreCase(const std::filesystem::path &directory, const std::string &segment,
+                         std::filesystem::path &out)
+{
+    std::error_code ec;
+    const std::filesystem::path direct = directory / segment;
+
+    if (std::filesystem::exists(direct, ec))
+    {
+        out = direct;
+        return true;
+    }
+
+    for (const std::filesystem::directory_entry &entry :
+         std::filesystem::directory_iterator(directory, ec))
+    {
+        if (EqualsIgnoreCase(entry.path().filename().string(), segment))
+        {
+            out = entry.path();
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ResolveCaseInsensitivePath(const std::string &directory, const std::string &normalized,
+                                std::string &resolved)
+{
+    std::error_code ec;
+    std::filesystem::path current(directory);
+
+    if (!std::filesystem::is_directory(current, ec))
+    {
+        return false;
+    }
+
+    size_t start = 0;
+
+    while (start < normalized.size())
+    {
+        const size_t slash = normalized.find('/', start);
+        const std::string segment = (slash == std::string::npos)
+                                        ? normalized.substr(start)
+                                        : normalized.substr(start, slash - start);
+        start = (slash == std::string::npos) ? normalized.size() : slash + 1;
+
+        if (segment.empty())
+        {
+            continue;
+        }
+
+        if (!FindEntryIgnoreCase(current, segment, current))
+        {
+            return false;
+        }
+    }
+
+    resolved = current.string();
+    return !resolved.empty();
+}
+#endif
+
 } // namespace
 
 std::string EditorDirectoryOf(const std::string &path)
@@ -94,7 +163,7 @@ bool EditorAssetSource::AddDirectory(const std::string &path)
 
     for (const std::string &existing : m_directories)
     {
-        if (EqualsIgnoreCase(existing, path))
+        if (PathsMatch(existing, path))
         {
             return false;
         }
@@ -106,6 +175,19 @@ bool EditorAssetSource::AddDirectory(const std::string &path)
 
 bool EditorAssetSource::AddPak(const std::string &path)
 {
+    if (path.empty())
+    {
+        return false;
+    }
+
+    for (const std::string &existing : m_archives)
+    {
+        if (PathsMatch(existing, path))
+        {
+            return false;
+        }
+    }
+
     std::vector<uint8_t> bytes;
 
     if (!ReadWholeFile(path, bytes) || bytes.size() < PakHeaderSize)
@@ -159,14 +241,12 @@ bool EditorAssetSource::AddPak(const std::string &path)
 
 bool EditorAssetSource::AddArchiveOrDirectory(const std::string &path)
 {
-#if defined(_WIN32)
     std::error_code ec;
 
     if (std::filesystem::is_directory(path, ec))
     {
         return AddDirectory(path);
     }
-#endif
 
     return AddPak(path);
 }
@@ -210,6 +290,16 @@ bool EditorAssetSource::ReadFile(const std::string &name, std::vector<uint8_t> &
         {
             return true;
         }
+
+#if !defined(_WIN32)
+        std::string resolved;
+
+        if (ResolveCaseInsensitivePath(directory, normalized, resolved) &&
+            ReadWholeFile(resolved, out))
+        {
+            return true;
+        }
+#endif
     }
 
     for (const Pak &pak : m_paks)

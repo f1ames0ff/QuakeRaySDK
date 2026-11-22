@@ -1,7 +1,5 @@
 #pragma once
 
-#include <windows.h>
-
 #include <chrono>
 #include <string>
 #include <unordered_map>
@@ -11,6 +9,7 @@
 
 #include "Assets.h"
 #include "EditorMaterial.h"
+#include "EditorPlatform.h"
 #include "EditorSession.h"
 #include "EditorSettings.h"
 #include "EditorUi.h"
@@ -38,16 +37,15 @@ struct EditorEmissiveLight
 class EditorApp
 {
 public:
-    explicit EditorApp(HINSTANCE instance);
+    explicit EditorApp(void *nativeInstance = nullptr);
     ~EditorApp();
 
     EditorApp(const EditorApp &) = delete;
     EditorApp &operator=(const EditorApp &) = delete;
 
-    int Run(int showCommand);
+    int Run(const std::vector<std::string> &args, int showCommand = 0);
 
 private:
-    static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     static void PrintMessage(const char *message, void *userData);
     // Logs the last ImGui item's screen rectangle as "panel rect: <name> x0,y0 x1,y1" whenever it
     // moves, which is how the scripted GUI checks find a control.
@@ -223,12 +221,17 @@ private:
     void RemoveSelectedCustomLight();
 
     void Frame();
+    void SubmitSceneFrame();
     void Shutdown();
 
-    LRESULT HandleWindowMessage(UINT message, WPARAM wParam, LPARAM lParam);
+    void HandleEvent(const EditorEvent &event);
+    void HandleMouseMoveEvent(const EditorEvent &event);
+    void HandleMouseButtonEvent(const EditorEvent &event);
+    void HandleKeyEvent(const EditorEvent &event);
+    void HandleFocusLost();
 
-    HWND m_window = nullptr;
-    HINSTANCE m_instanceHandle = nullptr;
+    EditorWindow m_window;
+    void *m_nativeInstance = nullptr;
     QrInstance m_instance = nullptr;
     QrMaterial m_material = QR_NO_MATERIAL;
     std::vector<QrMaterial> m_textureMaterials;
@@ -261,9 +264,12 @@ private:
     float m_cameraSpeed = 256.0f;
     float m_cameraSensitivity = 0.0032f;
     bool m_looking = false;
-    POINT m_lastMouse = {};
-    bool m_keys[256] = {};
+    int32_t m_lastMouseX = 0;
+    int32_t m_lastMouseY = 0;
+    bool m_keys[size_t(EditorKey::Count)] = {};
     bool m_showPanel = true;
+    uint32_t m_maxFrames = 0;
+    uint32_t m_renderedFrames = 0;
 
     // Where the panel's right edge landed this frame, so the overlay can put its hint block beside
     // the panel instead of under it. Cleared when the panel is closed, which is when the block

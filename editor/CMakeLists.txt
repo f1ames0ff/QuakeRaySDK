@@ -16,13 +16,36 @@ add_library(quakerayeditor_imgui STATIC
     "${QR_EDITOR_IMGUI_DIR}/imgui_widgets.cpp")
 target_include_directories(quakerayeditor_imgui PUBLIC "${QR_EDITOR_IMGUI_DIR}")
 target_compile_features(quakerayeditor_imgui PRIVATE cxx_std_20)
-target_compile_definitions(quakerayeditor_imgui PRIVATE UNICODE _UNICODE)
+if(WIN32)
+    target_compile_definitions(quakerayeditor_imgui PRIVATE UNICODE _UNICODE)
+endif()
 
-add_executable(quakerayeditor WIN32 Main.cpp EditorApp.cpp EditorMaterial.cpp EditorSettings.cpp
-    EditorSession.cpp EditorUi.cpp EditorSpatial.cpp Scene.cpp Assets.cpp)
+set(QR_EDITOR_COMMON_SOURCES
+    Main.cpp
+    EditorApp.cpp
+    EditorMaterial.cpp
+    EditorSettings.cpp
+    EditorSession.cpp
+    EditorUi.cpp
+    EditorSpatial.cpp
+    Scene.cpp
+    Assets.cpp)
+
+if(WIN32)
+    add_executable(quakerayeditor WIN32 ${QR_EDITOR_COMMON_SOURCES} EditorPlatformWin32.cpp)
+    target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+    target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui user32 gdi32 shell32)
+else()
+    find_package(X11 REQUIRED)
+    add_executable(quakerayeditor ${QR_EDITOR_COMMON_SOURCES} EditorPlatformX11.cpp)
+    target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_XLIB)
+    target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui X11::X11)
+    set_target_properties(quakerayeditor PROPERTIES
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN")
+endif()
+
 target_compile_features(quakerayeditor PRIVATE cxx_std_20)
-target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
-target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui user32 gdi32 shell32)
 
 set(QR_EDITOR_DEPLOY_COMMANDS
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -32,10 +55,19 @@ set(QR_EDITOR_DEPLOY_COMMANDS
         "$<TARGET_FILE_DIR:quakerayeditor>/fonts"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${QR_EDITOR_IMGUI_DIR}/fonts/Roboto-Regular.ttf"
-        "$<TARGET_FILE_DIR:quakerayeditor>/fonts/Roboto-Regular.ttf"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${QR_FFX_VK_RUNTIME_DLL}"
-        "$<TARGET_FILE_DIR:quakerayeditor>/amd_fidelityfx_vk.dll")
+        "$<TARGET_FILE_DIR:quakerayeditor>/fonts/Roboto-Regular.ttf")
+
+if(WIN32)
+    list(APPEND QR_EDITOR_DEPLOY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QR_FFX_VK_RUNTIME_DLL}"
+            "$<TARGET_FILE_DIR:quakerayeditor>/amd_fidelityfx_vk.dll")
+else()
+    list(APPEND QR_EDITOR_DEPLOY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QR_FFX_VK_SO}"
+            "$<TARGET_FILE_DIR:quakerayeditor>/libamd_fidelityfx_vk.so")
+endif()
 
 if(QR_EDITOR_SHADER_DIR AND EXISTS "${QR_EDITOR_SHADER_DIR}")
     list(APPEND QR_EDITOR_DEPLOY_COMMANDS
