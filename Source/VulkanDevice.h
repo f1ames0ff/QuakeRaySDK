@@ -234,6 +234,7 @@ private:
 
     void LockSpatialFrame();
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
+    bool UpdateWorldSamplers(uint32_t frameIndex, const QrDrawFrameTexturesParams *pTexturesParams);
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
     void AcquireFrameImage(bool allowRecreate);

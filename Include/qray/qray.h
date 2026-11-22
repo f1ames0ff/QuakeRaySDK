@@ -1120,6 +1120,12 @@ typedef enum QrSamplerFilter
     QR_SAMPLER_FILTER_NEAREST,
 } QrSamplerFilter;
 
+typedef enum QrSamplerMipmapMode
+{
+    QR_SAMPLER_MIPMAP_MODE_LINEAR = 0,
+    QR_SAMPLER_MIPMAP_MODE_NEAREST = 1,
+} QrSamplerMipmapMode;
+
 typedef struct QrTextureSet
 {
     const void *pDataAlbedoAlpha;
@@ -1374,8 +1380,16 @@ typedef struct QrDrawFrameTexturesParams
 
     uint32_t        emissionBlendMode;
 
-    float           emissionBlendStrength;
-    float           lightStyleScales[QR_LIGHT_STYLE_COUNT];
+    float               emissionBlendStrength;
+    float               lightStyleScales[QR_LIGHT_STYLE_COUNT];
+
+    /* World texture mipmap filter mode (0 = trilinear, 1 = bilinear). */
+    QrSamplerMipmapMode samplerMipmapMode;
+    /* World texture anisotropic filtering level:
+       0 = renderer default (16x, clamped to device maxSamplerAnisotropy),
+       1 = off (isotropic),
+       2 / 4 / 8 / 16 = 2x / 4x / 8x / 16x anisotropy. */
+    uint32_t            samplerAnisotropy;
 } QrDrawFrameTexturesParams;
 
 typedef enum QrDebugDrawFlagBits

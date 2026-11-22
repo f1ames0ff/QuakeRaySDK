@@ -58,7 +58,9 @@ public:
 
 public:
     SamplerManager(VkDevice device, uint32_t anisotropy, bool forceMinificationFilterLinear,
-                   rhi::RhiTextureTable *pRhiTextureTable = nullptr);
+                   rhi::RhiTextureTable *pRhiTextureTable = nullptr,
+                   uint32_t maxSupportedAnisotropy = 16,
+                   QrSamplerMipmapMode mipmapMode = QR_SAMPLER_MIPMAP_MODE_LINEAR);
     ~SamplerManager();
 
     SamplerManager(const SamplerManager &other) = delete;
@@ -77,11 +79,13 @@ public:
     VkSampler GetSampler(const Handle &handle) const;
 
     bool TryChangeMipLodBias(uint32_t frameIndex, float newMipLodBias);
+    bool TryUpdateSamplerState(uint32_t frameIndex, float newMipLodBias,
+                               uint32_t newAnisotropy, QrSamplerMipmapMode newMipmapMode);
 
     void SetRhiTextureTable(rhi::RhiTextureTable *pTable);
 
 private:
-    void CreateAllSamplers(uint32_t anisotropy, float mipLodBias);
+    void CreateAllSamplers(uint32_t anisotropy, VkSamplerMipmapMode mipmapMode, float mipLodBias);
     void AddAllSamplersToDestroy(uint32_t frameIndex);
 
     static uint32_t ToIndex(
@@ -102,7 +106,9 @@ private:
     rgl::unordered_map<uint32_t, VkSampler> samplers;
     std::vector<VkSampler> samplersToDelete[MAX_FRAMES_IN_FLIGHT];
     float mipLodBias;
+    uint32_t maxSupportedAnisotropy;
     uint32_t anisotropy;
+    VkSamplerMipmapMode mipmapMode;
     bool forceMinificationFilterLinear;
 
     rhi::RhiTextureTable *rhiTextureTable = nullptr;

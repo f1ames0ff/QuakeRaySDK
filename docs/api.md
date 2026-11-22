@@ -397,7 +397,7 @@ owns all output images. Optional pointer blocks select rendering features:
 | `QrDrawFrameBloomParams` | Bloom intensity and threshold. |
 | `QrDrawFrameReflectRefractParams` | Water, acid, glass, portals and their media properties. |
 | `QrDrawFrameSkyParams` | Sky type, sun disc, clouds, god rays and cubemap rotation; see [sky-and-atmosphere.md](sky-and-atmosphere.md). |
-| `QrDrawFrameTexturesParams` | Normal strength, material sampling, emission and light-style behavior. |
+| `QrDrawFrameTexturesParams` | Normal strength, material sampling (`samplerMipmapMode`: trilinear linear / bilinear nearest; `samplerAnisotropy`: `0` = default 16x clamped to device limit, `1` = off, `2/4/8/16`), emission and light-style behavior. |
 | `QrDrawFrameLevelFogParams` | Global level fog color and density. |
 | `QrDrawFrameDebugParams` | Diagnostic visualization flags. |
 | `QrDrawFramePostEffectsParams` | Wipe, blur, tint, CRT, DOF, vignette, film grain and gameplay effects. |

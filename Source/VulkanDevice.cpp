@@ -25,6 +25,7 @@
 #include "HaltonSequence.h"
 #include "Matrix.h"
 #include "RenderResolutionHelper.h"
+#include "SamplerFilterPolicy.h"
 #include "QrException.h"
 #include "Utils.h"
 #include "Const.h"
@@ -1696,8 +1697,8 @@ void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
     {
         {
             CpuProfileScope descriptors(cpuProfiler, QR_CPU_PASS_DESCRIPTORS);
-            const bool mipLodBiasUpdated = worldSamplerManager->TryChangeMipLodBias(frameIndex, renderResolution.GetMipLodBias());
-            textureManager->SubmitDescriptors(frameIndex, drawInfo->pTexturesParams, mipLodBiasUpdated);
+            const bool samplersUpdated = UpdateWorldSamplers(frameIndex, drawInfo->pTexturesParams);
+            textureManager->SubmitDescriptors(frameIndex, drawInfo->pTexturesParams, samplersUpdated);
         }
 
         if (!drawInfo->renderUiOnly)
@@ -1733,6 +1734,18 @@ void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
     EndFrame(cmd);
     currentFrameState.OnEndFrame();
     statsCpuTimingValid = cpuFrameProfiler.IsEnabled();
+}
+
+bool VulkanDevice::UpdateWorldSamplers(uint32_t frameIndex, const QrDrawFrameTexturesParams *pTexturesParams)
+{
+    const QrSamplerMipmapMode mipmapMode = pTexturesParams != nullptr
+        ? pTexturesParams->samplerMipmapMode
+        : QR_SAMPLER_MIPMAP_MODE_LINEAR;
+    const uint32_t anisotropy = pTexturesParams != nullptr
+        ? ResolveSamplerAnisotropy(pTexturesParams->samplerAnisotropy, kMaxWorldAnisotropy)
+        : kDefaultWorldAnisotropy;
+    return worldSamplerManager->TryUpdateSamplerState(
+        frameIndex, renderResolution.GetMipLodBias(), anisotropy, mipmapMode);
 }
 
 bool VulkanDevice::IsSuspended() const
