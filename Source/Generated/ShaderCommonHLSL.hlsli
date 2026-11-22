@@ -690,7 +690,7 @@ struct ShPortalInstance
 [[vk::binding(62, DESC_SET_FRAMEBUFFERS), vk::image_format("r11g11b10f")]] RWTexture2D<float4> framebufScreenEmission;
 #endif
 [[vk::binding(63, DESC_SET_FRAMEBUFFERS), vk::image_format("r11g11b10f")]] RWTexture2D<float4> framebufGodRays;
-[[vk::binding(64, DESC_SET_FRAMEBUFFERS), vk::image_format("r11g11b10f")]] RWTexture2D<float4> framebufGodRaysFiltered;
+[[vk::binding(64, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufGodRaysFiltered;
 [[vk::binding(65, DESC_SET_FRAMEBUFFERS), vk::image_format("r11g11b10f")]] RWTexture2D<float4> framebufBloomInput;
 [[vk::binding(66, DESC_SET_FRAMEBUFFERS), vk::image_format("r11g11b10f")]] RWTexture2D<float4> framebufBloom_Mip1;
 [[vk::binding(67, DESC_SET_FRAMEBUFFERS), vk::image_format("r11g11b10f")]] RWTexture2D<float4> framebufBloom_Mip2;

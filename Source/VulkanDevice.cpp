@@ -20,9 +20,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "HaltonSequence.h"
+#include "LightShaftMath.h"
 #include "Matrix.h"
 #include "RenderResolutionHelper.h"
 #include "QrException.h"
@@ -188,6 +190,256 @@ QrPortalUploadInfo SpatialPortal(const SpatialFrame &frame, const QrPortalUpload
     result.outDirection = SpatialDirection(frame, source.outDirection);
     result.outUp = SpatialDirection(frame, source.outUp);
     return result;
+}
+
+#define QR_SET_VEC3( dst, x, y, z ) \
+    ( dst )[ 0 ] = ( x );           \
+    ( dst )[ 1 ] = ( y );           \
+    ( dst )[ 2 ] = ( z )
+
+#define QR_SET_VEC3_A( dst, xyz )  \
+    ( dst )[ 0 ] = ( xyz )[ 0 ]; \
+    ( dst )[ 1 ] = ( xyz )[ 1 ]; \
+    ( dst )[ 2 ] = ( xyz )[ 2 ]
+
+#define QR_MAX_VEC3( dst, m ) \
+    ( dst )[ 0 ] = std::max( ( dst )[ 0 ], ( m ) );  \
+    ( dst )[ 1 ] = std::max( ( dst )[ 1 ], ( m ) );  \
+    ( dst )[ 2 ] = std::max( ( dst )[ 2 ], ( m ) )
+
+void FillVolumetricCameraUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo, float aspect)
+{
+    const bool lightShaftsRequested = drawInfo.pSkyParams != nullptr &&
+                                      (drawInfo.pSkyParams->lightShaftsEnabled != 0 ||
+                                       drawInfo.pSkyParams->lightShaftsSun != 0);
+    gu->volumeCameraNear = std::max(drawInfo.cameraNear, 2.5e-5f);
+
+    if (drawInfo.pVolumetricParams != nullptr)
+    {
+        if (drawInfo.pVolumetricParams->enable != 0)
+        {
+            gu->volumeEnableType = drawInfo.pVolumetricParams->useSimpleDepthBased
+                                       ? VOLUME_ENABLE_SIMPLE
+                                       : VOLUME_ENABLE_VOLUMETRIC;
+        }
+        else
+        {
+            gu->volumeEnableType = VOLUME_ENABLE_NONE;
+        }
+        gu->volumeScattering = drawInfo.pVolumetricParams->scaterring;
+        gu->volumeSourceAsymmetry = std::clamp(drawInfo.pVolumetricParams->sourceAssymetry, -1.0f, 1.0f);
+
+        QR_SET_VEC3_A(gu->volumeAmbient, drawInfo.pVolumetricParams->ambientColor.data);
+        QR_MAX_VEC3(gu->volumeAmbient, 0.0f);
+
+        QR_SET_VEC3_A(gu->volumeSourceColor, drawInfo.pVolumetricParams->sourceColor.data);
+        QR_MAX_VEC3(gu->volumeSourceColor, 0.0f);
+
+        QR_SET_VEC3_A(gu->volumeDirToSource, drawInfo.pVolumetricParams->sourceDirection.data);
+        Utils::Negate(gu->volumeDirToSource);
+        Utils::Normalize(gu->volumeDirToSource);
+    }
+    else
+    {
+        gu->volumeEnableType = VOLUME_ENABLE_VOLUMETRIC;
+        gu->volumeScattering = 0.2f;
+        gu->volumeSourceAsymmetry = 0.4f;
+        QR_SET_VEC3(gu->volumeAmbient, 0.8f, 0.85f, 1.0f);
+        QR_SET_VEC3(gu->volumeSourceColor, 0, 0, 0);
+        QR_SET_VEC3(gu->volumeDirToSource, 0, 1, 0);
+    }
+
+    const float volumetricFar =
+        drawInfo.pVolumetricParams != nullptr ? drawInfo.pVolumetricParams->volumetricFar : 0.0f;
+    const bool legacyVolumeOn =
+        gu->coreQ2RTX == 0 && drawInfo.pVolumetricParams != nullptr && drawInfo.pVolumetricParams->enable != 0;
+    gu->volumeCameraFar = ResolveVolumetricCameraFar(legacyVolumeOn, volumetricFar, gu->volumeCameraNear,
+                                                     drawInfo.cameraFar, lightShaftsRequested);
+
+    if (gu->volumeEnableType != VOLUME_ENABLE_NONE || lightShaftsRequested)
+    {
+        memcpy(gu->volumeViewProj_Prev, gu->volumeViewProj, 16 * sizeof(float));
+        memcpy(gu->volumeViewProjInv_Prev, gu->volumeViewProjInv, 16 * sizeof(float));
+
+        float volumeproj[16];
+        Matrix::MakeProjectionMatrix(volumeproj,
+                                     aspect,
+                                     drawInfo.fovYRadians,
+                                     gu->volumeCameraNear,
+                                     gu->volumeCameraFar);
+
+        Matrix::Multiply(gu->volumeViewProj, gu->view, volumeproj);
+        Matrix::Inverse(gu->volumeViewProjInv, gu->volumeViewProj);
+    }
+}
+
+void PopulateLightShaftSkySettings(const QrDrawFrameSkyParams *pSkyParams,
+                                   NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    out.lightShaftIntensity = 1.0f;
+    out.lightShaftSteps = 12u;
+    out.lightShaftSamples = 1u;
+    out.lightShaftDensity = 0.002f;
+    out.lightShaftAlbedo = 1.0f;
+    out.lightShaftLocalFogScale = 1.0f;
+    out.lightShaftTemporal = false;
+    out.lightShaftSun = false;
+    out.lightShaftDebug = 0u;
+    out.lightShaftRayBudget = 1048576u;
+    if (pSkyParams == nullptr)
+    {
+        return;
+    }
+
+    out.lightShaftIntensity = std::max(pSkyParams->lightShaftsIntensity, 0.0f);
+    const uint32_t res = std::min(pSkyParams->lightShaftsResolution, 2u);
+    out.lightShaftSteps = std::min(16u, 8u + res * 4u);
+    out.lightShaftSamples = 1u + res;
+    out.lightShaftDensity = std::max(pSkyParams->lightShaftsDensity, 0.0f);
+    out.lightShaftAlbedo = std::clamp(pSkyParams->lightShaftsAlbedo, 0.0f, 1.0f);
+    out.lightShaftLocalFogScale = std::max(pSkyParams->lightShaftsLocalFogScale, 0.0f);
+    out.lightShaftTemporal = pSkyParams->lightShaftsTemporal != 0;
+    out.lightShaftSun = pSkyParams->lightShaftsSun != 0;
+    out.lightShaftDebug = std::min(pSkyParams->lightShaftsDebug, 5u);
+    out.lightShaftRayBudget = pSkyParams->lightShaftsRayBudget;
+    for (int k = 0; k < 3; k++)
+    {
+        out.lightShaftEmissive[k] = pSkyParams->lightShaftsEmissive.data[k];
+    }
+}
+
+void CopyLightShaftSources(const LightManager::LightShaft *src,
+                           uint32_t count,
+                           NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        memcpy(out.lightShafts[i].position, src[i].position, sizeof(src[i].position));
+        memcpy(out.lightShafts[i].direction, src[i].direction, sizeof(src[i].direction));
+        memcpy(out.lightShafts[i].color, src[i].color, sizeof(src[i].color));
+        memcpy(out.lightShafts[i].cone, src[i].cone, sizeof(src[i].cone));
+        memcpy(out.lightShafts[i].tangentU, src[i].tangentU, sizeof(src[i].tangentU));
+        memcpy(out.lightShafts[i].tangentV, src[i].tangentV, sizeof(src[i].tangentV));
+        memcpy(out.lightShafts[i].surface, src[i].surface, sizeof(src[i].surface));
+        memcpy(out.lightShafts[i].emission, src[i].emission, sizeof(src[i].emission));
+        memcpy(out.lightShafts[i].source, src[i].source, sizeof(src[i].source));
+    }
+}
+
+void PopulateGodRaysWorldBounds(Scene &scene,
+                                uint32_t frameIndex,
+                                NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    out.hasAabb = scene.HasAABB();
+    if (!out.hasAabb)
+    {
+        return;
+    }
+
+    float aabbMin[3], aabbMax[3];
+    scene.GetAABB(aabbMin, aabbMax);
+    for (int k = 0; k < 3; k++)
+    {
+        const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
+        out.aabbMin[k] = aabbMin[k];
+        out.aabbMax[k] = aabbMax[k];
+        out.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
+        out.worldHalfSizeInv[k] = 1.0f / halfSize;
+    }
+
+    out.staticCollector = scene.GetASManager()->GetStaticCollector().get();
+    out.dynamicCollector = scene.GetASManager()->GetDynamicCollector(frameIndex).get();
+}
+
+void PopulateGodRaysSunDirections(const QrDrawFrameSkyParams *pSkyParams,
+                                  bool sunShaftsOn,
+                                  bool useSkyBrightest,
+                                  const float sunDir[3],
+                                  const float sunColor[3],
+                                  NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    if (!sunShaftsOn)
+    {
+        return;
+    }
+
+    for (int k = 0; k < 3; k++)
+    {
+        if (useSkyBrightest)
+        {
+            out.shadowLightDirection[k] = -pSkyParams->godRaysSkyDirection.data[k];
+            out.sunDirection[k] = pSkyParams->godRaysSkyDirection.data[k];
+            out.sunColor[k] = pSkyParams->godRaysSkyColor.data[k];
+        }
+        else
+        {
+            out.shadowLightDirection[k] = sunDir[k];
+            out.sunDirection[k] = -sunDir[k];
+            out.sunColor[k] = sunColor[k];
+        }
+    }
+}
+
+void PopulateFallbackShaftDirection(const LightManager::LightShaft &firstShaft,
+                                    NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    const float lenSq = firstShaft.direction[0] * firstShaft.direction[0] +
+                        firstShaft.direction[1] * firstShaft.direction[1] +
+                        firstShaft.direction[2] * firstShaft.direction[2];
+    const bool validDirection = lenSq > 0.0001f;
+    for (int k = 0; k < 3; k++)
+    {
+        out.shadowLightDirection[k] = validDirection ? firstShaft.direction[k] : (k == 2 ? 1.0f : 0.0f);
+    }
+}
+
+void PopulateGodRaysInputs(const QrDrawFrameInfo &drawInfo,
+                           uint32_t frameIndex,
+                           const ShGlobalUniform *globalUniform,
+                           Scene &scene,
+                           NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
+{
+    static constexpr float kGodRaysRadianceScale = 500.0f;
+    static constexpr float kStepScales[5] = { 2.0f, 1.5f, 1.0f, 0.75f, 0.5f };
+
+    const float godRaysIntensity =
+        (drawInfo.pSkyParams == nullptr) ? 1.0f : std::max(drawInfo.pSkyParams->godRaysIntensity, 0.0f);
+    const bool godRaysEnabled =
+        ((drawInfo.pSkyParams == nullptr) || (drawInfo.pSkyParams->godRaysEnabled != 0)) &&
+        (godRaysIntensity > 0.0f);
+
+    float sunColor[3] = {}, sunDir[3] = {}, sunAngularRadius = 0.0047f;
+    const bool sunExists = scene.GetLightManager()->GetLastDirectionalLight(sunColor, sunDir, &sunAngularRadius);
+    const bool useSkyBrightest =
+        (drawInfo.pSkyParams != nullptr) &&
+        (drawInfo.pSkyParams->skyType == QR_SKY_TYPE_RASTERIZED_GEOMETRY) &&
+        (drawInfo.pSkyParams->godRaysFromSkyTexture != 0);
+    const bool sunShaftsOn = godRaysEnabled && (sunExists || useSkyBrightest);
+
+    const bool lightShaftsEnabled = drawInfo.pSkyParams != nullptr && drawInfo.pSkyParams->lightShaftsEnabled != 0;
+    LightManager::LightShaft lightShafts[LightManager::MAX_LIGHT_SHAFTS] = {};
+    const uint32_t lightShaftCount = lightShaftsEnabled
+        ? scene.GetLightManager()->CollectLightShafts(
+              lightShafts, LightManager::MAX_LIGHT_SHAFTS,
+              globalUniform->cameraPosition, globalUniform->volumeCameraFar)
+        : 0;
+    const bool lightShaftsOn = lightShaftCount > 0;
+
+    out.enabled = sunShaftsOn || lightShaftsOn;
+    out.intensity = kGodRaysRadianceScale * godRaysIntensity;
+    out.eccentricity = 0.75f;
+    const uint32_t quality = (drawInfo.pSkyParams != nullptr) ? std::min(drawInfo.pSkyParams->godRaysQuality, 4u) : 2u;
+    out.sunStepScale = kStepScales[quality];
+    out.lightShaftCount = lightShaftCount;
+
+    PopulateLightShaftSkySettings(drawInfo.pSkyParams, out);
+    PopulateGodRaysSunDirections(drawInfo.pSkyParams, sunShaftsOn, useSkyBrightest, sunDir, sunColor, out);
+    if (!sunShaftsOn && lightShaftsOn)
+    {
+        PopulateFallbackShaftDirection(lightShafts[0], out);
+    }
+    CopyLightShaftSources(lightShafts, lightShaftCount, out);
+    PopulateGodRaysWorldBounds(scene, frameIndex, out);
 }
 
 }
@@ -378,21 +630,6 @@ void VulkanDevice::CompleteAcquireForPresent()
 
     AcquireFrameImage(true);
 }
-
-#define QR_SET_VEC3( dst, x, y, z ) \
-    ( dst )[ 0 ] = ( x );           \
-    ( dst )[ 1 ] = ( y );           \
-    ( dst )[ 2 ] = ( z )
-
-#define QR_SET_VEC3_A( dst, xyz )  \
-    ( dst )[ 0 ] = ( xyz )[ 0 ]; \
-    ( dst )[ 1 ] = ( xyz )[ 1 ]; \
-    ( dst )[ 2 ] = ( xyz )[ 2 ]
-
-#define QR_MAX_VEC3( dst, m ) \
-    ( dst )[ 0 ] = std::max( ( dst )[ 0 ], ( m ) );  \
-    ( dst )[ 1 ] = std::max( ( dst )[ 1 ], ( m ) );  \
-    ( dst )[ 2 ] = std::max( ( dst )[ 2 ], ( m ) )
 
 void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const
 {
@@ -892,63 +1129,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->worldUpVector[ 2 ] = drawInfo.worldUpVector.data[ 2 ];
     }
 
-    {
-        gu->volumeCameraNear = std::max( drawInfo.cameraNear, 2.5e-5f );
-        gu->volumeCameraFar  = std::min(
-            drawInfo.cameraFar,
-            drawInfo.pVolumetricParams ? drawInfo.pVolumetricParams->volumetricFar : 2.5f );
-
-        if( drawInfo.pVolumetricParams )
-        {
-            if( drawInfo.pVolumetricParams->enable )
-            {
-                gu->volumeEnableType = drawInfo.pVolumetricParams->useSimpleDepthBased
-                                           ? VOLUME_ENABLE_SIMPLE
-                                           : VOLUME_ENABLE_VOLUMETRIC;
-            }
-            else
-            {
-                gu->volumeEnableType = VOLUME_ENABLE_NONE;
-            }
-            gu->volumeScattering = drawInfo.pVolumetricParams->scaterring;
-            gu->volumeSourceAsymmetry = std::clamp( drawInfo.pVolumetricParams->sourceAssymetry, -1.0f, 1.0f );
-
-            QR_SET_VEC3_A( gu->volumeAmbient, drawInfo.pVolumetricParams->ambientColor.data );
-            QR_MAX_VEC3( gu->volumeAmbient, 0.0f );
-
-            QR_SET_VEC3_A( gu->volumeSourceColor, drawInfo.pVolumetricParams->sourceColor.data );
-            QR_MAX_VEC3( gu->volumeSourceColor, 0.0f );
-
-            QR_SET_VEC3_A( gu->volumeDirToSource, drawInfo.pVolumetricParams->sourceDirection.data );
-            Utils::Negate( gu->volumeDirToSource );
-            Utils::Normalize( gu->volumeDirToSource );
-        }
-        else
-        {
-            gu->volumeEnableType      = VOLUME_ENABLE_VOLUMETRIC;
-            gu->volumeScattering      = 0.2f;
-            gu->volumeSourceAsymmetry = 0.4f;
-            QR_SET_VEC3( gu->volumeAmbient, 0.8f, 0.85f, 1.0f );
-            QR_SET_VEC3( gu->volumeSourceColor, 0, 0, 0 );
-            QR_SET_VEC3( gu->volumeDirToSource, 0, 1, 0 );
-        }
-
-        if( gu->volumeEnableType != VOLUME_ENABLE_NONE )
-        {
-            memcpy( gu->volumeViewProj_Prev, gu->volumeViewProj, 16 * sizeof( float ) );
-            memcpy( gu->volumeViewProjInv_Prev, gu->volumeViewProjInv, 16 * sizeof( float ) );
-
-            float volumeproj[ 16 ];
-            Matrix::MakeProjectionMatrix( volumeproj,
-                                          aspect,
-                                          drawInfo.fovYRadians,
-                                          gu->volumeCameraNear,
-                                          gu->volumeCameraFar );
-
-            Matrix::Multiply( gu->volumeViewProj, gu->view, volumeproj );
-            Matrix::Inverse( gu->volumeViewProjInv, gu->volumeViewProj );
-        }
-    }
+    FillVolumetricCameraUniform(gu, drawInfo, aspect);
 
     gu->antiFireflyEnabled = !!drawInfo.forceAntiFirefly;
 
@@ -1214,64 +1395,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 
     if (!drawInfo.renderUiOnly)
     {
-        const float godRaysIntensity = (drawInfo.pSkyParams == nullptr)
-            ? 1.0f : std::max(drawInfo.pSkyParams->godRaysIntensity, 0.0f);
-        const bool godRaysEnabled =
-            ((drawInfo.pSkyParams == nullptr) || (drawInfo.pSkyParams->godRaysEnabled != 0)) &&
-            (godRaysIntensity > 0.0f);
-
-        float sunColor[3] = {}, sunDir[3] = {}, sunAngularRadius = 0.0047f;
-        const bool sunExists =
-            scene->GetLightManager()->GetLastDirectionalLight(sunColor, sunDir, &sunAngularRadius);
-
-        const bool useSkyBrightest =
-            (drawInfo.pSkyParams != nullptr) &&
-            (drawInfo.pSkyParams->skyType == QR_SKY_TYPE_RASTERIZED_GEOMETRY) &&
-            (drawInfo.pSkyParams->godRaysFromSkyTexture != 0);
-
-        const bool godRaysOn = godRaysEnabled && (sunExists || useSkyBrightest);
-
-        sky.godRays.enabled = godRaysOn;
-        sky.godRays.intensity = 0.05f * godRaysIntensity;
-        sky.godRays.eccentricity = 0.75f;
-
-        if (godRaysOn)
-        {
-            for (int k = 0; k < 3; k++)
-            {
-                if (useSkyBrightest)
-                {
-                    sky.godRays.shadowLightDirection[k] = -drawInfo.pSkyParams->godRaysSkyDirection.data[k];
-                    sky.godRays.sunDirection[k] = drawInfo.pSkyParams->godRaysSkyDirection.data[k];
-                    sky.godRays.sunColor[k] = drawInfo.pSkyParams->godRaysSkyColor.data[k];
-                }
-                else
-                {
-                    sky.godRays.shadowLightDirection[k] = sunDir[k];
-                    sky.godRays.sunDirection[k] = -sunDir[k];
-                    sky.godRays.sunColor[k] = sunColor[k];
-                }
-            }
-        }
-
-        sky.godRays.hasAabb = scene->HasAABB();
-        if (sky.godRays.hasAabb)
-        {
-            float aabbMin[3], aabbMax[3];
-            scene->GetAABB(aabbMin, aabbMax);
-
-            for (int k = 0; k < 3; k++)
-            {
-                const float halfSize = std::max((aabbMax[k] - aabbMin[k]) * 0.5f, 0.025f);
-                sky.godRays.aabbMin[k] = aabbMin[k];
-                sky.godRays.aabbMax[k] = aabbMax[k];
-                sky.godRays.worldCenter[k] = (aabbMin[k] + aabbMax[k]) * 0.5f;
-                sky.godRays.worldHalfSizeInv[k] = 1.0f / halfSize;
-            }
-
-            sky.godRays.staticCollector = scene->GetASManager()->GetStaticCollector().get();
-            sky.godRays.dynamicCollector = scene->GetASManager()->GetDynamicCollector(frameIndex).get();
-        }
+        PopulateGodRaysInputs(drawInfo, frameIndex, globalUniform, *scene, sky.godRays);
     }
 
     sky.portalStaging = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(portalList->GetStagingBuffer(frameIndex)));
