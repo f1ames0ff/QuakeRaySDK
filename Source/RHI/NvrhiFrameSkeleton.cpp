@@ -136,6 +136,14 @@ void CopySkyLightShafts(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &src, 
     }
 }
 
+void CopyVec3ToVec4(float (&dst)[4], const float (&src)[3])
+{
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = 0.0f;
+}
+
 void PopulateGodRaysParams(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &src,
                            const float shadowMapVP[16],
                            float shadowMapDepthScale,
@@ -144,8 +152,8 @@ void PopulateGodRaysParams(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &sr
 {
     memcpy(dst.sunDirection, src.sunDirection, sizeof(dst.sunDirection));
     memcpy(dst.sunColor, src.sunColor, sizeof(dst.sunColor));
-    memcpy(dst.worldCenter, src.worldCenter, sizeof(dst.worldCenter));
-    memcpy(dst.worldHalfSizeInv, src.worldHalfSizeInv, sizeof(dst.worldHalfSizeInv));
+    CopyVec3ToVec4(dst.worldCenter, src.worldCenter);
+    CopyVec3ToVec4(dst.worldHalfSizeInv, src.worldHalfSizeInv);
     memcpy(dst.shadowMapVP, shadowMapVP, sizeof(dst.shadowMapVP));
     dst.shadowMapDepthScale = shadowMapDepthScale;
     dst.godRaysIntensity = modes.sunShadowMapNeeded ? src.intensity : 0.0f;
@@ -2890,11 +2898,11 @@ bool NvrhiFrameSkeleton::PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *
     volumeParams.mediumHistoryWeight = godRays.lightShaftHistoryWeight;
     volumeParams.sunEnabled = froxelSunActive ? 1u : 0u;
     volumeParams.temporalEnabled = godRays.lightShaftTemporal ? 1u : 0u;
-    memcpy(volumeParams.worldCenter, godRays.worldCenter, sizeof(volumeParams.worldCenter));
-    memcpy(volumeParams.worldHalfSizeInv, godRays.worldHalfSizeInv, sizeof(volumeParams.worldHalfSizeInv));
+    CopyVec3ToVec4(volumeParams.worldCenter, godRays.worldCenter);
+    CopyVec3ToVec4(volumeParams.worldHalfSizeInv, godRays.worldHalfSizeInv);
     memcpy(volumeParams.sunDirection, godRays.sunDirection, sizeof(volumeParams.sunDirection));
     memcpy(volumeParams.sunColor, godRays.sunColor, sizeof(volumeParams.sunColor));
-    memcpy(volumeParams.mediumEmissive, godRays.lightShaftEmissive, sizeof(volumeParams.mediumEmissive));
+    CopyVec3ToVec4(volumeParams.mediumEmissive, godRays.lightShaftEmissive);
     volumeParams.historyValid = UpdateLightShaftHistoryValid(
         pUniform, godRays.lightShaftTemporal, volumeParams.prevCameraPosition) ? 1u : 0u;
     CopySkyLightShafts(godRays, volumeParams.lightShafts);
