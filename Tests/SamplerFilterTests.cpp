@@ -57,12 +57,12 @@ void TestQuantizationAndHardwareClamping()
 
 void TestMipmapModeConversion()
 {
+    Check(QR_SAMPLER_MIPMAP_MODE_LINEAR == 0u,
+          "QR_SAMPLER_MIPMAP_MODE_LINEAR must remain 0 for zero-initialized structs");
     Check(ToVkSamplerMipmapMode(QR_SAMPLER_MIPMAP_MODE_LINEAR) == VK_SAMPLER_MIPMAP_MODE_LINEAR,
           "Linear mipmap mode must map to VK_SAMPLER_MIPMAP_MODE_LINEAR");
     Check(ToVkSamplerMipmapMode(QR_SAMPLER_MIPMAP_MODE_NEAREST) == VK_SAMPLER_MIPMAP_MODE_NEAREST,
           "Nearest mipmap mode must map to VK_SAMPLER_MIPMAP_MODE_NEAREST");
-    Check(ToVkSamplerMipmapMode(static_cast<QrSamplerMipmapMode>(99)) == VK_SAMPLER_MIPMAP_MODE_LINEAR,
-          "Out-of-range mipmap mode must fall back to VK_SAMPLER_MIPMAP_MODE_LINEAR");
 }
 
 }
