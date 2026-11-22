@@ -24,17 +24,31 @@
 #include "RenderResolutionHelper.h"
 #include "QrException.h"
 
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 #include <cstdio>
 #include <vector>
+
+#ifndef _WIN32
+static void OutputDebugStringA(const char *text)
+{
+    fputs(text, stderr);
+}
+#endif
 
 namespace
 {
     void FsrMessageCallback(uint32_t type, const wchar_t* msg)
     {
         char buf[512];
+#ifdef _WIN32
         snprintf(buf, sizeof(buf), "[FSR] type=%u: %S\n", type, msg);
         OutputDebugStringA(buf);
+#else
+        snprintf(buf, sizeof(buf), "[FSR] type=%u: %ls\n", type, msg);
+        fputs(buf, stderr);
+#endif
     }
 
     FfxApiSurfaceFormat MapVkFormat(VkFormat fmt)
@@ -156,6 +170,7 @@ qray::FidelityFX::FSR::FSR(VkDevice _device, VkPhysicalDevice _physDevice, UserP
     , m_displayWidth(0)
     , m_displayHeight(0)
     , m_hasSize(false)
+    , m_loggedFirstDispatch(false)
 {
 }
 
@@ -294,7 +309,7 @@ void qray::FidelityFX::FSR::RecreateContext()
     upscaleDesc.header.type   = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     upscaleDesc.header.pNext  = &overrideDesc.header;
     overrideDesc.header.pNext = &backendDesc.header;
-    upscaleDesc.flags         = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
+    upscaleDesc.flags         = 0;
     upscaleDesc.maxRenderSize  = { m_renderWidth, m_renderHeight };
     upscaleDesc.maxUpscaleSize = { m_displayWidth, m_displayHeight };
     upscaleDesc.fpMessage      = FsrMessageCallback;
@@ -306,7 +321,32 @@ void qray::FidelityFX::FSR::RecreateContext()
         throw QrException(QR_GRAPHICS_API_ERROR, "Failed to create FSR context");
     }
 
+    float velocityFactor = 0.0f;
+    ffxConfigureDescUpscaleKeyValue velocityConfig = {};
+    velocityConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+    velocityConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FVELOCITYFACTOR;
+    velocityConfig.u64         = 0;
+    velocityConfig.ptr         = &velocityFactor;
+    ffxConfigure(&m_context, &velocityConfig.header);
+
+    float shadingChangeScale = 0.0f;
+    ffxConfigureDescUpscaleKeyValue shadingChangeConfig = {};
+    shadingChangeConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+    shadingChangeConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FSHADINGCHANGESCALE;
+    shadingChangeConfig.u64         = 0;
+    shadingChangeConfig.ptr         = &shadingChangeScale;
+    ffxConfigure(&m_context, &shadingChangeConfig.header);
+
+    float reactivenessScale = 0.0f;
+    ffxConfigureDescUpscaleKeyValue reactivenessConfig = {};
+    reactivenessConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
+    reactivenessConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FREACTIVENESSSCALE;
+    reactivenessConfig.u64         = 0;
+    reactivenessConfig.ptr         = &reactivenessScale;
+    ffxConfigure(&m_context, &reactivenessConfig.header);
+
     s_contextForJitter = m_context;
+    m_loggedFirstDispatch = false;
 
     ffxQueryGetProviderVersion pv = {};
     pv.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
@@ -377,8 +417,8 @@ qray::FramebufferImageIndex qray::FidelityFX::FSR::Apply(
     info.reactive          = {};
     info.transparencyAndComposition = {};
     info.output            = ToFfxApiResource(OUTPUT_IMAGE_INDEX, frameIndex, *framebuffers, resolutionState);
-    info.jitterOffset.x    = jitterOffset.data[0];
-    info.jitterOffset.y    = jitterOffset.data[1];
+    info.jitterOffset.x    = -jitterOffset.data[0];
+    info.jitterOffset.y    = -jitterOffset.data[1];
     info.motionVectorScale.x = static_cast<float>(resolutionState.renderWidth);
     info.motionVectorScale.y = static_cast<float>(resolutionState.renderHeight);
     info.renderSize.width  = resolutionState.renderWidth;
@@ -406,6 +446,24 @@ qray::FramebufferImageIndex qray::FidelityFX::FSR::Apply(
     }
 
     InsertBarriers(cmd, frameIndex, *framebuffers, rs, true);
+
+    if (!m_loggedFirstDispatch)
+    {
+        m_loggedFirstDispatch = true;
+
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "FSR: upscale dispatch %ux%u -> %ux%u (jitter %.3f, %.3f, reset=%d)",
+            resolutionState.renderWidth, resolutionState.renderHeight,
+            m_displayWidth, m_displayHeight,
+            (double)jitterOffset.data[0], (double)jitterOffset.data[1],
+            resetAccumulation ? 1 : 0);
+        OutputDebugStringA(buf);
+        if (m_pUserPrint)
+        {
+            m_pUserPrint->Print(buf);
+        }
+    }
 
     return OUTPUT_IMAGE_INDEX;
 }

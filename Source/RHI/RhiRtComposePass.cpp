@@ -90,11 +90,11 @@ static_assert(COMPUTE_SVGF_ATROUS_ITERATION_COUNT == 4,
 // NVRHI slot: raw = offset + slot (RhiPipeline.h). The numbers are still derived from the generated
 // arrays at run time (GetComposeSlot), so a generator change cannot drift from them.
 constexpr uint32_t FRAMEBUFFER_UAV_OFFSET = 0;
-const uint32_t FRAMEBUFFER_SRV_OFFSET = ShFramebuffers_Count;
-const uint32_t FRAMEBUFFER_SAMPLER_OFFSET = ShFramebuffers_Count * 2;
+constexpr uint32_t FRAMEBUFFER_SRV_OFFSET = ShFramebuffers_Count;
+constexpr uint32_t FRAMEBUFFER_SAMPLER_OFFSET = ShFramebuffers_Count * 2;
 
-const uint32_t COMPOSE_BLOOM_RESULT_SLOT = COMPOSE_BLOOM_RESULT_BINDING - FRAMEBUFFER_SRV_OFFSET;
-const uint32_t COMPOSE_OPTICAL_SAMPLER_SLOT = COMPOSE_OPTICAL_SAMPLER_BINDING - FRAMEBUFFER_SAMPLER_OFFSET;
+constexpr uint32_t COMPOSE_BLOOM_RESULT_SLOT = COMPOSE_BLOOM_RESULT_BINDING - FRAMEBUFFER_SRV_OFFSET;
+constexpr uint32_t COMPOSE_OPTICAL_SAMPLER_SLOT = COMPOSE_OPTICAL_SAMPLER_BINDING - FRAMEBUFFER_SAMPLER_OFFSET;
 
 // The size class of one union image: the engine's `GetFramebufSize` maps the generated flags onto
 // the render size, the `(render + 1) / 2` half (FB_IMAGE_FLAGS_FRAMEBUF_FLAGS_FORCE_SIZE_1_2: the
@@ -236,14 +236,13 @@ struct ComposeBinding
     bool isSampler;
 };
 
-// CmQ2GradientReproject: 10 storage images and 17 sampled images (measured: exactly these 27
+// CmQ2GradientReproject: 10 storage images and 15 sampled images (measured: exactly these 25
 // bindings, all in set 0). The order is the reconnaissance's table order - the UAVs first, then the
 // SRVs. The reproject reads the `_PREV` roles and writes the current ones for the checkerboard half
 // the primary did not trace.
-constexpr uint32_t GRADIENT_REPROJECT_BINDING_COUNT = 29;
+constexpr uint32_t GRADIENT_REPROJECT_BINDING_COUNT = 25;
 constexpr ComposeBinding GRADIENT_REPROJECT_BINDINGS[GRADIENT_REPROJECT_BINDING_COUNT] =
 {
-    { FB_IMAGE_INDEX_ALBEDO,               true, false }, //   0  framebufAlbedo
     { FB_IMAGE_INDEX_NORMAL,               true, false }, //   3  framebufNormal
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,   true, false }, //   7  framebufMetallicRoughness
     { FB_IMAGE_INDEX_SURFACE_POSITION,     true, false }, //  19  framebufSurfacePosition
@@ -254,7 +253,6 @@ constexpr ComposeBinding GRADIENT_REPROJECT_BINDINGS[GRADIENT_REPROJECT_BINDING_
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,     true, false }, // 115  framebufQ2GradSmplPos
     { FB_IMAGE_INDEX_Q2_RNG_SEED,          true, false }, // 121  framebufQ2RngSeed
     { FB_IMAGE_INDEX_Q2_CLUSTER,           true, false },
-    { FB_IMAGE_INDEX_ALBEDO_PREV,          false, false }, // 125  framebufAlbedo_Prev_Sampled
     { FB_IMAGE_INDEX_NORMAL_PREV,          false, false }, // 128  framebufNormal_Prev_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,      false, false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV, false, false }, // 130  framebufNormalGeometry_Prev_Sampled
@@ -267,8 +265,6 @@ constexpr ComposeBinding GRADIENT_REPROJECT_BINDINGS[GRADIENT_REPROJECT_BINDING_
     { FB_IMAGE_INDEX_Q2_COLOR_SPEC_PREV,   false, false }, // 204  framebufQ2ColorSpec_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH,        false, false }, // 205  framebufQ2ViewDepth_Sampled
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH_PREV,   false, false }, // 206  framebufQ2ViewDepth_Prev_Sampled
-    { FB_IMAGE_INDEX_Q2_BASE_COLOR_PREV,   false, false }, // 208  framebufQ2BaseColor_Prev_Sampled
-    { FB_IMAGE_INDEX_Q2_METALLIC_PREV,     false, false }, // 210  framebufQ2Metallic_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS_PREV, false, false }, // 240 framebufQ2GradSmplPos_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED_PREV,     false, false }, // 246  framebufQ2RngSeed_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER_PREV,      false, false },
@@ -300,18 +296,24 @@ constexpr ComposeBinding ADAPTER_BINDINGS[ADAPTER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_Q2_FOG_ACCUM,         false, false }, // 214  framebufQ2FogAccum_Sampled
 };
 
-// CmQ2GradientImg: 2 storage images and 6 sampled images. The A4.5 pair fix reads
+// CmQ2GradientImg: 4 storage images and 8 sampled images. The A4.5 pair fix reads
 // `framebufQ2GradHFSpecPing` through its storage image, so its sampled view (raw 237) is
-// dead-stripped and the measured item count is 8 instead of the pre-fix 9.
-constexpr uint32_t GRADIENT_IMG_BINDING_COUNT = 8;
+// dead-stripped; restoring the gradient sample's current-frame normal & MR adds UAV writes for
+// `framebufNormal` and `framebufMetallicRoughness` plus SRV reads for `framebufQ2BaseColor` and
+// `framebufQ2Metallic` (12 items total).
+constexpr uint32_t GRADIENT_IMG_BINDING_COUNT = 12;
 constexpr ComposeBinding GRADIENT_IMG_BINDINGS[GRADIENT_IMG_BINDING_COUNT] =
 {
+    { FB_IMAGE_INDEX_NORMAL,                true, false }, //   3  framebufNormal
+    { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,    true, false }, //   7  framebufMetallicRoughness
     { FB_IMAGE_INDEX_Q2_GRAD_L_F_PING,      true, false }, // 111  framebufQ2GradLFPing
     { FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PING, true, false }, // 113  framebufQ2GradHFSpecPing
     { FB_IMAGE_INDEX_MOTION,                false, false }, // 137  framebufMotion_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_S_H,      false, false }, // 197  framebufQ2ColorLF_SH_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_H_F,          false, false }, // 201  framebufQ2ColorHF_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_SPEC,         false, false }, // 203  framebufQ2ColorSpec_Sampled
+    { FB_IMAGE_INDEX_Q2_BASE_COLOR,         false, false }, // 207  framebufQ2BaseColor_Sampled
+    { FB_IMAGE_INDEX_Q2_METALLIC,           false, false }, // 209  framebufQ2Metallic_Sampled
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_L_F_S_H_PREV, false, false }, // 216 framebufQ2HistColorLF_SH_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,      false, false }, // 239  framebufQ2GradSmplPos_Sampled
 };
@@ -746,8 +748,8 @@ constexpr FramebufferImageIndex CHAIN_RESTORE_IMAGES[CHAIN_RESTORE_COUNT] =
     FB_IMAGE_INDEX_Q2_COLOR_SPEC_PREV,
     FB_IMAGE_INDEX_Q2_VIEW_DEPTH,
     FB_IMAGE_INDEX_Q2_VIEW_DEPTH_PREV,
-    FB_IMAGE_INDEX_Q2_BASE_COLOR_PREV,
-    FB_IMAGE_INDEX_Q2_METALLIC_PREV,
+    FB_IMAGE_INDEX_Q2_BASE_COLOR,
+    FB_IMAGE_INDEX_Q2_METALLIC,
     FB_IMAGE_INDEX_Q2_TRANSPARENT,
     FB_IMAGE_INDEX_Q2_GOD_RAYS_THROUGHPUT_DIST,
     FB_IMAGE_INDEX_Q2_FOG_ACCUM,
@@ -777,10 +779,9 @@ constexpr FramebufferImageIndex CHAIN_RESTORE_IMAGES[CHAIN_RESTORE_COUNT] =
 
 // The reproject's sampled reads and the TAAU's: each call is self-contained, so it restores what it
 // read even when a later call of the frame is skipped.
-constexpr uint32_t GRADIENT_REPROJECT_RESTORE_COUNT = 18;
+constexpr uint32_t GRADIENT_REPROJECT_RESTORE_COUNT = 15;
 constexpr FramebufferImageIndex GRADIENT_REPROJECT_RESTORE_IMAGES[GRADIENT_REPROJECT_RESTORE_COUNT] =
 {
-    FB_IMAGE_INDEX_ALBEDO_PREV,
     FB_IMAGE_INDEX_NORMAL_PREV,
     FB_IMAGE_INDEX_NORMAL_GEOMETRY,
     FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,
@@ -793,8 +794,6 @@ constexpr FramebufferImageIndex GRADIENT_REPROJECT_RESTORE_IMAGES[GRADIENT_REPRO
     FB_IMAGE_INDEX_Q2_COLOR_SPEC_PREV,
     FB_IMAGE_INDEX_Q2_VIEW_DEPTH,
     FB_IMAGE_INDEX_Q2_VIEW_DEPTH_PREV,
-    FB_IMAGE_INDEX_Q2_BASE_COLOR_PREV,
-    FB_IMAGE_INDEX_Q2_METALLIC_PREV,
     FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS_PREV,
     FB_IMAGE_INDEX_Q2_RNG_SEED_PREV,
     FB_IMAGE_INDEX_Q2_CLUSTER_PREV,

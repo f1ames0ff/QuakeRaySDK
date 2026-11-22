@@ -24,7 +24,9 @@
 #include "QrException.h"
 #include "Utils.h"
 
+#ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
+#endif
 
 using namespace qray;
 
@@ -108,6 +110,7 @@ Swapchain::Swapchain(
     , presentSampleStartUs(0)
     , presentSampleFrames(0)
     , presentFpsX10(0)
+    , recreatePending(false)
     , currentSwapchainIndex(UINT32_MAX)
     , subscribers{}
     , cachedSurfaceCaps{}
@@ -290,12 +293,18 @@ bool Swapchain::IsWaitablePresentMode(QrPresentMode mode) const
     return UsesPresentWait2(mode);
 }
 
-SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore)
+bool Swapchain::PrepareForFrame()
 {
-    using Clock = std::chrono::steady_clock;
+    return RecreateIfNeeded(true);
+}
 
-    SwapchainAcquireTimings timings;
+bool Swapchain::IsRecreatePending() const
+{
+    return recreatePending;
+}
 
+bool Swapchain::RecreateIfNeeded(bool allowRecreate)
+{
     ResetSurfaceCapabilitiesCache();
 
     const VkExtent2D requestedExtent = GetOptimalExtent();
@@ -307,13 +316,32 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
         usePresentWait2 != wantPresentWait2 || WantFullscreenExclusive() != createdExclusive;
 
     const bool forceRecreate = recreateState.BeginAcquire(parametersChanged);
-    if (parametersChanged)
+    const bool wasPending = recreatePending;
+    if (!parametersChanged && !forceRecreate && !wasPending)
     {
-        TryRecreate(requestedExtent, requestedPresentMode);
+        return false;
     }
-    else if (forceRecreate)
+
+    if (!allowRecreate)
     {
-        TryRecreate(requestedExtent, requestedPresentMode, true);
+        recreatePending = true;
+        return false;
+    }
+
+    recreatePending = false;
+    return TryRecreate(requestedExtent, requestedPresentMode, forceRecreate || wasPending);
+}
+
+SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore, bool allowRecreate)
+{
+    using Clock = std::chrono::steady_clock;
+
+    SwapchainAcquireTimings timings;
+
+    RecreateIfNeeded(allowRecreate);
+    if (!allowRecreate && recreatePending)
+    {
+        return timings;
     }
 
     PollPresentFences();
@@ -337,6 +365,12 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
 
             if (waitResult == VK_ERROR_OUT_OF_DATE_KHR)
             {
+                if (!allowRecreate)
+                {
+                    recreatePending = true;
+                    return timings;
+                }
+
                 ResetSurfaceCapabilitiesCache();
                 TryRecreate(GetOptimalExtent(), requestedPresentMode, true);
             }
@@ -379,18 +413,20 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
 
         recreateState.Acquired(r);
 
-        if (r == VK_SUCCESS)
+        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)
         {
-            return timings;
-        }
-
-        if (r == VK_SUBOPTIMAL_KHR)
-        {
+            timings.acquired = true;
             return timings;
         }
 
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
         {
+            if (!allowRecreate)
+            {
+                recreatePending = true;
+                return timings;
+            }
+
             ResetSurfaceCapabilitiesCache();
             TryRecreate(GetOptimalExtent(), requestedPresentMode, true);
             continue;
@@ -654,6 +690,8 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
     swapchainInfo.oldSwapchain = oldSwapchain;
 
     const bool useExclusive = WantFullscreenExclusive();
+
+#ifdef _WIN32
     VkSurfaceFullScreenExclusiveInfoEXT fullScreenExclusiveInfo = {};
     VkSurfaceFullScreenExclusiveWin32InfoEXT fullScreenExclusiveWin32Info = {};
 
@@ -667,6 +705,7 @@ void Swapchain::Create(uint32_t newWidth, uint32_t newHeight, QrPresentMode mode
         fullScreenExclusiveInfo.fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT;
         swapchainInfo.pNext = &fullScreenExclusiveInfo;
     }
+#endif
 
     createdExclusive = false;
     r = vkCreateSwapchainKHR(device, &swapchainInfo, nullptr, &swapchain);

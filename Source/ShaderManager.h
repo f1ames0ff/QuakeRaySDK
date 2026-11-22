@@ -51,7 +51,7 @@ public:
 private:
     struct ShaderModule
     {
-        VkShaderModule module;
+        VkShaderModule vkModule;
         VkShaderStageFlagBits shaderStage;
     };
 

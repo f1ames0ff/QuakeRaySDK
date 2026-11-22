@@ -41,23 +41,21 @@ namespace
 
     float Minor3(const float *m, int skipRow, int skipCol)
     {
-        int rows[3];
-        int cols[3];
-        int rowCount = 0;
-        int colCount = 0;
+        assert(skipRow >= 0 && skipRow < 4);
+        assert(skipCol >= 0 && skipCol < 4);
 
-        for (int i = 0; i < 4; i++)
+        const int rows[3] =
         {
-            if (i != skipRow)
-            {
-                rows[rowCount++] = i;
-            }
-
-            if (i != skipCol)
-            {
-                cols[colCount++] = i;
-            }
-        }
+            skipRow == 0 ? 1 : 0,
+            skipRow <= 1 ? 2 : 1,
+            skipRow <= 2 ? 3 : 2,
+        };
+        const int cols[3] =
+        {
+            skipCol == 0 ? 1 : 0,
+            skipCol <= 1 ? 2 : 1,
+            skipCol <= 2 ? 3 : 2,
+        };
 
         return m[rows[0] * 4 + cols[0]] * Minor2(m, rows[1], rows[2], cols[1], cols[2]) -
                m[rows[0] * 4 + cols[1]] * Minor2(m, rows[1], rows[2], cols[0], cols[2]) +

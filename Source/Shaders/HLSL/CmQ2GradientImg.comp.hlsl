@@ -132,6 +132,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         grad_hf = q2GetGradient(getLuminance(curr_hf), prev_hf_spec_lum.x);
         grad_spec = q2GetGradient(getLuminance(curr_spec), prev_hf_spec_lum.y);
+
+        const float4 saved_normal = framebufQ2BaseColor_Sampled.Load(int3(grad_sample_pos_curr, 0));
+        const uint restored_normal_enc =
+              ((uint)(saved_normal.x + 0.5) & 0xFFu)
+            | (((uint)(saved_normal.y + 0.5) & 0xFFu) << 8)
+            | (((uint)(saved_normal.z + 0.5) & 0xFFu) << 16)
+            | (((uint)(saved_normal.w + 0.5) & 0xFFu) << 24);
+        framebufNormal[grad_sample_pos_curr] = (uint4)restored_normal_enc;
+        framebufMetallicRoughness[grad_sample_pos_curr] =
+            float4(framebufQ2Metallic_Sampled.Load(int3(grad_sample_pos_curr, 0)).xy, 0.0, 0.0);
     }
 
     // Accumulate the LF luminances over the whole 3x3 square

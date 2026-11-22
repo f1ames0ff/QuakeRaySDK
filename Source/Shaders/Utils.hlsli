@@ -131,8 +131,17 @@ float3 decodeNormal(uint _packed)
 
 float3 safeNormalize(const float3 v)
 {
-    const float len = length(v);
-    return len > 0.001 ? v / len : float3(0, 1, 0);
+    // Rescale by the largest component before computing rsqrt(dot(...)) so small
+    // metric-scale triangle cross products (e.g. viewmodel triangles with |cross| ~ 1e-5 m^2)
+    // and inverse-transpose cofactor vectors (~1e-8) normalize without underflow or
+    // falling back to (0, 1, 0), while still rejecting zero, subnormal, Inf, and NaN inputs.
+    const float maxComp = max(abs(v.x), max(abs(v.y), abs(v.z)));
+    if (!all(isfinite(v)) || !(maxComp > 1.0e-20))
+    {
+        return float3(0, 1, 0);
+    }
+    const float3 scaled = v / maxComp;
+    return scaled * rsqrt(dot(scaled, scaled));
 }
 
 

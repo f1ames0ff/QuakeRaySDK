@@ -63,16 +63,23 @@ public:
             return;
         }
 
-        std::unique_lock<std::mutex> lock(mutex);
-        condition.wait(lock, [this] {
-            return state.load(std::memory_order_acquire) >= Complete;
-        });
-
-        if (state.load(std::memory_order_acquire) == Failed)
+        bool failed = false;
+        std::exception_ptr failure;
         {
-            const std::exception_ptr failure = exception;
-            lock.unlock();
+            std::unique_lock<std::mutex> lock(mutex);
+            condition.wait(lock, [this] {
+                return state.load(std::memory_order_acquire) >= Complete;
+            });
 
+            if (state.load(std::memory_order_acquire) == Failed)
+            {
+                failed = true;
+                failure = exception;
+            }
+        }
+
+        if (failed)
+        {
             if (failure != nullptr)
             {
                 std::rethrow_exception(failure);

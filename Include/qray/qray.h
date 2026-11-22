@@ -20,16 +20,26 @@
 
 #include <stdint.h>
 
-#if !defined(QR_STATIC)
+#if defined(_WIN32) && !defined(QR_STATIC)
     #ifdef QR_LIBRARY_EXPORTS
         #define QRAPI __declspec(dllexport)
     #else
         #define QRAPI __declspec(dllimport)
     #endif
-    #define QRCONV __cdecl
 #else
     #define QRAPI
+#endif
+
+#ifdef _WIN32
     #define QRCONV __cdecl
+#else
+    #define QRCONV
+#endif
+
+#ifdef __cplusplus
+    #define QR_ENUM_UINT32 : uint32_t
+#else
+    #define QR_ENUM_UINT32
 #endif
 
 #define QR_API_VERSION "1.06.0000"
@@ -122,6 +132,7 @@ typedef void (*PFN_qrOpenFile)(const char *pFilePath, void *pUserData, const voi
 typedef void (*PFN_qrCloseFile)(void *pFileUserHandle, void *pUserData);
 
 typedef struct QrWin32SurfaceCreateInfo QrWin32SurfaceCreateInfo;
+typedef struct QrXlibSurfaceCreateInfo QrXlibSurfaceCreateInfo;
 
 #ifdef QR_USE_SURFACE_WIN32
 typedef struct QrWin32SurfaceCreateInfo
@@ -129,6 +140,14 @@ typedef struct QrWin32SurfaceCreateInfo
     HINSTANCE           hinstance;
     HWND                hwnd;
 } QrWin32SurfaceCreateInfo;
+#endif
+
+#ifdef QR_USE_SURFACE_XLIB
+typedef struct QrXlibSurfaceCreateInfo
+{
+    void                *dpy;
+    unsigned long        window;
+} QrXlibSurfaceCreateInfo;
 #endif
 
 typedef enum QrTextureSwizzling
@@ -147,6 +166,7 @@ typedef struct QrInstanceCreateInfo
     const char                  *pAppGUID;
 
     QrWin32SurfaceCreateInfo    *pWin32SurfaceInfo;
+    QrXlibSurfaceCreateInfo     *pXlibSurfaceCreateInfo;
 
     const char                  *pConfigPath;
 
@@ -1229,7 +1249,7 @@ QRAPI QrResult QRCONV qrDestroyCubemap(
     QrInstance                          qrInstance,
     QrCubemap                           cubemap);
 
-typedef enum QrPresentMode
+typedef enum QrPresentMode QR_ENUM_UINT32
 {
     QR_PRESENT_MODE_MAILBOX = 0,   // Uncapped rendering using native Mailbox presentation.
     QR_PRESENT_MODE_VSYNC,         // Display-paced FIFO presentation.
@@ -1778,7 +1798,7 @@ QRAPI QrBool32 QRCONV qrIsSuspended(
 
 #define QR_RAY_STATS_CATEGORY_COUNT 5
 
-typedef enum QrCpuPassIndex
+typedef enum QrCpuPassIndex QR_ENUM_UINT32
 {
     QR_CPU_PASS_PREPARE = 0,
     QR_CPU_PASS_HOT_RELOAD,

@@ -450,6 +450,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         return;
 
     uint2 center_shared_pos = lowres_local_id * Q2_GRAD_DWN + (uint2)1;
+    const int2 center_ipos = int2(groupID.xy) * GROUP_SIZE + int2(center_shared_pos);
+    if (center_ipos.x >= width || center_ipos.y >= height)
+        return;
+
+    const int lf_half_width = width / 2;
+    const int lf_field_left = (center_ipos.x < lf_half_width) ? 0 : lf_half_width;
+    const int lf_field_right = (center_ipos.x < lf_half_width) ? lf_half_width : width;
+
     float3 center_normal = float3(unpackHalf2x16(s_normal_lum[center_shared_pos.y + FILTER_RADIUS][center_shared_pos.x + FILTER_RADIUS].x),
                                   unpackHalf2x16(s_normal_lum[center_shared_pos.y + FILTER_RADIUS][center_shared_pos.x + FILTER_RADIUS].y).x);
     float center_depth = s_depth[center_shared_pos.y + FILTER_RADIUS][center_shared_pos.x + FILTER_RADIUS];
@@ -468,6 +476,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         for(int xx = -1; xx <= 1; xx++)
         {
             if(yy == 0 && xx == 0)
+                continue;
+
+            const int2 p_ipos = center_ipos + int2(xx, yy);
+            if (p_ipos.x < lf_field_left || p_ipos.x >= lf_field_right || p_ipos.y < 0 || p_ipos.y >= height)
                 continue;
 
             float3 p_normal = float3(unpackHalf2x16(s_normal_lum[center_shared_pos.y + FILTER_RADIUS + yy][center_shared_pos.x + FILTER_RADIUS + xx].x),

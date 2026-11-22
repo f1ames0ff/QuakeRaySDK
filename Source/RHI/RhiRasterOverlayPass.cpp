@@ -92,7 +92,7 @@ constexpr nvrhi::Format DEPTH_FORMAT = nvrhi::Format::D32;
 // 136) as an NVRHI Texture_SRV. The engine's sampled-view binding is 124 + image index
 // (ShFramebuffers_Sampled_Bindings), so the slot is the image index and the layout carries the
 // shader-resource offset 124 - the arithmetic RhiSkyPass's world framebuffers layout documents.
-const uint32_t DEPTH_NDC_SRV_OFFSET = ShFramebuffers_Count;
+constexpr uint32_t DEPTH_NDC_SRV_OFFSET = ShFramebuffers_Count;
 constexpr uint32_t DEPTH_NDC_SRV_SLOT = static_cast<uint32_t>(FB_IMAGE_INDEX_DEPTH_NDC);
 
 // The world shader's set 4 binding 25: FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR, the Rgba32ui storage
@@ -100,9 +100,9 @@ constexpr uint32_t DEPTH_NDC_SRV_SLOT = static_cast<uint32_t>(FB_IMAGE_INDEX_DEP
 // binding is the image index, so the slot is 25; the three offsets repeat the engine layout's
 // triple exactly as RhiSkyPass's world framebuffers layout does (recon 5).
 constexpr uint32_t WORLD_STORAGE_SLOT = static_cast<uint32_t>(FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR);
-const uint32_t WORLD_FRAMEBUFFERS_SRV_OFFSET = ShFramebuffers_Count;
+constexpr uint32_t WORLD_FRAMEBUFFERS_SRV_OFFSET = ShFramebuffers_Count;
 constexpr uint32_t WORLD_FRAMEBUFFERS_UAV_OFFSET = 0;
-const uint32_t WORLD_FRAMEBUFFERS_SAMPLER_OFFSET = ShFramebuffers_Count * 2;
+constexpr uint32_t WORLD_FRAMEBUFFERS_SAMPLER_OFFSET = ShFramebuffers_Count * 2;
 
 // The smoke fragment's set 4: the six items RsSmoke.frag statically uses, measured with spirv-dis
 // over renderer/Build/RsSmoke.frag.spv - `framebufDepthWorld_Sampled` at raw 133 (the depth fade,
@@ -252,6 +252,32 @@ nvrhi::BlendFactor DecodeBlendFactor(uint32_t stateFlags, uint32_t offset)
     }
 }
 
+// Bit 0: transmittance/multiplicative blending (ZERO/SRC_COLOR, ZERO/ONE_MINUS_SRC_COLOR,
+// DST_COLOR/ZERO, etc.) where outColor.rgb is a dimensionless factor in [0, 1], not HDR
+// scene radiance. Keep outColor.rgb unscaled by scene exposure so indoor darkening/filter
+// decals do not crush to solid black.
+// Bit 1: ZERO / ONE_MINUS_SRC_COLOR inverse darken decals, where sRGB-decoded masks must
+// preserve their perceptual sRGB attenuation curve in linear HDR blending.
+uint32_t ComputeOverlayBlendFlags(const RasterizedDataCollector::DrawInfo &info)
+{
+    if ((info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE) == 0)
+    {
+        return 0u;
+    }
+
+    const bool srcIsZero = info.blendFuncSrc == QR_BLEND_FACTOR_ZERO;
+    const bool srcIsDstColor = info.blendFuncSrc == QR_BLEND_FACTOR_DST_COLOR ||
+                               info.blendFuncSrc == QR_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    const bool dstUsesSrcColor = info.blendFuncDst == QR_BLEND_FACTOR_SRC_COLOR ||
+                                 info.blendFuncDst == QR_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    const bool dstIsZero = info.blendFuncDst == QR_BLEND_FACTOR_ZERO;
+    const bool isTransmittance = (srcIsZero && dstUsesSrcColor) ||
+                                 (srcIsDstColor && (dstIsZero || dstUsesSrcColor));
+    const bool isInverseDarken = srcIsZero &&
+                                 info.blendFuncDst == QR_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    return (isTransmittance ? 1u : 0u) | (isInverseDarken ? 2u : 0u);
+}
+
 // The per-draw block, byte for byte the legacy RasterizedPushConst (Rasterizer.cpp:33-65): the
 // model-view-projection, the color, and the two texture indices. The type is repeated because
 // RasterizedPushConst is private to the Rasterizer translation unit; the offsets below are the ones
@@ -263,7 +289,8 @@ struct OverlayPushConstants
     float    c[4];
     uint32_t t;
     uint32_t e;
-    float    unused[8];
+    uint32_t blendFlags;
+    float    unused[7];
 
     // The world sub-pass shares `RsWorld.frag.spv` with the overlay's world pipeline, and that
     // fragment reads the particle proxy flag at offset 120: the block has to carry it, or the
@@ -287,6 +314,7 @@ struct OverlayPushConstants
         memcpy(c, info.color.Get(), 4 * sizeof(float));
         t = info.textureIndex;
         e = info.emissionTextureIndex;
+        blendFlags = ComputeOverlayBlendFlags(info);
         memset(unused, 0, sizeof(unused));
         particleProxy = info.particleProxy ? 1u : 0u;
     }
@@ -296,6 +324,7 @@ static_assert(offsetof(OverlayPushConstants, vp) == 0);
 static_assert(offsetof(OverlayPushConstants, c) == 64);
 static_assert(offsetof(OverlayPushConstants, t) == 80);
 static_assert(offsetof(OverlayPushConstants, e) == 84);
+static_assert(offsetof(OverlayPushConstants, blendFlags) == 88);
 static_assert(offsetof(OverlayPushConstants, particleProxy) == 120);
 static_assert(sizeof(OverlayPushConstants) == RASTERIZED_PUSH_CONSTANT_SIZE);
 
