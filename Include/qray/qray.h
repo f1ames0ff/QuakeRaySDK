@@ -1120,7 +1120,7 @@ typedef enum QrSamplerFilter
     QR_SAMPLER_FILTER_NEAREST,
 } QrSamplerFilter;
 
-typedef enum QrSamplerMipmapMode
+typedef enum QrSamplerMipmapMode QR_ENUM_UINT32
 {
     QR_SAMPLER_MIPMAP_MODE_LINEAR = 0,
     QR_SAMPLER_MIPMAP_MODE_NEAREST = 1,
