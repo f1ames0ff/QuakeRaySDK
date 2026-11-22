@@ -67,6 +67,7 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "BRDF.hlsli"
 #include "Q2Asvgf.hlsli"
+#include "Subsurface.hlsli"
 
 #define Q2_FIREFLY_FACTOR 8.0
 #define Q2_FIREFLY_MIN_LUM 1.0
@@ -486,6 +487,7 @@ void q2CompositeUnfiltered(const int2 pix, const int width, const int height)
     const float3 throughput = framebufThroughput_Sampled.Load(int3(pix, 0)).rgb;
 
     float3 illuminated;
+    float3 sssDiffuse = (float3)0.0;
 
     if (!isSkyPix(pix))
     {
@@ -506,9 +508,21 @@ void q2CompositeUnfiltered(const int2 pix, const int width, const int height)
             ro_d = (float3)globalUniform.fixedAlbedo.x;
         }
 
+        const bool debugDisableSss = (globalUniform.debugShowFlags &
+            (DEBUG_SHOW_FLAG_ONLY_DIRECT_DIFFUSE |
+             DEBUG_SHOW_FLAG_ONLY_SPECULAR |
+             DEBUG_SHOW_FLAG_ONLY_INDIRECT_DIFFUSE)) != 0u;
+        const float sssMask = debugDisableSss
+            ? 0.0
+            : getSubsurfaceMask(framebufQ2Subsurface_Sampled.Load(int3(pix, 0)));
+
         illuminated =
-            (diffuse + indirect) * ro_d +
+            (diffuse + indirect) * ((1.0 - sssMask) * ro_d) +
             specular * ro_s;
+        if (sssMask > 0.0)
+        {
+            sssDiffuse = max(diffuse + indirect, (float3)0.0);
+        }
 
         if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ONLY_DIRECT_DIFFUSE) != 0)
         {
@@ -538,6 +552,7 @@ void q2CompositeUnfiltered(const int2 pix, const int width, const int height)
     illuminated = fogAccum.rgb + illuminated * (1.0 - fogAccum.a);
 
     framebufQ2Color[pix] = float4(max((float3)0.0, illuminated), 0);
+    framebufQ2SssDiffuse[pix] = float4(sssDiffuse, 0);
 }
 
 [numthreads(16, 16, 1)]

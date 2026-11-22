@@ -89,6 +89,7 @@ float2 getMotionVectorForUpscaler(const float2 motionCurToPrev)
 void storeQ2GBuffer(
     const int2 pix,
     const float3 baseColor, float transparency, const float2 glassParams, const float3 glassColor,
+    const float4 subsurface,
     float metallic, float roughness,
     float depth,
     float halfConeAngle, float distToLight,
@@ -105,6 +106,7 @@ void storeQ2GBuffer(
     framebufQ2BaseColor[pix]                = float4(baseColor, transparency);
     /* The metallic buffer's free tail and the bounce throughput's third channel carry the
        pane's glass colour to the reflect/refract pass, which reads it back for the tint. */
+    framebufQ2Subsurface[pix]               = subsurface;
     framebufQ2Metallic[pix]                 = float4(metallic, roughness, glassColor.g, glassColor.b);
     framebufQ2BounceThroughput[pix]         = float4(glassParams, glassColor.r, halfConeAngle);
     framebufQ2Transparent[pix]              = float4(transparentColor, transparentAlpha);
@@ -139,7 +141,7 @@ void storeSky(
 
         framebufAlbedo[getRegularPixFromCheckerboardPix(pix)] = float4(albedo, 0.0);
 
-        storeQ2GBuffer(pix, albedo, 1.0, (float2)0.0, (float3)1.0, 0.0, 1.0, globalUniform.rayLength * 2.0, 0.0, globalUniform.rayLength * 2.0, albedo, 1.0, fogAccum, ~0u);
+        storeQ2GBuffer(pix, albedo, 1.0, (float2)0.0, (float3)1.0, (float4)0.0, 0.0, 1.0, globalUniform.rayLength * 2.0, 0.0, globalUniform.rayLength * 2.0, albedo, 1.0, fogAccum, ~0u);
     }
 
     float2 m = getMotionForInfinitePoint(rayDir);
@@ -424,7 +426,7 @@ void main()
     uint4 q2Fog1, q2Fog2;
     q2FindFogVolumes(cameraOrigin, cameraRayDir, 0.0, firstHitDepthLinear, q2Fog1, q2Fog2);
     const float4 q2FogAccum = q2SegmentFog(q2Fog1, q2Fog2, firstHitDepthLinear);
-    storeQ2GBuffer(pix, h.albedo, h.transparency, h.glassParams, h.glassColor, h.metallic, h.roughness,
+    storeQ2GBuffer(pix, h.albedo, h.transparency, h.glassParams, h.glassColor, h.subsurface, h.metallic, h.roughness,
                    firstHitDepthLinear, 0.5 * length(cameraRayDir - cameraRayDirAX), firstHitDepthLinear,
                    (float3)0.0, 0.0, q2FogAccum, h.cluster);
 }
@@ -689,7 +691,7 @@ void main()
     framebufThroughput[pix]                 = float4(throughput, wasSplit ? 1.0 : -1.0);
 
     const float q2HalfConeAngle = framebufQ2BounceThroughput_Sampled.Load(int3(pix, 0)).w;
-    storeQ2GBuffer(pix, h.albedo, 1.0, (float2)0.0, (float3)1.0, h.metallic, h.roughness,
+    storeQ2GBuffer(pix, h.albedo, 1.0, (float2)0.0, (float3)1.0, h.subsurface, h.metallic, h.roughness,
                    -fullPathLength, q2HalfConeAngle, q2LastSegmentLen,
                    (float3)0.0, 0.0, q2FogAccum, h.cluster);
 }
@@ -1053,7 +1055,7 @@ void main()
             }
 
             storeSky(pix, rayDir, true, throughput, wasSplit, q2FogAccum);
-            storeQ2GBuffer(pix, (float3)0.0, 1.0, (float2)0.0, (float3)1.0, 0.0, 1.0, -globalUniform.rayLength * 2.0, q2HalfConeAngle, globalUniform.rayLength * 2.0,
+            storeQ2GBuffer(pix, (float3)0.0, 1.0, (float2)0.0, (float3)1.0, (float4)0.0, 0.0, 1.0, -globalUniform.rayLength * 2.0, q2HalfConeAngle, globalUniform.rayLength * 2.0,
                            q2Transparent.rgb, q2Transparent.a, q2FogAccum, ~0u);
 
             /* The transport's spare RGB carries the segment's own origin to the
@@ -1140,7 +1142,7 @@ void main()
     framebufViewDirection[pix]              = float4(rayDir, 0.0);
     framebufThroughput[pix]                 = float4(throughput, wasSplit ? 1.0 : -1.0);
 
-    storeQ2GBuffer(pix, h.albedo, h.transparency, h.glassParams, h.glassColor, h.metallic, h.roughness,
+    storeQ2GBuffer(pix, h.albedo, h.transparency, h.glassParams, h.glassColor, h.subsurface, h.metallic, h.roughness,
                    -fullPathLength, q2HalfConeAngle, q2LastSegmentLen,
                    q2Transparent.rgb, q2Transparent.a, q2FogAccum, h.cluster);
 }

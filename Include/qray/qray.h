@@ -371,6 +371,10 @@ typedef enum QrGeometryUploadFlagBits
     /* The layer-0 texture coordinates are scaled and shifted per material
        (texture_scale_u/v, texture_offset_u/v) before they reach the shaders. */
     QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT = 2048,
+    /* Enable screen-space subsurface scattering and back-lit translucency for
+       opaque / alpha-tested materials using subsurfaceColor, subsurfaceRadius,
+       and subsurfaceStrength (plus Normal.a when a normal map is bound). */
+    QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT = 4096,
 } QrGeometryUploadFlagBits;
 typedef QrFlags QrGeometryUploadFlags;
 
@@ -407,6 +411,13 @@ typedef struct QrGeometryUploadInfo
 
     QrLayeredMaterial               geomMaterial;
     QrTransform                     transform;
+
+    /* Subsurface scattering parameters when QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT
+       is set: linear RGB scatter tint in [0, 1], scatter radius in meters
+       (clamped to [0, 1]), and global strength multiplier in [0, 1]. */
+    QrFloat3D                       subsurfaceColor;
+    float                           subsurfaceRadius;
+    float                           subsurfaceStrength;
 } QrGeometryUploadInfo;
 
 typedef struct QrUpdateTransformInfo

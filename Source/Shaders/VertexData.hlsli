@@ -329,6 +329,7 @@ ShTriangle getTriangle(int instanceID, int instanceCustomIndex, int localGeometr
     tr.geomEmission = inst.defaultEmission;
 
     tr.portalIndex = inst.portalIndex;
+    tr.subsurfacePacked = inst.subsurfacePacked;
 
     return tr;
 }

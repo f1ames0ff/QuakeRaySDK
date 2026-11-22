@@ -18,6 +18,7 @@
 #ifdef DESC_SET_VERTEX_DATA
 #ifdef DESC_SET_GLOBAL_UNIFORM
 #ifdef DESC_SET_TEXTURES
+#include "Subsurface.hlsli"
 
 #if defined(HITINFO_INL_PRIM)
 float3 processAlbedoGrad(uint geometryInstanceFlags, const float2 texCoords[3], const uint3 materials[3], const float4 materialColors[3], const float2 dPdx[3], const float2 dPdy[3])
@@ -177,6 +178,7 @@ ShHitInfo getHitInfoBounce(
     h.transparency = 1.0f;
     h.glassParams = (float2)0.0f;
     h.glassColor = (float3)1.0f;
+    h.subsurface = (float4)0.0f;
 
     int instanceId, instCustomIndex;
     int geomIndex, primIndex;
@@ -437,6 +439,7 @@ ShHitInfo getHitInfoBounce(
 
 
 #if !defined(HITINFO_INL_INDIR)
+    float sssMaskAlpha = 1.0f;
     if (tr.materials[0][MATERIAL_NORMAL_INDEX] != MATERIAL_NO_TEXTURE)
     {
         const bool isGlassNormal = (tr.geometryInstanceFlags & GEOM_INST_FLAG_MEDIA_TYPE_GLASS) != 0u;
@@ -453,6 +456,18 @@ ShHitInfo getHitInfoBounce(
         float2 nrm = nrmSample.xy;
         // the normal map's alpha carries the material's glass transparency
         h.transparency = nrmSample.a;
+    #if defined(HITINFO_INL_PRIM)
+        if ((tr.geometryInstanceFlags & GEOM_INST_FLAG_SUBSURFACE) != 0u)
+        {
+            sssMaskAlpha = getTextureSampleGrad(tr.materials[0][MATERIAL_NORMAL_INDEX], texCoords[0], dTdx[0], dTdy[0]).a;
+        }
+        else
+        {
+            sssMaskAlpha = nrmSample.a;
+        }
+    #else
+        sssMaskAlpha = nrmSample.a;
+    #endif
         nrm.xy = nrm.xy * 2.0 - (float2)1.0;
 
         const float3 bitangent = cross(h.normalGeom, tr.tangent.xyz) * tr.tangent.w;
@@ -505,6 +520,13 @@ ShHitInfo getHitInfoBounce(
     h.portalIndex = tr.portalIndex;
 
     h.cluster = tr.cluster;
+
+#if !defined(HITINFO_INL_INDIR)
+    if ((tr.geometryInstanceFlags & GEOM_INST_FLAG_SUBSURFACE) != 0u)
+    {
+        h.subsurface = buildSubsurfaceGBuffer(tr.subsurfacePacked, sssMaskAlpha);
+    }
+#endif
 
     return h;
 }

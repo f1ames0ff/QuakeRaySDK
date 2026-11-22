@@ -221,6 +221,11 @@ QrGeometryUploadInfo SpatialFrame::Geometry(const QrGeometryUploadInfo &value) c
         result.layerColors[2].data[1] = Length(value.layerColors[2].data[1]);
     }
 
+    if ((value.flags & QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT) != 0u)
+    {
+        result.subsurfaceRadius = Length(value.subsurfaceRadius);
+    }
+
     return result;
 }
 

@@ -378,12 +378,12 @@ private:
         // not as VkImages, because they are what the change detection compares; a change in any of
         // them or in any of the three sizes means the engine re-created the framebuffers (or the
         // resolution changed) and the wraps and the sets have to follow.
-        uint64_t imageHandles[95] = {};
+        uint64_t imageHandles[98] = {};
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t upscaledWidth = 0;
         uint32_t upscaledHeight = 0;
-        nvrhi::TextureHandle engineTextures[95];
+        nvrhi::TextureHandle engineTextures[98];
         nvrhi::BindingSetHandle gradientReprojectSet;
         nvrhi::BindingSetHandle adapterSet;
         nvrhi::BindingSetHandle gradientImgSet;
@@ -396,6 +396,7 @@ private:
         nvrhi::BindingSetHandle checkerboardSet;
         nvrhi::BindingSetHandle prepareHdrSet;
         nvrhi::BindingSetHandle glassBlurSet;
+        nvrhi::BindingSetHandle sssBlurSet;
         nvrhi::BindingSetHandle prepareFinalSet;
         nvrhi::BindingSetHandle taauSet;
 
@@ -448,6 +449,14 @@ private:
     bool PreparePrepareFinalSet(Target &target,
                                 nvrhi::ITexture *pBloomTexture);
 
+    bool CreateSssBlurResources();
+    bool PrepareBlurSets(Target &target);
+    bool PrepareSssBlurSet(Target &target);
+    void RecordSssBlur(nvrhi::ICommandList *pCommandList,
+                       const Target &target,
+                       uint32_t groupsX,
+                       uint32_t groupsY);
+
     // Set 1 over the module's compute uniform layout, rebuilt when the pointer changed. Returns
     // false when the buffer is not the static constant-buffer wrap the shader's
     // `ConstantBuffer<ShGlobalUniform>` requires.
@@ -499,6 +508,7 @@ private:
     nvrhi::ShaderHandle checkerboardShader;
     nvrhi::ShaderHandle prepareHdrShader;
     nvrhi::ShaderHandle glassBlurShader;
+    nvrhi::ShaderHandle sssBlurShader;
     nvrhi::ShaderHandle prepareFinalShader;
     nvrhi::ShaderHandle taauShader;
 
@@ -519,6 +529,7 @@ private:
     nvrhi::BindingLayoutHandle checkerboardFramebufferLayout;
     nvrhi::BindingLayoutHandle prepareHdrFramebufferLayout;
     nvrhi::BindingLayoutHandle glassBlurFramebufferLayout;
+    nvrhi::BindingLayoutHandle sssBlurFramebufferLayout;
     nvrhi::BindingLayoutHandle prepareFinalFramebufferLayout;
     nvrhi::BindingLayoutHandle taauFramebufferLayout;
     nvrhi::BindingLayoutHandle uniformLayout;
@@ -546,6 +557,7 @@ private:
     nvrhi::ComputePipelineHandle checkerboardPipeline;
     nvrhi::ComputePipelineHandle prepareHdrPipeline;
     nvrhi::ComputePipelineHandle glassBlurPipeline;
+    nvrhi::ComputePipelineHandle sssBlurPipeline;
     nvrhi::ComputePipelineHandle prepareFinalPipeline;
     nvrhi::ComputePipelineHandle taauPipeline;
 

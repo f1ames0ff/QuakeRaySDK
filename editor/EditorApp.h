@@ -81,6 +81,7 @@ public:
         Emissive,
         Overlay,
         Gloss,
+        Subsurface,
     };
 
     enum class GizmoPart
@@ -303,6 +304,8 @@ private:
     bool m_lumaClipboardValid = false;
     EditorGlossBlock m_glossClipboard;
     bool m_glossClipboardValid = false;
+    EditorSssBlock m_sssClipboard;
+    bool m_sssClipboardValid = false;
 
     // The light the panel edits: the map light or the custom one, whichever was picked last.
     // Null when the selection is a surface or nothing at all.
@@ -419,6 +422,8 @@ private:
                                      int32_t materialIndex);
     void DrawMaterialEditorGlossBlocks(const std::string &name, EditorMaterialParams &params,
                                       int32_t materialIndex);
+    void DrawMaterialEditorSssBlocks(const std::string &name, EditorMaterialParams &params,
+                                     int32_t materialIndex);
     void DrawMaterialEditorEntitiesTab();
     void DrawMaterialEditorSystemTab();
     void ResetActiveMaterialTab();
@@ -564,6 +569,7 @@ private:
     int32_t m_selectedMaterial = -1;
     int32_t m_selectedLumaBlock = 0;
     int32_t m_selectedGlossBlock = 0;
+    int32_t m_selectedSssBlock = 0;
     int32_t m_lastInspectedMaterial = -1;
 
     std::vector<EditorAssetCatalogEntry> m_modelCatalog;

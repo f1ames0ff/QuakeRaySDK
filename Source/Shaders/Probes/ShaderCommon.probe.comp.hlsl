@@ -122,7 +122,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
          float(geometryInstances[0].prevBaseIndexIndex) + float(geometryInstances[0].vertexCount) +
          float(geometryInstances[0].indexCount) + geometryInstances[0].defaultRoughness +
          geometryInstances[0].defaultMetallicity + geometryInstances[0].defaultEmission +
-         float(geometryInstances[0]._unused1);
+         float(geometryInstances[0].subsurfacePacked);
 
     // ShTonemapping
     v += tonemapping[0].tmExposureBias + tonemapping[0].tmExposureSpeedDown +
@@ -950,6 +950,24 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     v += float(framebufQ2ParticleLayer[pix].x);
     v += float(framebufQ2ParticleLayer_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufQ2ParticleLayer_Sampler, uv, 0.0).x;
+
+    // framebufQ2Subsurface  rgba16f
+    framebufQ2Subsurface[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2Subsurface[pix].x);
+    v += float(framebufQ2Subsurface_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2Subsurface_Sampler, uv, 0.0).x;
+
+    // framebufQ2SssDiffuse  r11g11b10f
+    framebufQ2SssDiffuse[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2SssDiffuse[pix].x);
+    v += float(framebufQ2SssDiffuse_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2SssDiffuse_Sampler, uv, 0.0).x;
+
+    // framebufQ2SssTemp  r11g11b10f
+    framebufQ2SssTemp[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2SssTemp[pix].x);
+    v += float(framebufQ2SssTemp_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2SssTemp_Sampler, uv, 0.0).x;
 
     probeOutput[0] = v;
 }
