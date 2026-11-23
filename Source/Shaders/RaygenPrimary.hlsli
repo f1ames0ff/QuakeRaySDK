@@ -63,6 +63,7 @@
 /* Defined in RayClearance.hlsli, which only the Q2 reflect/refract raygen
    includes: its ray query must not reach the modules that do not use it. */
 float traceClearance(float3 origin, float3 direction, float maxDistance, uint cullMask);
+bool hasClearanceBlocker(float3 origin, float3 direction, float tMin, float maxDistance, uint cullMask);
 
 #define GLASS_ROUGHNESS_MAX_ANGLE 0.35
 
@@ -75,6 +76,56 @@ float3 sampleRoughNormal(float3 n, float3 v, float alpha, float2 u)
     const float3 m = sampleGGXVNDF(mul(transpose(basis), v), alpha, u.x, u.y, oneOverPdf);
 
     return normalize(mul(basis, m));
+}
+
+void prepareSeamSafeReflRefrLaunch(
+    const float3 hitPosition,
+    const float3 geomN,
+    const float3 inDir,
+    const float3 outDir,
+    const float prevSegmentLen,
+    const bool isRefraction,
+    const bool crossInterface,
+    const uint fullMask,
+    out float3 launchOrigin,
+    out uint launchMask,
+    out float launchTMin)
+{
+    const float unitScale = globalUniform.sceneUnitsPerHostUnit;
+    const float baseTMin = 2.5e-5 * unitScale;
+    const float pullback = min(2.5e-4 * unitScale, prevSegmentLen * 0.25);
+    const float3 safeOrigin = hitPosition - inDir * pullback;
+    const uint opaqueMask = fullMask & (~INSTANCE_MASK_REFRACT);
+
+    launchMask = fullMask;
+    launchTMin = baseTMin;
+
+    if (isRefraction && crossInterface)
+    {
+        const float hAbove = max(dot(safeOrigin - hitPosition, geomN), 0.0);
+        const float cosExit = max(-dot(outDir, geomN), 0.05);
+        const float tCross = (hAbove + baseTMin) / cosExit;
+
+        if (hasClearanceBlocker(safeOrigin, outDir, 0.0, tCross + 2.0 * baseTMin, opaqueMask))
+        {
+            launchOrigin = safeOrigin;
+            launchMask = opaqueMask;
+            launchTMin = 0.0;
+        }
+        else
+        {
+            launchOrigin = safeOrigin + outDir * tCross;
+        }
+    }
+    else
+    {
+        launchOrigin = safeOrigin;
+        if (hasClearanceBlocker(safeOrigin, outDir, 0.0, 2.0 * baseTMin, opaqueMask))
+        {
+            launchMask = opaqueMask;
+            launchTMin = 0.0;
+        }
+    }
 }
 
 #endif
@@ -818,7 +869,11 @@ void main()
             break;
         }
 
-        const float3 normal = getNormal(h.hitPosition, h.normal, h.normalGeom, rayCone, rayDir,
+        const float3 inDir = rayDir;
+        const float prevSegmentLen = (i == 0) ? firstHitDepthLinear : q2LastSegmentLen;
+        const float3 orientedGeomN = isBackface(h.normalGeom, inDir) ? -h.normalGeom : h.normalGeom;
+
+        const float3 normal = getNormal(h.hitPosition, h.normal, h.normalGeom, rayCone, inDir,
                                         !isPortal && (newRayMedia == MEDIA_TYPE_WATER || currentRayMedia == MEDIA_TYPE_WATER ||
                                                       newRayMedia == MEDIA_TYPE_ACID || currentRayMedia == MEDIA_TYPE_ACID),
                                         wasPortal);
@@ -854,14 +909,27 @@ void main()
         else if (primaryIsWater || primaryIsSlime)
         {
             const float ior = getIndexOfRefraction(primaryIsWater ? MEDIA_TYPE_WATER : MEDIA_TYPE_ACID);
-            const float3 reflected = reflect(rayDir, normal);
-            const float nDotV = abs(dot(rayDir, normal));
+            float3 waterN = normal;
+            if (dot(inDir, waterN) >= -0.001)
+            {
+                waterN = orientedGeomN;
+            }
+            float3 reflected = reflect(inDir, waterN);
+            if (dot(reflected, orientedGeomN) < 0.01)
+            {
+                reflected = reflect(inDir, orientedGeomN);
+            }
+            const float nDotV = abs(dot(inDir, waterN));
 
             if (currentRayMedia == MEDIA_TYPE_WATER || currentRayMedia == MEDIA_TYPE_ACID)
             {
-                const float3 refracted = refract(rayDir, normal, ior);
+                float3 refracted = refract(inDir, waterN, ior);
+                if (dot(refracted, refracted) > 0.0 && dot(refracted, orientedGeomN) > -0.05)
+                {
+                    refracted = refract(inDir, orientedGeomN, ior);
+                }
                 float ndv = 1.0 - (1.0 - nDotV) * 3.0;
-                if (ndv <= 0.0 || dot(refracted, refracted) == 0.0)
+                if (ndv <= 0.0 || dot(refracted, refracted) == 0.0 || dot(refracted, orientedGeomN) > -0.05)
                 {
                     rayDir = reflected;
                     correctMotionVector = 1;
@@ -891,7 +959,11 @@ void main()
             }
             else
             {
-                const float3 refracted = refract(rayDir, normal, 1.0 / ior);
+                float3 refracted = refract(inDir, waterN, 1.0 / ior);
+                if (dot(refracted, refracted) == 0.0 || dot(refracted, orientedGeomN) > -0.05)
+                {
+                    refracted = refract(inDir, orientedGeomN, 1.0 / ior);
+                }
                 const float F = 0.1 + 0.9 * pow(1.0 - nDotV, 5.0);
                 doSplit = (i == 0);
                 doRefraction = isPixOdd;
@@ -1018,7 +1090,11 @@ void main()
         else
         {
             throughput *= h.albedo;
-            rayDir = reflect(rayDir, normal);
+            rayDir = reflect(inDir, normal);
+            if (dot(rayDir, orientedGeomN) < 0.01)
+            {
+                rayDir = reflect(inDir, orientedGeomN);
+            }
             correctMotionVector = 1;
         }
 
@@ -1027,7 +1103,26 @@ void main()
             wasSplit = true;
         }
 
-        currentPayload = traceReflectionRefractionRay(rayOrigin, rayDir, instIndex, h.geometryInstanceFlags, doRefraction);
+        uint launchMask = getReflectionRefractionCullMask(instIndex, h.geometryInstanceFlags, doRefraction);
+        float launchTMin = 2.5e-5 * globalUniform.sceneUnitsPerHostUnit;
+
+        if (!isPortal && (primaryIsWater || primaryIsSlime || (!doRefraction && (primaryIsGlass || primaryIsChrome))))
+        {
+            prepareSeamSafeReflRefrLaunch(
+                h.hitPosition,
+                orientedGeomN,
+                inDir,
+                rayDir,
+                prevSegmentLen,
+                doRefraction,
+                primaryIsWater || primaryIsSlime,
+                launchMask,
+                rayOrigin,
+                launchMask,
+                launchTMin);
+        }
+
+        currentPayload = traceReflectionRefractionRayWithMask(rayOrigin, rayDir, launchMask, launchTMin);
         rayStatsMark(RAY_STATS_CATEGORY_REFLECTION_REFRACTION);
 
         if (!doesPayloadContainHitInfo(currentPayload))
