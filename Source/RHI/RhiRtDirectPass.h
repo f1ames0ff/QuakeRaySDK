@@ -227,7 +227,7 @@ public:
     // prepared and records nothing twice. Returns false when the light buffers or a pending copy
     // source are missing - the caller treats it as "no light data for this frame".
     bool EnsureLightSet(nvrhi::ICommandList *pCommandList, uint32_t frameIndex, uint32_t frameId,
-                        uint32_t lightStatsMode);
+                        uint32_t lightStatsMode, nvrhi::IBuffer *pUniformBuffer = nullptr);
 
     // ReSTIR reservoir configuration (host cvar rt_restir). The host calls it once per traced frame
     // before any pass that borrows the set 6: a size or enable change re-creates the two-slot

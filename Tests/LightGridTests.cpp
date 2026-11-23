@@ -25,7 +25,7 @@ int g_checks = 0;
         }                                              \
     } while (0)
 
-qray::LightGridSource MakeSource(uint64_t uid, float x, float y, float z, float reach = 100.0f)
+qray::LightGridSource MakeSource(uint64_t uid, float x, float y, float z, float reach = 2.5f)
 {
     qray::LightGridSource source{};
     source.uid = uid;
@@ -72,7 +72,7 @@ void TestCenteredLight()
 {
     qray::LightGrid grid;
     const float    camera[3] = { 0.0f, 0.0f, 0.0f };
-    const qray::LightGridSource source = MakeSource(7, 0.0f, 0.0f, 0.0f, 100.0f);
+    const qray::LightGridSource source = MakeSource(7, 0.0f, 0.0f, 0.0f, 2.5f);
 
     grid.Build(&source, 1, camera);
 
@@ -83,6 +83,11 @@ void TestCenteredLight()
     CHECK(stats.enabled == 1, "the built grid must report enabled");
     CHECK(stats.sources == 1, "the grid must report its source count");
     CHECK(stats.occupiedCells > 0, "a light with reach must occupy cells");
+    CHECK(std::fabs(stats.cellSize[0] - 2.0f) < 1e-5f, "cascade 0 must use 2.0 m cells");
+    CHECK(std::fabs(stats.origin[0].data[0] + 16.0f) < 1e-5f &&
+              std::fabs(stats.origin[0].data[1] + 16.0f) < 1e-5f &&
+              std::fabs(stats.origin[0].data[2] + 16.0f) < 1e-5f,
+          "cascade 0 origin at zero must be (-16, -16, -16) m");
 
     const uint32_t cell = CenterCell(0);
     const std::vector<uint64_t> list = ReadList(grid, cell);
@@ -94,6 +99,16 @@ void TestCenteredLight()
 
     CHECK(std::find(coarse.begin(), coarse.end(), uint64_t(7)) != coarse.end(),
           "the light must be in the cascade-1 cell that contains its origin");
+
+    const float snappedCamera[3] = { 17.5f, -17.5f, 15.9f };
+    grid.Build(&source, 1, snappedCamera);
+    const QrLightGridStats &snappedStats = grid.GetStats();
+    CHECK(std::fabs(snappedStats.origin[0].data[0] - 0.0f) < 1e-5f,
+          "viewOrigin.x 17.5 m snaps to 16 m (origin 0 m)");
+    CHECK(std::fabs(snappedStats.origin[0].data[1] + 48.0f) < 1e-5f,
+          "viewOrigin.y -17.5 m floors to -32 m (origin -48 m)");
+    CHECK(std::fabs(snappedStats.origin[0].data[2] + 16.0f) < 1e-5f,
+          "viewOrigin.z 15.9 m floors to 0 m (origin -16 m)");
 }
 
 void TestFastTailCapacity()
@@ -104,7 +119,7 @@ void TestFastTailCapacity()
 
     for (uint32_t i = 0; i < 300; i++)
     {
-        sources.push_back(MakeSource(uint64_t(i) + 1, 0.0f, 0.0f, 0.0f, 100.0f));
+        sources.push_back(MakeSource(uint64_t(i) + 1, 0.0f, 0.0f, 0.0f, 2.5f));
     }
 
     grid.Build(sources.data(), uint32_t(sources.size()), camera);
@@ -123,7 +138,7 @@ void TestNoOverlapWhenOutOfCascade()
 {
     qray::LightGrid grid;
     const float    camera[3] = { 0.0f, 0.0f, 0.0f };
-    const qray::LightGridSource source = MakeSource(99, 100000.0f, 100000.0f, 100000.0f, 10.0f);
+    const qray::LightGridSource source = MakeSource(99, 10000.0f, 10000.0f, 10000.0f, 1.0f);
 
     grid.Build(&source, 1, camera);
 
@@ -139,8 +154,8 @@ void TestDeterminism()
 
     for (uint32_t i = 0; i < 64; i++)
     {
-        sources.push_back(MakeSource(uint64_t(i) + 1, float(i) * 8.0f - 256.0f,
-                                     float(i % 8) * 16.0f - 64.0f, 0.0f, 200.0f));
+        sources.push_back(MakeSource(uint64_t(i) + 1, float(i) * 0.2f - 6.4f,
+                                     float(i % 8) * 0.4f - 1.6f, 0.0f, 5.0f));
     }
 
     grid.Build(sources.data(), uint32_t(sources.size()), camera);

@@ -22,8 +22,8 @@
 //
 // This is the ABI and sampling oracle, not the runtime update path. The GPU builder will own the
 // probe atlas; the constants and the lookup math here are what the shader has to match. The
-// cascade bounds are metric (the renderer scene is meters): the first cascade is 32.512 m
-// (16 cells x 2.032 m, the report's 1,280 u / 80 u),
+// cascade bounds are metric (the renderer scene is meters, 0.025 m/u): the first cascade is 32.0 m
+// (16 cells x 2.0 m, the report's 1,280 u / 80 u),
 // and every following cascade doubles the side.
 
 #pragma once
@@ -53,8 +53,8 @@ public:
     static constexpr uint32_t kMaxLocalVolumes = 128;
     static constexpr uint32_t kCascadeProbeCount = kCascades * kProbesPerCascade;
     static constexpr uint32_t kProbeCount = kCascadeProbeCount + kMaxLocalVolumes * kProbesPerLocalVolume;
-    static constexpr float kBaseBounds = 32.512f;
-    static constexpr float kSnap = 16.256f;
+    static constexpr float kBaseBounds = 32.0f;
+    static constexpr float kSnap = 16.0f;
 
     struct Cascade
     {

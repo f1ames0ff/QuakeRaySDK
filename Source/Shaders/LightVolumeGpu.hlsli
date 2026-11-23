@@ -14,10 +14,10 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //
-// GPU-side probe record, SH helpers and cascade lookup. The constants and the lookup math match
-// Source/LightVolume.h/.cpp; the CPU oracle stays the reference for the tests. The GPU update pass
-// currently fills the six cascades only (one per frame); the local-volume storage is present in
-// the ABI but not written or sampled yet.
+// GPU-side probe record, SH helpers and cascade/local lookup. The constants and lookup math
+// match Source/LightVolume.h/.cpp; the CPU oracle stays the reference for the tests. The volume
+// update pass refreshes one of the six cascades (plus one active local volume when present) per
+// frame, and both indirect final-gather and second-bounce volume queries sample local-first.
 
 #ifndef LIGHT_VOLUME_GPU_HLSLI_
 #define LIGHT_VOLUME_GPU_HLSLI_
@@ -32,11 +32,11 @@
 #define Q2_LIGHT_VOLUME_CASCADE_PROBE_COUNT (Q2_LIGHT_VOLUME_CASCADES * Q2_LIGHT_VOLUME_PROBES_PER_CASCADE)
 #define Q2_LIGHT_VOLUME_MAX_LOCAL 8u
 // The renderer scene is metric (the camera uniform is in meters, e.g. camera.x 12 for
-// Quake x 480). The report's 1280 u / 640 u snap are Quake units: 1280 * 0.0254 and
-// 640 * 0.0254. Keeping the Quake values made the probe cube 1280 m wide, so every
+// Quake x 480). The report's 1280 u / 640 u snap are Quake units: 1280 * 0.025 and
+// 640 * 0.025. Keeping the Quake values made the probe cube 1280 m wide, so every
 // cascade probe sat outside the ~50 m map and the volume saw only sky.
-#define Q2_LIGHT_VOLUME_BASE_BOUNDS 32.512
-#define Q2_LIGHT_VOLUME_SNAP 16.256
+#define Q2_LIGHT_VOLUME_BASE_BOUNDS 32.0
+#define Q2_LIGHT_VOLUME_SNAP 16.0
 #define Q2_LIGHT_VOLUME_PI 3.14159265358979323846
 
 struct ShLightVolumeProbe
@@ -175,14 +175,17 @@ int q2LightVolumeFindLocal(const float3 position)
     return best;
 }
 
-// Samples the integrated radiance SH and converts it to the screen-space SH layout used by
-// SphericalHarmonics.hlsli: (L0, Ly, Lz, Lx), radiance coefficients (the volume's integral is
-// divided by 4*pi). The weight comes from lightVolumeParams.y.
-bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH outSh)
+bool q2InterpolateLightVolumeSh(const float3 position, out float outIntegrated[4][3])
 {
-    outSh = newSH();
+    for (uint band = 0u; band < 4u; band++)
+    {
+        for (uint channel = 0u; channel < 3u; channel++)
+        {
+            outIntegrated[band][channel] = 0.0;
+        }
+    }
 
-    if (!(globalUniform.lightVolumeParams.x > 0.0) || !(weight > 0.0))
+    if (!(globalUniform.lightVolumeParams.x > 0.0))
     {
         return false;
     }
@@ -233,15 +236,6 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
 
     baseProbe += uint((base.z * int(dim) + base.y) * int(dim) + base.x);
 
-    float integrated[4][3];
-    for (uint band = 0u; band < 4u; band++)
-    {
-        for (uint channel = 0u; channel < 3u; channel++)
-        {
-            integrated[band][channel] = 0.0;
-        }
-    }
-
     for (uint dz = 0u; dz < 2u; dz++)
     {
         for (uint dy = 0u; dy < 2u; dy++)
@@ -259,11 +253,32 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
                 {
                     for (uint channel = 0u; channel < 3u; channel++)
                     {
-                        integrated[band][channel] += probe.sh[band][channel] * w;
+                        outIntegrated[band][channel] += probe.sh[band][channel] * w;
                     }
                 }
             }
         }
+    }
+
+    return true;
+}
+
+// Samples the integrated radiance SH and converts it to the screen-space SH layout used by
+// SphericalHarmonics.hlsli: (L0, Ly, Lz, Lx), radiance coefficients (the volume's integral is
+// divided by 4*pi). The weight comes from lightVolumeParams.y.
+bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH outSh)
+{
+    outSh = newSH();
+
+    if (!(weight > 0.0))
+    {
+        return false;
+    }
+
+    float integrated[4][3];
+    if (!q2InterpolateLightVolumeSh(position, integrated))
+    {
+        return false;
     }
 
     const float scale = weight / (4.0 * Q2_LIGHT_VOLUME_PI);
@@ -272,6 +287,40 @@ bool q2SampleLightVolumeSH(const float3 position, const float weight, out SH out
     outSh.r = float4(integrated[0][0], integrated[2][0], integrated[3][0], integrated[1][0]) * scale;
     outSh.g = float4(integrated[0][1], integrated[2][1], integrated[3][1], integrated[1][1]) * scale;
     outSh.b = float4(integrated[0][2], integrated[2][2], integrated[3][2], integrated[1][2]) * scale;
+    return true;
+}
+
+// Evaluates Ramamoorthi-Hanrahan irradiance matching LightVolume::EvaluateIrradiance on the CPU.
+bool q2EvaluateLightVolumeIrradiance(const float3 position, const float3 normal, out float3 outIrradiance)
+{
+    outIrradiance = (float3)0.0;
+
+    float integrated[4][3];
+    if (!q2InterpolateLightVolumeSh(position, integrated))
+    {
+        return false;
+    }
+
+    const float lenSq = dot(normal, normal);
+    const float3 n = (isfinite(lenSq) && lenSq > 1e-12) ? (normal * rsqrt(lenSq)) : float3(0.0, 0.0, 1.0);
+    const float basis[4] =
+    {
+        0.886227,
+        1.023328 * n.x,
+        1.023328 * n.y,
+        1.023328 * n.z,
+    };
+
+    for (uint channel = 0u; channel < 3u; channel++)
+    {
+        float irradiance = 0.0;
+        for (uint band = 0u; band < 4u; band++)
+        {
+            irradiance += integrated[band][channel] * basis[band];
+        }
+        outIrradiance[channel] = max(irradiance, 0.0);
+    }
+
     return true;
 }
 
