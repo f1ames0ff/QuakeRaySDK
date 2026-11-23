@@ -1,12 +1,12 @@
 #pragma once
 
-#include <windows.h>
-
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include <qray/qray.h>
+
+#include "EditorPlatform.h"
 
 // The game's QR_GUI_ImagePick: the image a colour is taken from, at the panel's full width and the
 // texture's aspect, with Ctrl+wheel zoom. Returns true when the author clicked it, with outU/outV
@@ -27,18 +27,20 @@ bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth, 
 class EditorUi
 {
 public:
-    bool Initialize(HWND window, QrInstance instance, const std::string &fontPath, std::string &error);
+    bool Initialize(EditorWindow *window, QrInstance instance, const std::string &fontPath,
+                    std::string &error);
     void Shutdown();
 
     void BeginFrame(float deltaSeconds, uint32_t clientWidth, uint32_t clientHeight);
     bool EndFrame(QrInstance instance, uint32_t clientWidth, uint32_t clientHeight);
 
-    // Returns true when the message was consumed by the UI and must not reach
+    // Returns true when the event was consumed by the UI and must not reach
     // the editor's camera handling.
-    bool HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
+    bool HandleEvent(const EditorEvent &event);
 
     bool WantsMouse() const;
     bool WantsKeyboard() const;
+    bool WantsTextInput() const;
 
     float MouseX() const { return m_mouseX; }
     float MouseY() const { return m_mouseY; }
@@ -47,11 +49,10 @@ public:
     float DisplayScale() const { return m_scale; }
 
 private:
-    void TrackMouse(HWND window);
-    void AddKey(uint32_t virtualKey, bool down);
-    void UpdateModifiers();
+    void AddKey(EditorKey editorKey, bool down, const EditorModifiers &modifiers);
+    void UpdateModifiers(const EditorModifiers &modifiers);
 
-    HWND m_window = nullptr;
+    EditorWindow *m_window = nullptr;
     QrInstance m_instance = nullptr;
     QrMaterial m_fontMaterial = QR_NO_MATERIAL;
     bool m_ready = false;
