@@ -819,7 +819,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         }
 
         const uint32_t giProbeBits =
-            ( 1u << 15 ) | ( 1u << 16 ) | ( 1u << 17 ) | ( 1u << 18 ) | ( 1u << 19 );
+            ( 1u << 15 ) | ( 1u << 16 ) | ( 1u << 17 ) | ( 1u << 18 ) | ( 1u << 19 ) |
+            QR_DEBUG_DRAW_SPEC_HISTORY_LEN_BIT | QR_DEBUG_DRAW_SPEC_GRADIENT_BIT;
         gu->debugShowFlags |= ( fs & giProbeBits );
     }
 

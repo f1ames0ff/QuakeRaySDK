@@ -25,12 +25,35 @@ There are no separate "enable GI" or "run denoiser" calls.
 | `fixedAlbedo` | Diagnostic fixed albedo override; `0` is normal | Non-negative |
 | `lightUniqueIdIgnoreFirstPersonViewerShadows` | Optional pointer to one light ID | May be null |
 
-The current indirect shader treats values below `0.75` as half resolution and
-below `0.25` as disabled. Hosts should use the meaningful Quake levels:
+The current indirect shader treats `giBounceRays` in `[0.25, 0.75)` as half
+resolution and values `< 0.25` as disabled. Hosts should use the meaningful Quake levels:
 
 - `0`: indirect disabled;
+- `0.5`: half-resolution indirect rays (alternating even/odd scanlines with
+  separate `UnfilteredIndirectSpecular` storage, `1x` physical radiance for
+  indirect diffuse/sky, parity-locked ASVGF gradient tracing with saved
+  current-frame `SurfacePosition`/`ViewDirection`, and bilateral vertical row
+  reconstruction for both `UnfilteredIndirectSpecular` and
+  `UnfilteredIndirectSH` in `CmQ2Adapter` and unfiltered debug views);
 - `1`: single bounce;
 - `2`: two bounces when `enableSecondBounceForIndirect` is set.
+
+## Specular denoiser and debug probes
+
+The ASVGF specular branch reprojects reflected radiance via the virtual reflected
+world point (`framebufViewDirection.w` blended smoothly back to surface motion
+for rough, curved, or moving reflectors), tracks dedicated `rg32f` temporal
+moments in `Q2HistMomentsSpec`, and filters with independent specular variance
+and `hist_len_spec` edge-stopping in `CmQ2Atrous`.
+
+Two public diagnostic bits in `QrDebugDrawFlagBits` (`debugShowFlags`) aid
+reflection tuning and are evaluated post-tonemap and post-fog in `CmPrepareFinal`
+(returning `0.0` when `denoiserEnabled == 0`):
+
+- `QR_DEBUG_DRAW_SPEC_HISTORY_LEN_BIT` (`1u << 20`): visualizes
+  `saturate(hist_len_spec / 64.0)` (specular history length);
+- `QR_DEBUG_DRAW_SPEC_GRADIENT_BIT` (`1u << 21`): visualizes
+  `saturate(grad_hf_spec.y)` (specular temporal gradient).
 
 ## Quake mapping
 
@@ -74,17 +97,19 @@ drawInfo.pIlluminationParams = &illumination;
 
 ## Temporal history
 
-There is no general public "reset history" function. The renderer currently
-resets temporal state when returning from a UI-only frame to world rendering.
-The FSR path also treats camera displacement greater than `2.5 m` as a cut.
-Other discontinuities must be handled by the host's renderer lifecycle:
+There is no general public "reset history" function. The renderer automatically
+triggers a one-frame temporal history reset (`restirParams[2] = 1`) when
+returning from a UI-only frame to world rendering, when render resolution /
+framebuffer targets are recreated (`PrepareForSize`), and when `denoiserEnabled`
+transitions from `0` to `1`. The FSR path also treats camera displacement
+greater than `2.5 m` as a cut. Other discontinuities (such as in-world camera
+teleports without a UI or resolution transition) must be handled by the host:
 
-- recreate the renderer instance when guaranteed global history reset is needed;
-- pass the new render resolution; the renderer owns dependent target recreation;
+- recreate the renderer instance when a guaranteed full reset is needed;
+- pass the new render resolution; the renderer owns dependent target recreation
+  and resets temporal history alongside it;
 - keep camera positions/times consistent rather than injecting teleports as
-  continuous motion;
-- verify denoiser off/on transitions on the target scene; no separate API reset
-  exists for that toggle.
+  continuous motion.
 
 ## Validation
 

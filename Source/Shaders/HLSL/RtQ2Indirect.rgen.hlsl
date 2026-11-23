@@ -72,7 +72,6 @@
 
 [[vk::constant_id(0)]] const uint maxAlbedoLayerCount = 0;
 #define MATERIAL_MAX_ALBEDO_LAYERS maxAlbedoLayerCount
-#define FORCE_EVALBRDF_GGX_LOOSE
 #define DESC_SET_TLAS 0
 #define DESC_SET_FRAMEBUFFERS 1
 #define DESC_SET_GLOBAL_UNIFORM 2
@@ -259,7 +258,8 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
 }
 
 void q2ShadeIndirect(const Surface surf, const float3 hitPos, const float3 hitRadiance,
-                     float oneOverPdf, out float3 diffuse, out float3 specular)
+                     float oneOverPdf,
+                     out float3 diffuse, out float3 specular)
 {
     const float3 l  = safeNormalize( hitPos - surf.position );
     const float nl  = dot( surf.normal, l );
@@ -273,13 +273,22 @@ void q2ShadeIndirect(const Surface surf, const float3 hitPos, const float3 hitRa
 
     const float3 radiance = boostChroma( hitRadiance );
 
-    diffuse  = nl * radiance * evalBRDFLambertian( 1.0 );
-    specular = nl * radiance *
-               evalBRDFSmithGGX( surf.normal, surf.toViewerDir, l, surf.roughness,
-                                 surf.specularColor );
+    const float diffWeight = min( nl * evalBRDFLambertian( 1.0 ) * oneOverPdf, 4.0 );
+    diffuse  = radiance * diffWeight;
 
-    diffuse  *= oneOverPdf;
-    specular *= oneOverPdf;
+    // Path-space firefly clamping for 1-spp specular: preserve crisp bright peaks on mirrors
+    // while bounding high-variance emissive/radiance spikes on rougher surfaces.
+    const float  specMaxRadiance = lerp( 50.0, 10.0, smoothstep( 0.08, 0.40, surf.roughness ) );
+    const float  specLum         = getLuminance( radiance );
+    const float3 specRadiance    = ( specLum > specMaxRadiance ) ? radiance * ( specMaxRadiance / specLum ) : radiance;
+
+    // Without FORCE_EVALBRDF_GGX_LOOSE, D_GGX cancels identically for 1-spp VNDF (<= F <= 1.0);
+    // [0, 2] still bounds ReSTIR GI reused neighbor samples where oneOverPdf comes from reservoir shadingWeight.
+    const float3 specWeight = clamp(
+        nl * evalBRDFSmithGGX( surf.normal, surf.toViewerDir, l, surf.roughness, surf.specularColor ) * oneOverPdf,
+        (float3)0.0,
+        (float3)2.0 );
+    specular = specRadiance * specWeight;
 }
 
 float q2SkyNeeBsdfWeight( const Surface surf, const float3 direction )
@@ -347,39 +356,34 @@ void main()
 {
     int2 pix = (int2)DispatchRaysIndex().xy;
 
-    // Q2RTX pt_num_bounce_rays == 0: no indirect lighting at all. Storing zeros
-    // keeps the denoiser and the composite pass consistent - they only ever add
-    // the SH to the direct lighting.
     if ( globalUniform.giBounceRays.x < 0.25 )
     {
         imageStoreUnfilteredIndirectSH( pix, irradianceToSH( (float3)0.0, float3( 0.0, 0.0, 1.0 ) ) );
+        framebufUnfilteredIndirectSpecular[pix] = float4( 0.0, 0.0, 0.0, 0.0 );
         return;
     }
 
-    // Q2RTX Low GI (pt_num_bounce_rays == 0.5): the host dispatches only half of the
-    // rows and the traced rows alternate every frame, so the denoiser fills the rest.
-    // Every traced pixel therefore stands in for two, hence the doubled contribution
-    // below (Q2RTX does the same with throughput.rgb *= 2).
     const bool halfRes = globalUniform.giBounceRays.x < 0.75;
     if ( halfRes )
     {
-        pix.y = pix.y * 2 + (int)( globalUniform.frameId & 1u );
+        const int parity = (int)( globalUniform.frameId & 1u );
+        const int2 pixOther = int2( pix.x, pix.y * 2 + ( parity ^ 1 ) );
+        pix.y = pix.y * 2 + parity;
 
-        // Odd render heights leave the last row of the half resolution grid without
-        // a partner; such a pixel keeps its previous value, like the untraced rows.
-        //
-        // textureSize(framebufQ2RngSeed_Sampled, 0).y is the texture's own height here:
-        // GetDimensions hands back uints and the golden's ivec2 component is an int, so the
-        // comparison takes a (int) cast, exact for every height this renderer creates.
         uint seedTexWidth, seedTexHeight;
-        framebufQ2RngSeed_Sampled.GetDimensions(seedTexWidth, seedTexHeight);
+        framebufQ2RngSeed_Sampled.GetDimensions( seedTexWidth, seedTexHeight );
+
+        if ( pixOther.y < (int)seedTexHeight )
+        {
+            framebufUnfilteredIndirectSpecular[pixOther] = float4( 0.0, 0.0, 0.0, 0.0 );
+            imageStoreUnfilteredIndirectSH( pixOther, irradianceToSH( (float3)0.0, float3( 0.0, 0.0, 1.0 ) ) );
+        }
 
         if ( pix.y >= (int)seedTexHeight )
         {
             return;
         }
     }
-    const float halfResScale = halfRes ? 2.0 : 1.0;
 
     const uint seed = framebufQ2RngSeed_Sampled.Load(int3(pix, 0)).r;
 
@@ -389,6 +393,7 @@ void main()
     if ( surf.isSky )
     {
         imageStoreUnfilteredIndirectSH( pix, irradianceToSH( (float3)0.0, float3( 0.0, 0.0, 1.0 ) ) );
+        framebufUnfilteredIndirectSpecular[pix] = float4( 0.0, 0.0, 0.0, 0.0 );
         return;
     }
 
@@ -415,7 +420,8 @@ void main()
         const bool isGradient = q2GetIsGradient( pix );
         const uint cluster    = hitSurf.cluster;
 
-        const float alpha       = square( hitSurf.roughness );
+        const float regRoughness = max( hitSurf.roughness, surf.roughness );
+        const float alpha       = square( regRoughness );
         const float phongExp    = q2RoughnessSquareToSpecPower( alpha );
         const float phongScale  = min( 100.0, 1.0 / ( M_PI * max( alpha * alpha, 1e-4 ) ) );
         const float phongWeight = clamp(
@@ -536,26 +542,26 @@ void main()
     }
 
     float3 diffuse, specular;
-    q2ShadeIndirect( surf, hitPos, hitRadiance * halfResScale, oneOverSourcePdf, diffuse, specular );
+    q2ShadeIndirect( surf, hitPos, hitRadiance, oneOverSourcePdf, diffuse, specular );
 
     {
-        // Read the unfiltered specular through the storage image, not the sampled view: this
-        // raygen also writes framebufUnfilteredSpecular, and binding both views of one image in
-        // one set makes the SRV and the UAV disagree about the image layout (A4.3).
-        const float3 direct = decodeE5B9G9R9( framebufUnfilteredSpecular.Load( pix ).r );
-        if ( getLuminance( direct ) < getLuminance( specular ) )
+        const float3 direct = texelFetchUnfilteredSpecular( pix );
+        const float3 demodIndir = min( demodulateSpecular( specular, surf.specularColor ), (float3)32768.0 );
+        const float indirLum = getLuminance( demodIndir );
+        const float4 prevViewDir = framebufViewDirection.Load( pix );
+        if ( indirLum > 1e-5 && ( prevViewDir.w < 0.0 || getLuminance( direct ) < indirLum ) )
         {
-            framebufViewDirection[pix] =
-                float4( -surf.toViewerDir, length( hitPos - surf.position ) );
+            const float hitDist = clamp( length( hitPos - surf.position ), 0.0, Q2_MAX_VIEW_DIR_HIT_DIST );
+            framebufViewDirection[pix] = float4( -surf.toViewerDir, hitDist );
         }
 
-        imageStoreUnfilteredSpecular( pix,
-                                      direct + demodulateSpecular( specular, surf.specularColor ) );
+        const float tracedTag = float( globalUniform.frameId & 1u ) + 1.0;
+        framebufUnfilteredIndirectSpecular[pix] = float4( demodIndir, tracedTag );
     }
 
     {
         SH sh = irradianceToSH( diffuse * skyBsdfWeight, safeNormalize( hitPos - surf.position ) );
-        accumulateSH( sh, irradianceToSH( q2SkyNee( surf, seed ) * halfResScale, surf.normal ), 1.0 );
+        accumulateSH( sh, irradianceToSH( q2SkyNee( surf, seed ), surf.normal ), 1.0 );
 
         if ( indirDbg( INDIR_DBG_SANITY ) )
         {

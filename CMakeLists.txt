@@ -441,6 +441,89 @@ if(QR_BUILD_TESTS)
     endif()
     add_test(NAME qray_posteffects_gpu COMMAND qray_posteffects_smoke "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_PROBE_DIR}")
     set_tests_properties(qray_posteffects_gpu PROPERTIES TIMEOUT 120 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
+
+    set(QR_REFLECTIONS_SHADER_DEPS
+        Source/Shaders/Q2Asvgf.hlsli
+        Source/Shaders/BRDF.hlsli
+        Source/Shaders/ShaderCommonHLSLFunc.hlsli
+        Source/Shaders/ShaderCommonHLSL.hlsli
+        Source/Generated/ShaderCommonHLSL.hlsli
+        Source/Shaders/Structs.hlsli
+        Source/Shaders/VertexData.hlsli
+        Source/Shaders/SphericalHarmonics.hlsli
+        Source/Shaders/Utils.hlsli
+        Source/Shaders/Random.hlsli
+        Source/Shaders/Exposure.hlsli
+        Source/Shaders/TonemappingUtils.hlsli
+        Source/Shaders/LocalExposure.hlsli
+        Source/Shaders/ColorCompositing.hlsli
+        Source/Shaders/Volumetric.hlsli
+        Source/Shaders/NearDof.hlsli
+        Source/Shaders/LPM/ffx_a.h)
+    set(QR_REFLECTIONS_PROD_SHADERS
+        CmQ2GradientReproject
+        CmQ2Adapter
+        CmQ2GradientImg
+        CmQ2GradientAtrous
+        CmQ2Temporal
+        CmQ2AtrousLF
+        CmQ2Atrous
+        CmPrepareFinal)
+    set(QR_REFLECTIONS_SPVS
+        "${QR_PROBE_DIR}/SynthGbuffer.comp.spv"
+        "${QR_PROBE_DIR}/SynthShade.comp.spv")
+    foreach(QR_SHADER_NAME IN LISTS QR_REFLECTIONS_PROD_SHADERS)
+        set(QR_SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/Source/Shaders/HLSL/${QR_SHADER_NAME}.comp.hlsl")
+        set(QR_SHADER_OUT "${QR_PROBE_DIR}/${QR_SHADER_NAME}.comp.spv")
+        add_custom_command(OUTPUT "${QR_SHADER_OUT}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
+            COMMAND "${QR_DXC}" -spirv -fspv-target-env=vulkan1.2 -T cs_6_2 -E main
+                -fspv-extension=SPV_KHR_ray_tracing
+                -fspv-extension=SPV_EXT_descriptor_indexing
+                -fspv-extension=SPV_KHR_compute_shader_derivatives
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Shaders"
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Generated"
+                "${QR_SHADER_SRC}"
+                -Fo "${QR_SHADER_OUT}"
+            DEPENDS "${QR_SHADER_SRC}" ${QR_REFLECTIONS_SHADER_DEPS}
+            VERBATIM)
+        list(APPEND QR_REFLECTIONS_SPVS "${QR_SHADER_OUT}")
+    endforeach()
+
+    add_custom_command(OUTPUT "${QR_PROBE_DIR}/SynthGbuffer.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
+        COMMAND "${QR_DXC}" -spirv -fspv-target-env=vulkan1.2 -T cs_6_2 -E main -DPASS_GBUFFER=1
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Shaders"
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Generated"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ReflectionsSynthScene.comp.hlsl"
+            -Fo "${QR_PROBE_DIR}/SynthGbuffer.comp.spv"
+        DEPENDS Tests/ReflectionsSynthScene.comp.hlsl
+            Source/Shaders/ShaderCommonHLSLFunc.hlsli Source/Shaders/BRDF.hlsli Source/Shaders/Q2Asvgf.hlsli
+            Source/Generated/ShaderCommonHLSL.hlsli
+        VERBATIM)
+    add_custom_command(OUTPUT "${QR_PROBE_DIR}/SynthShade.comp.spv"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"
+        COMMAND "${QR_DXC}" -spirv -fspv-target-env=vulkan1.2 -T cs_6_2 -E main -DPASS_SHADE=1
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Shaders"
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/Source/Generated"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ReflectionsSynthScene.comp.hlsl"
+            -Fo "${QR_PROBE_DIR}/SynthShade.comp.spv"
+        DEPENDS Tests/ReflectionsSynthScene.comp.hlsl
+            Source/Shaders/ShaderCommonHLSLFunc.hlsli Source/Shaders/BRDF.hlsli Source/Shaders/Q2Asvgf.hlsli
+            Source/Generated/ShaderCommonHLSL.hlsli
+        VERBATIM)
+    add_executable(qray_reflections_denoiser_smoke Tests/ReflectionsDenoiserSmoke.cpp
+        ${QR_REFLECTIONS_SPVS})
+    target_compile_features(qray_reflections_denoiser_smoke PRIVATE cxx_std_20)
+    target_include_directories(qray_reflections_denoiser_smoke PRIVATE Source)
+    target_link_libraries(qray_reflections_denoiser_smoke PRIVATE renderer nvrhi_vk nvrhi)
+    if(WIN32)
+        target_link_libraries(qray_reflections_denoiser_smoke PRIVATE user32)
+    endif()
+    add_test(NAME qray_reflections_denoiser_gpu COMMAND qray_reflections_denoiser_smoke
+        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_PROBE_DIR}")
+    set_tests_properties(qray_reflections_denoiser_gpu PROPERTIES TIMEOUT 180
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
     set(QR_DTAL_PROBE "${QR_PROBE_DIR}/DtalPerf.comp.spv")
     add_custom_command(OUTPUT "${QR_DTAL_PROBE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${QR_PROBE_DIR}"

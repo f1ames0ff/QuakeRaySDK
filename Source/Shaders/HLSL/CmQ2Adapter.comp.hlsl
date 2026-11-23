@@ -75,14 +75,22 @@
 
 float3 q2AntiFirefly(const int2 pix, const float3 center, const Texture2D<uint4> buf, const int width, const int height)
 {
-    float maxNeighborLum = 1.0f;
-    float centerLum = getLuminance(center);
-
+    const float centerLum = getLuminance(center);
+    if (!isfinite(centerLum))
+    {
+        return (float3)0.0;
+    }
     if (centerLum < Q2_FIREFLY_MIN_LUM)
     {
         return center;
     }
 
+    const int halfWidth = width / 2;
+    const int field_left = (pix.x >= halfWidth) ? halfWidth : 0;
+    const int field_right = (pix.x >= halfWidth) ? width : halfWidth;
+
+    float max1 = 1.0f;
+    float max2 = 1.0f;
     for (int yy = -1; yy <= 1; yy++)
     {
         for (int xx = -1; xx <= 1; xx++)
@@ -93,17 +101,30 @@ float3 q2AntiFirefly(const int2 pix, const float3 center, const Texture2D<uint4>
             }
 
             const int2 p = pix + int2(xx, yy);
-            if (p.x < 0 || p.x >= width || p.y < 0 || p.y >= height)
+            if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= height)
             {
                 continue;
             }
 
             const float3 c = decodeE5B9G9R9(buf.Load(int3(p, 0)).r);
-            maxNeighborLum = max(maxNeighborLum, getLuminance(c));
+            const float lum = getLuminance(c);
+            if (!isfinite(lum))
+            {
+                continue;
+            }
+            if (lum > max1)
+            {
+                max2 = max1;
+                max1 = lum;
+            }
+            else if (lum > max2)
+            {
+                max2 = lum;
+            }
         }
     }
 
-    const float limit = maxNeighborLum * Q2_FIREFLY_FACTOR;
+    const float limit = max2 * Q2_FIREFLY_FACTOR;
     if (centerLum > limit)
     {
         return center * (limit / centerLum);
@@ -112,15 +133,354 @@ float3 q2AntiFirefly(const int2 pix, const float3 center, const Texture2D<uint4>
     return center;
 }
 
+bool q2IsCurrGradientSample(const int2 p, const int width, const int height)
+{
+    if (globalUniform.fltEnable.x < 0.5 || !q2InGradBounds(p, width, height))
+    {
+        return false;
+    }
+
+    const int2 pos_grad = p / Q2_GRAD_DWN;
+    const uint u = framebufQ2GradSmplPos_Sampled.Load(int3(pos_grad, 0)).r;
+    if ((u & (1u << 31)) == 0u)
+    {
+        return false;
+    }
+
+    const int2 stratum = int2(
+        (u >> (Q2_STRATUM_OFFSET_SHIFT * 0)) & Q2_STRATUM_OFFSET_MASK,
+        (u >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
+    return all(pos_grad * Q2_GRAD_DWN + stratum == p);
+}
+
+bool q2EvalHalfResNeighborWeight(const int2 p, const float depth_c, const float3 normal_c,
+                                 const int width, const int height, out float wDepth, out float wBilateral)
+{
+    wDepth = 0.0;
+    wBilateral = 0.0;
+    if (isSkyPix(p) || q2IsCurrGradientSample(p, width, height))
+    {
+        return false;
+    }
+
+    const float depth_n = framebufQ2ViewDepth_Sampled.Load(int3(p, 0)).r;
+    const float3 normal_n = texelFetchNormal(p);
+    wDepth = exp(-abs(depth_n - depth_c) / max(0.05 * abs(depth_c), 1e-4));
+    const float wNormal = pow(saturate(dot(normal_n, normal_c)), 8.0);
+    wBilateral = wDepth * wNormal;
+    return true;
+}
+
+float3 q2FetchReconstructedIndirectSpec(const int2 pix, const int width, const int height, const bool filterFireflies)
+{
+    if (globalUniform.giBounceRays.x < 0.25 || isSkyPix(pix))
+    {
+        return (float3)0.0;
+    }
+
+    const int halfWidth = width / 2;
+    const int field_left = (pix.x >= halfWidth) ? halfWidth : 0;
+    const int field_right = (pix.x >= halfWidth) ? width : halfWidth;
+
+    const float4 raw = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(pix, 0));
+    const bool halfRes = globalUniform.giBounceRays.x < 0.75;
+    const float expectedTag = float(globalUniform.frameId & 1u) + 1.0;
+
+    float3 center = raw.rgb;
+    if (halfRes && abs(raw.a - expectedTag) > 0.25)
+    {
+        const float depth_c = framebufQ2ViewDepth_Sampled.Load(int3(pix, 0)).r;
+        const float3 normal_c = texelFetchNormal(pix);
+        const int2 flat_c = q2CheckerToFlat(pix, width);
+        const bool canCrossFields = framebufThroughput_Sampled.Load(int3(pix, 0)).a <= 0.5;
+
+        float3 sumBilateral = (float3)0.0;
+        float sumW = 0.0;
+        float3 sumSideBilateral = (float3)0.0;
+        float sumSideW = 0.0;
+        float3 sumFallback = (float3)0.0;
+        float sumFallbackW = 0.0;
+
+        if (canCrossFields)
+        {
+            for (int yy = -1; yy <= 1; yy += 2)
+            {
+                const int fy = flat_c.y + yy;
+                if (fy < 0 || fy >= height)
+                {
+                    continue;
+                }
+
+                const int2 p = q2FlatToChecker(int2(flat_c.x, fy), width);
+                const float4 s = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(p, 0));
+                if (abs(s.a - expectedTag) > 0.25)
+                {
+                    continue;
+                }
+
+                float wDepth, wBi;
+                if (!q2EvalHalfResNeighborWeight(p, depth_c, normal_c, width, height, wDepth, wBi))
+                {
+                    continue;
+                }
+
+                sumBilateral += s.rgb * wBi;
+                sumW += wBi;
+                if (wDepth > 0.1)
+                {
+                    sumFallback += s.rgb * wDepth;
+                    sumFallbackW += wDepth;
+                }
+            }
+        }
+
+        for (int yy = -1; yy <= 1; yy += 2)
+        {
+            for (int xx = -1; xx <= 1; xx++)
+            {
+                const int2 p = pix + int2(xx, yy);
+                if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= height)
+                {
+                    continue;
+                }
+
+                const int2 p_flat = q2CheckerToFlat(p, width);
+                if (abs(p_flat.x - flat_c.x) > 1)
+                {
+                    continue;
+                }
+
+                const float4 s = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(p, 0));
+                if (abs(s.a - expectedTag) > 0.25)
+                {
+                    continue;
+                }
+
+                float wDepth, wBi;
+                if (!q2EvalHalfResNeighborWeight(p, depth_c, normal_c, width, height, wDepth, wBi))
+                {
+                    continue;
+                }
+
+                const float wSpatial = 0.5;
+                sumSideBilateral += s.rgb * (wSpatial * wBi);
+                sumSideW += wSpatial * wBi;
+                if (wDepth > 0.1)
+                {
+                    sumFallback += s.rgb * (wSpatial * wDepth);
+                    sumFallbackW += wSpatial * wDepth;
+                }
+            }
+        }
+
+        if (sumW > 1e-4)
+        {
+            center = sumBilateral / sumW;
+        }
+        else if (sumSideW > 1e-6)
+        {
+            center = sumSideBilateral / sumSideW;
+        }
+        else if (sumFallbackW > 1e-6)
+        {
+            center = sumFallback / sumFallbackW;
+        }
+        else
+        {
+            center = (float3)0.0;
+        }
+    }
+
+    if (!filterFireflies)
+    {
+        return center;
+    }
+
+    const float centerLum = getLuminance(center);
+    if (!isfinite(centerLum))
+    {
+        return (float3)0.0;
+    }
+    if (centerLum < Q2_FIREFLY_MIN_LUM)
+    {
+        return center;
+    }
+
+    float max1 = 3.0f;
+    float max2 = 3.0f;
+    const int rY = halfRes ? 2 : 1;
+    for (int yy = -rY; yy <= rY; yy++)
+    {
+        for (int xx = -1; xx <= 1; xx++)
+        {
+            if (xx == 0 && yy == 0)
+            {
+                continue;
+            }
+
+            const int2 p = pix + int2(xx, yy);
+            if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= height)
+            {
+                continue;
+            }
+
+            if (q2IsCurrGradientSample(p, width, height))
+            {
+                continue;
+            }
+
+            const float4 s = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(p, 0));
+            if (halfRes && abs(s.a - expectedTag) > 0.25)
+            {
+                continue;
+            }
+
+            const float lum = getLuminance(s.rgb);
+            if (!isfinite(lum))
+            {
+                continue;
+            }
+            if (lum > max1)
+            {
+                max2 = max1;
+                max1 = lum;
+            }
+            else if (lum > max2)
+            {
+                max2 = lum;
+            }
+        }
+    }
+
+    const float rough = framebufMetallicRoughness_Sampled.Load(int3(pix, 0)).y;
+    const float factor = lerp(12.0, 6.0, smoothstep(0.06, 0.45, rough));
+    const float limit = max(Q2_FIREFLY_MIN_LUM, max2 * factor);
+    if (centerLum > limit)
+    {
+        return center * (limit / centerLum);
+    }
+
+    return center;
+}
+
+SH q2FetchReconstructedIndirectSH(const int2 pix, const int width, const int height)
+{
+    if (globalUniform.giBounceRays.x < 0.25 || isSkyPix(pix))
+    {
+        return newSH();
+    }
+
+    const bool halfRes = globalUniform.giBounceRays.x < 0.75;
+    const int currParity = (int)(globalUniform.frameId & 1u);
+    if (!halfRes || ((pix.y & 1) == currParity))
+    {
+        return texelFetchUnfilteredIndirectSH(pix);
+    }
+
+    const int halfWidth = width / 2;
+    const int field_left = (pix.x >= halfWidth) ? halfWidth : 0;
+    const int field_right = (pix.x >= halfWidth) ? width : halfWidth;
+    const float depth_c = framebufQ2ViewDepth_Sampled.Load(int3(pix, 0)).r;
+    const float3 normal_c = texelFetchNormal(pix);
+    const int2 flat_c = q2CheckerToFlat(pix, width);
+    const bool canCrossFields = framebufThroughput_Sampled.Load(int3(pix, 0)).a <= 0.5;
+
+    SH sumBilateral = newSH();
+    float sumW = 0.0;
+    SH sumSideBilateral = newSH();
+    float sumSideW = 0.0;
+    SH sumFallback = newSH();
+    float sumFallbackW = 0.0;
+
+    if (canCrossFields)
+    {
+        for (int yy = -1; yy <= 1; yy += 2)
+        {
+            const int fy = flat_c.y + yy;
+            if (fy < 0 || fy >= height)
+            {
+                continue;
+            }
+
+            const int2 p = q2FlatToChecker(int2(flat_c.x, fy), width);
+            float wDepth, wBi;
+            if (!q2EvalHalfResNeighborWeight(p, depth_c, normal_c, width, height, wDepth, wBi))
+            {
+                continue;
+            }
+
+            const SH nSh = texelFetchUnfilteredIndirectSH(p);
+            accumulateSH(sumBilateral, nSh, wBi);
+            sumW += wBi;
+            if (wDepth > 0.1)
+            {
+                accumulateSH(sumFallback, nSh, wDepth);
+                sumFallbackW += wDepth;
+            }
+        }
+    }
+
+    for (int yy = -1; yy <= 1; yy += 2)
+    {
+        for (int xx = -1; xx <= 1; xx++)
+        {
+            const int2 p = pix + int2(xx, yy);
+            if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= height)
+            {
+                continue;
+            }
+
+            const int2 p_flat = q2CheckerToFlat(p, width);
+            if (abs(p_flat.x - flat_c.x) > 1)
+            {
+                continue;
+            }
+
+            float wDepth, wBi;
+            if (!q2EvalHalfResNeighborWeight(p, depth_c, normal_c, width, height, wDepth, wBi))
+            {
+                continue;
+            }
+
+            const float wSpatial = 0.5;
+            const SH nSh = texelFetchUnfilteredIndirectSH(p);
+            accumulateSH(sumSideBilateral, nSh, wSpatial * wBi);
+            sumSideW += wSpatial * wBi;
+            if (wDepth > 0.1)
+            {
+                accumulateSH(sumFallback, nSh, wSpatial * wDepth);
+                sumFallbackW += wSpatial * wDepth;
+            }
+        }
+    }
+
+    if (sumW > 1e-4)
+    {
+        multiplySH(sumBilateral, 1.0 / sumW);
+        return sumBilateral;
+    }
+    if (sumSideW > 1e-6)
+    {
+        multiplySH(sumSideBilateral, 1.0 / sumSideW);
+        return sumSideBilateral;
+    }
+    if (sumFallbackW > 1e-6)
+    {
+        multiplySH(sumFallback, 1.0 / sumFallbackW);
+        return sumFallback;
+    }
+    return newSH();
+}
+
 // Composites the raw, unfiltered ReSTIR signal. Used when the denoiser is
 // disabled (Q2RTX flt_enable = 0): the lighting channels come straight from the
 // path tracer instead of the ASVGF reconstructions, so the image is noisy but
 // reacts to any lighting change immediately.
-void q2CompositeUnfiltered(const int2 pix)
+void q2CompositeUnfiltered(const int2 pix, const int width, const int height)
 {
     const float3 diffuse = texelFetchUnfilteredDirect(pix);
-    const float3 specular = texelFetchUnfilteredSpecular(pix);
-    const SH indir = texelFetchUnfilteredIndirectSH(pix);
+    const float3 specular = texelFetchUnfilteredSpecular(pix) + q2FetchReconstructedIndirectSpec(pix, width, height, false);
+    const SH indir = q2FetchReconstructedIndirectSH(pix, width, height);
 
     const float3 albedo = framebufAlbedo_Sampled.Load(int3(getRegularPixFromCheckerboardPix(pix), 0)).rgb;
     const float3 throughput = framebufThroughput_Sampled.Load(int3(pix, 0)).rgb;
@@ -194,13 +554,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (globalUniform.fltEnable.x < 0.5)
     {
-        q2CompositeUnfiltered(pix);
+        q2CompositeUnfiltered(pix, width, height);
         return;
     }
 
     const float3 diffuse = q2AntiFirefly(pix, texelFetchUnfilteredDirect(pix), framebufUnfilteredDirect_Sampled, width, height);
-    const float3 specular = q2AntiFirefly(pix, texelFetchUnfilteredSpecular(pix), framebufUnfilteredSpecular_Sampled, width, height);
-    const SH indir = texelFetchUnfilteredIndirectSH(pix);
+    const float3 directSpec = q2AntiFirefly(pix, texelFetchUnfilteredSpecular(pix), framebufUnfilteredSpecular_Sampled, width, height);
+    const float3 indirectSpec = q2FetchReconstructedIndirectSpec(pix, width, height, true);
+    const float3 specular = directSpec + indirectSpec;
+    const SH indir = q2FetchReconstructedIndirectSH(pix, width, height);
 
     const float3 hf = diffuse * Q2_STORAGE_SCALE_HF;
     framebufQ2ColorHF[pix] = (uint4)q2PackRGBE(hf);

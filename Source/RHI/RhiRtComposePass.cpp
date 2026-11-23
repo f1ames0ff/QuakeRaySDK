@@ -128,7 +128,7 @@ struct ComposeImage
 // the three are part of the union so the per-list announcement below names their resting state and
 // the restore lists return the ones this module moves to it. The god-rays module owns their
 // contents and has to leave them in GENERAL (see the class comment).
-constexpr uint32_t COMPOSE_IMAGE_COUNT = 90;
+constexpr uint32_t COMPOSE_IMAGE_COUNT = 95;
 constexpr ComposeImage COMPOSE_IMAGES[COMPOSE_IMAGE_COUNT] =
 {
     { FB_IMAGE_INDEX_ALBEDO,                ComposeImageSize::Render }, //   0  framebufAlbedo           (adapter/gradient-reproj/atrous/PF)
@@ -221,10 +221,15 @@ constexpr ComposeImage COMPOSE_IMAGES[COMPOSE_IMAGE_COUNT] =
     { FB_IMAGE_INDEX_Q2_GLASS_HISTORY,     ComposeImageSize::Render },
     { FB_IMAGE_INDEX_Q2_GLASS_HISTORY_PREV, ComposeImageSize::Render },
 { FB_IMAGE_INDEX_Q2_PARTICLE_LAYER, ComposeImageSize::Render }, // 130  framebufQ2ParticleLayer (checkerboard SRV, refl/refr UAV)
+    { FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC,       ComposeImageSize::Render }, //  37  framebufQ2HistMomentsSpec (temporal UAV)
+    { FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC_PREV,  ComposeImageSize::Render }, //  38  framebufQ2HistMomentsSpec_Prev (temporal SRV)
+    { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR, ComposeImageSize::Render }, // 40 framebufUnfilteredIndirectSpecular (adapter/final SRV)
+    { FB_IMAGE_INDEX_Q2_GRAD_SAVED_SURF_POS,     ComposeImageSize::Third },  //  39  framebufQ2GradSavedSurfPos (reproj UAV, gradImg SRV)
+    { FB_IMAGE_INDEX_Q2_GRAD_SAVED_VIEW_DIR,     ComposeImageSize::Third },  //  41  framebufQ2GradSavedViewDir (reproj UAV, gradImg SRV)
 };
 
-static_assert(COMPOSE_IMAGE_COUNT == 90,
-              "the per-slot image arrays of RhiRtComposePass.h are sized 90 (COMPOSE_IMAGES)");
+static_assert(COMPOSE_IMAGE_COUNT == 95,
+              "the per-slot image arrays of RhiRtComposePass.h are sized 95 (COMPOSE_IMAGES)");
 
 // One item of a pass's set 0: the engine image, the binding kind and whether the item is a sampler
 // (only the TAAU history carries one). 'isUAV' selects both the layout item and the set item type;
@@ -240,19 +245,23 @@ struct ComposeBinding
 // bindings, all in set 0). The order is the reconnaissance's table order - the UAVs first, then the
 // SRVs. The reproject reads the `_PREV` roles and writes the current ones for the checkerboard half
 // the primary did not trace.
-constexpr uint32_t GRADIENT_REPROJECT_BINDING_COUNT = 25;
+constexpr uint32_t GRADIENT_REPROJECT_BINDING_COUNT = 29;
 constexpr ComposeBinding GRADIENT_REPROJECT_BINDINGS[GRADIENT_REPROJECT_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_NORMAL,               true, false }, //   3  framebufNormal
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,   true, false }, //   7  framebufMetallicRoughness
     { FB_IMAGE_INDEX_SURFACE_POSITION,     true, false }, //  19  framebufSurfacePosition
     { FB_IMAGE_INDEX_VIEW_DIRECTION,       true, false }, //  23  framebufViewDirection
+    { FB_IMAGE_INDEX_Q2_GRAD_SAVED_SURF_POS, true, false }, //  39  framebufQ2GradSavedSurfPos
+    { FB_IMAGE_INDEX_Q2_GRAD_SAVED_VIEW_DIR, true, false }, //  41  framebufQ2GradSavedViewDir
     { FB_IMAGE_INDEX_Q2_BASE_COLOR,        true, false }, //  83  framebufQ2BaseColor
     { FB_IMAGE_INDEX_Q2_METALLIC,          true, false }, //  85  framebufQ2Metallic
     { FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PING, true, false }, // 113  framebufQ2GradHFSpecPing
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,     true, false }, // 115  framebufQ2GradSmplPos
     { FB_IMAGE_INDEX_Q2_RNG_SEED,          true, false }, // 121  framebufQ2RngSeed
     { FB_IMAGE_INDEX_Q2_CLUSTER,           true, false },
+    { FB_IMAGE_INDEX_ALBEDO,               false, false }, // 124  framebufAlbedo_Sampled
+    { FB_IMAGE_INDEX_ALBEDO_PREV,          false, false }, // 125  framebufAlbedo_Prev_Sampled
     { FB_IMAGE_INDEX_NORMAL_PREV,          false, false }, // 128  framebufNormal_Prev_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,      false, false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV, false, false }, // 130  framebufNormalGeometry_Prev_Sampled
@@ -270,11 +279,8 @@ constexpr ComposeBinding GRADIENT_REPROJECT_BINDINGS[GRADIENT_REPROJECT_BINDING_
     { FB_IMAGE_INDEX_Q2_CLUSTER_PREV,      false, false },
 };
 
-// CmQ2Adapter: 5 storage images and 12 sampled images (measured: exactly these 17 bindings, all in
-// set 0; the module's own uniform layout carries set 1). The order is the reconnaissance's table
-// order - the UAVs first, then the SRVs. 16-18 are sampled like the rest; the A4.3 indirect pass
-// writes them earlier on the same command list.
-constexpr uint32_t ADAPTER_BINDING_COUNT = 17;
+// CmQ2Adapter: 5 storage images and 15 sampled images.
+constexpr uint32_t ADAPTER_BINDING_COUNT = 20;
 constexpr ComposeBinding ADAPTER_BINDINGS[ADAPTER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_S_H,     true, false }, //  73  framebufQ2ColorLF_SH
@@ -292,8 +298,11 @@ constexpr ComposeBinding ADAPTER_BINDINGS[ADAPTER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_S_H_G, false, false }, // 141  framebufUnfilteredIndirectSH_G_Sampled
     { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_S_H_B, false, false }, // 142  framebufUnfilteredIndirectSH_B_Sampled
     { FB_IMAGE_INDEX_THROUGHPUT,           false, false }, // 150  framebufThroughput_Sampled
+    { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR, false, false }, // 172 framebufUnfilteredIndirectSpecular_Sampled
+    { FB_IMAGE_INDEX_Q2_VIEW_DEPTH,        false, false }, // 205  framebufQ2ViewDepth_Sampled
     { FB_IMAGE_INDEX_Q2_TRANSPARENT,       false, false }, // 212  framebufQ2Transparent_Sampled
     { FB_IMAGE_INDEX_Q2_FOG_ACCUM,         false, false }, // 214  framebufQ2FogAccum_Sampled
+    { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,     false, false }, // 239  framebufQ2GradSmplPos_Sampled
 };
 
 // CmQ2GradientImg: 4 storage images and 8 sampled images. The A4.5 pair fix reads
@@ -301,14 +310,18 @@ constexpr ComposeBinding ADAPTER_BINDINGS[ADAPTER_BINDING_COUNT] =
 // dead-stripped; restoring the gradient sample's current-frame normal & MR adds UAV writes for
 // `framebufNormal` and `framebufMetallicRoughness` plus SRV reads for `framebufQ2BaseColor` and
 // `framebufQ2Metallic` (12 items total).
-constexpr uint32_t GRADIENT_IMG_BINDING_COUNT = 12;
+constexpr uint32_t GRADIENT_IMG_BINDING_COUNT = 16;
 constexpr ComposeBinding GRADIENT_IMG_BINDINGS[GRADIENT_IMG_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_NORMAL,                true, false }, //   3  framebufNormal
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,    true, false }, //   7  framebufMetallicRoughness
+    { FB_IMAGE_INDEX_SURFACE_POSITION,      true, false }, //  19  framebufSurfacePosition
+    { FB_IMAGE_INDEX_VIEW_DIRECTION,        true, false }, //  23  framebufViewDirection
     { FB_IMAGE_INDEX_Q2_GRAD_L_F_PING,      true, false }, // 111  framebufQ2GradLFPing
     { FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PING, true, false }, // 113  framebufQ2GradHFSpecPing
     { FB_IMAGE_INDEX_MOTION,                false, false }, // 137  framebufMotion_Sampled
+    { FB_IMAGE_INDEX_Q2_GRAD_SAVED_SURF_POS, false, false }, // 171  framebufQ2GradSavedSurfPos_Sampled
+    { FB_IMAGE_INDEX_Q2_GRAD_SAVED_VIEW_DIR, false, false }, // 173  framebufQ2GradSavedViewDir_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_S_H,      false, false }, // 197  framebufQ2ColorLF_SH_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_H_F,          false, false }, // 201  framebufQ2ColorHF_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_SPEC,         false, false }, // 203  framebufQ2ColorSpec_Sampled
@@ -330,11 +343,12 @@ constexpr ComposeBinding GRADIENT_ATROUS_BINDINGS[GRADIENT_ATROUS_BINDING_COUNT]
     { FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PONG, true, false }, // 114  framebufQ2GradHFSpecPong
 };
 
-// CmQ2Temporal: 9 storage images and 21 sampled images; `[numthreads(15, 15, 1)]`. It reads the
+// CmQ2Temporal: 10 storage images and 27 sampled images; `[numthreads(15, 15, 1)]`. It reads the
 // `_PREV` histories and writes the current ones plus the a-trous inputs.
-constexpr uint32_t TEMPORAL_BINDING_COUNT = 30;
+constexpr uint32_t TEMPORAL_BINDING_COUNT = 37;
 constexpr ComposeBinding TEMPORAL_BINDINGS[TEMPORAL_BINDING_COUNT] =
 {
+    { FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC,       true, false }, //  37  framebufQ2HistMomentsSpec
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_L_F_S_H,      true, false }, //  91  framebufQ2HistColorLF_SH
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_L_F_C_O_C_G,  true, false }, //  93  framebufQ2HistColorLF_COCG
     { FB_IMAGE_INDEX_Q2_HIST_MOMENTS_H_F,        true, false }, //  97  framebufQ2HistMomentsHF
@@ -349,9 +363,14 @@ constexpr ComposeBinding TEMPORAL_BINDINGS[TEMPORAL_BINDING_COUNT] =
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false, false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,       false, false }, // 130  framebufNormalGeometry_Prev_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false, false }, // 131  framebufMetallicRoughness_Sampled
+    { FB_IMAGE_INDEX_METALLIC_ROUGHNESS_PREV,    false, false }, // 132  framebufMetallicRoughness_Prev_Sampled
     { FB_IMAGE_INDEX_DEPTH_GRAD,                 false, false }, // 135  framebufDepthGrad_Sampled
     { FB_IMAGE_INDEX_MOTION,                     false, false }, // 137  framebufMotion_Sampled
+    { FB_IMAGE_INDEX_SURFACE_POSITION,           false, false }, // 143  framebufSurfacePosition_Sampled
+    { FB_IMAGE_INDEX_SURFACE_POSITION_PREV,      false, false }, // 144  framebufSurfacePosition_Prev_Sampled
+    { FB_IMAGE_INDEX_VIEW_DIRECTION,             false, false }, // 147  framebufViewDirection_Sampled
     { FB_IMAGE_INDEX_THROUGHPUT,                 false, false }, // 150  framebufThroughput_Sampled
+    { FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC_PREV,  false, false }, // 170  framebufQ2HistMomentsSpec_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_S_H,           false, false }, // 197  framebufQ2ColorLF_SH_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_C_O_C_G,       false, false }, // 199  framebufQ2ColorLF_COCG_Sampled
     { FB_IMAGE_INDEX_Q2_COLOR_H_F,               false, false }, // 201  framebufQ2ColorHF_Sampled
@@ -365,6 +384,7 @@ constexpr ComposeBinding TEMPORAL_BINDINGS[TEMPORAL_BINDING_COUNT] =
     { FB_IMAGE_INDEX_Q2_FILTERED_SPEC_PREV,      false, false }, // 224  framebufQ2FilteredSpec_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_L_F_PONG,           false, false }, // 236  framebufQ2GradLFPong_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PONG,      false, false }, // 238  framebufQ2GradHFSpecPong_Sampled
+    { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,           false, false }, // 239  framebufQ2GradSmplPos_Sampled
 };
 
 // CmQ2AtrousLF: 4 storage images and 3 sampled images; the A4.5 pair fix reads the ping/pong LF
@@ -386,7 +406,7 @@ constexpr ComposeBinding ATROUS_LF_BINDINGS[ATROUS_LF_BINDING_COUNT] =
 // fields through their storage images, so the measured item count is 23 instead of the pre-fix 30.
 // The iteration is the shader's specialization constant, so the module dispatches four
 // specialized pipelines.
-constexpr uint32_t ATROUS_BINDING_COUNT = 23;
+constexpr uint32_t ATROUS_BINDING_COUNT = 25;
 constexpr ComposeBinding ATROUS_BINDINGS[ATROUS_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_H_F,          true, false }, //  95  framebufQ2HistColorHF
@@ -403,6 +423,7 @@ constexpr ComposeBinding ATROUS_BINDINGS[ATROUS_BINDING_COUNT] =
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false, false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false, false }, // 131  framebufMetallicRoughness_Sampled
     { FB_IMAGE_INDEX_DEPTH_GRAD,                 false, false }, // 135  framebufDepthGrad_Sampled
+    { FB_IMAGE_INDEX_VIEW_DIRECTION,             false, false }, // 147  framebufViewDirection_Sampled
     { FB_IMAGE_INDEX_THROUGHPUT,                 false, false }, // 150  framebufThroughput_Sampled
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH,              false, false }, // 205  framebufQ2ViewDepth_Sampled
     { FB_IMAGE_INDEX_Q2_TRANSPARENT,             false, false }, // 212  framebufQ2Transparent_Sampled
@@ -410,6 +431,7 @@ constexpr ComposeBinding ATROUS_BINDINGS[ATROUS_BINDING_COUNT] =
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_L_F_S_H,      false, false }, // 215  framebufQ2HistColorLF_SH_Sampled
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_L_F_C_O_C_G,  false, false }, // 217  framebufQ2HistColorLF_COCG_Sampled
     { FB_IMAGE_INDEX_Q2_HIST_MOMENTS_H_F,        false, false }, // 221  framebufQ2HistMomentsHF_Sampled
+    { FB_IMAGE_INDEX_Q2_FILTERED_SPEC,           false, false }, // 223  framebufQ2FilteredSpec_Sampled
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_S_H,     false, false }, // 225  framebufQ2AtrousPingLF_SH_Sampled
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_C_O_C_G, false, false }, // 227  framebufQ2AtrousPingLF_COCG_Sampled
 };
@@ -479,7 +501,7 @@ constexpr ComposeBinding GLASS_BLUR_BINDINGS[GLASS_BLUR_BINDING_COUNT] =
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY, false, false },
 };
 
-constexpr uint32_t PREPARE_FINAL_BINDING_COUNT = 17;
+constexpr uint32_t PREPARE_FINAL_BINDING_COUNT = 21;
 constexpr ComposeBinding PREPARE_FINAL_BINDINGS[PREPARE_FINAL_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_ALBEDO,               false, false }, // 124  framebufAlbedo_Sampled
@@ -491,6 +513,7 @@ constexpr ComposeBinding PREPARE_FINAL_BINDINGS[PREPARE_FINAL_BINDING_COUNT] =
     { FB_IMAGE_INDEX_UNFILTERED_SPECULAR,  false, false }, // 139  framebufUnfilteredSpecular_Sampled
     { FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR, false, false }, // 149  framebufPrimaryToReflRefr_Sampled
     { FB_IMAGE_INDEX_THROUGHPUT,           false, false }, // 150  framebufThroughput_Sampled
+    { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR, false, false }, // 172 framebufUnfilteredIndirectSpecular_Sampled
     { FB_IMAGE_INDEX_ACID_FOG,             false, false }, // 184  framebufAcidFog_Sampled
     { FB_IMAGE_INDEX_SCREEN_EMISSION,      false, false }, // 186  framebufScreenEmission_Sampled
     { FB_IMAGE_INDEX_GOD_RAYS_FILTERED,    false, false }, // 188  framebufGodRaysFiltered_Sampled
@@ -499,6 +522,9 @@ constexpr ComposeBinding PREPARE_FINAL_BINDINGS[PREPARE_FINAL_BINDING_COUNT] =
     { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_S_H_B, true, false }, //  18  framebufUnfilteredIndirectSH_B
     { FB_IMAGE_INDEX_FINAL,                true, false }, //  28  framebufFinal
     { FB_IMAGE_INDEX_BLOOM_INPUT,          false, false }, //  65  framebufBloomInput
+    { FB_IMAGE_INDEX_Q2_FILTERED_SPEC,     false, false }, // 231  framebufQ2FilteredSpec_Sampled
+    { FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PONG, false, false }, // 246  framebufQ2GradHFSpecPong_Sampled
+    { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,     false, false }, // 247  framebufQ2GradSmplPos_Sampled
 };
 
 // CmQ2TAAU: 2 storage images, 3 sampled images and the game's sampler for the history (image 120,
@@ -674,7 +700,7 @@ constexpr bool AreComposeImagesDistinct()
 // it is the image this module really moves to read-only and has to move back; 63/89 are bound by no
 // compose set, and their requirement is a same-state UnorderedAccess barrier that names the
 // god-rays module's hand-off (the class comment's contract), not a transition.
-constexpr uint32_t COMPOSE_RESTORE_COUNT = 31;
+constexpr uint32_t COMPOSE_RESTORE_COUNT = 35;
 constexpr FramebufferImageIndex COMPOSE_RESTORE_IMAGES[COMPOSE_RESTORE_COUNT] =
 {
     FB_IMAGE_INDEX_SURFACE_POSITION,
@@ -686,6 +712,7 @@ constexpr FramebufferImageIndex COMPOSE_RESTORE_IMAGES[COMPOSE_RESTORE_COUNT] =
     FB_IMAGE_INDEX_MOTION,
     FB_IMAGE_INDEX_UNFILTERED_DIRECT,
     FB_IMAGE_INDEX_UNFILTERED_SPECULAR,
+    FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR,
     FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR,
     FB_IMAGE_INDEX_THROUGHPUT,
     FB_IMAGE_INDEX_PRE_FINAL,
@@ -708,9 +735,12 @@ constexpr FramebufferImageIndex COMPOSE_RESTORE_IMAGES[COMPOSE_RESTORE_COUNT] =
     FB_IMAGE_INDEX_Q2_VIEW_DEPTH,
     FB_IMAGE_INDEX_NORMAL_GEOMETRY,
     FB_IMAGE_INDEX_Q2_PARTICLE_LAYER,
+    FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,
+    FB_IMAGE_INDEX_Q2_FILTERED_SPEC,
+    FB_IMAGE_INDEX_Q2_GRAD_H_F_SPEC_PONG,
 };
 
-constexpr uint32_t CHAIN_RESTORE_COUNT = 62;
+constexpr uint32_t CHAIN_RESTORE_COUNT = 68;
 constexpr FramebufferImageIndex CHAIN_RESTORE_IMAGES[CHAIN_RESTORE_COUNT] =
 {
     FB_IMAGE_INDEX_SURFACE_POSITION,
@@ -728,7 +758,9 @@ constexpr FramebufferImageIndex CHAIN_RESTORE_IMAGES[CHAIN_RESTORE_COUNT] =
     FB_IMAGE_INDEX_MOTION,
     FB_IMAGE_INDEX_UNFILTERED_DIRECT,
     FB_IMAGE_INDEX_UNFILTERED_SPECULAR,
+    FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR,
     FB_IMAGE_INDEX_SURFACE_POSITION_PREV,
+    FB_IMAGE_INDEX_VIEW_DIRECTION,
     FB_IMAGE_INDEX_VIEW_DIRECTION_PREV,
     FB_IMAGE_INDEX_PRIMARY_TO_REFL_REFR,
     FB_IMAGE_INDEX_THROUGHPUT,
@@ -760,6 +792,8 @@ constexpr FramebufferImageIndex CHAIN_RESTORE_IMAGES[CHAIN_RESTORE_COUNT] =
     FB_IMAGE_INDEX_Q2_HIST_COLOR_H_F_PREV,
     FB_IMAGE_INDEX_Q2_HIST_MOMENTS_H_F,
     FB_IMAGE_INDEX_Q2_HIST_MOMENTS_H_F_PREV,
+    FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC_PREV,
+    FB_IMAGE_INDEX_Q2_FILTERED_SPEC,
     FB_IMAGE_INDEX_Q2_FILTERED_SPEC_PREV,
     FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_S_H,
     FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_C_O_C_G,
@@ -775,13 +809,17 @@ constexpr FramebufferImageIndex CHAIN_RESTORE_IMAGES[CHAIN_RESTORE_COUNT] =
     FB_IMAGE_INDEX_Q2_GLASS_REFLECTION_PREV,
     FB_IMAGE_INDEX_Q2_GLASS_HISTORY_PREV,
     FB_IMAGE_INDEX_Q2_PARTICLE_LAYER,
+    FB_IMAGE_INDEX_Q2_GRAD_SAVED_SURF_POS,
+    FB_IMAGE_INDEX_Q2_GRAD_SAVED_VIEW_DIR,
 };
 
 // The reproject's sampled reads and the TAAU's: each call is self-contained, so it restores what it
 // read even when a later call of the frame is skipped.
-constexpr uint32_t GRADIENT_REPROJECT_RESTORE_COUNT = 15;
+constexpr uint32_t GRADIENT_REPROJECT_RESTORE_COUNT = 17;
 constexpr FramebufferImageIndex GRADIENT_REPROJECT_RESTORE_IMAGES[GRADIENT_REPROJECT_RESTORE_COUNT] =
 {
+    FB_IMAGE_INDEX_ALBEDO,
+    FB_IMAGE_INDEX_ALBEDO_PREV,
     FB_IMAGE_INDEX_NORMAL_PREV,
     FB_IMAGE_INDEX_NORMAL_GEOMETRY,
     FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,
@@ -905,6 +943,104 @@ static_assert(ComposeTablesAreConsistent(),
               "every compose binding has to resolve to a union image");
 static_assert(AreComposeImagesDistinct(), "the compose image union must not repeat an image");
 static_assert(AreRestoreImagesWrapped(), "every restored image has to be in the compose image union");
+
+constexpr bool ContainsImage(const FramebufferImageIndex *list, uint32_t count, FramebufferImageIndex img)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (list[i] == img)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr void ApplyPassStates(const ComposeBinding *bindings, uint32_t count,
+                               int8_t (&state)[COMPOSE_IMAGE_COUNT])
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (bindings[i].isSampler)
+        {
+            continue;
+        }
+        const uint32_t slot = FindComposeImage(bindings[i].image);
+        state[slot] = bindings[i].isUAV ? 1 : 2;
+    }
+}
+
+constexpr void ApplyOverlayHandoffStates(int8_t (&state)[COMPOSE_IMAGE_COUNT])
+{
+    for (uint32_t i = 0; i < RASTER_OVERLAY_HANDOFF_COUNT; i++)
+    {
+        const uint32_t slot = FindComposeImage(RASTER_OVERLAY_HANDOFF_IMAGES[i]);
+        state[slot] = 1;
+    }
+}
+
+constexpr bool AllReadOnlyStatesRestored(const int8_t (&state)[COMPOSE_IMAGE_COUNT],
+                                         const FramebufferImageIndex *restore,
+                                         uint32_t restoreCount)
+{
+    for (uint32_t i = 0; i < COMPOSE_IMAGE_COUNT; i++)
+    {
+        if (state[i] == 2 && !ContainsImage(restore, restoreCount, COMPOSE_IMAGES[i].image))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+constexpr bool SequenceRestoredBy(bool filtered, bool glassBlur,
+                                  const FramebufferImageIndex *restore, uint32_t restoreCount)
+{
+    int8_t state[COMPOSE_IMAGE_COUNT] = {};
+    ApplyPassStates(ADAPTER_BINDINGS, ADAPTER_BINDING_COUNT, state);
+    if (filtered)
+    {
+        ApplyPassStates(GRADIENT_IMG_BINDINGS, GRADIENT_IMG_BINDING_COUNT, state);
+        ApplyPassStates(GRADIENT_ATROUS_BINDINGS, GRADIENT_ATROUS_BINDING_COUNT, state);
+        ApplyPassStates(TEMPORAL_BINDINGS, TEMPORAL_BINDING_COUNT, state);
+        ApplyPassStates(ATROUS_LF_BINDINGS, ATROUS_LF_BINDING_COUNT, state);
+        ApplyPassStates(ATROUS_BINDINGS, ATROUS_BINDING_COUNT, state);
+    }
+    ApplyPassStates(INTERLEAVE_BINDINGS, INTERLEAVE_BINDING_COUNT, state);
+    ApplyPassStates(HISTOGRAM_BINDINGS, HISTOGRAM_BINDING_COUNT, state);
+    ApplyPassStates(CHECKERBOARD_BINDINGS, CHECKERBOARD_BINDING_COUNT, state);
+    ApplyOverlayHandoffStates(state);
+    ApplyPassStates(PREPARE_HDR_BINDINGS, PREPARE_HDR_BINDING_COUNT, state);
+    if (glassBlur)
+    {
+        ApplyPassStates(GLASS_BLUR_BINDINGS, GLASS_BLUR_BINDING_COUNT, state);
+    }
+    ApplyPassStates(PREPARE_FINAL_BINDINGS, PREPARE_FINAL_BINDING_COUNT, state);
+    return AllReadOnlyStatesRestored(state, restore, restoreCount);
+}
+
+constexpr bool BindingReadOnlyCoveredBy(const ComposeBinding *bindings, uint32_t bindingCount,
+                                        const FramebufferImageIndex *restore, uint32_t restoreCount)
+{
+    int8_t state[COMPOSE_IMAGE_COUNT] = {};
+    ApplyPassStates(bindings, bindingCount, state);
+    return AllReadOnlyStatesRestored(state, restore, restoreCount);
+}
+
+constexpr bool RestoreListsCoverSampledReads()
+{
+    return SequenceRestoredBy(false, false, COMPOSE_RESTORE_IMAGES, COMPOSE_RESTORE_COUNT) &&
+           SequenceRestoredBy(false, true, COMPOSE_RESTORE_IMAGES, COMPOSE_RESTORE_COUNT) &&
+           SequenceRestoredBy(true, false, CHAIN_RESTORE_IMAGES, CHAIN_RESTORE_COUNT) &&
+           SequenceRestoredBy(true, true, CHAIN_RESTORE_IMAGES, CHAIN_RESTORE_COUNT) &&
+           BindingReadOnlyCoveredBy(GRADIENT_REPROJECT_BINDINGS, GRADIENT_REPROJECT_BINDING_COUNT,
+                                    GRADIENT_REPROJECT_RESTORE_IMAGES, GRADIENT_REPROJECT_RESTORE_COUNT) &&
+           BindingReadOnlyCoveredBy(TAAU_BINDINGS, TAAU_BINDING_COUNT,
+                                    TAAU_RESTORE_IMAGES, TAAU_RESTORE_COUNT);
+}
+
+static_assert(RestoreListsCoverSampledReads(),
+              "every pass sequence must restore all images whose last binding is a sampled read");
 
 // The union positions of the two images the present can sample (GetFinalTexture,
 // GetUpscaledTexture).
@@ -1925,17 +2061,20 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
         opticalDummyCleared = true;
     }
 
-    // The legacy dispatch arithmetic (Q2Denoiser.cpp:344-345, :400-408, :472, :519, :593,
-    // :606-607, ImageComposition.cpp:198-199, Tonemapping.cpp:176-179). `Utils::GetWorkGroupCount`
-    // is `1 + ceil(size / 16)`, one workgroup beyond the ceiling; the shaders' bounds check on
-    // `globalUniform.renderWidth/renderHeight` discards those invocations. The gradient and
-    // LF-a-trous dispatches run over the third of the render size the strata cover.
+    // `Utils::GetWorkGroupCount` computes `ceil(size / groupSize)` (minimum 1); the shaders'
+    // bounds checks discard trailing lanes. Gradient passes operate on complete 3x3 strata
+    // (`width / 3`), whereas `atrousLf` operates on `(width + 1) / 3` LF anchors
+    // (`ipos * 3 + 1 < renderWidth`), which includes index `width / 3` when `dim % 3 == 2`.
     const uint32_t groupsX = Utils::GetWorkGroupCount(width, COMPOSE_GROUP_SIZE);
     const uint32_t groupsY = Utils::GetWorkGroupCount(height, COMPOSE_GROUP_SIZE);
     const uint32_t temporalGroupsX = Utils::GetWorkGroupCount(width, TEMPORAL_GROUP_SIZE);
     const uint32_t temporalGroupsY = Utils::GetWorkGroupCount(height, TEMPORAL_GROUP_SIZE);
     const uint32_t gradientGroupsX = Utils::GetWorkGroupCount(width / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
     const uint32_t gradientGroupsY = Utils::GetWorkGroupCount(height / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
+    const uint32_t atrousLfGroupsX =
+        Utils::GetWorkGroupCount((width + 1) / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
+    const uint32_t atrousLfGroupsY =
+        Utils::GetWorkGroupCount((height + 1) / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
 
     // The adapter always runs; it dispatches by the switch itself (CmQ2Adapter.comp.hlsl:193-213),
     // so it either composites the raw ReSTIR signal into Q2_COLOR or anti-fireflies it into the
@@ -1982,7 +2121,7 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
         {
             RecordDispatch(pCommandList, atrousLfPipeline,
                            { target.atrousLfSet, target.uniformSet },
-                           gradientGroupsX, gradientGroupsY, 1, &i);
+                           atrousLfGroupsX, atrousLfGroupsY, 1, &i);
 
             if (i + 1 < COMPUTE_SVGF_ATROUS_ITERATION_COUNT)
             {

@@ -54,6 +54,26 @@
 // The GLSL original declares the workgroup size here; in HLSL it is an attribute of the
 // entry point instead, so the shader itself carries [numthreads(16, 16, 1)].
 
+bool q2IsPrevGradientSample(const int2 pp, const int width, const int height)
+{
+    if (!q2InGradBounds(pp, width, height))
+    {
+        return false;
+    }
+
+    const int2 pos_grad_prev = pp / Q2_GRAD_DWN;
+    const uint prev_grad_sample_pos = framebufQ2GradSmplPos_Prev_Sampled.Load(int3(pos_grad_prev, 0)).x;
+    if ((prev_grad_sample_pos & (1u << 31)) == 0u)
+    {
+        return false;
+    }
+
+    const int2 stratum_prev = int2(
+        (prev_grad_sample_pos >> (Q2_STRATUM_OFFSET_SHIFT * 0)) & Q2_STRATUM_OFFSET_MASK,
+        (prev_grad_sample_pos >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
+    return all(pos_grad_prev * Q2_GRAD_DWN + stratum_prev == pp);
+}
+
 [numthreads(16, 16, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -71,6 +91,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const float inv_width = 1.0 / globalUniform.renderWidth;
     const float inv_height = 1.0 / globalUniform.renderHeight;
+    const bool halfResIndir = (globalUniform.giBounceRays.x >= 0.25 && globalUniform.giBounceRays.x < 0.75);
+    const int currTracedParity = (int)(globalUniform.frameId & 1u);
+    const int prevTracedParity = currTracedParity ^ 1;
 
     bool found = false;
     int2 found_offset = (int2)0;
@@ -82,6 +105,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         for (int offx = 0; offx < Q2_GRAD_DWN; offx++)
         {
             int2 p = pos_grad * Q2_GRAD_DWN + int2(offx, offy);
+            if (halfResIndir && ((p.y & 1) != currTracedParity))
+            {
+                continue;
+            }
 
             // Reproject the current pixel into the previous frame
             float4 motion = framebufMotion_Sampled.Load(int3(p, 0));
@@ -119,14 +146,18 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                 }
             }
 
+            if (halfResIndir && ((pp.y & 1) != prevTracedParity))
+            {
+                pp.y ^= 1;
+                if (pp.y >= height)
+                {
+                    continue;
+                }
+            }
+
             // Don't reuse the same pixel if it was a gradient sample on the
             // previous frame (carrying the same RNG forward would add bias).
-            int2 pos_grad_prev = pp / Q2_GRAD_DWN;
-            uint prev_grad_sample_pos = framebufQ2GradSmplPos_Prev_Sampled.Load(int3(pos_grad_prev, 0)).x;
-            int2 stratum_prev = int2(
-                (prev_grad_sample_pos >> (Q2_STRATUM_OFFSET_SHIFT * 0)) & Q2_STRATUM_OFFSET_MASK,
-                (prev_grad_sample_pos >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
-            if (all(pos_grad_prev * Q2_GRAD_DWN + stratum_prev == pp))
+            if (q2IsPrevGradientSample(pp, width, height))
             {
                 continue;
             }
@@ -203,6 +234,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         (float)((curr_normal_enc >> 16) & 0xFFu),
         (float)((curr_normal_enc >> 24) & 0xFFu));
     framebufQ2Metallic[ipos] = float4(curr_mr, 0.0, 0.0);
+    framebufQ2GradSavedSurfPos[pos_grad] = framebufSurfacePosition[ipos];
+    framebufQ2GradSavedViewDir[pos_grad] = framebufViewDirection[ipos];
 
     framebufNormal[ipos] =
                framebufNormal_Prev_Sampled.Load(int3(found_pos_prev, 0));

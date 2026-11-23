@@ -92,11 +92,11 @@ filter_image(
     RWTexture2D<float4> img_moments,
     out float3 filtered_hf,
     out float3 filtered_spec,
-    out float2 filtered_moments)
+    out float4 filtered_moments)
 {
     float3 color_center_hf = q2UnpackRGBE(img_hf.Load( ipos ).r);
     float3 color_center_spec = q2UnpackRGBE(img_spec.Load( ipos ).r);
-    float2 moments_center = img_moments.Load( ipos ).xy;
+    float4 moments_center = img_moments.Load( ipos );
 
     if(Q2_ATROUS_ITERATIONS_HF <= q2AtrousIteration && Q2_ATROUS_ITERATIONS_SPEC <= q2AtrousIteration)
     {
@@ -115,6 +115,8 @@ filter_image(
     float sigma_l_hf = 0;
 
     float hist_len_hf = framebufQ2HistMomentsHF_Sampled.Load(int3( ipos, 0 )).b;
+    float hist_len_spec = max(framebufQ2FilteredSpec_Sampled.Load(int3( ipos, 0 )).a, 1.0);
+    float spec_hit_dist = framebufViewDirection_Sampled.Load(int3( ipos, 0 )).w;
 
     if(Q2_FLT_ATROUS_LUM_HF != 0 && hist_len_hf > 1)
     {
@@ -129,20 +131,28 @@ filter_image(
         sigma_l_hf = 0;
     }
 
-    // reduce the HF filter sensitivity to normals when the lighting is invalidated
-    float normal_weight_scale = clamp(hist_len_hf / 8, 0, 1);
+    const float lum_mean_spec = moments_center.z;
+    const float var_spec = max(0.0, moments_center.w - moments_center.z * moments_center.z);
+    const float hist_var_scale = (hist_len_spec < 4.0)
+        ? lerp(4.0, 1.0, saturate((hist_len_spec - 1.0) / 3.0))
+        : (1.0 / clamp(hist_len_spec * 0.25, 1.0, 8.0));
+    const float inv_lum_scale_spec = (Q2_FLT_ATROUS_LUM_SPEC != 0.0)
+        ? (1.0 / ((Q2_FLT_ATROUS_LUM_SPEC * 0.125) * sqrt(var_spec * hist_var_scale) + 0.05))
+        : 0.0;
 
-    float normal_weight_hf = Q2_FLT_ATROUS_NORMAL_HF;
-    normal_weight_hf *= normal_weight_scale;
+    // Reduce filter sensitivity to normals independently for HF and SPEC when history is invalidated
+    float normal_weight_scale_hf = clamp(hist_len_hf / 8.0, 0.0, 1.0);
+    float normal_weight_scale_spec = clamp(hist_len_spec / 8.0, 0.0, 1.0);
+
+    float normal_weight_hf = Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf;
     float normal_weight_spec = roughnessSquaredToSpecPower(square(roughness_center)) * Q2_FLT_ATROUS_NORMAL_SPEC;
-    normal_weight_spec = clamp(normal_weight_spec, 8, 1024);
-    normal_weight_spec *= normal_weight_scale;
+    normal_weight_spec = clamp(normal_weight_spec, 8.0, 1024.0) * normal_weight_scale_spec;
 
     const int step_size = (int)(1u << q2AtrousIteration);
 
     float3 sum_color_hf = color_center_hf.rgb;
     float3 sum_color_spec = color_center_spec.rgb;
-    float2 sum_moments = moments_center;
+    float4 sum_moments = moments_center;
 
     float sum_w_hf = 1.0;
     float sum_w_spec = 1.0;
@@ -158,11 +168,51 @@ filter_image(
         field_right = width;
     }
 
-    // Primary opaque surfaces (depth_center > 0) receive 1-spp stochastic specular from
-    // RtQ2Indirect rather than the deterministic mirror path; keep a small spatial filter
-    // floor so mirror-smooth texels (e.g. weapon gloss=255) do not expose raw 1-spp dots.
-    const float spec_filter_roughness = depth_center > 0.0 ? max(roughness_center, 0.08) : roughness_center;
-    float spec_filter_width_scale = clamp(spec_filter_roughness * 30 - (float)q2AtrousIteration, 0, 1);
+    if (spec_hit_dist < 0.0 && depth_center > 1e-4 && !isSkyPix(ipos) && dot(normal_center, normal_center) > 0.5)
+    {
+        float minValidDist = Q2_MAX_VIEW_DIR_HIT_DIST + 1.0;
+        [unroll]
+        for (int dy = -1; dy <= 1; dy += 2)
+        {
+            const int ny = ipos.y + dy;
+            if (ny >= 0 && ny < height)
+            {
+                const int2 np = int2(ipos.x, ny);
+                const float nDepth = framebufQ2ViewDepth_Sampled.Load(int3(np, 0)).r;
+                if (abs(depth_center - nDepth) / max(abs(depth_center), 1e-3) < 0.05
+                    && dot(normal_center, texelFetchNormal(np)) > 0.95)
+                {
+                    const float nDist = framebufViewDirection_Sampled.Load(int3(np, 0)).w;
+                    if (nDist >= 0.0)
+                    {
+                        minValidDist = min(minValidDist, min(nDist, Q2_MAX_VIEW_DIR_HIT_DIST));
+                    }
+                }
+            }
+        }
+        if (minValidDist <= Q2_MAX_VIEW_DIR_HIT_DIST)
+        {
+            spec_hit_dist = minValidDist;
+        }
+    }
+
+    // GGX cone-footprint filter radius scaling: smoothly taper spatial blur down on converged mirrors
+    // (< 0.03), while scaling glossy/rough spatial reach by screen resolution and hit distance.
+    const float spec_alpha = square(roughness_center);
+    const float spec_eff_dist = (spec_hit_dist > 0.0)
+        ? min(spec_hit_dist, Q2_MAX_VIEW_DIR_HIT_DIST)
+        : abs(depth_center);
+    const float spec_cone_radius = spec_alpha
+        * (spec_eff_dist / max(abs(depth_center) + spec_eff_dist, 1e-3))
+        * globalUniform.renderHeight * 0.5;
+    const float hist_floor_radius = lerp(2.0, 0.0, saturate((hist_len_spec - 1.0) / 3.0));
+    const float hist_taper = lerp(1.0, 0.45, saturate((hist_len_spec - 8.0) / 32.0));
+    const float mirror_gate = lerp(1.0, smoothstep(0.02, 0.035, roughness_center), saturate((hist_len_spec - 1.0) / 3.0));
+    const float eff_spec_radius = max(spec_cone_radius * hist_taper, hist_floor_radius) * mirror_gate;
+    const float spec_filter_width_scale = depth_center > 0.0
+        ? saturate(eff_spec_radius / float(step_size))
+        : clamp(roughness_center * 30.0 - (float)q2AtrousIteration, 0.0, 1.0);
+    const float rough_sharpness = lerp(4.0, 12.0, saturate(hist_len_spec / 16.0));
 
     // Compute the weighted average of color and moments from a sparse 3x3 pattern around the target pixel
     const int r = 1;
@@ -187,30 +237,34 @@ filter_image(
             w *= exp(-dist_z / (float)step_size);
             w *= Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
 
-            float w_hf = w;
-
             float3 c_hf = q2UnpackRGBE(img_hf.Load( p ).r);
             float3 c_spec = q2UnpackRGBE(img_spec.Load( p ).r);
-            float2 c_mom = img_moments.Load( p ).xy;
+            float4 c_mom = img_moments.Load( p );
             float l_hf = getLuminance(c_hf.rgb);
             float dist_l_hf = abs(lum_mean_hf - l_hf);
 
-            w_hf *= exp(- dist_l_hf * dist_l_hf * sigma_l_hf);
+            float w_hf = w * exp(- dist_l_hf * dist_l_hf * sigma_l_hf);
 
-            float w_spec = w_hf;
-            w_spec *= max(0, 1 - 10 * abs(roughness - roughness_center));
+            float l_spec = getLuminance(c_spec.rgb);
+            float dist_l_spec = abs(lum_mean_spec - l_spec);
+            float w_spec = w;
+            if(inv_lum_scale_spec > 0.0)
+            {
+                w_spec *= exp(-dist_l_spec * inv_lum_scale_spec);
+            }
+            w_spec *= exp(-abs(roughness - roughness_center) * rough_sharpness);
             w_spec *= spec_filter_width_scale;
 
             float NdotN = max(0.0, dot(normal_center, normal));
 
             if(normal_weight_hf > 0)
             {
-                w_hf *= pow(NdotN, normal_weight_hf);
+                w_hf *= q2SafePow(NdotN, normal_weight_hf);
             }
 
             if(normal_weight_spec > 0)
             {
-                w_spec *= pow(NdotN, normal_weight_spec);
+                w_spec *= q2SafePow(NdotN, normal_weight_spec);
             }
 
             if(Q2_ATROUS_ITERATIONS_HF <= q2AtrousIteration)
@@ -221,7 +275,8 @@ filter_image(
 
             sum_color_hf += c_hf.rgb * w_hf;
             sum_color_spec += c_spec.rgb * w_spec;
-            sum_moments  += c_mom * w_hf;
+            sum_moments.xy += c_mom.xy * w_hf;
+            sum_moments.zw += c_mom.zw * w_spec;
             sum_w_hf     += w_hf;
             sum_w_spec   += w_spec;
         }
@@ -229,7 +284,8 @@ filter_image(
 
     filtered_hf = sum_color_hf / sum_w_hf;
     filtered_spec = sum_color_spec / sum_w_spec;
-    filtered_moments = sum_moments / sum_w_hf;
+    filtered_moments.xy = sum_moments.xy / sum_w_hf;
+    filtered_moments.zw = sum_moments.zw / sum_w_spec;
 }
 
 // Bilinear/bilateral interpolation of the LF channel data (denoised at 1/3 resolution)
@@ -314,7 +370,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float3 filtered_hf;
     float3 filtered_spec;
-    float2 filtered_moments;
+    float4 filtered_moments;
 
     // Read the HF/SPEC/moments inputs through their storage images, not the sampled views:
     // this pass also writes them (each iteration reads the field the previous one wrote),
@@ -334,17 +390,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     case 0:
         framebufQ2HistColorHF[ipos] = (uint4)q2PackRGBE(filtered_hf);
         framebufQ2AtrousPongSpec[ipos] = (uint4)q2PackRGBE(filtered_spec);
-        framebufQ2AtrousPongMoments[ipos] = float4(filtered_moments, 0, 0);
+        framebufQ2AtrousPongMoments[ipos] = filtered_moments;
         break;
     case 1:
         framebufQ2AtrousPingHF[ipos] = (uint4)q2PackRGBE(filtered_hf);
         framebufQ2AtrousPingSpec[ipos] = (uint4)q2PackRGBE(filtered_spec);
-        framebufQ2AtrousPingMoments[ipos] = float4(filtered_moments, 0, 0);
+        framebufQ2AtrousPingMoments[ipos] = filtered_moments;
         break;
     case 2:
         framebufQ2AtrousPongHF[ipos] = (uint4)q2PackRGBE(filtered_hf);
         framebufQ2AtrousPongSpec[ipos] = (uint4)q2PackRGBE(filtered_spec);
-        framebufQ2AtrousPongMoments[ipos] = float4(filtered_moments, 0, 0);
+        framebufQ2AtrousPongMoments[ipos] = filtered_moments;
         break;
     }
 

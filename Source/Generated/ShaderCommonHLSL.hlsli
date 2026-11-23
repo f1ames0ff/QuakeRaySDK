@@ -517,11 +517,11 @@ struct ShPortalInstance
 #define FB_IMAGE_INDEX_DIFF_TEMPORARY 34
 #define FB_IMAGE_INDEX_DIFF_ACCUM_COLOR 35
 #define FB_IMAGE_INDEX_DIFF_ACCUM_COLOR_PREV 36
-#define FB_IMAGE_INDEX_DIFF_ACCUM_MOMENTS 37
-#define FB_IMAGE_INDEX_DIFF_ACCUM_MOMENTS_PREV 38
-#define FB_IMAGE_INDEX_DIFF_COLOR_HISTORY 39
-#define FB_IMAGE_INDEX_DIFF_PING_COLOR_AND_VARIANCE 40
-#define FB_IMAGE_INDEX_DIFF_PONG_COLOR_AND_VARIANCE 41
+#define FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC 37
+#define FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC_PREV 38
+#define FB_IMAGE_INDEX_Q2_GRAD_SAVED_SURF_POS 39
+#define FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR 40
+#define FB_IMAGE_INDEX_Q2_GRAD_SAVED_VIEW_DIR 41
 #define FB_IMAGE_INDEX_SPEC_ACCUM_COLOR 42
 #define FB_IMAGE_INDEX_SPEC_ACCUM_COLOR_PREV 43
 #define FB_IMAGE_INDEX_SPEC_PING_COLOR 44
@@ -661,11 +661,11 @@ struct ShPortalInstance
 [[vk::binding(34, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufDiffTemporary;
 [[vk::binding(35, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufDiffAccumColor;
 [[vk::binding(36, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufDiffAccumColor_Prev;
-[[vk::binding(37, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufDiffAccumMoments;
-[[vk::binding(38, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufDiffAccumMoments_Prev;
-[[vk::binding(39, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufDiffColorHistory;
-[[vk::binding(40, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufDiffPingColorAndVariance;
-[[vk::binding(41, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufDiffPongColorAndVariance;
+[[vk::binding(37, DESC_SET_FRAMEBUFFERS), vk::image_format("rg32f")]] RWTexture2D<float4> framebufQ2HistMomentsSpec;
+[[vk::binding(38, DESC_SET_FRAMEBUFFERS), vk::image_format("rg32f")]] RWTexture2D<float4> framebufQ2HistMomentsSpec_Prev;
+[[vk::binding(39, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba32f")]] RWTexture2D<float4> framebufQ2GradSavedSurfPos;
+[[vk::binding(40, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufUnfilteredIndirectSpecular;
+[[vk::binding(41, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufQ2GradSavedViewDir;
 [[vk::binding(42, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufSpecAccumColor;
 [[vk::binding(43, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufSpecAccumColor_Prev;
 [[vk::binding(44, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufSpecPingColor;
@@ -723,8 +723,8 @@ struct ShPortalInstance
 [[vk::binding(94, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufQ2HistColorLF_COCG_Prev;
 [[vk::binding(95, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufQ2HistColorHF;
 [[vk::binding(96, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufQ2HistColorHF_Prev;
-[[vk::binding(97, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufQ2HistMomentsHF;
-[[vk::binding(98, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufQ2HistMomentsHF_Prev;
+[[vk::binding(97, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba32f")]] RWTexture2D<float4> framebufQ2HistMomentsHF;
+[[vk::binding(98, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba32f")]] RWTexture2D<float4> framebufQ2HistMomentsHF_Prev;
 [[vk::binding(99, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufQ2FilteredSpec;
 [[vk::binding(100, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufQ2FilteredSpec_Prev;
 [[vk::binding(101, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba16f")]] RWTexture2D<float4> framebufQ2AtrousPingLF_SH;
@@ -735,8 +735,8 @@ struct ShPortalInstance
 [[vk::binding(106, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufQ2AtrousPongHF;
 [[vk::binding(107, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufQ2AtrousPingSpec;
 [[vk::binding(108, DESC_SET_FRAMEBUFFERS), vk::image_format("r32ui")]] RWTexture2D<uint4> framebufQ2AtrousPongSpec;
-[[vk::binding(109, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufQ2AtrousPingMoments;
-[[vk::binding(110, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufQ2AtrousPongMoments;
+[[vk::binding(109, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba32f")]] RWTexture2D<float4> framebufQ2AtrousPingMoments;
+[[vk::binding(110, DESC_SET_FRAMEBUFFERS), vk::image_format("rgba32f")]] RWTexture2D<float4> framebufQ2AtrousPongMoments;
 [[vk::binding(111, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufQ2GradLFPing;
 [[vk::binding(112, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufQ2GradLFPong;
 [[vk::binding(113, DESC_SET_FRAMEBUFFERS), vk::image_format("rg16f")]] RWTexture2D<float4> framebufQ2GradHFSpecPing;
@@ -807,11 +807,11 @@ struct ShPortalInstance
 [[vk::binding(166, DESC_SET_FRAMEBUFFERS)]] Texture2D<uint4> framebufDiffTemporary_Sampled;
 [[vk::binding(167, DESC_SET_FRAMEBUFFERS)]] Texture2D<uint4> framebufDiffAccumColor_Sampled;
 [[vk::binding(168, DESC_SET_FRAMEBUFFERS)]] Texture2D<uint4> framebufDiffAccumColor_Prev_Sampled;
-[[vk::binding(169, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufDiffAccumMoments_Sampled;
-[[vk::binding(170, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufDiffAccumMoments_Prev_Sampled;
-[[vk::binding(171, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufDiffColorHistory_Sampled;
-[[vk::binding(172, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufDiffPingColorAndVariance_Sampled;
-[[vk::binding(173, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufDiffPongColorAndVariance_Sampled;
+[[vk::binding(169, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufQ2HistMomentsSpec_Sampled;
+[[vk::binding(170, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufQ2HistMomentsSpec_Prev_Sampled;
+[[vk::binding(171, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufQ2GradSavedSurfPos_Sampled;
+[[vk::binding(172, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufUnfilteredIndirectSpecular_Sampled;
+[[vk::binding(173, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> framebufQ2GradSavedViewDir_Sampled;
 [[vk::binding(174, DESC_SET_FRAMEBUFFERS)]] Texture2D<uint4> framebufSpecAccumColor_Sampled;
 [[vk::binding(175, DESC_SET_FRAMEBUFFERS)]] Texture2D<uint4> framebufSpecAccumColor_Prev_Sampled;
 [[vk::binding(176, DESC_SET_FRAMEBUFFERS)]] Texture2D<uint4> framebufSpecPingColor_Sampled;
@@ -953,11 +953,11 @@ struct ShPortalInstance
 [[vk::binding(298, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffTemporary_Sampler;
 [[vk::binding(299, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffAccumColor_Sampler;
 [[vk::binding(300, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffAccumColor_Prev_Sampler;
-[[vk::binding(301, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffAccumMoments_Sampler;
-[[vk::binding(302, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffAccumMoments_Prev_Sampler;
-[[vk::binding(303, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffColorHistory_Sampler;
-[[vk::binding(304, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffPingColorAndVariance_Sampler;
-[[vk::binding(305, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufDiffPongColorAndVariance_Sampler;
+[[vk::binding(301, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufQ2HistMomentsSpec_Sampler;
+[[vk::binding(302, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufQ2HistMomentsSpec_Prev_Sampler;
+[[vk::binding(303, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufQ2GradSavedSurfPos_Sampler;
+[[vk::binding(304, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufUnfilteredIndirectSpecular_Sampler;
+[[vk::binding(305, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufQ2GradSavedViewDir_Sampler;
 [[vk::binding(306, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufSpecAccumColor_Sampler;
 [[vk::binding(307, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufSpecAccumColor_Prev_Sampler;
 [[vk::binding(308, DESC_SET_FRAMEBUFFERS)]] SamplerState framebufSpecPingColor_Sampler;

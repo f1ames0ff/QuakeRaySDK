@@ -381,35 +381,35 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     v += float(framebufDiffAccumColor_Prev_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufDiffAccumColor_Prev_Sampler, uv, 0.0).x;
 
-    // framebufDiffAccumMoments  rg16f
-    framebufDiffAccumMoments[pix] = float4(1.0, 1.0, 1.0, 1.0);
-    v += float(framebufDiffAccumMoments[pix].x);
-    v += float(framebufDiffAccumMoments_Sampled.Load(int3(pix, 0)).x);
-    v += framebufAlbedo_Sampled.SampleLevel(framebufDiffAccumMoments_Sampler, uv, 0.0).x;
+    // framebufQ2HistMomentsSpec  rg32f
+    framebufQ2HistMomentsSpec[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2HistMomentsSpec[pix].x);
+    v += float(framebufQ2HistMomentsSpec_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2HistMomentsSpec_Sampler, uv, 0.0).x;
 
-    // framebufDiffAccumMoments_Prev  rg16f
-    framebufDiffAccumMoments_Prev[pix] = float4(1.0, 1.0, 1.0, 1.0);
-    v += float(framebufDiffAccumMoments_Prev[pix].x);
-    v += float(framebufDiffAccumMoments_Prev_Sampled.Load(int3(pix, 0)).x);
-    v += framebufAlbedo_Sampled.SampleLevel(framebufDiffAccumMoments_Prev_Sampler, uv, 0.0).x;
+    // framebufQ2HistMomentsSpec_Prev  rg32f
+    framebufQ2HistMomentsSpec_Prev[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2HistMomentsSpec_Prev[pix].x);
+    v += float(framebufQ2HistMomentsSpec_Prev_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2HistMomentsSpec_Prev_Sampler, uv, 0.0).x;
 
-    // framebufDiffColorHistory  rgba16f
-    framebufDiffColorHistory[pix] = float4(1.0, 1.0, 1.0, 1.0);
-    v += float(framebufDiffColorHistory[pix].x);
-    v += float(framebufDiffColorHistory_Sampled.Load(int3(pix, 0)).x);
-    v += framebufAlbedo_Sampled.SampleLevel(framebufDiffColorHistory_Sampler, uv, 0.0).x;
+    // framebufQ2GradSavedSurfPos  rgba32f
+    framebufQ2GradSavedSurfPos[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2GradSavedSurfPos[pix].x);
+    v += float(framebufQ2GradSavedSurfPos_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2GradSavedSurfPos_Sampler, uv, 0.0).x;
 
-    // framebufDiffPingColorAndVariance  rgba16f
-    framebufDiffPingColorAndVariance[pix] = float4(1.0, 1.0, 1.0, 1.0);
-    v += float(framebufDiffPingColorAndVariance[pix].x);
-    v += float(framebufDiffPingColorAndVariance_Sampled.Load(int3(pix, 0)).x);
-    v += framebufAlbedo_Sampled.SampleLevel(framebufDiffPingColorAndVariance_Sampler, uv, 0.0).x;
+    // framebufUnfilteredIndirectSpecular  rgba16f
+    framebufUnfilteredIndirectSpecular[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufUnfilteredIndirectSpecular[pix].x);
+    v += float(framebufUnfilteredIndirectSpecular_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufUnfilteredIndirectSpecular_Sampler, uv, 0.0).x;
 
-    // framebufDiffPongColorAndVariance  rgba16f
-    framebufDiffPongColorAndVariance[pix] = float4(1.0, 1.0, 1.0, 1.0);
-    v += float(framebufDiffPongColorAndVariance[pix].x);
-    v += float(framebufDiffPongColorAndVariance_Sampled.Load(int3(pix, 0)).x);
-    v += framebufAlbedo_Sampled.SampleLevel(framebufDiffPongColorAndVariance_Sampler, uv, 0.0).x;
+    // framebufQ2GradSavedViewDir  rgba16f
+    framebufQ2GradSavedViewDir[pix] = float4(1.0, 1.0, 1.0, 1.0);
+    v += float(framebufQ2GradSavedViewDir[pix].x);
+    v += float(framebufQ2GradSavedViewDir_Sampled.Load(int3(pix, 0)).x);
+    v += framebufAlbedo_Sampled.SampleLevel(framebufQ2GradSavedViewDir_Sampler, uv, 0.0).x;
 
     // framebufSpecAccumColor  r32ui
     framebufSpecAccumColor[pix] = uint4(1u, 1u, 1u, 1u);
@@ -741,13 +741,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     v += float(framebufQ2HistColorHF_Prev_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufQ2HistColorHF_Prev_Sampler, uv, 0.0).x;
 
-    // framebufQ2HistMomentsHF  rgba16f
+    // framebufQ2HistMomentsHF  rgba32f
     framebufQ2HistMomentsHF[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufQ2HistMomentsHF[pix].x);
     v += float(framebufQ2HistMomentsHF_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufQ2HistMomentsHF_Sampler, uv, 0.0).x;
 
-    // framebufQ2HistMomentsHF_Prev  rgba16f
+    // framebufQ2HistMomentsHF_Prev  rgba32f
     framebufQ2HistMomentsHF_Prev[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufQ2HistMomentsHF_Prev[pix].x);
     v += float(framebufQ2HistMomentsHF_Prev_Sampled.Load(int3(pix, 0)).x);
@@ -813,13 +813,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     v += float(framebufQ2AtrousPongSpec_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufQ2AtrousPongSpec_Sampler, uv, 0.0).x;
 
-    // framebufQ2AtrousPingMoments  rg16f
+    // framebufQ2AtrousPingMoments  rgba32f
     framebufQ2AtrousPingMoments[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufQ2AtrousPingMoments[pix].x);
     v += float(framebufQ2AtrousPingMoments_Sampled.Load(int3(pix, 0)).x);
     v += framebufAlbedo_Sampled.SampleLevel(framebufQ2AtrousPingMoments_Sampler, uv, 0.0).x;
 
-    // framebufQ2AtrousPongMoments  rg16f
+    // framebufQ2AtrousPongMoments  rgba32f
     framebufQ2AtrousPongMoments[pix] = float4(1.0, 1.0, 1.0, 1.0);
     v += float(framebufQ2AtrousPongMoments[pix].x);
     v += float(framebufQ2AtrousPongMoments_Sampled.Load(int3(pix, 0)).x);

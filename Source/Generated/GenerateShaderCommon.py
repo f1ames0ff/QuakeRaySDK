@@ -875,10 +875,10 @@ FRAMEBUFFERS = {
 
     "DiffTemporary"                     : (PACKED_E5, CHANNELS_RGB,  0),
     "DiffAccumColor"                    : (PACKED_E5, CHANNELS_RGB,  FRAMEBUF_FLAGS_STORE_PREV),
-    "DiffAccumMoments"                  : (FLOAT16,   CHANNELS_RG,   FRAMEBUF_FLAGS_STORE_PREV),
-    "DiffColorHistory"                  : (FLOAT16,   CHANNELS_RGBA, 0),
-    "DiffPingColorAndVariance"          : (FLOAT16,   CHANNELS_RGBA, 0),
-    "DiffPongColorAndVariance"          : (FLOAT16,   CHANNELS_RGBA, 0),
+    "Q2HistMomentsSpec"                 : (FLOAT32,   CHANNELS_RG,   FRAMEBUF_FLAGS_STORE_PREV),
+    "Q2GradSavedSurfPos"                : (FLOAT32,   CHANNELS_RGBA, FRAMEBUF_FLAGS_FORCE_SIZE_1_3),
+    "UnfilteredIndirectSpecular"        : (FLOAT16,   CHANNELS_RGBA, 0),
+    "Q2GradSavedViewDir"                : (FLOAT16,   CHANNELS_RGBA, FRAMEBUF_FLAGS_FORCE_SIZE_1_3),
 
     "SpecAccumColor"                    : (PACKED_E5, CHANNELS_RGB,  FRAMEBUF_FLAGS_STORE_PREV),
     "SpecPingColor"                     : (PACKED_E5, CHANNELS_RGB,  0),
@@ -943,7 +943,7 @@ if Q2_CORE_ENABLED:
         "Q2HistColorLF_SH"              : (FLOAT16,   CHANNELS_RGBA, FRAMEBUF_FLAGS_STORE_PREV),
         "Q2HistColorLF_COCG"            : (FLOAT16,   CHANNELS_RG,   FRAMEBUF_FLAGS_STORE_PREV),
         "Q2HistColorHF"                 : (UINT32,    CHANNELS_R,    FRAMEBUF_FLAGS_STORE_PREV),
-        "Q2HistMomentsHF"               : (FLOAT16,   CHANNELS_RGBA, FRAMEBUF_FLAGS_STORE_PREV),
+        "Q2HistMomentsHF"               : (FLOAT32,   CHANNELS_RGBA, FRAMEBUF_FLAGS_STORE_PREV),
         "Q2FilteredSpec"                : (FLOAT16,   CHANNELS_RGBA, FRAMEBUF_FLAGS_STORE_PREV),
 
         "Q2AtrousPingLF_SH"             : (FLOAT16,   CHANNELS_RGBA, FRAMEBUF_FLAGS_FORCE_SIZE_1_3),
@@ -954,8 +954,8 @@ if Q2_CORE_ENABLED:
         "Q2AtrousPongHF"                : (UINT32,    CHANNELS_R,    0),
         "Q2AtrousPingSpec"              : (UINT32,    CHANNELS_R,    0),
         "Q2AtrousPongSpec"              : (UINT32,    CHANNELS_R,    0),
-        "Q2AtrousPingMoments"           : (FLOAT16,   CHANNELS_RG,   0),
-        "Q2AtrousPongMoments"           : (FLOAT16,   CHANNELS_RG,   0),
+        "Q2AtrousPingMoments"           : (FLOAT32,   CHANNELS_RGBA, 0),
+        "Q2AtrousPongMoments"           : (FLOAT32,   CHANNELS_RGBA, 0),
 
         "Q2GradLFPing"                  : (FLOAT16,   CHANNELS_RG,   FRAMEBUF_FLAGS_FORCE_SIZE_1_3),
         "Q2GradLFPong"                  : (FLOAT16,   CHANNELS_RG,   FRAMEBUF_FLAGS_FORCE_SIZE_1_3),

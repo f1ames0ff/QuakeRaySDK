@@ -94,19 +94,20 @@ struct FramebufferBinding
     bool isUAV;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 14;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 15;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
-    { FB_IMAGE_INDEX_UNFILTERED_SPECULAR,        true  }, //  15  framebufUnfilteredSpecular (r32ui)
     { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_S_H_R,  true  }, //  16  framebufUnfilteredIndirectSH_R
     { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_S_H_G,  true  }, //  17  framebufUnfilteredIndirectSH_G
     { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_S_H_B,  true  }, //  18  framebufUnfilteredIndirectSH_B
     { FB_IMAGE_INDEX_VIEW_DIRECTION,             true  }, //  23  framebufViewDirection
+    { FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR, true }, // 40 framebufUnfilteredIndirectSpecular
     { FB_IMAGE_INDEX_ALBEDO,                     false }, // 124  framebufAlbedo_Sampled
     { FB_IMAGE_INDEX_IS_SKY,                     false }, // 126  framebufIsSky_Sampled
     { FB_IMAGE_INDEX_NORMAL,                     false }, // 127  framebufNormal_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false }, // 131  framebufMetallicRoughness_Sampled
+    { FB_IMAGE_INDEX_UNFILTERED_SPECULAR,        false }, // 139  framebufUnfilteredSpecular_Sampled
     { FB_IMAGE_INDEX_SURFACE_POSITION,           false }, // 143  framebufSurfacePosition_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,           false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,                false }, // 245  framebufQ2RngSeed_Sampled

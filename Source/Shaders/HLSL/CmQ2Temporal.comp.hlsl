@@ -110,6 +110,7 @@
 // Store some color data in shared memory for efficient access and for downsampling
 groupshared uint2 s_normal_lum[SHARED_SIZE][SHARED_SIZE];
 groupshared float s_depth[SHARED_SIZE][SHARED_SIZE];
+groupshared float2 s_spec_lum_rough[SHARED_SIZE][SHARED_SIZE];
 groupshared float4 s_lf_shy[GROUP_SIZE][GROUP_SIZE];
 groupshared float2 s_lf_cocg[GROUP_SIZE][GROUP_SIZE];
 groupshared float s_depth_width[GROUP_SIZE / Q2_GRAD_DWN][GROUP_SIZE / Q2_GRAD_DWN];
@@ -135,11 +136,33 @@ Q2SH q2LoadSH(Texture2D<float4> img_shY, Texture2D<float4> img_CoCg, int2 p)
     return r;
 }
 
+bool q2IsCurrGradientSample(const int2 p, const int width, const int height)
+{
+    if (!q2InGradBounds(p, width, height))
+    {
+        return false;
+    }
+
+    const int2 pos_grad = p / Q2_GRAD_DWN;
+    const uint u = framebufQ2GradSmplPos_Sampled.Load(int3(pos_grad, 0)).r;
+    if ((u & (1u << 31)) == 0u)
+    {
+        return false;
+    }
+
+    const int2 stratum = int2(
+        (u >> (Q2_STRATUM_OFFSET_SHIFT * 0)) & Q2_STRATUM_OFFSET_MASK,
+        (u >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
+    return all(pos_grad * Q2_GRAD_DWN + stratum == p);
+}
+
 // Preload the color data into shared memory
 void
 preload(const uint3 groupID, const uint linearIdx)
 {
-    int2 groupBase = int2(groupID.xy) * GROUP_SIZE - FILTER_RADIUS;
+    const int2 groupBase = int2(groupID.xy) * GROUP_SIZE - FILTER_RADIUS;
+    const int width = (int)globalUniform.renderWidth;
+    const int height = (int)globalUniform.renderHeight;
 
     // The size of these shared memory buffers is larger than the group size because we
     // use them for some spatial filtering. So a single load per thread is not enough.
@@ -153,9 +176,14 @@ preload(const uint3 groupID, const uint linearIdx)
         float depth = framebufQ2ViewDepth_Sampled.Load(int3(ipos, 0)).r;
         float3 normal = texelFetchNormal(ipos);
         float3 color_hf = q2UnpackRGBE(framebufQ2ColorHF_Sampled.Load(int3(ipos, 0)).r);
+        float3 color_spec = q2UnpackRGBE(framebufQ2ColorSpec_Sampled.Load(int3(ipos, 0)).r);
+        float rough = framebufMetallicRoughness_Sampled.Load(int3(ipos, 0)).y;
+        const bool isGrad = (ipos.x >= 0 && ipos.y >= 0 && ipos.x < width && ipos.y < height)
+                          && q2IsCurrGradientSample(ipos, width, height);
 
         s_normal_lum[yy][xx] = uint2(packHalf2x16(normal.xy), packHalf2x16(float2(normal.z, getLuminance(color_hf))));
         s_depth[yy][xx] = depth;
+        s_spec_lum_rough[yy][xx] = float2(getLuminance(color_spec), rough + (isGrad ? 2.0 : 0.0));
     }
 }
 
@@ -170,6 +198,36 @@ get_shared_data(const uint3 groupThreadID, int2 offset, out float depth, out flo
 
     normal = float3(unpackHalf2x16(normal_lum.x), unpackHalf2x16(normal_lum.y).x);
     lum_hf = unpackHalf2x16(normal_lum.y).y;
+}
+
+void
+get_shared_spec_data(const uint3 groupThreadID, int2 offset, out float lum_spec, out float rough, out bool is_grad)
+{
+    int2 addr = int2(groupThreadID.xy) + (int2)FILTER_RADIUS + offset;
+    float2 spec_rough = s_spec_lum_rough[addr.y][addr.x];
+    lum_spec = spec_rough.x;
+    is_grad = (spec_rough.y >= 1.5);
+    rough = is_grad ? (spec_rough.y - 2.0) : spec_rough.y;
+}
+
+bool
+q2ProjectStaticMotion(const float3 worldPos, out float2 outMotion)
+{
+    const float4 viewCur  = mul(globalUniform.view, float4(worldPos, 1.0));
+    const float4 viewPrev = mul(globalUniform.viewPrev, float4(worldPos, 1.0));
+    const float4 clipCur  = mul(globalUniform.projection, viewCur);
+    const float4 clipPrev = mul(globalUniform.projectionPrev, viewPrev);
+
+    if (clipCur.w <= 1e-4 || clipPrev.w <= 1e-4)
+    {
+        outMotion = (float2)0.0;
+        return false;
+    }
+
+    const float2 screenCur  = (clipCur.xy / clipCur.w) * 0.5 + 0.5;
+    const float2 screenPrev = (clipPrev.xy / clipPrev.w) * 0.5 + 0.5;
+    outMotion = screenPrev - screenCur;
+    return true;
 }
 
 [numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
@@ -192,6 +250,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
 
     const int width = (int)globalUniform.renderWidth;
     const int height = (int)globalUniform.renderHeight;
+    const int cb_half = width / 2;
+    const int cb_left = (ipos.x < cb_half) ? 0 : cb_half;
+    const int cb_right = (ipos.x < cb_half) ? cb_half : width;
     const float inv_width = 1.0 / globalUniform.renderWidth;
     const float inv_height = 1.0 / globalUniform.renderHeight;
 
@@ -220,13 +281,107 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
 
     float3 geo_normal_curr = texelFetchNormalGeometry(ipos);
 
-    // Try to get the history sample for all channels, including HF moments
+    // Try to get the history sample for all channels, including HF and SPEC moments
     bool temporal_sample_valid_diff = false;
     bool temporal_sample_valid_spec = false;
     Q2SH temporal_color_lf = q2InitSH();
     float3 temporal_color_hf = (float3)0.0;
     float4 temporal_color_histlen_spec = (float4)0.0;
     float4 temporal_moments_histlen_hf = (float4)0.0;
+    float2 temporal_moments_spec = (float2)0.0;
+
+    // Virtual-point parallax reprojection for SPEC: reflect hit distance into virtual
+    // reflected world point, blending back to surface motion for rough, curved, or
+    // dynamically moving reflectors (disabled on sky and secondary refl/refr surfaces).
+    const bool validPrimarySurface = (depth_curr > 1e-4) && (dot(geo_normal_curr, geo_normal_curr) > 0.5);
+    const float3 surfPos = framebufSurfacePosition_Sampled.Load(int3(ipos, 0)).xyz;
+    const float4 viewDirAndDist = framebufViewDirection_Sampled.Load(int3(ipos, 0));
+    float hitDist = (viewDirAndDist.w >= 0.0) ? min(viewDirAndDist.w, Q2_MAX_VIEW_DIR_HIT_DIST) : -1.0;
+    float3 viewDirCurr = safeNormalize(viewDirAndDist.xyz);
+    if (validPrimarySurface && hitDist < 0.0)
+    {
+        float minValidDist = Q2_MAX_VIEW_DIR_HIT_DIST + 1.0;
+        [unroll]
+        for (int dy = -1; dy <= 1; dy += 2)
+        {
+            const int ny = ipos.y + dy;
+            if (ny >= 0 && ny < height)
+            {
+                const int2 np = int2(ipos.x, ny);
+                const float nDepth = framebufQ2ViewDepth_Sampled.Load(int3(np, 0)).r;
+                if (abs(depth_curr - nDepth) / max(abs(depth_curr), 1e-3) < 0.05
+                    && dot(normal_curr, texelFetchNormal(np)) > 0.95)
+                {
+                    const float4 nView = framebufViewDirection_Sampled.Load(int3(np, 0));
+                    if (nView.w >= 0.0)
+                    {
+                        minValidDist = min(minValidDist, min(nView.w, Q2_MAX_VIEW_DIR_HIT_DIST));
+                        if (dot(viewDirAndDist.xyz, viewDirAndDist.xyz) < 1e-6)
+                        {
+                            viewDirCurr = safeNormalize(nView.xyz);
+                        }
+                    }
+                }
+            }
+        }
+        hitDist = (minValidDist <= Q2_MAX_VIEW_DIR_HIT_DIST) ? minValidDist : -1.0;
+    }
+
+    float normalVar = 0.0;
+    const int2 cardOffsets[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+    [unroll]
+    for (int ci = 0; ci < 4; ci++)
+    {
+        const int2 cp = ipos + cardOffsets[ci];
+        if (cp.x < cb_left || cp.x >= cb_right || cp.y < 0 || cp.y >= height)
+        {
+            continue;
+        }
+        float dCard;
+        float3 nCard;
+        float lumCard;
+        get_shared_data(groupThreadID, cardOffsets[ci], dCard, nCard, lumCard);
+        if (validPrimarySurface && abs(depth_curr - dCard) / max(abs(depth_curr), 1e-3) < 0.05)
+        {
+            normalVar = max(normalVar, 1.0 - dot(normal_curr, nCard));
+        }
+    }
+    const float curvMetric = normalVar * square(max(globalUniform.renderHeight / 1080.0, 0.25));
+    const float curvatureBlend = smoothstep(0.0008, 0.015, curvMetric);
+
+    float dynamicObjBlend = 1.0;
+    float2 staticSurfMotion;
+    if (validPrimarySurface && q2ProjectStaticMotion(surfPos, staticSurfMotion))
+    {
+        const float objMotionPx = length((motion.xy - staticSurfMotion) * float2(width, height));
+        dynamicObjBlend = saturate((objMotionPx - 0.5) / 2.0);
+    }
+
+    const float roughBlend = smoothstep(0.06, 0.38, metal_rough.y);
+    float surface_blend = 1.0;
+    float spec_virtual_weight = 0.0;
+    float2 motion_spec_xy = motion.xy;
+    float2 virtualMotion;
+    if (validPrimarySurface && hitDist > 0.0
+        && q2ProjectStaticMotion(surfPos + viewDirCurr * hitDist, virtualMotion))
+    {
+        surface_blend = max(roughBlend, max(curvatureBlend, dynamicObjBlend));
+        spec_virtual_weight = 1.0 - surface_blend;
+        motion_spec_xy = lerp(virtualMotion, motion.xy, surface_blend);
+    }
+
+    float2 pos_prev_spec;
+    if (sample_across_fields)
+    {
+        pos_prev_spec = ((float2(q2CheckerToFlat(ipos, width)) + (float2)0.5) * float2(inv_width, inv_height) + motion_spec_xy) * float2(width, height);
+    }
+    else
+    {
+        pos_prev_spec = ((float2(ipos) + (float2)0.5) * float2(inv_width * 2.0, inv_height) + motion_spec_xy) * float2(width / 2, height);
+    }
+
+    const float motion_z = (depth_curr < 0.0) ? -motion.z : motion.z;
+
     if (globalUniform.restirParams.z == 0u)
     {
         float temporal_sum_w_diff = 0.0;
@@ -243,7 +398,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             field_right = width;
         }
 
-        // Bilinear/bilateral filter
+        // Bilinear/bilateral filter (diffuse channels at surface motion)
         const int2 off[4] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
         float w[4] = {
             (1.0 - subpix.x) * (1.0 - subpix.y),
@@ -271,7 +426,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             // Q2ViewDepth is negative for reflection/refraction surfaces, and the
             // stored motion depth delta (motion.z) is in the positive primary
             // space - flip its sign so the motion-compensated match stays exact.
-            const float motion_z = (depth_curr < 0.0) ? -motion.z : motion.z;
             float dist_depth = abs(depth_curr - depth_prev + motion_z) / abs(depth_curr);
             float dot_normals = dot(normal_curr, normal_prev);
             float dot_geo_normals = dot(geo_normal_curr, geo_normal_prev);
@@ -286,15 +440,62 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             if(dist_depth < 0.1 && dot_geo_normals > 0.5)
             {
                 float w_diff = w[i] * max(dot_normals, 0);
-                float w_spec = w[i] * pow(max(dot_normals, 0), shininess);
 
                 Q2SH hist_color_lf = q2LoadSH(framebufQ2HistColorLF_SH_Prev_Sampled, framebufQ2HistColorLF_COCG_Prev_Sampled, p);
                 q2AccumulateSH(temporal_color_lf, hist_color_lf, w_diff);
 
                 temporal_color_hf           += q2UnpackRGBE(framebufQ2HistColorHF_Prev_Sampled.Load(int3(p, 0)).r) * w_diff;
-                temporal_color_histlen_spec += framebufQ2FilteredSpec_Prev_Sampled.Load(int3(p, 0)) * w_spec;
                 temporal_moments_histlen_hf += framebufQ2HistMomentsHF_Prev_Sampled.Load(int3(p, 0)).rgba * w_diff;
                 temporal_sum_w_diff         += w_diff;
+            }
+        }
+
+        // Dedicated specular 2x2 bilinear history fetch at virtual-parallax reprojection coords
+        const float2 pos_ld_spec = floor(pos_prev_spec - (float2)0.5);
+        const float2 subpix_spec = frac(pos_prev_spec - (float2)0.5 - pos_ld_spec);
+        const float w_s[4] = {
+            (1.0 - subpix_spec.x) * (1.0 - subpix_spec.y),
+            (subpix_spec.x      ) * (1.0 - subpix_spec.y),
+            (1.0 - subpix_spec.x) * (subpix_spec.y      ),
+            (subpix_spec.x      ) * (subpix_spec.y      )
+        };
+        for(int j = 0; j < 4; j++)
+        {
+            int2 p_s = int2(pos_ld_spec) + off[j];
+            if(p_s.x < field_left || p_s.x >= field_right || p_s.y >= height || p_s.y < 0)
+                continue;
+
+            if (sample_across_fields)
+            {
+                p_s = q2FlatToChecker(p_s, width);
+            }
+
+            const float3 surfPosPrev = framebufSurfacePosition_Prev_Sampled.Load(int3(p_s, 0)).xyz;
+            const float depth_prev_s = framebufQ2ViewDepth_Prev_Sampled.Load(int3(p_s, 0)).r;
+            const float3 geo_normal_prev_s = texelFetchNormalGeometry_Prev(p_s);
+            const float rough_prev = framebufMetallicRoughness_Prev_Sampled.Load(int3(p_s, 0)).y;
+
+            const float planeDist = abs(dot(surfPosPrev - surfPos, geo_normal_curr)) / max(abs(depth_curr), 1e-3);
+            float surfDepthDist = abs(depth_curr - depth_prev_s + motion_z) / max(abs(depth_curr), 1e-3);
+            if(depth_curr < 0.0)
+            {
+                surfDepthDist *= 0.25;
+            }
+            const float geomDist = lerp(planeDist, surfDepthDist, surface_blend);
+            const float parallaxUv = length(motion_spec_xy - motion.xy);
+            const float planeTol = lerp(0.015, 0.08, surface_blend);
+
+            if(dot(geo_normal_curr, geo_normal_prev_s) > 0.75
+                && geomDist < planeTol
+                && surfDepthDist < (0.08 + 4.0 * parallaxUv)
+                && abs(rough_prev - metal_rough.y) <= 0.25)
+            {
+                const float3 normal_prev_s = texelFetchNormal_Prev(p_s);
+                const float w_rough = exp(-abs(rough_prev - metal_rough.y) * 10.0);
+                const float w_spec = w_s[j] * q2SafePow(max(dot(normal_curr, normal_prev_s), 0.0), shininess) * w_rough;
+
+                temporal_color_histlen_spec += framebufQ2FilteredSpec_Prev_Sampled.Load(int3(p_s, 0)) * w_spec;
+                temporal_moments_spec       += framebufQ2HistMomentsSpec_Prev_Sampled.Load(int3(p_s, 0)).xy * w_spec;
                 temporal_sum_w_spec         += w_spec;
             }
         }
@@ -313,20 +514,31 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         {
             float inv_w_spec = 1.0 / temporal_sum_w_spec;
             temporal_color_histlen_spec *= inv_w_spec;
+            temporal_moments_spec       *= inv_w_spec;
             temporal_sample_valid_spec = true;
         }
     }
 
-    // Compute spatial moments of the HF channel in a 3x3 window
+    // Compute spatial moments of HF and SPEC channels in a 3x3 window
+    float lum_curr_spec;
+    float rough_curr_shared;
+    bool is_grad_curr = false;
+    get_shared_spec_data(groupThreadID, (int2)0, lum_curr_spec, rough_curr_shared, is_grad_curr);
     float2 spatial_moments_hf = float2(lum_curr_hf, lum_curr_hf * lum_curr_hf);
+    float2 spatial_moments_spec = is_grad_curr ? (float2)0.0 : float2(lum_curr_spec, lum_curr_spec * lum_curr_spec);
 
     {
         float spatial_sum_w_hf = 1.0;
+        float spatial_sum_w_spec = is_grad_curr ? 0.0 : 1.0;
         for(int yy = -FILTER_RADIUS; yy <= FILTER_RADIUS; yy++)
         {
             for(int xx = -FILTER_RADIUS; xx <= FILTER_RADIUS; xx++)
             {
                 if(xx == 0 && yy == 0)
+                    continue;
+
+                const int2 mp = ipos + int2(xx, yy);
+                if (mp.x < cb_left || mp.x >= cb_right || mp.y < 0 || mp.y >= height)
                     continue;
 
                 float depth;
@@ -341,17 +553,79 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
 
                     spatial_moments_hf += float2(lum_p_hf * w_hf, lum_p_hf * lum_p_hf * w_hf);
                     spatial_sum_w_hf  += w_hf;
+
+                    float lum_p_spec;
+                    float rough_p;
+                    bool is_grad_p = false;
+                    get_shared_spec_data(groupThreadID, int2(xx, yy), lum_p_spec, rough_p, is_grad_p);
+                    if (!is_grad_p)
+                    {
+                        const float w_s_mom = pow(max(0.0, dot(normal, normal_curr)), 32.0)
+                                            * exp(-abs(rough_p - metal_rough.y) * 10.0);
+                        spatial_moments_spec += float2(lum_p_spec * w_s_mom, lum_p_spec * lum_p_spec * w_s_mom);
+                        spatial_sum_w_spec   += w_s_mom;
+                    }
                 }
             }
         }
 
         spatial_moments_hf /= spatial_sum_w_hf;
+        spatial_moments_spec = (spatial_sum_w_spec > 1e-6)
+            ? (spatial_moments_spec / spatial_sum_w_spec)
+            : float2(lum_curr_spec, lum_curr_spec * lum_curr_spec);
     }
 
     // Load the target pixel colors for all channels
     Q2SH color_curr_lf = q2LoadSH(framebufQ2ColorLF_SH_Sampled, framebufQ2ColorLF_COCG_Sampled, ipos);
     float3 color_curr_hf = q2UnpackRGBE(framebufQ2ColorHF_Sampled.Load(int3(ipos, 0)).r);
     float3 color_curr_spec = q2UnpackRGBE(framebufQ2ColorSpec_Sampled.Load(int3(ipos, 0)).r);
+    if (is_grad_curr)
+    {
+        float3 sum_curr_spec = (float3)0.0;
+        float sum_w_curr = 0.0;
+
+        for (int yy = -1; yy <= 1; yy++)
+        {
+            for (int xx = -1; xx <= 1; xx++)
+            {
+                if (xx == 0 && yy == 0)
+                {
+                    continue;
+                }
+
+                const int2 np = ipos + int2(xx, yy);
+                if (np.x < cb_left || np.x >= cb_right || np.y < 0 || np.y >= height)
+                {
+                    continue;
+                }
+
+                float d_n;
+                float3 n_n;
+                float lum_hf_n;
+                get_shared_data(groupThreadID, int2(xx, yy), d_n, n_n, lum_hf_n);
+
+                float lum_spec_n;
+                float rough_n;
+                bool is_grad_n = false;
+                get_shared_spec_data(groupThreadID, int2(xx, yy), lum_spec_n, rough_n, is_grad_n);
+
+                if (!is_grad_n && abs(depth_curr - d_n) * gradDepth < 2.0)
+                {
+                    const float w_n = ((xx == 0 || yy == 0) ? 1.0 : 0.5)
+                                      * q2SafePow(max(0.0, dot(n_n, normal_curr)), shininess)
+                                      * exp(-abs(rough_n - metal_rough.y) * 10.0);
+                    sum_curr_spec += q2UnpackRGBE(framebufQ2ColorSpec_Sampled.Load(int3(np, 0)).r) * w_n;
+                    sum_w_curr += w_n;
+                }
+            }
+        }
+
+        if (sum_w_curr > 1e-5)
+        {
+            color_curr_spec = sum_curr_spec / sum_w_curr;
+            lum_curr_spec = getLuminance(color_curr_spec);
+        }
+    }
 
     Q2SH out_color_lf;
     float3 out_color_hf;
@@ -362,8 +636,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     // 1/3 res: CmQ2GradientReproject + Img + Atrous). After the 7 atrous
     // iterations the LF result is in Q2GradLFPong and the HF/SPEC result
     // (after 3 iterations) in Q2GradHFSpecPong. Clamped like Q2RTX.
-    float grad_lf = framebufQ2GradLFPong_Sampled.Load(int3(ipos / Q2_GRAD_DWN, 0)).x;
-    float2 grad_hf_spec = framebufQ2GradHFSpecPong_Sampled.Load(int3(ipos / Q2_GRAD_DWN, 0)).xy;
+    const int2 grad_ipos = q2ClampGradPos(ipos, width, height);
+    float grad_lf = framebufQ2GradLFPong_Sampled.Load(int3(grad_ipos, 0)).x;
+    float2 grad_hf_spec = framebufQ2GradHFSpecPong_Sampled.Load(int3(grad_ipos, 0)).xy;
     grad_lf = clamp(grad_lf, 0.0, 1.0);
     grad_hf_spec = clamp(grad_hf_spec, (float2)0.0, (float2)1.0);
 
@@ -402,28 +677,43 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         out_moments_histlen_hf = float4(spatial_moments_hf, 1, 1);
     }
 
+    const float2 curr_moments_spec = float2(lum_curr_spec, lum_curr_spec * lum_curr_spec);
+    float2 out_moments_spec;
+
     if(temporal_sample_valid_spec)
     {
-        // Same sequence as above, only for the specular channel
-        float antilag = grad_hf_spec.y * Q2_FLT_ANTILAG_SPEC + motion_length * Q2_FLT_ANTILAG_SPEC_MOTION;
+        // Resolution-normalized motion antilag attenuated when virtual-point parallax is trusted
+        const float resScale1080 = 1080.0 / max(globalUniform.renderHeight, 1.0);
+        const float motion_length_spec = motion_length * resScale1080 * (1.0 - 0.95 * spec_virtual_weight);
+        float antilag = grad_hf_spec.y * Q2_FLT_ANTILAG_SPEC + motion_length_spec * Q2_FLT_ANTILAG_SPEC_MOTION;
         float antilag_alpha_spec = clamp(lerp(1.0, antilag, Q2_FLT_TEMPORAL_SPEC), 0, 1);
         float hist_len_spec = min(temporal_color_histlen_spec.a * pow(1.0 - antilag_alpha_spec, 10) + 1.0, 256.0);
         float alpha_color_spec = max(Q2_FLT_MIN_ALPHA_COLOR_SPEC, 1.0 / hist_len_spec);
         alpha_color_spec = lerp(alpha_color_spec, 1.0, antilag_alpha_spec);
         out_color_histlen_spec.rgb = lerp(temporal_color_histlen_spec.rgb, color_curr_spec.rgb, alpha_color_spec);
         out_color_histlen_spec.a = hist_len_spec;
+
+        float alpha_moments_spec = max(Q2_FLT_MIN_ALPHA_MOMENTS_SPEC, 1.0 / hist_len_spec);
+        alpha_moments_spec = lerp(alpha_moments_spec, 1.0, antilag_alpha_spec);
+        out_moments_spec = lerp(temporal_moments_spec, curr_moments_spec, alpha_moments_spec);
     }
     else
     {
         out_color_histlen_spec = float4(color_curr_spec, 1);
+        out_moments_spec = curr_moments_spec;
     }
 
-    // Store the outputs for further processing by the a-trous HF filter
+    const float2 atrous_moments_spec = (out_color_histlen_spec.a < 4.0)
+        ? lerp(spatial_moments_spec, out_moments_spec, saturate((out_color_histlen_spec.a - 1.0) / 3.0))
+        : out_moments_spec;
+
+    // Store the outputs for further processing by the a-trous filter
     framebufQ2HistMomentsHF[ipos] = out_moments_histlen_hf;
+    framebufQ2HistMomentsSpec[ipos] = float4(out_moments_spec, 0.0, 0.0);
     Q2_STORE_SH(framebufQ2HistColorLF_SH, framebufQ2HistColorLF_COCG, ipos, out_color_lf);
     framebufQ2AtrousPingHF[ipos] = (uint4)q2PackRGBE(out_color_hf);
     framebufQ2AtrousPingSpec[ipos] = (uint4)q2PackRGBE(out_color_histlen_spec.rgb);
-    framebufQ2AtrousPingMoments[ipos] = float4(out_moments_histlen_hf.xy, 0, 0);
+    framebufQ2AtrousPingMoments[ipos] = float4(out_moments_histlen_hf.xy, atrous_moments_spec);
     framebufQ2FilteredSpec[ipos] = out_color_histlen_spec;
 
     GroupMemoryBarrierWithGroupSync();
