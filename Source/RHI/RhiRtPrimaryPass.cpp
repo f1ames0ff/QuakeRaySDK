@@ -395,7 +395,7 @@ bool RhiRtPrimaryPass::Create(nvrhi::IDevice *pDevice,
     {
         // Set 2: the global uniform at raw binding 0 (DXC's default would put it at 256).
         nvrhi::BindingLayoutDesc desc;
-        desc.visibility = nvrhi::ShaderType::AllRayTracing;
+        desc.visibility = nvrhi::ShaderType::AllRayTracing | nvrhi::ShaderType::Compute;
         desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setConstantBufferOffset(0));
         desc.addItem(nvrhi::BindingLayoutItem::ConstantBuffer(BINDING_GLOBAL_UNIFORM));
 
