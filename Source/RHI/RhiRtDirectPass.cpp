@@ -583,7 +583,7 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         // VUID-VkGraphicsPipelineCreateInfo-layout-07988.
         nvrhi::BindingLayoutDesc desc;
         desc.visibility = nvrhi::ShaderType::AllRayTracing | nvrhi::ShaderType::Vertex |
-                          nvrhi::ShaderType::Compute;
+                          nvrhi::ShaderType::Pixel | nvrhi::ShaderType::Compute;
         desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
                                    .setShaderResourceOffset(0)
                                    .setUnorderedAccessViewOffset(0));

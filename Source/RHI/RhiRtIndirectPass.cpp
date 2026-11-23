@@ -95,7 +95,7 @@ struct FramebufferBinding
     bool isUAV;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 14;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 16;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_UNFILTERED_SPECULAR,        true  }, //  15  framebufUnfilteredSpecular (r32ui)
@@ -107,8 +107,10 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_IS_SKY,                     false }, // 126  framebufIsSky_Sampled
     { FB_IMAGE_INDEX_NORMAL,                     false }, // 127  framebufNormal_Sampled
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false }, // 129  framebufNormalGeometry_Sampled
+    { FB_IMAGE_INDEX_NORMAL_GEOMETRY_PREV,       false }, // 130  framebufNormalGeometry_Prev_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false }, // 131  framebufMetallicRoughness_Sampled
     { FB_IMAGE_INDEX_SURFACE_POSITION,           false }, // 143  framebufSurfacePosition_Sampled
+    { FB_IMAGE_INDEX_SURFACE_POSITION_PREV,      false }, // 144  framebufSurfacePosition_Prev_Sampled
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,           false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,                false }, // 245  framebufQ2RngSeed_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER,                 false }, // 247  framebufQ2Cluster_Sampled
@@ -985,9 +987,10 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
 
         if (motionImage != 0)
         {
-            target.motionTexture = rhi::wrapEngineTexture(
+            target.motionTexture = rhi::wrapEngineStorageImage(
                 device, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(motionImage)),
-                motionFormat, motionExtent.width, motionExtent.height, 1,
+                static_cast<uint64_t>(reinterpret_cast<uintptr_t>(motionView)),
+                motionFormat, motionExtent.width, motionExtent.height,
                 "RhiRtIndirectPass GI motion");
         }
 
@@ -1084,7 +1087,7 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
     if (target.motionTexture != nullptr)
     {
         pCommandList->beginTrackingTextureState(target.motionTexture, nvrhi::AllSubresources,
-                                                nvrhi::ResourceStates::ShaderResource);
+                                                nvrhi::ResourceStates::UnorderedAccess);
     }
 
     // The twelve sets, in the layout order the pipeline was built with; the pinned backend's legacy
@@ -1133,6 +1136,11 @@ void RhiRtIndirectPass::Render(nvrhi::ICommandList *pCommandList,
             pCommandList->setTextureState(
                 target.framebufferTextures[i], nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
         }
+    }
+    if (target.motionTexture != nullptr)
+    {
+        pCommandList->setTextureState(
+            target.motionTexture, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
     }
 }
 
