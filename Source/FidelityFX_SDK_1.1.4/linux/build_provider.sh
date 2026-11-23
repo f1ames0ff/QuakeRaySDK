@@ -36,6 +36,12 @@ if [[ ! -f "$sdk_root/sdk/src/backends/vk/ffx_vk.cpp" ]]; then
     exit 1
 fi
 
+if [[ "${QR_FFX_FORCE:-0}" != "1" ]] && [[ -f "$out_dir/libamd_fidelityfx_vk.so" ]] && \
+   [[ -z "$(find "$sdk_root" "$script_dir" -type f -newer "$out_dir/libamd_fidelityfx_vk.so" -print -quit)" ]]; then
+    echo "FidelityFX provider is up to date: $out_dir/libamd_fidelityfx_vk.so"
+    exit 0
+fi
+
 if [[ -z "${GLSLANG_VALIDATOR:-}" ]]; then
     if command -v glslangValidator >/dev/null 2>&1; then
         GLSLANG_VALIDATOR="$(command -v glslangValidator)"
