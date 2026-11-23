@@ -6,6 +6,8 @@
 
 #include <qray/qray.h>
 
+class EditorAssetSource;
+
 // How a BSP surface behaves in the renderer, derived from its texture name the
 // same way gl_model.c classifies TEX_SPECIAL surfaces.
 enum class EditorSurfaceKind
@@ -25,6 +27,9 @@ struct EditorTexture
     uint32_t width = 0;
     uint32_t height = 0;
     std::vector<uint8_t> rgba;
+    // Per-texel fullbright mask extracted from Quake palette indices 224..255 (0 or 255).
+    std::vector<uint8_t> fullbright;
+    bool isExternal = false;
 };
 
 // One BSP polygon of a surface, kept because a textured area light is built from a face's own
@@ -35,6 +40,7 @@ struct EditorSurfaceFace
 {
     float normal[3] = { 0.0f, 0.0f, 0.0f };
     uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
+    uint32_t aliasInstanceId = 0;
     std::vector<QrFloat3D> positions;
     std::vector<QrFloat2D> texCoords;
 };
@@ -74,6 +80,14 @@ struct EditorLight
     float direction[3] = { 0.0f, 0.0f, 1.0f };
     float angleInner = 0.0f;
     float angleOuter = 30.0f;
+    bool hasOffset = false;
+    float offset[3] = {};
+    bool lightShafts = false;
+    float lightShaftsPower = 1.0f;
+    float lightShaftsDistance = 0.0f;
+    float lightShaftsFalloff = 1.0f;
+    bool hasColor = false;
+    bool forceRasterize = false;
     // The light style index the game animates the light with, the same index the map's `style`
     // key names and the same one rt_custom_style_names indexes: 0 is steady, 1..11 are the
     // animated styles. The preview stays at full brightness because a standalone editor has
@@ -81,6 +95,25 @@ struct EditorLight
     // at 256 - which is exactly what a map light without a style renders as.
     int32_t style = 0;
     std::string className;
+    uint64_t emitterUniqueID = 0;
+    float modelSizeMeters = 0.0f;
+    bool groupEdit = true;
+    bool enabled = true;
+
+    bool operator==(const EditorLight &) const = default;
+};
+
+// An alias (.mdl) entity instance placed in the scene, carrying its skin frame name,
+// world origin, pose bounding radius (meters), and Quake entity unique ID so material
+// dlights can be generated and edited just like vkquake-rt's RT_LIGHT_Emit.
+struct EditorAliasInstance
+{
+    std::string modelName;
+    std::string textureName;
+    float origin[3] = {};
+    float modelSizeMeters = 0.5f;
+    uint64_t uniqueID = 0;
+    uint32_t aliasInstanceId = 0;
 };
 
 // Radiance per unit of a map light's `light` key, matching RT_FIXUP_LIGHT_INTENSITY: the game
@@ -121,15 +154,18 @@ struct EditorBspNode
     int32_t children[2] = {};
 };
 
-// The world cluster table of r_world.c RT_BuildWorldClustersIdentity: cluster i is leaf i,
-// cluster 0 is the solid leaf, and cluster numLeafs is the solid edge cluster. A light's
-// cluster index is therefore its BSP leaf index, exactly as in the game.
+// The world cluster table of r_world.c: cluster 0 is the solid leaf/hole, and each BSP leaf
+// maps through leafCluster[leaf] (identity when numLeafs < 8192, 3D grid cell when folded).
 struct EditorWorldClusters
 {
     std::vector<QrFloat3D> mins;
     std::vector<QrFloat3D> maxs;
     std::vector<uint8_t> flags;
     std::vector<int32_t> contents;
+    std::vector<uint32_t> leafCluster;
+    std::vector<uint8_t> visData;
+    std::vector<int32_t> visOffsets;
+    uint32_t pvsRowBytes = 0;
     uint32_t numLeafs = 0;
 };
 
@@ -140,6 +176,8 @@ struct EditorScene
     std::vector<EditorTexture> textures;
     std::vector<EditorSurface> surfaces;
     std::vector<EditorLight> lights;
+    std::vector<EditorLight> bspLights;
+    std::vector<EditorAliasInstance> aliasInstances;
     std::vector<EditorBspNode> nodes;
     EditorWorldClusters worldClusters;
     // The skyflatcolor of gl_sky.c: the average of the sky texture's opaque front-layer
@@ -157,6 +195,7 @@ struct EditorScene
     uint32_t skyLayerWidth = 0;
     uint32_t skyLayerHeight = 0;
     bool hasScrollingSky = false;
+    std::string skyboxName;
     float boundsMin[3] = {};
     float boundsMax[3] = {};
     float cameraPosition[3] = {};
@@ -165,14 +204,45 @@ struct EditorScene
     bool hasCamera = false;
 };
 
+struct EditorSceneLoadOptions
+{
+    const EditorAssetSource *assets = nullptr;
+    bool multiplayer = false;
+};
+
 // palette768 is the 768-byte Quake palette (gfx/palette.lmp); when it is null
 // the palette stored inside each BSP texture is used instead.
 bool LoadEditorSceneObj(const std::string &path, EditorScene &scene, std::string &error);
+bool LoadEditorSceneBspMemory(const std::vector<uint8_t> &bytes, const std::string &sourceName,
+                              const uint8_t *palette768, EditorScene &scene,
+                              std::string &error, const EditorSceneLoadOptions &options = {});
 bool LoadEditorSceneBsp(const std::string &path, const uint8_t *palette768, EditorScene &scene,
-                        std::string &error);
+                        std::string &error, const EditorSceneLoadOptions &options = {});
 bool LoadEditorScene(const std::string &path, const uint8_t *palette768, EditorScene &scene,
-                     std::string &error);
+                     std::string &error, const EditorSceneLoadOptions &options = {});
 
 // Re-resolves the cluster a light stands in, the way the loader does when it reads the map, so
 // moving a light in the panel keeps its world cluster light list correct.
 uint32_t ResolveEditorLightCluster(const EditorScene &scene, const float origin[3]);
+
+struct EditorPreviewModelFrame
+{
+    std::string name;
+    std::vector<QrVertex> vertices;
+    std::vector<uint32_t> indices;
+    float center[3] = {};
+    float radius = 16.0f;
+};
+
+struct EditorPreviewModel
+{
+    std::string path;
+    bool holey = false;
+    std::vector<EditorTexture> skins;
+    std::vector<EditorPreviewModelFrame> frames;
+};
+
+// Loads an IDPO v6 .mdl alias model from mounted archives into centered local-space preview frames.
+bool LoadEditorAliasModel(const std::string &modelPath, const EditorAssetSource &assets,
+                          const uint8_t *palette768, EditorPreviewModel &outModel,
+                          std::string &error);

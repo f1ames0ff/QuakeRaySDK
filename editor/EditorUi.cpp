@@ -215,6 +215,17 @@ bool EditorUi::WantsKeyboard() const
     return io.WantCaptureKeyboard;
 }
 
+bool EditorUi::WantsTextInput() const
+{
+    if (!m_ready)
+    {
+        return false;
+    }
+
+    const ImGuiIO &io = ImGui::GetIO();
+    return io.WantTextInput;
+}
+
 void EditorUi::SetCursorVisible(bool visible)
 {
     if (m_cursorVisible == visible)
@@ -259,6 +270,35 @@ void EditorUi::AddKey(EditorKey editorKey, bool down, const EditorModifiers &mod
     io.AddKeyEvent(key, down);
 }
 
+namespace
+{
+void HandleUiMouseButton(EditorWindow *window, ImGuiIO &io, uint32_t &mouseButtons,
+                         const EditorEvent &event)
+{
+    const uint32_t previousButtons = mouseButtons;
+
+    if (window != nullptr && event.down && mouseButtons == 0)
+    {
+        window->SetMouseCapture(true);
+    }
+
+    io.AddMouseButtonEvent(event.button, event.down);
+
+    if (event.down)
+    {
+        mouseButtons |= 1u << uint32_t(event.button);
+        return;
+    }
+
+    mouseButtons &= ~(1u << uint32_t(event.button));
+
+    if (previousButtons != 0 && mouseButtons == 0 && window != nullptr)
+    {
+        window->SetMouseCapture(false);
+    }
+}
+} // namespace
+
 bool EditorUi::HandleEvent(const EditorEvent &event)
 {
     if (!m_ready)
@@ -277,30 +317,8 @@ bool EditorUi::HandleEvent(const EditorEvent &event)
         return false;
 
     case EditorEventType::MouseButton:
-    {
-        if (m_window != nullptr && event.down && m_mouseButtons == 0)
-        {
-            m_window->SetMouseCapture(true);
-        }
-
-        io.AddMouseButtonEvent(event.button, event.down);
-
-        if (event.down)
-        {
-            m_mouseButtons |= 1u << uint32_t(event.button);
-        }
-        else
-        {
-            m_mouseButtons &= ~(1u << uint32_t(event.button));
-
-            if (m_mouseButtons == 0 && m_window != nullptr)
-            {
-                m_window->SetMouseCapture(false);
-            }
-        }
-
+        HandleUiMouseButton(m_window, io, m_mouseButtons, event);
         return false;
-    }
 
     case EditorEventType::MouseWheel:
         io.AddMouseWheelEvent(0.0f, event.wheelY);
@@ -318,6 +336,10 @@ bool EditorUi::HandleEvent(const EditorEvent &event)
         return false;
 
     case EditorEventType::Focus:
+        if (!event.down)
+        {
+            m_mouseButtons = 0;
+        }
         io.AddFocusEvent(event.down);
         return false;
 

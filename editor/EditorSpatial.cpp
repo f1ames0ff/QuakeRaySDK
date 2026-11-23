@@ -59,6 +59,16 @@ void EditorMetersTransmittance(QrFloat3D &color)
 
 void EditorMetersGeometry(QrGeometryUploadInfo &upload, std::vector<QrVertex> &scratch)
 {
+    for (int row = 0; row < 3; row++)
+    {
+        upload.transform.matrix[row][3] = EditorMetersLength(upload.transform.matrix[row][3]);
+    }
+
+    if (upload.passThroughType == QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT)
+    {
+        upload.layerColors[2].data[1] = EditorMetersLength(upload.layerColors[2].data[1]);
+    }
+
     if (upload.pVertices == nullptr || upload.vertexCount == 0)
     {
         return;

@@ -40,6 +40,7 @@ public:
 
     bool WantsMouse() const;
     bool WantsKeyboard() const;
+    bool WantsTextInput() const;
 
     float MouseX() const { return m_mouseX; }
     float MouseY() const { return m_mouseY; }

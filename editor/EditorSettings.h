@@ -21,7 +21,7 @@ struct EditorRenderSettings
     // rt_model_lights, as they are in RT_AddAliasEmissiveLights.
     float truelight = 1.0f;
     bool levelLights = false;
-    bool modelLights = false;
+    bool modelLights = true;
 
     // Sky
     int32_t skyType = QR_SKY_TYPE_PROCEDURAL;
@@ -152,7 +152,8 @@ struct EditorRenderSettings
     float restir = 0.0f;                // rt_restir
     float restirCandidates = 8.0f;      // rt_restir_candidates
     float giLevel = 1.0f;               // rt_gi_level
-    float neeSamples = 1.0f;            // rt_nee_samples
+    float neeSamples = 2.0f;            // rt_nee_samples
+    uint32_t shadowRays = 2;            // rt_shadowrays
     float sensitivityDirect = 0.4f;     // rt_sensit_dir
     float sensitivityIndirect = 0.06f;  // rt_sensit_indir
     float sensitivitySpecular = 0.03f;  // rt_sensit_spec
@@ -167,10 +168,15 @@ struct EditorRenderSettings
     int32_t q2DepthGrad = 1;            // rt_q2_depthgrad
     int32_t q2LightStats = 1;           // rt_q2_lightstats
     bool reflRefrEarlyOut = true;       // rt_reflrefr_earlyout
-    // rt_renderscale: 100 renders at the window, and anything below renders smaller and
-    // stretches the result, as the game's ResolutionToQray does. No upscaler is offered,
-    // because the SDK's own upscalers need a host that can query them per device.
-    float renderScale = 100.0f;
+    float renderScale = 100.0f;         // rt_renderscale (<= 0 means 100%)
+    int32_t upscaleFsr31 = 0;           // rt_upscale_fsr31
+    int32_t upscaleDlss = 0;            // rt_upscale_dlss
+    int32_t sharpenMode = 0;            // rt_sharpen
+
+    // Camera / mouse-look matching Quake's sensitivity, m_yaw and m_pitch.
+    float mouseSensitivity = 3.0f;
+    float mouseYaw = 0.022f;
+    float mousePitch = 0.022f;
 
     // Level fog: a density of 0 draws none, which is what a map without a `fog`
     // key gets. The colour starts white because that is the engine's own default
@@ -179,6 +185,39 @@ struct EditorRenderSettings
     float fogColor[3] = { 1.0f, 1.0f, 1.0f };
     float fogDensity = 0.0f;
     float fogSkyBlend = 0.0f;
+
+    // Global light multiplier and volumetric light shafts.
+    float globalLightMult = 10.0f;         // rt_globallight_mult
+    bool lightShafts = true;               // rt_light_shafts
+    float lightShaftsIntensity = 1.0f;     // rt_light_shafts_intensity
+    int32_t lightShaftsResolution = 1;     // rt_light_shafts_resolution
+    float lightShaftsDensity = 0.002f;     // rt_light_shafts_density
+    float lightShaftsAlbedo = 1.0f;        // rt_light_shafts_albedo
+    float lightShaftsLocalFogScale = 1.0f; // rt_light_shafts_local_fog
+    float lightShaftsEmissive[3] = { 0.0f, 0.0f, 0.0f }; // rt_light_shafts_emissive_r/g/b
+    bool lightShaftsTemporal = true;       // rt_light_shafts_temporal
+    bool lightShaftsSun = false;           // rt_light_shafts_sun
+    int32_t lightShaftsDebug = 0;          // rt_light_shafts_debug
+    int32_t lightShaftsRayBudget = 1048576; // rt_light_shafts_rays
+
+    // System / DTAL (Direct Triangular Area Lights) cvars matching qr_editor.c.
+    bool pauseWorld = false;
+    bool dtalProxy = true;                 // rt_dtal_proxy
+    float dtalClearance = 1.0f;            // rt_dtal_clearance
+    int32_t dtalMaxPolys = 64;             // rt_dtal_maxpolys
+    float dtalMinArea = 0.0f;              // rt_dtal_minarea
+    float dtalProxyMinArea = 0.0f;         // rt_dtal_proxy_minarea
+    float dtalProxyModelMinArea = 0.0f;    // rt_dtal_proxy_model_minarea
+    int32_t dtalGroups = 0;                // rt_dtal_groups
+    float dtalSpacing = 128.0f;            // rt_dtal_spacing
+    int32_t dtalMaxGroups = 2048;          // rt_dtal_maxgroups
+    int32_t levelLightMaxPolys = 2;        // rt_level_light_maxpolys
+    int32_t dtalDebug = 0;                 // rt_dtal_debug
+    float dtalModelMinArea = 0.0f;         // rt_dtal_model_minarea
+    int32_t dtalModelMaxPolys = 8;         // rt_dtal_model_maxpolys
+    int32_t dtalModelBudget = 512;         // rt_dtal_model_budget
+
+    bool operator==(const EditorRenderSettings &) const = default;
 };
 
 // The sun the editor draws: the directional light, the disc and the shafts are one
@@ -206,6 +245,8 @@ struct EditorSunState
     // size the sky shader paints is rt_sky_sun_size, which is EditorRenderSettings'
     // sunDiscSize because the block owns it.
     float angularDiameter = 0.05f;
+
+    bool operator==(const EditorSunState &) const = default;
 };
 
 // The radiance one unit of `rt_sky_sun` is worth, matching RT_FIXUP_LIGHT_INTENSITY
@@ -263,3 +304,6 @@ void BuildEditorFrameParams(const EditorRenderSettings &settings, const float su
 // result, so fov 90 is a 73.7 degree vertical field whatever the aspect -- not the 60 the
 // renderer's own constant names. A window with no size yet falls back to 4:3.
 float EditorFovYRadians(const EditorRenderSettings &settings, float width, float height);
+
+// Computes sun pitch/yaw matching RT_UpdateSunEditor from a unit view/ray direction towards the sun.
+void ApplySunDirectionFromRay(const float direction[3], EditorSunState &sun);

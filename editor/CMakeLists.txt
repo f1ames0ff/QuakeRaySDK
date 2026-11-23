@@ -23,10 +23,13 @@ endif()
 set(QR_EDITOR_COMMON_SOURCES
     Main.cpp
     EditorApp.cpp
+    EditorGui.cpp
+    EditorPanels.cpp
     EditorMaterial.cpp
     EditorSettings.cpp
     EditorSession.cpp
     EditorUi.cpp
+    EditorViewport.cpp
     EditorSpatial.cpp
     Scene.cpp
     Assets.cpp)
@@ -46,6 +49,7 @@ else()
 endif()
 
 target_compile_features(quakerayeditor PRIVATE cxx_std_20)
+target_include_directories(quakerayeditor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
 
 set(QR_EDITOR_DEPLOY_COMMANDS
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -82,7 +86,10 @@ if(QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}")
             "$<TARGET_FILE_DIR:quakerayeditor>/textures"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${QR_EDITOR_TEXTURE_DIR}/BlueNoise_LDR_RGBA_128.png"
-            "$<TARGET_FILE_DIR:quakerayeditor>/textures/BlueNoise_LDR_RGBA_128.png")
+            "$<TARGET_FILE_DIR:quakerayeditor>/textures/BlueNoise_LDR_RGBA_128.png"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QR_EDITOR_TEXTURE_DIR}/WaterNormal_n.png"
+            "$<TARGET_FILE_DIR:quakerayeditor>/textures/WaterNormal_n.png")
 endif()
 
 add_custom_command(TARGET quakerayeditor POST_BUILD

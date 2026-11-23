@@ -184,6 +184,7 @@ struct EditorWindow::Impl
     bool quitRequested = false;
     int exitCode = 0;
     bool cursorVisible = true;
+    bool mouseCaptured = false;
     bool pendingRepeat = false;
     unsigned int repeatKeycode = 0;
 
@@ -451,6 +452,12 @@ void EditorWindow::Destroy()
 
     if (m_impl->display != nullptr)
     {
+        if (m_impl->mouseCaptured)
+        {
+            XUngrabPointer(m_impl->display, CurrentTime);
+            m_impl->mouseCaptured = false;
+        }
+
         if (m_impl->invisibleCursor != kX11None)
         {
             XFreeCursor(m_impl->display, m_impl->invisibleCursor);
@@ -470,6 +477,7 @@ void EditorWindow::Destroy()
     m_impl->width = 0;
     m_impl->height = 0;
     m_impl->cursorVisible = true;
+    m_impl->mouseCaptured = false;
 }
 
 bool EditorWindow::IsValid() const
@@ -547,7 +555,13 @@ bool EditorWindow::WarpCursorToCenter(int32_t &outX, int32_t &outY)
     const int cx = int(m_impl->width / 2);
     const int cy = int(m_impl->height / 2);
     XWarpPointer(m_impl->display, kX11None, m_impl->window, 0, 0, 0, 0, cx, cy);
-    XFlush(m_impl->display);
+    XSync(m_impl->display, 0);
+
+    XEvent discarded = {};
+    while (XCheckTypedWindowEvent(m_impl->display, m_impl->window, MotionNotify, &discarded) != 0)
+    {
+    }
+
     outX = cx;
     outY = cy;
     return true;
@@ -574,9 +588,29 @@ void EditorWindow::SetCursorVisible(bool visible)
     XFlush(m_impl->display);
 }
 
-void EditorWindow::SetMouseCapture(bool)
+void EditorWindow::SetMouseCapture(bool capture)
 {
-    // X11 maintains an automatic passive pointer grab while a mouse button is pressed.
+    if (!IsValid() || m_impl->mouseCaptured == capture)
+    {
+        return;
+    }
+
+    if (capture)
+    {
+        const int status = XGrabPointer(
+            m_impl->display, m_impl->window, 1,
+            ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+            GrabModeAsync, GrabModeAsync, m_impl->window,
+            kX11None, CurrentTime);
+        m_impl->mouseCaptured = (status == GrabSuccess);
+    }
+    else
+    {
+        XUngrabPointer(m_impl->display, CurrentTime);
+        m_impl->mouseCaptured = false;
+    }
+
+    XFlush(m_impl->display);
 }
 
 void EditorWindow::BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const

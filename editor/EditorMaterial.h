@@ -42,11 +42,29 @@ struct EditorEmissiveBlock
     // Non-empty selects by uv instead of by colour -- pairs of u,v, at least three of them.
     // The colour and threshold are then unused, which is what the game's polygon form does.
     std::vector<float> polyUv;
+
+    bool operator==(const EditorEmissiveBlock &) const = default;
 };
 
 // RT_MAT_MAX_EMISSIVE_COLORS: the game's loader stops reading blocks past this, so the editor
 // stops adding them here rather than write entries the game would drop.
 inline constexpr size_t kEditorEmissiveBlockMax = 10;
+
+// One procedural gloss block: selects pixels by color cube distance or UV polygon mask and
+// assigns smoothed roughness and metalness when no external texture_gloss is bound.
+struct EditorGlossBlock
+{
+    float color[3] = { 1.0f, 1.0f, 1.0f };
+    float threshold = 0.02f;
+    float feather = 0.0f;
+    float roughness = 0.25f;
+    float metalness = 0.0f;
+    std::vector<float> polyUv;
+
+    bool operator==(const EditorGlossBlock &) const = default;
+};
+
+inline constexpr size_t kEditorGlossBlockMax = 10;
 
 // The subset of the game's rt_material_t the editor expresses. The keys whose only consumer is
 // a packed material texture -- the extra images, bump_scale, transparency, luma_blend -- are
@@ -128,6 +146,7 @@ struct EditorMaterialParams
     // 1 (rt_material.c's rt_mat_reset), which is what a light material's colour is scaled by.
     float emissiveFactor = 1.0f;
     bool luma = false;
+    bool hasColorEmissive = false;
 
     // Luma, luma_blend: -1 follows the global rt_emis_blend the way the game's cvar value does,
     // 0..5 pin off / normal / add / overlay / hard light / color dodge. Rides the alpha of the
@@ -146,6 +165,12 @@ struct EditorMaterialParams
     float lumaThreshold = 0.02f;
     float lumaFeather = 0.0f;
 
+    // Gloss: procedural roughness/metalness mask blocks evaluated when texture_gloss is empty.
+    bool hasColorGloss = false;
+    std::vector<EditorGlossBlock> glossBlocks;
+    float glossThreshold = 0.02f;
+    float glossFeather = 0.0f;
+
     // Light: the rest of the group the game's is_light (`luma` above) belongs to. They say what
     // light the material's own surface casts and how bright and which colour it is. The SDK's
     // upload path derives a surface's cast light from geometry it does not carry for an alias
@@ -160,11 +185,17 @@ struct EditorMaterialParams
     float lightFocus = -1.0f;
     float lightFocusSoft = -1.0f;
     bool lightProjector = false;
+    bool lightShafts = false;
+    float lightShaftsPower = 1.0f;
+    float lightShaftsDistance = 0.0f;
+    float lightShaftsFalloff = 1.0f;
+    bool enabled = true;
+
+    bool operator==(const EditorMaterialParams &) const = default;
 };
 
-// The roughness the editor has always used for BSP surfaces, kept as the value a
-// material falls back to when it has no override.
-inline constexpr float kEditorDefaultRoughness = 0.7f;
+// Default roughness matching the game's rt_brush_rough ("1.0") when a material has no override.
+inline constexpr float kEditorDefaultRoughness = 1.0f;
 
 // Writes one material into an upload info: the albedo tint from baseFactor, the shading
 // scalars, the texcoord transform and the exact-normals flag. `passThroughType` is passed in
@@ -199,6 +230,12 @@ public:
     // The material of a surface, or the defaults when the table has no entry for its texture.
     const EditorMaterialParams &For(const EditorSurface &surface) const;
 
+    // Effective material entry name bound to `surface` (e.g. active "+0..." animation frame).
+    const std::string &EffectiveNameFor(const EditorSurface &surface) const;
+
+    // Binds a surface family name (e.g. "+basebtn") to a specific frame entry index.
+    void BindSurfaceAlias(const std::string &surfaceName, int32_t entryIndex);
+
 private:
     struct Entry
     {
@@ -211,6 +248,9 @@ private:
     EditorMaterialParams m_defaults;
 };
 
+// Matches RT_EMIS_GLOW_THRESHOLD in vkquake-rt's Quake/gl_texmgr.c.
+inline constexpr float kEditorGlowThreshold = 0.02f;
+
 // What the emission channel of a bake says about the light its surface casts. gl_texmgr.c
 // derives the same three things while it synthesizes the packed set: rtemissivecolor, the
 // albedo weighted sum of the mask normalised by mean_base, and rtemissivemean, the
@@ -222,7 +262,15 @@ struct EditorMaterialEmission
     float color[3] = { 1.0f, 1.0f, 1.0f };
     float mean = 0.0f;
     float meanBase = 0.0f;
+    bool hasGlow = false;
+    float glowUvMin[2] = { 0.0f, 0.0f };
+    float glowUvMax[2] = { 1.0f, 1.0f };
+    float glowMean = 0.0f;
 };
+
+// Computes tight UV glow bounds and mean emission over the active box from texel extents.
+void FinalizeEditorGlowExtents(int minX, int minY, int maxX, int maxY, uint32_t width,
+                               uint32_t height, EditorMaterialEmission &out);
 
 // Bakes the material parameters whose only consumer is a packed material texture. The SDK takes
 // one albedo, one normal and one roughness-metallic-emission image, so a material that names a
@@ -275,10 +323,14 @@ private:
         float emission = 0.0f;
         int32_t lumaBlend = -1;
         bool metalnessFromNormalAlpha = false;
+        bool hasRoughnessOverride = false;
+        bool mirror = false;
+        bool enabled = true;
         // The colour blocks, serialized: two materials that differ in any block's colour,
         // threshold, feather, factor, blend or polygon are different bakes.
         std::string emissiveMask;
-        bool operator==(const Key &other) const;
+        std::string glossMask;
+        bool operator==(const Key &other) const = default;
     };
 
     struct Entry
