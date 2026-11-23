@@ -1,4 +1,4 @@
-// Copyright (C) 2019, NVIDIA CORPORATION. All rights reserved.
+﻿// Copyright (C) 2019, NVIDIA CORPORATION. All rights reserved.
 // Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
 //
 // This file is a port of shader/god_rays_filter.comp from Quake 2 RTX (https://github.com/NVIDIA/Q2RTX),
@@ -22,8 +22,9 @@
 // Bilateral spatial upscale of the half-resolution god rays to full screen
 // resolution. Ported 1:1 from Quake 2 RTX (god_rays_filter.comp), GPL v2.
 // Q2RTX additionally blends the result onto the color buffer in this shader;
-// in qray the additive compositing happens in CmPrepareFinal, so this pass
-// only writes the filtered volumetric sunlight to framebufGodRaysFiltered.
+// in qray the compositing happens in CmPrepareHdr. The filtered volumetric
+// sunlight is written to RGB and the light-shaft extinction (1 - transmittance)
+// to alpha so a zero-cleared buffer decodes as transmittance 1.0.
 
 
 // HLSL counterpart of CmGodRaysFilter.comp.
@@ -55,9 +56,16 @@
 // the accumulation into result and fallbackResult, the weightSum branch (division by weightSum
 // against the fixed / 16.0 of the fallback), and the final store of result.rgb with a zero alpha.
 
+#define DESC_SET_LIGHT_SHAFT_PARAMS 1
 #define DESC_SET_FRAMEBUFFERS 2
 #define DESC_SET_GLOBAL_UNIFORM 3
+#define DESC_SET_LIGHT_SHAFT_SCATTER 4
 #include "ShaderCommonHLSLFunc.hlsli"
+#include "LightShafts.hlsli"
+#include "LightShaftBlur.hlsli"
+
+[[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<LightShaftParams_BT> lightShaftParams;
+[[vk::binding(0, DESC_SET_LIGHT_SHAFT_SCATTER)]] Texture2D<float4> lightShaftScatter;
 
 [numthreads(16, 16, 1)]
 void main( uint3 dispatchThreadID : SV_DispatchThreadID )
@@ -113,5 +121,30 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
         result.rgba = fallbackResult.rgba / 16.0;
     }
 
-    framebufGodRaysFiltered[iPosition] = float4(result.rgb, 0.0);
+    float3 lightShafts = (float3)0.0;
+    float shaftTransmittance = 1.0;
+
+    if (lightShaftParams[0].lightShaftCount > 0u)
+    {
+        float4 filteredShaft;
+        if (lightShaftParams[0].accumDebugMode != 0u)
+        {
+            filteredShaft = lightShaftScatter.Load(int3(iPosition, 0));
+        }
+        else
+        {
+            const int2 renderSize = int2(globalUniform.renderWidth, globalUniform.renderHeight);
+            const float froxelPxY = clamp(
+                (float)renderSize.y / max((float)lightShaftParams[0].accumVolumeSizeY, 1.0), 1.0, 12.0);
+            filteredShaft = filterLightShaft1D(
+                lightShaftScatter, framebufQ2ViewDepth_Sampled, iPosition, renderSize,
+                int2(0, 1), froxelPxY);
+        }
+
+        lightShafts = filteredShaft.rgb;
+        shaftTransmittance = saturate(filteredShaft.a);
+    }
+
+    const float shaftExtinction = saturate(1.0 - shaftTransmittance);
+    framebufGodRaysFiltered[iPosition] = float4(result.rgb + lightShafts, shaftExtinction);
 }

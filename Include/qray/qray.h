@@ -739,6 +739,10 @@ typedef struct QrSphericalLightUploadInfo
 
     float           radius;
     QrFloat3D       normal;
+    QrBool32        lightShafts;
+    float           lightShaftsPower;
+    float           lightShaftsDistance;
+    float           lightShaftsFalloff;
 } QrSphericalLightUploadInfo;
 
 typedef struct QrPolygonalLightUploadInfo
@@ -769,6 +773,10 @@ typedef struct QrTexturedAreaLightUploadInfo
 
     int             fit;
     int             isStatic;
+    QrBool32        lightShafts;
+    float           lightShaftsPower;
+    float           lightShaftsDistance;
+    float           lightShaftsFalloff;
 } QrTexturedAreaLightUploadInfo;
 
 /* Spot lights are regular lights in the light array: any number of them can be uploaded. */
@@ -786,6 +794,10 @@ typedef struct QrSpotLightUploadInfo
 
     // Inner cone half-angle. In radians; the intensity is full below it.
     float           angleInner;
+    QrBool32        lightShafts;
+    float           lightShaftsPower;
+    float           lightShaftsDistance;
+    float           lightShaftsFalloff;
 } QrSpotLightUploadInfo;
 
 QRAPI QrResult QRCONV qrUploadDirectionalLight(
@@ -872,6 +884,10 @@ typedef struct QrDtalGroupUploadInfo
 
     uint32_t        memberBase;
     uint32_t        memberCount;
+    QrBool32        lightShafts;
+    float           lightShaftsPower;
+    float           lightShaftsDistance;
+    float           lightShaftsFalloff;
 } QrDtalGroupUploadInfo;
 
 typedef struct QrDtalGroupUploadBatch
@@ -1359,6 +1375,17 @@ typedef struct QrDrawFrameSkyParams
 
     /* Multiplier for the baseline 0.025-radian sun-disc angular radius. */
     float       sunDiscSize;
+    QrBool32    lightShaftsEnabled;
+    float       lightShaftsIntensity;
+    uint32_t    lightShaftsResolution;
+    float       lightShaftsDensity;
+    float       lightShaftsAlbedo;
+    float       lightShaftsLocalFogScale;
+    QrFloat3D   lightShaftsEmissive;
+    QrBool32    lightShaftsTemporal;
+    QrBool32    lightShaftsSun;
+    uint32_t    lightShaftsDebug;
+    uint32_t    lightShaftsRayBudget;
 } QrDrawFrameSkyParams;
 
 #define QR_LIGHT_STYLE_COUNT 64

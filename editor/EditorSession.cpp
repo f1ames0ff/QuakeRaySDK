@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include "Assets.h"
 
@@ -39,6 +42,119 @@ std::string Lowercase(std::string_view text)
     }
 
     return lowered;
+}
+
+// The name a world material carries in the game's file: the miptex the BSP stores is keyed with
+// the `textures/` prefix there, so a scene name is written in that form and read in either, which
+// is also what lets a file an older editor wrote keep resolving.
+std::string CanonicalMaterialName(const std::string &name)
+{
+    static const std::string_view prefix = "textures/";
+    const std::string lowered = Lowercase(name);
+
+    if (lowered.compare(0, prefix.size(), prefix) == 0 ||
+        lowered.compare(0, 6, "progs/") == 0 ||
+        lowered.find(':') != std::string::npos)
+    {
+        return name;
+    }
+
+    return std::string(prefix) + name;
+}
+
+// A frame of an animated texture: Quake's `+0tex` .. `+9tex` and the `+atex` .. `+jtex` the
+// engines that ran out of digits wrote. Note that stripped base names like `+basebtn` also begin
+// with letters in `a..j`, so lookup always tries `+0` whenever index 1 is non-numeric.
+bool IsLikelyExplicitFramePrefix(char c)
+{
+    const char lower = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+    return (lower >= '0' && lower <= '9') || lower == 'a';
+}
+
+std::string StarToHash(std::string text)
+{
+    for (char &c : text)
+    {
+        if (c == '*')
+        {
+            c = '#';
+        }
+    }
+
+    return text;
+}
+
+// The key a material is written under: the game's per-miptex form, so an animated family with no
+// entry yet is created as the frame the game reads its light from rather than as a name no lookup
+// can reach.
+std::string MaterialKeyName(const std::string &name)
+{
+    const std::string normalized = StarToHash(name);
+
+    if (normalized.size() >= 2 && normalized[0] == '+' && !IsLikelyExplicitFramePrefix(normalized[1]))
+    {
+        return CanonicalMaterialName("+0" + normalized.substr(1));
+    }
+
+    return CanonicalMaterialName(normalized);
+}
+
+// The names one scene material can have in the file. Both per-miptex frame names (`+0basebtn`,
+// `+1basebtn`, `+abasebtn`) and stripped family names (`+basebtn`, `+planet`) may be queried, and
+// either form may or may not carry the textures/ prefix. Quake's `*liquid` prefix also swaps to
+// `#liquid` in texture names (e.g. `*teleport` <-> `textures/#teleport`).
+size_t MaterialNameCandidates(const std::string &name, std::string *out, size_t maxOut)
+{
+    size_t count = 0;
+
+    auto add = [&](const std::string &value) {
+        const std::string lowered = Lowercase(value);
+
+        for (size_t i = 0; i < count; i++)
+        {
+            if (out[i] == lowered)
+            {
+                return;
+            }
+        }
+
+        if (count < maxOut)
+        {
+            out[count++] = lowered;
+        }
+    };
+
+    const std::string hashed = StarToHash(name);
+    add(CanonicalMaterialName(hashed));
+    add(hashed);
+    add(CanonicalMaterialName(name));
+    add(name);
+
+    if (hashed.size() >= 2 && hashed[0] == '+' &&
+        !std::isdigit(static_cast<unsigned char>(hashed[1])))
+    {
+        add(CanonicalMaterialName("+0" + hashed.substr(1)));
+        add("+0" + hashed.substr(1));
+    }
+
+    return count;
+}
+
+// foundLower is a name as the file spells it, already lowercased.
+bool MaterialNameMatches(const std::string &entryName, const std::string &foundLower)
+{
+    std::string candidates[8];
+    const size_t count = MaterialNameCandidates(entryName, candidates, 8);
+
+    for (size_t i = 0; i < count; i++)
+    {
+        if (candidates[i] == foundLower)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool IsSpace(char c)
@@ -184,8 +300,13 @@ std::string_view ValueOf(std::string_view line)
 
     size_t end = start;
 
-    while (end < line.size() && line[end] != '\r' && line[end] != '\n' && line[end] != '#')
+    while (end < line.size() && line[end] != '\r' && line[end] != '\n')
     {
+        if (line[end] == '#' && (end == start || IsSpace(line[end - 1])))
+        {
+            break;
+        }
+
         end++;
     }
 
@@ -317,6 +438,55 @@ std::string FormatColor(const float color[3])
     return buffer;
 }
 
+void AppendOwnedTailValues(const EditorMaterialParams &params,
+                           std::vector<std::pair<const char *, std::string>> &values)
+{
+    if (!params.enabled)
+    {
+        values.emplace_back("enabled", "false");
+    }
+    if (params.lightShafts)
+    {
+        values.emplace_back("light_shafts", "true");
+    }
+    if (params.lightShaftsPower != 1.0f)
+    {
+        values.emplace_back("light_shafts_power", FormatFloat(params.lightShaftsPower));
+    }
+    if (params.lightShaftsDistance > 0.0f)
+    {
+        values.emplace_back("light_shafts_distance", FormatFloat(params.lightShaftsDistance));
+    }
+    if (params.lightShaftsFalloff != 1.0f)
+    {
+        values.emplace_back("light_shafts_falloff", FormatFloat(params.lightShaftsFalloff));
+    }
+    if (params.hasColorEmissive && !params.emissiveBlocks.empty())
+    {
+        values.emplace_back("luma", std::string());
+    }
+    if (params.lumaThreshold != 0.02f)
+    {
+        values.emplace_back("luma_threshold", FormatFloat(params.lumaThreshold));
+    }
+    if (params.lumaFeather != 0.0f)
+    {
+        values.emplace_back("luma_feather", FormatFloat(params.lumaFeather));
+    }
+    if (params.hasColorGloss && !params.glossBlocks.empty())
+    {
+        values.emplace_back("gloss", std::string());
+    }
+    if (params.glossThreshold != 0.02f)
+    {
+        values.emplace_back("gloss_threshold", FormatFloat(params.glossThreshold));
+    }
+    if (params.glossFeather != 0.0f)
+    {
+        values.emplace_back("gloss_feather", FormatFloat(params.glossFeather));
+    }
+}
+
 // The owned keys of `params`, in canonical order, as `key`/`value` pairs. A key at its file
 // default is left out, which is what keeps a save from growing the file by eleven dead lines.
 std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMaterialParams &params)
@@ -343,14 +513,14 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("texture_emissive", params.emissiveTexture);
     }
 
-    if (!params.glossTexture.empty())
-    {
-        append("texture_gloss", params.glossTexture);
-    }
-
     if (!params.overlayTexture.empty())
     {
         append("texture_overlay", params.overlayTexture);
+    }
+
+    if (!params.glossTexture.empty())
+    {
+        append("texture_gloss", params.glossTexture);
     }
 
     if (params.textureScaleU != 1.0f)
@@ -393,7 +563,8 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("metalness_from_normal_alpha", "true");
     }
 
-    if (params.emissiveFactor != 0.0f)
+    // rt_material.c's default is 1, so only a value that differs from it has to be written.
+    if (params.emissiveFactor != 1.0f)
     {
         append("emissive_factor", FormatFloat(params.emissiveFactor));
     }
@@ -498,70 +669,85 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
         append("light_projector", "true");
     }
 
-    // QRE_WriteEmissiveBlocks writes the list, then QRE_WriteMaterial writes the two material
-    // defaults the blocks inherit, and only when they differ from the file's own defaults.
-    if (!params.emissiveBlocks.empty())
-    {
-        append("luma", std::string());
-    }
-
-    if (params.lumaThreshold != 0.02f)
-    {
-        append("luma_threshold", FormatFloat(params.lumaThreshold));
-    }
-
-    if (params.lumaFeather != 0.0f)
-    {
-        append("luma_feather", FormatFloat(params.lumaFeather));
-    }
-
+    AppendOwnedTailValues(params, values);
     return values;
 }
 
-// One owned key as YAML. Every key but `luma` is a scalar on its own line; `luma` is the list of
-// colour blocks, so it lays them out under the key the way QRE_WriteEmissiveBlocks does.
-void AppendOwnedValue(std::string &out, const std::string &indent, const char *key,
-                      const std::string &value, const EditorMaterialParams &params)
+void AppendPolygonOrColorYaml(std::string &out, const std::string &indent,
+                              const std::vector<float> &polyUv, const float color[3],
+                              float threshold)
 {
-    if (std::string_view(key) != "luma")
+    if (polyUv.size() >= 6)
     {
-        out += indent;
-        out += key;
-        out += ": ";
-        out += value;
+        char buffer[64];
+        out += indent + "  - polygon:";
+
+        for (size_t p = 0; p + 1 < polyUv.size(); p += 2)
+        {
+            std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", polyUv[p], polyUv[p + 1]);
+            out += buffer;
+        }
+
         out += '\n';
         return;
     }
 
+    out += indent + "  - color: " + FormatColor(color) + "\n";
+    out += indent + "    threshold: " + FormatFloat(threshold) + "\n";
+}
+
+void AppendLumaBlocksYaml(std::string &out, const std::string &indent,
+                          const EditorMaterialParams &params)
+{
     out += indent + "luma:\n";
 
     for (const EditorEmissiveBlock &block : params.emissiveBlocks)
     {
-        char buffer[64];
-
-        if (block.polyUv.size() >= 6)
-        {
-            out += indent + "  - polygon:";
-
-            for (size_t p = 0; p + 1 < block.polyUv.size(); p += 2)
-            {
-                std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", block.polyUv[p],
-                              block.polyUv[p + 1]);
-                out += buffer;
-            }
-
-            out += '\n';
-        }
-        else
-        {
-            out += indent + "  - color: " + FormatColor(block.color) + "\n";
-            out += indent + "    threshold: " + FormatFloat(block.threshold) + "\n";
-        }
-
+        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
         out += indent + "    emissive_factor: " + FormatFloat(block.factor) + "\n";
         out += indent + "    blend: " + BlendNameOf(block.blend) + "\n";
     }
+}
+
+void AppendGlossBlocksYaml(std::string &out, const std::string &indent,
+                           const EditorMaterialParams &params)
+{
+    out += indent + "gloss:\n";
+
+    for (const EditorGlossBlock &block : params.glossBlocks)
+    {
+        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
+        out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
+        out += indent + "    roughness: " + FormatFloat(block.roughness) + "\n";
+        out += indent + "    metalness: " + FormatFloat(block.metalness) + "\n";
+    }
+}
+
+// One owned key as YAML. Every key but `luma` and `gloss` is a scalar on its own line; `luma` and
+// `gloss` are lists of colour / polygon blocks.
+void AppendOwnedValue(std::string &out, const std::string &indent, const char *key,
+                      const std::string &value, const EditorMaterialParams &params)
+{
+    const std::string_view keyView(key);
+
+    if (keyView == "luma")
+    {
+        AppendLumaBlocksYaml(out, indent, params);
+        return;
+    }
+
+    if (keyView == "gloss")
+    {
+        AppendGlossBlocksYaml(out, indent, params);
+        return;
+    }
+
+    out += indent;
+    out += key;
+    out += ": ";
+    out += value;
+    out += '\n';
 }
 
 // A line holding nothing but whitespace: inside a nested block it belongs to that block.
@@ -661,14 +847,14 @@ std::string_view Trimmed(std::string_view text)
 
 // RT_MAT_EMIS_POLY_MAX points of a `- polygon:` value, clamped to the unit square; fewer than
 // three of them are no polygon at all, which is the reset the loader does.
-void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
+void ReadUvPolygon(std::string_view value, std::vector<float> &outPolyUv)
 {
-    block.polyUv.clear();
+    outPolyUv.clear();
 
     const std::string text(value);
     const char *cursor = text.c_str();
 
-    while (*cursor && block.polyUv.size() < 32)
+    while (*cursor && outPolyUv.size() < 32)
     {
         char *end = nullptr;
         const float u = std::strtof(cursor, &end);
@@ -693,8 +879,8 @@ void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
         }
 
         cursor = end;
-        block.polyUv.push_back(std::clamp(u, 0.0f, 1.0f));
-        block.polyUv.push_back(std::clamp(v, 0.0f, 1.0f));
+        outPolyUv.push_back(std::clamp(u, 0.0f, 1.0f));
+        outPolyUv.push_back(std::clamp(v, 0.0f, 1.0f));
 
         while (*cursor == ' ' || *cursor == '\t')
         {
@@ -702,10 +888,15 @@ void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
         }
     }
 
-    if (block.polyUv.size() < 6)
+    if (outPolyUv.size() < 6)
     {
-        block.polyUv.clear();
+        outPolyUv.clear();
     }
+}
+
+void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
+{
+    ReadUvPolygon(value, block.polyUv);
 }
 
 void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorEmissiveBlock &block,
@@ -748,6 +939,11 @@ void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorE
     }
 }
 
+bool IsLumaBlockHeaderKey(std::string_view key)
+{
+    return key == "luma" || key == "color_emissive";
+}
+
 // Reads the `luma` key of one entry in either of its authored forms: the list of colour / polygon
 // blocks, or the legacy `luma: ff0000,00ff00` scalar the game still accepts.
 void ReadEmissiveBlocks(const std::string &text, const std::vector<TextLine> &lines, size_t begin,
@@ -759,7 +955,7 @@ void ReadEmissiveBlocks(const std::string &text, const std::vector<TextLine> &li
     {
         const std::string_view line = lines[i].View(text);
 
-        if (LeadingWhitespace(line) != keyIndent || KeyOf(line) != "luma")
+        if (LeadingWhitespace(line) != keyIndent || !IsLumaBlockHeaderKey(KeyOf(line)))
         {
             continue;
         }
@@ -873,6 +1069,242 @@ void ReadEmissiveBlocks(const std::string &text, const std::vector<TextLine> &li
     }
 }
 
+bool IsGlossBlockHeaderKey(std::string_view key)
+{
+    return key == "gloss" || key == "color_gloss";
+}
+
+void ApplyGlossBlockKey(std::string_view key, std::string_view value, EditorGlossBlock &block,
+                        uint32_t &has)
+{
+    if (key == "color")
+    {
+        ParseColor(value, block.color);
+    }
+    else if (key == "polygon")
+    {
+        ReadUvPolygon(value, block.polyUv);
+    }
+    else if (key == "threshold")
+    {
+        block.threshold = FloatOf(value, block.threshold);
+        has |= kOwnedThreshold;
+    }
+    else if (key == "feather")
+    {
+        const float pixels = FloatOf(value, block.feather);
+        block.feather = std::clamp(float(std::lround(pixels)), 0.0f, 16.0f);
+        has |= kOwnedFeather;
+    }
+    else if (key == "roughness")
+    {
+        block.roughness = std::clamp(FloatOf(value, block.roughness), 0.0f, 1.0f);
+    }
+    else if (key == "metalness")
+    {
+        block.metalness = std::clamp(FloatOf(value, block.metalness), 0.0f, 1.0f);
+    }
+}
+
+void ParseScalarColorGlossList(std::string_view scalar, EditorMaterialParams &params,
+                               std::vector<uint32_t> &has)
+{
+    size_t start = 0;
+
+    while (start < scalar.size() && params.glossBlocks.size() < kEditorGlossBlockMax)
+    {
+        size_t stop = scalar.find_first_of(", \t", start);
+
+        if (stop == std::string_view::npos)
+        {
+            stop = scalar.size();
+        }
+
+        if (stop > start)
+        {
+            EditorGlossBlock block;
+            ParseColor(scalar.substr(start, stop - start), block.color);
+            params.glossBlocks.push_back(block);
+            has.push_back(0);
+        }
+
+        start = stop + 1;
+    }
+}
+
+void ParseNestedGlossLine(std::string_view item, EditorMaterialParams &params,
+                          std::vector<uint32_t> &has, size_t &current)
+{
+    if (item.size() >= 2 && item.front() == '-' && IsSpace(item[1]))
+    {
+        if (params.glossBlocks.size() >= kEditorGlossBlockMax)
+        {
+            current = size_t(-1);
+            return;
+        }
+
+        params.glossBlocks.emplace_back();
+        has.push_back(0);
+        current = params.glossBlocks.size() - 1;
+        item = Trimmed(item.substr(1));
+    }
+
+    if (current == size_t(-1))
+    {
+        return;
+    }
+
+    const size_t colon = item.find(':');
+
+    if (colon != std::string_view::npos)
+    {
+        ApplyGlossBlockKey(Trimmed(item.substr(0, colon)), Trimmed(item.substr(colon + 1)),
+                           params.glossBlocks[current], has[current]);
+    }
+}
+
+void ApplyGlossBlockDefaults(EditorMaterialParams &params, const std::vector<uint32_t> &has)
+{
+    for (size_t b = 0; b < params.glossBlocks.size() && b < has.size(); b++)
+    {
+        EditorGlossBlock &block = params.glossBlocks[b];
+
+        if ((has[b] & kOwnedThreshold) == 0)
+        {
+            block.threshold = params.glossThreshold;
+        }
+
+        if ((has[b] & kOwnedFeather) == 0)
+        {
+            block.feather = params.glossFeather;
+        }
+    }
+}
+
+void ReadGlossBlocks(const std::string &text, const std::vector<TextLine> &lines, size_t begin,
+                     size_t end, size_t keyIndent, EditorMaterialParams &params)
+{
+    std::vector<uint32_t> has;
+
+    for (size_t i = begin; i < end; i++)
+    {
+        const std::string_view line = lines[i].View(text);
+
+        if (LeadingWhitespace(line) != keyIndent || !IsGlossBlockHeaderKey(KeyOf(line)))
+        {
+            continue;
+        }
+
+        const std::string_view scalar = Trimmed(ValueOf(line));
+
+        if (!scalar.empty())
+        {
+            ParseScalarColorGlossList(scalar, params, has);
+            continue;
+        }
+
+        size_t current = size_t(-1);
+
+        for (size_t k = i + 1; k < end; k++)
+        {
+            const std::string_view nested = lines[k].View(text);
+
+            if (IsBlankLine(nested))
+            {
+                continue;
+            }
+
+            const size_t indent = LeadingWhitespace(nested);
+
+            if (indent <= keyIndent)
+            {
+                break;
+            }
+
+            ParseNestedGlossLine(nested.substr(indent), params, has, current);
+        }
+    }
+
+    ApplyGlossBlockDefaults(params, has);
+}
+
+void ApplyGlossScalarKey(std::string_view key, std::string_view value, EditorMaterialParams &params)
+{
+    if (key == "gloss" || key == "color_gloss")
+    {
+        params.hasColorGloss = true;
+    }
+    else if (key == "gloss_threshold")
+    {
+        params.glossThreshold = FloatOf(value, params.glossThreshold);
+    }
+    else if (key == "gloss_feather")
+    {
+        params.glossFeather = FloatOf(value, params.glossFeather);
+    }
+}
+
+void ResetMaterialBlockState(EditorMaterialParams &params)
+{
+    params.emissiveBlocks.clear();
+    params.hasColorEmissive = false;
+    params.glossBlocks.clear();
+    params.hasColorGloss = false;
+}
+
+void ApplyExtraMaterialScalarKey(std::string_view key, std::string_view value,
+                                 EditorMaterialParams &params)
+{
+    if (key == "enabled")
+    {
+        params.enabled = BoolOf(value, params.enabled);
+    }
+    else if (key == "light_shafts")
+    {
+        params.lightShafts = BoolOf(value, params.lightShafts);
+    }
+    else if (key == "light_shafts_power")
+    {
+        params.lightShaftsPower = std::clamp(FloatOf(value, params.lightShaftsPower), 0.0f, 16.0f);
+    }
+    else if (key == "light_shafts_distance")
+    {
+        params.lightShaftsDistance =
+            std::clamp(FloatOf(value, params.lightShaftsDistance), 0.0f, 25.0f);
+    }
+    else if (key == "light_shafts_falloff")
+    {
+        params.lightShaftsFalloff =
+            std::clamp(FloatOf(value, params.lightShaftsFalloff), 0.0f, 4.0f);
+    }
+    else if (key == "luma" || key == "color_emissive")
+    {
+        params.hasColorEmissive = true;
+    }
+    else if (key == "emissive_blend")
+    {
+        params.lumaBlend = EmissiveBlendOf(value, params.lumaBlend);
+    }
+    else if (key == "color_emissive_threshold")
+    {
+        params.lumaThreshold = FloatOf(value, params.lumaThreshold);
+    }
+    else if (key == "color_emissive_feather")
+    {
+        params.lumaFeather = FloatOf(value, params.lumaFeather);
+    }
+    else
+    {
+        ApplyGlossScalarKey(key, value, params);
+    }
+}
+
+void FinalizeExtraMaterialRead(EditorMaterialParams &params)
+{
+    params.hasColorEmissive = params.hasColorEmissive || !params.emissiveBlocks.empty();
+    params.hasColorGloss = params.hasColorGloss || !params.glossBlocks.empty();
+}
+
 std::string FormatVector(const float value[3])
 {
     return FormatFloat(value[0]) + " " + FormatFloat(value[1]) + " " + FormatFloat(value[2]);
@@ -918,8 +1350,20 @@ std::string LevelKeyOf(const std::string &scenePath)
 // the editor does not model are left in the file.
 bool IsLightKey(std::string_view key)
 {
-    static const char *const keys[] = { "origin",  "radius",     "intensity",   "color",
-                                        "spot",    "dir",        "angle_inner", "angle_outer",
+    static const char *const keys[] = { "origin",
+                                        "offset",
+                                        "radius",
+                                        "intensity",
+                                        "color",
+                                        "spot",
+                                        "dir",
+                                        "angle_inner",
+                                        "angle_outer",
+                                        "light_shafts",
+                                        "light_shafts_power",
+                                        "light_shafts_distance",
+                                        "light_shafts_falloff",
+                                        "enabled",
                                         "style" };
 
     for (const char *owned : keys)
@@ -1097,6 +1541,41 @@ std::vector<SubBlock> SectionBlocks(const std::vector<TextLine> &lines, const st
     return blocks;
 }
 
+void ApplyExtraLightEntryKey(std::string_view key, std::string_view value, std::string_view line,
+                             EditorLevelLight &light, std::vector<std::string> &extra)
+{
+    if (key == "offset")
+    {
+        light.hasOffset = true;
+        ParseVector(value, light.offset);
+    }
+    else if (key == "light_shafts")
+    {
+        light.lightShafts = BoolOf(value, light.lightShafts);
+    }
+    else if (key == "light_shafts_power")
+    {
+        light.lightShaftsPower = std::clamp(FloatOf(value, light.lightShaftsPower), 0.0f, 16.0f);
+    }
+    else if (key == "light_shafts_distance")
+    {
+        light.lightShaftsDistance =
+            std::clamp(FloatOf(value, light.lightShaftsDistance), 0.0f, 25.0f);
+    }
+    else if (key == "light_shafts_falloff")
+    {
+        light.lightShaftsFalloff = std::clamp(FloatOf(value, light.lightShaftsFalloff), 0.0f, 4.0f);
+    }
+    else if (key == "enabled")
+    {
+        light.enabled = BoolOf(value, light.enabled);
+    }
+    else
+    {
+        extra.push_back(TrimmedLine(line));
+    }
+}
+
 std::vector<LightEntryBlock> ParseLightEntries(const std::vector<TextLine> &lines,
                                                const std::string &text, const SubBlock &block)
 {
@@ -1175,7 +1654,7 @@ std::vector<LightEntryBlock> ParseLightEntries(const std::vector<TextLine> &line
             }
             else
             {
-                entry.extra.push_back(TrimmedLine(line));
+                ApplyExtraLightEntryKey(key, value, line, light, entry.extra);
             }
 
             i++;
@@ -1405,6 +1884,26 @@ std::string RenderSkyBlock(const EditorLevelSky &sky, size_t childIndent)
     return text;
 }
 
+void AppendLightEntryShafts(std::string &text, const std::string &field, const EditorLevelLight &light)
+{
+    if (light.lightShafts)
+    {
+        text += field + "light_shafts: true\n";
+    }
+    if (light.lightShaftsPower != 1.0f)
+    {
+        text += field + "light_shafts_power: " + FormatFloat(light.lightShaftsPower) + "\n";
+    }
+    if (light.lightShaftsDistance > 0.0f)
+    {
+        text += field + "light_shafts_distance: " + FormatFloat(light.lightShaftsDistance) + "\n";
+    }
+    if (light.lightShaftsFalloff != 1.0f)
+    {
+        text += field + "light_shafts_falloff: " + FormatFloat(light.lightShaftsFalloff) + "\n";
+    }
+}
+
 // The entry as RT_CustomLights_WriteEntry lays it out. `extra` carries the keys the editor cannot
 // express, which is how an entry's `offset:` survives a session.
 std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<std::string> &extra,
@@ -1415,6 +1914,11 @@ std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<st
     std::string text;
 
     text += head + "- origin: " + FormatVector(light.origin) + "\n";
+
+    if (light.hasOffset)
+    {
+        text += field + "offset: " + FormatVector(light.offset) + "\n";
+    }
 
     for (const std::string &line : extra)
     {
@@ -1431,6 +1935,12 @@ std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<st
         text += field + "dir: " + FormatVector(light.direction) + "\n";
         text += field + "angle_inner: " + FormatFloat(light.angleInner) + "\n";
         text += field + "angle_outer: " + FormatFloat(light.angleOuter) + "\n";
+        AppendLightEntryShafts(text, field, light);
+    }
+
+    if (!light.enabled)
+    {
+        text += field + "enabled: false\n";
     }
 
     if (light.style > 0)
@@ -1443,11 +1953,296 @@ std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<st
     return text;
 }
 
-bool ReadFileText(const std::string &path, std::string &text)
+void ApplyEmitterConeField(std::string_view key, std::string_view value,
+                           EditorEmitterLightOverride &out)
 {
+    if (key == "spot")
+    {
+        out.spot = BoolOf(value, out.spot);
+        out.hasSpot = true;
+    }
+    else if (key == "dir")
+    {
+        ParseVector(value, out.dir);
+        out.hasDir = true;
+    }
+    else if (key == "angle_inner")
+    {
+        out.angleInner = FloatOf(value, out.angleInner);
+        out.hasAngles = true;
+    }
+    else if (key == "angle_outer")
+    {
+        out.angleOuter = FloatOf(value, out.angleOuter);
+        out.hasAngles = true;
+    }
+    else if (key == "force_rasterize")
+    {
+        out.forceRasterize = BoolOf(value, out.forceRasterize);
+    }
+    else if (key == "enabled")
+    {
+        out.enabled = BoolOf(value, out.enabled);
+    }
+    else if (key == "group_edit")
+    {
+        out.groupEdit = BoolOf(value, out.groupEdit);
+    }
+}
+
+void ApplyEmitterLightField(std::string_view key, std::string_view value,
+                            EditorEmitterLightOverride &out)
+{
+    if (key == "light_radius")
+    {
+        out.radius = FloatOf(value, out.radius);
+        out.hasRadius = true;
+    }
+    else if (key == "light_intensity")
+    {
+        out.intensity = FloatOf(value, out.intensity);
+        out.hasIntensity = true;
+    }
+    else if (key == "light_offset")
+    {
+        ParseVector(value, out.offset);
+        out.hasOffset = true;
+    }
+    else if (key == "light_color")
+    {
+        ParseColor(value, out.color);
+        out.hasColor = true;
+    }
+    else if (key == "light_style")
+    {
+        const std::string lower = Lowercase(value);
+        if (lower == "none" || lower == "off" || lower == "default")
+        {
+            out.style = 0;
+            out.hasStyle = false;
+        }
+        else
+        {
+            out.style = StyleFromValue(value);
+            out.hasStyle = true;
+        }
+    }
+    else
+    {
+        ApplyEmitterConeField(key, value, out);
+    }
+}
+
+bool HasEmitterOverrideFields(const EditorEmitterLightOverride &ov)
+{
+    return ov.hasRadius || ov.hasIntensity || ov.hasOffset || ov.hasColor || ov.hasSpot ||
+           ov.hasDir || ov.hasAngles || ov.forceRasterize || ov.hasStyle || !ov.groupEdit ||
+           !ov.enabled;
+}
+
+std::string RenderEmitterLightEntry(const EditorEmitterLightOverride &ov)
+{
+    std::string text;
+    text += "  - name: " + ov.name + "\n";
+
+    if (ov.hasRadius)
+    {
+        text += "    light_radius: " + FormatFloat(ov.radius) + "\n";
+    }
+    if (ov.hasIntensity)
+    {
+        text += "    light_intensity: " + FormatFloat(ov.intensity) + "\n";
+    }
+    if (ov.hasOffset)
+    {
+        text += "    light_offset: " + FormatVector(ov.offset) + "\n";
+    }
+    if (ov.hasColor)
+    {
+        text += "    light_color: " + FormatColor(ov.color) + "\n";
+    }
+    if (ov.hasSpot)
+    {
+        text += "    spot: " + FormatBool(ov.spot) + "\n";
+    }
+    if (ov.hasDir)
+    {
+        text += "    dir: " + FormatVector(ov.dir) + "\n";
+    }
+    if (ov.hasAngles)
+    {
+        text += "    angle_inner: " + FormatFloat(ov.angleInner) + "\n";
+        text += "    angle_outer: " + FormatFloat(ov.angleOuter) + "\n";
+    }
+    if (ov.forceRasterize)
+    {
+        text += "    force_rasterize: true\n";
+    }
+    if (ov.hasStyle)
+    {
+        const int32_t style = std::clamp(ov.style, 0, kEditorStyleCount - 1);
+        text += "    light_style: " + std::string(kEditorStyleNames[style]) + "\n";
+    }
+
+    if (!ov.enabled)
+    {
+        text += "    enabled: false\n";
+    }
+
+    text += "    group_edit: " + FormatBool(ov.groupEdit) + "\n";
+    return text;
+}
+
+bool IsTopLevelEmitterHeader(std::string_view line)
+{
+    if (LeadingWhitespace(line) != 0)
+    {
+        return false;
+    }
+
+    const std::string key = Lowercase(KeyOf(line));
+    return key == "qray_lights" || key == "lights";
+}
+
+bool EndsEmitterSectionLine(std::string_view line)
+{
+    if (LeadingWhitespace(line) != 0 || line.empty() || line[0] == '#' || line[0] == '\r' ||
+        line[0] == '\n')
+    {
+        return false;
+    }
+
+    std::string dummyName;
+    if (NameOf(line, dummyName) || IsTopLevelEmitterHeader(line))
+    {
+        return false;
+    }
+
+    return !KeyOf(line).empty();
+}
+
+std::string MergeEmitterLightsText(const std::string &doc,
+                                   const std::vector<EditorEmitterLightOverride> &emitters)
+{
+    const std::vector<TextLine> lines = SplitLines(doc);
+    size_t head = size_t(-1);
+
+    for (size_t i = 0; i < lines.size(); i++)
+    {
+        if (IsTopLevelEmitterHeader(lines[i].View(doc)))
+        {
+            head = i;
+            break;
+        }
+    }
+
+    const std::string block = RenderEmitterLightsBlock(emitters);
+    std::string out;
+
+    if (head != size_t(-1))
+    {
+        size_t end = head + 1;
+        while (end < lines.size() && !EndsEmitterSectionLine(lines[end].View(doc)))
+        {
+            end++;
+        }
+
+        for (size_t i = 0; i < head; i++)
+        {
+            out += lines[i].View(doc);
+        }
+        out += block;
+        for (size_t i = end; i < lines.size(); i++)
+        {
+            out += lines[i].View(doc);
+        }
+        return out;
+    }
+
+    if (block.empty())
+    {
+        return doc;
+    }
+
+    size_t insertAt = lines.size();
+    for (size_t i = 0; i < lines.size(); i++)
+    {
+        if (EndsEmitterSectionLine(lines[i].View(doc)))
+        {
+            insertAt = i;
+            break;
+        }
+    }
+
+    for (size_t i = 0; i < insertAt; i++)
+    {
+        out += lines[i].View(doc);
+    }
+    out += block;
+    for (size_t i = insertAt; i < lines.size(); i++)
+    {
+        out += lines[i].View(doc);
+    }
+    return out;
+}
+
+bool IsEmittedMaterialKey(std::string_view key,
+                          const std::vector<std::pair<const char *, std::string>> &values)
+{
+    static constexpr const char *kAlwaysReplacedKeys[] = {
+        "enabled",         "luma",        "color_emissive", "gloss",
+        "color_gloss",     "gloss_threshold", "gloss_feather",
+    };
+
+    for (const char *replaced : kAlwaysReplacedKeys)
+    {
+        if (key == replaced)
+        {
+            return true;
+        }
+    }
+
+    for (const auto &[emittedKey, emittedValue] : values)
+    {
+        if (key == emittedKey)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+FILE *OpenFilePortable(const std::string &path, const char *mode)
+{
+#if defined(_WIN32)
     FILE *file = nullptr;
 
-    if (fopen_s(&file, path.c_str(), "rb") != 0 || file == nullptr)
+    if (fopen_s(&file, path.c_str(), mode) != 0)
+    {
+        return nullptr;
+    }
+
+    return file;
+#else
+    return std::fopen(path.c_str(), mode);
+#endif
+}
+
+bool ReplaceFilePortable(const std::string &temporary, const std::string &path)
+{
+#if defined(_WIN32)
+    return MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    return std::rename(temporary.c_str(), path.c_str()) == 0;
+#endif
+}
+
+bool ReadFileText(const std::string &path, std::string &text)
+{
+    FILE *file = OpenFilePortable(path, "rb");
+
+    if (file == nullptr)
     {
         return false;
     }
@@ -1480,7 +2275,7 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
     else
     {
         paths.materials = sceneDirectory.empty() ? "qray.materials.yaml"
-                                                 : sceneDirectory + "\\qray.materials.yaml";
+                                                 : sceneDirectory + "/qray.materials.yaml";
     }
 
     if (!lightsOverride.empty())
@@ -1490,16 +2285,16 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
     else
     {
         paths.lights = sceneDirectory.empty() ? "qray.lights.yaml"
-                                              : sceneDirectory + "\\qray.lights.yaml";
+                                              : sceneDirectory + "/qray.lights.yaml";
     }
 
     const std::string materialsDirectory = EditorDirectoryOf(paths.materials);
     paths.materialsBackup = (materialsDirectory.empty() ? std::string(".") : materialsDirectory) +
-                            "\\qray.backup_materials.yaml";
+                            "/qray.backup_materials.yaml";
 
     const std::string lightsDirectory = EditorDirectoryOf(paths.lights);
     paths.lightsBackup = (lightsDirectory.empty() ? std::string(".") : lightsDirectory) +
-                         "\\qray.backup_lights.yaml";
+                         "/qray.backup_lights.yaml";
 
     paths.level = LevelKeyOf(scenePath);
     return paths;
@@ -1510,9 +2305,9 @@ bool EditorMaterialsDocument::Load(const std::string &path, std::string &error)
     m_text.clear();
     m_exists = false;
 
-    FILE *probe = nullptr;
+    FILE *probe = OpenFilePortable(path, "rb");
 
-    if (fopen_s(&probe, path.c_str(), "rb") != 0 || probe == nullptr)
+    if (probe == nullptr)
     {
         return true; // a target that does not exist yet: the writer emits the header
     }
@@ -1531,14 +2326,13 @@ bool EditorMaterialsDocument::Load(const std::string &path, std::string &error)
 
 size_t EditorMaterialsDocument::FindEntry(const std::string &name) const
 {
-    const std::string wanted = Lowercase(name);
     const std::vector<TextLine> lines = SplitLines(m_text);
 
     for (size_t i = 0; i < lines.size(); i++)
     {
         std::string found;
 
-        if (NameOf(lines[i].View(m_text), found) && found == wanted)
+        if (NameOf(lines[i].View(m_text), found) && MaterialNameMatches(name, found))
         {
             return i;
         }
@@ -1551,6 +2345,51 @@ bool EditorMaterialsDocument::HasMaterial(const std::string &name) const
 {
     return FindEntry(name) != size_t(-1);
 }
+
+namespace
+{
+
+size_t FindMaterialEntryEnd(const std::vector<TextLine> &lines, const std::string &text, size_t head)
+{
+    size_t end = head + 1;
+
+    for (; end < lines.size(); end++)
+    {
+        const std::string_view line = lines[end].View(text);
+        std::string nextName;
+
+        // The entry ends at the next sequence item of its own name, whatever indentation the file
+        // uses, so a neighbour's keys never count as this entry's.
+        if (!IsBodyLine(line) || NameOf(line, nextName))
+        {
+            break;
+        }
+    }
+
+    return end;
+}
+
+size_t InferMaterialKeyIndent(const std::vector<TextLine> &lines, const std::string &text,
+                              size_t begin, size_t end)
+{
+    size_t keyIndent = size_t(-1);
+
+    for (size_t i = begin; i < end; i++)
+    {
+        const std::string_view line = lines[i].View(text);
+
+        if (KeyOf(line).empty())
+        {
+            continue;
+        }
+
+        keyIndent = std::min(keyIndent, LeadingWhitespace(line));
+    }
+
+    return keyIndent;
+}
+
+} // namespace
 
 bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMaterialParams &params) const
 {
@@ -1565,41 +2404,10 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
     bool glass = false;
     bool water = false;
 
-    params.emissiveBlocks.clear();
+    ResetMaterialBlockState(params);
 
-    size_t end = head + 1;
-
-    for (; end < lines.size(); end++)
-    {
-        const std::string_view line = lines[end].View(m_text);
-        std::string nextName;
-
-        // The entry ends at the next sequence item of its own name, whatever indentation the file
-        // uses, so a neighbour's keys never count as this entry's.
-        if (!IsBodyLine(line) || NameOf(line, nextName))
-        {
-            break;
-        }
-    }
-
-    size_t keyIndent = size_t(-1);
-
-    for (size_t i = head + 1; i < end; i++)
-    {
-        const std::string_view line = lines[i].View(m_text);
-
-        if (KeyOf(line).empty())
-        {
-            continue;
-        }
-
-        const size_t level = LeadingWhitespace(line);
-
-        if (level < keyIndent)
-        {
-            keyIndent = level;
-        }
-    }
+    const size_t end = FindMaterialEntryEnd(lines, m_text, head);
+    const size_t keyIndent = InferMaterialKeyIndent(lines, m_text, head + 1, end);
 
     for (size_t i = head + 1; i < end; i++)
     {
@@ -1757,10 +2565,16 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         {
             params.lumaFeather = FloatOf(value, params.lumaFeather);
         }
+        else
+        {
+            ApplyExtraMaterialScalarKey(key, value, params);
+        }
     }
 
     // The blocks inherit the material-level tone controls, so they are read once those are known.
     ReadEmissiveBlocks(m_text, lines, head + 1, end, keyIndent, params);
+    ReadGlossBlocks(m_text, lines, head + 1, end, keyIndent, params);
+    FinalizeExtraMaterialRead(params);
 
     // a material that asks for both is glass, as the loader decides
     params.type = glass ? EditorMaterialType::Glass
@@ -1779,13 +2593,6 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
         merged += "qray_materials:\n";
     }
 
-    std::vector<std::string> wanted(entries.size());
-
-    for (size_t i = 0; i < entries.size(); i++)
-    {
-        wanted[i] = Lowercase(entries[i].name);
-    }
-
     const std::vector<TextLine> lines = SplitLines(m_text);
 
     for (size_t i = 0; i < lines.size(); i++)
@@ -1796,9 +2603,12 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
 
         if (NameOf(line, found))
         {
-            for (size_t e = 0; e < wanted.size(); e++)
+            for (size_t e = 0; e < entries.size(); e++)
             {
-                if (wanted[e] == found && !written[e])
+                // The same resolution a read uses, so an entry the file already carries under the
+                // game's key form is updated in place rather than appended a second time under
+                // the scene's bare miptex name.
+                if (!written[e] && MaterialNameMatches(entries[e].name, found))
                 {
                     entry = e;
                     break;
@@ -1879,14 +2689,7 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
             // default stays where it was, so an untouched value keeps its own line.
             if (!key.empty() && LeadingWhitespace(bodyLine) == keyIndent)
             {
-                for (const auto &[emittedKey, emittedValue] : values)
-                {
-                    if (key == emittedKey)
-                    {
-                        emitted = true;
-                        break;
-                    }
-                }
+                emitted = IsEmittedMaterialKey(key, values);
             }
 
             if (emitted)
@@ -1931,7 +2734,7 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
             merged += '\n';
         }
 
-        merged += "  - name: " + entries[e].name + "\n";
+        merged += "  - name: " + MaterialKeyName(entries[e].name) + "\n";
 
         for (const auto &[key, value] : OwnedValues(entries[e].params))
         {
@@ -1968,6 +2771,34 @@ std::string RenderEditorLevelSection(const std::string &level, const EditorLevel
     }
 
     return text;
+}
+
+std::string RenderEmitterLightsBlock(const std::vector<EditorEmitterLightOverride> &emitters)
+{
+    std::string entries;
+
+    for (const EditorEmitterLightOverride &ov : emitters)
+    {
+        if (ov.name.empty() || !HasEmitterOverrideFields(ov))
+        {
+            continue;
+        }
+
+        entries += RenderEmitterLightEntry(ov);
+    }
+
+    if (entries.empty())
+    {
+        return {};
+    }
+
+    return "qray_lights:\n" + entries;
+}
+
+std::string MergeEmitterLightsYaml(const std::string &yamlText,
+                                   const std::vector<EditorEmitterLightOverride> &emitters)
+{
+    return MergeEmitterLightsText(yamlText, emitters);
 }
 
 bool EditorLevelDocument::Load(const std::string &path, std::string &error)
@@ -2041,6 +2872,58 @@ EditorLevelDocument::ReadResult EditorLevelDocument::ReadLevel(const std::string
     }
 
     return result;
+}
+
+std::vector<EditorEmitterLightOverride> EditorLevelDocument::ReadEmitterLights() const
+{
+    const std::vector<TextLine> lines = SplitLines(m_text);
+    std::vector<EditorEmitterLightOverride> emitters;
+    bool inEmitters = false;
+    EditorEmitterLightOverride *current = nullptr;
+
+    for (const TextLine &textLine : lines)
+    {
+        const std::string_view line = textLine.View(m_text);
+
+        if (IsTopLevelEmitterHeader(line))
+        {
+            inEmitters = true;
+            current = nullptr;
+            continue;
+        }
+
+        if (EndsEmitterSectionLine(line))
+        {
+            inEmitters = false;
+            current = nullptr;
+            continue;
+        }
+
+        if (!inEmitters)
+        {
+            continue;
+        }
+
+        std::string itemName;
+        if (NameOf(line, itemName))
+        {
+            emitters.emplace_back();
+            emitters.back().name = std::move(itemName);
+            current = &emitters.back();
+            continue;
+        }
+
+        if (current != nullptr)
+        {
+            const std::string key = Lowercase(KeyOf(line));
+            if (!key.empty())
+            {
+                ApplyEmitterLightField(key, ValueOf(line), *current);
+            }
+        }
+    }
+
+    return emitters;
 }
 
 std::string EditorLevelDocument::WriteMerged(const std::string &level, const EditorLevelSky &sky,
@@ -2239,9 +3122,9 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
 bool WriteEditorFile(const std::string &path, const std::string &text, std::string &error)
 {
     const std::string temporary = path + ".tmp";
-    FILE *file = nullptr;
+    FILE *file = OpenFilePortable(temporary, "wb");
 
-    if (fopen_s(&file, temporary.c_str(), "wb") != 0 || file == nullptr)
+    if (file == nullptr)
     {
         error = "cannot write " + temporary;
         return false;
@@ -2257,7 +3140,7 @@ bool WriteEditorFile(const std::string &path, const std::string &text, std::stri
         return false;
     }
 
-    if (!MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+    if (!ReplaceFilePortable(temporary, path))
     {
         remove(temporary.c_str());
         error = "cannot replace " + path;

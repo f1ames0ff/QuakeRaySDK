@@ -37,6 +37,8 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
 struct EditorLevelLight
 {
     float origin[3] = {};
+    bool hasOffset = false;
+    float offset[3] = {};
     float radius = 0.4f;
     float intensity = 3.0f;
     float color[3] = { 1.0f, 1.0f, 1.0f };
@@ -44,7 +46,14 @@ struct EditorLevelLight
     float direction[3] = { 1.0f, 0.0f, 0.0f };
     float angleInner = 0.0f;
     float angleOuter = 30.0f;
+    bool lightShafts = false;
+    float lightShaftsPower = 1.0f;
+    float lightShaftsDistance = 0.0f;
+    float lightShaftsFalloff = 1.0f;
     int32_t style = 0;
+    bool enabled = true;
+
+    bool operator==(const EditorLevelLight &) const = default;
 };
 
 // The fog of the level section, in the scale the `fog` console command takes: the renderer divides
@@ -90,6 +99,35 @@ struct EditorLevelSky
     bool Empty() const;
 };
 
+// Per-emitter dynamic light override from the `qray_lights:` section of `qray.lights.yaml`.
+// Mirrors Quake/rt_lights.c `rt_light_t`.
+struct EditorEmitterLightOverride
+{
+    std::string name;
+    bool hasRadius = false;
+    float radius = 0.5f;
+    bool hasIntensity = false;
+    float intensity = 1.0f;
+    bool hasOffset = false;
+    float offset[3] = {};
+    bool hasColor = false;
+    float color[3] = { 1.0f, 1.0f, 1.0f };
+    bool hasSpot = false;
+    bool spot = false;
+    bool hasDir = false;
+    float dir[3] = { 0.0f, 0.0f, 1.0f };
+    bool hasAngles = false;
+    float angleInner = 0.0f;
+    float angleOuter = 30.0f;
+    bool forceRasterize = false;
+    bool hasStyle = false;
+    int32_t style = 0;
+    bool groupEdit = true;
+    bool enabled = true;
+
+    bool operator==(const EditorEmitterLightOverride &) const = default;
+};
+
 // The names rt_custom_style_names carries, in the engine's own order: the index is the
 // d_lightstylevalue[] slot a map's `style` key also selects, so the file's `style:` key holds the
 // name and the editor holds the index.
@@ -102,6 +140,10 @@ extern const char *const kEditorStyleNames[kEditorStyleCount];
 std::string RenderEditorLevelSection(const std::string &level, const EditorLevelSky &sky,
                                      const EditorLevelFog &fog,
                                      const std::vector<EditorLevelLight> &lights);
+
+std::string RenderEmitterLightsBlock(const std::vector<EditorEmitterLightOverride> &emitters);
+std::string MergeEmitterLightsYaml(const std::string &yamlText,
+                                   const std::vector<EditorEmitterLightOverride> &emitters);
 
 // One touched material, as the panel left it.
 struct EditorMaterialEntry
@@ -170,6 +212,7 @@ public:
     };
 
     ReadResult ReadLevel(const std::string &level) const;
+    std::vector<EditorEmitterLightOverride> ReadEmitterLights() const;
 
     // The merged text. The section's `sky:`, `fog:` and `lights:` blocks are replaced where they
     // stand and appended to a section that does not carry them yet; a level the file did not

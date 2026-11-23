@@ -120,6 +120,7 @@ set(renderer_SOURCES
     Source/RHI/RhiRtComposePass.cpp
     Source/RHI/RhiRtDirectPass.cpp
     Source/RHI/RhiRtGodRaysPass.cpp
+    Source/RHI/RhiLightShaftVolumePass.cpp
     Source/RHI/RhiRtIndirectPass.cpp
     Source/RHI/RhiRtPrimaryPass.cpp
     Source/RHI/RhiRtReflRefrPass.cpp
@@ -196,9 +197,6 @@ option(QR_BUILD_TESTS "Build headless renderer GPU regression tests" OFF)
 option(QR_BUILD_EDITOR "Build the standalone QuakeRay editor" OFF)
 option(QR_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer (GCC/Clang)" OFF)
 if(QR_RENDERER_STANDALONE)
-    if(NOT WIN32 AND QR_BUILD_EDITOR)
-        message(FATAL_ERROR "Standalone QuakeRay editor currently supports Win32 only")
-    endif()
     if(QR_BUILD_TESTS)
         enable_testing()
     endif()
@@ -468,6 +466,15 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_dtal_perf COMMAND qray_dtal_perf "${QR_DTAL_PROBE}" "${QR_PROBE_DIR}/DtalPerf.baseline.txt")
     set_tests_properties(qray_dtal_perf PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
+    add_executable(qray_light_shaft_tests
+        Tests/LightShaftTests.cpp
+    )
+    target_compile_features(qray_light_shaft_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_light_shaft_tests PRIVATE
+        Source
+    )
+    add_test(NAME qray_light_shaft_tests COMMAND qray_light_shaft_tests)
+    set_tests_properties(qray_light_shaft_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
 endif()
 
 add_library(qray_alias OBJECT Source/rt_alias.c)
