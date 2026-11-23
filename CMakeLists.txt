@@ -287,6 +287,12 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_swapchain_policy COMMAND qray_swapchain_policy)
     set_tests_properties(qray_swapchain_policy PROPERTIES TIMEOUT 30)
 
+    add_executable(qray_sampler_filter_tests Tests/SamplerFilterTests.cpp)
+    target_compile_features(qray_sampler_filter_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_sampler_filter_tests PRIVATE Include Source ${Vulkan_INCLUDE_DIRS})
+    add_test(NAME qray_sampler_filter_tests COMMAND qray_sampler_filter_tests)
+    set_tests_properties(qray_sampler_filter_tests PROPERTIES TIMEOUT 30)
+
     add_executable(qray_spatial_contract_tests Tests/SpatialContractTests.cpp Source/SpatialFrame.cpp)
     target_compile_features(qray_spatial_contract_tests PRIVATE cxx_std_20)
     target_compile_definitions(qray_spatial_contract_tests PRIVATE QR_STATIC)

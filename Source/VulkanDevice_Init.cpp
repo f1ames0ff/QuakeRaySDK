@@ -51,6 +51,7 @@
 #include "GpuContextInternal.h"
 #include "Generated/ShaderCommonC.h"
 #include "LibraryConfig.h"
+#include "SamplerFilterPolicy.h"
 #include "SwapchainPolicy.h"
 #include "RHI/NvrhiContext.h"
 #include "RHI/NvrhiFrameSkeleton.h"
@@ -80,6 +81,17 @@
 #include "RHI/RhiUiPass.h"
 
 using namespace qray;
+
+namespace
+{
+
+uint32_t QueryMaxSupportedAnisotropy(const PhysicalDevice &physDevice)
+{
+    const float raw = physDevice.GetProperties().limits.maxSamplerAnisotropy;
+    return raw >= 1.0f ? static_cast<uint32_t>(raw) : 1u;
+}
+
+}
 
 void VulkanDevice::InitGodRaysAndLightShaftPasses(const QrInstanceCreateInfo *info)
 {
@@ -198,9 +210,12 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                                                        acquireFullScreenExclusiveMode, releaseFullScreenExclusiveMode);
     swapchain->SetPrintFunction([this](const char *message) { Print(message); });
 
-    worldSamplerManager     = std::make_shared<SamplerManager>(device, 8, info->textureSamplerForceMinificationFilterLinear,
-                                                               rhiTextureTable.get());
-    genericSamplerManager   = std::make_shared<SamplerManager>(device, 0, info->textureSamplerForceMinificationFilterLinear);
+    const uint32_t maxSupportedAnisotropy = QueryMaxSupportedAnisotropy(*physDevice);
+    worldSamplerManager     = std::make_shared<SamplerManager>(device, kDefaultWorldAnisotropy,
+                                                               info->textureSamplerForceMinificationFilterLinear,
+                                                               rhiTextureTable.get(), maxSupportedAnisotropy);
+    genericSamplerManager   = std::make_shared<SamplerManager>(device, 1u, info->textureSamplerForceMinificationFilterLinear,
+                                                               nullptr, 1u);
 
     framebuffers        = std::make_shared<Framebuffers>(
         device,
