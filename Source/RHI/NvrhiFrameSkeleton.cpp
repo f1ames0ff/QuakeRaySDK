@@ -925,6 +925,27 @@ bool NvrhiFrameSkeleton::GetGpuTimings(float *pFrameMs, float *pPassMs) const
     return true;
 }
 
+bool NvrhiFrameSkeleton::ShouldResetHistory(const SkyFrameInputs &sky, bool &outFilterEnabled) const
+{
+    outFilterEnabled = (sky.uniform != nullptr && sky.uniform->GetData() != nullptr) &&
+                       (sky.uniform->GetData()->fltEnable[0] >= 0.5f);
+    if (sky.renderUiOnly)
+    {
+        return false;
+    }
+    return previousFrameUiOnly || pendingHistoryReset || (!previousFilterEnabled && outFilterEnabled);
+}
+
+void NvrhiFrameSkeleton::UpdateHistoryTracking(bool renderUiOnly, bool filterEnabledNow)
+{
+    previousFrameUiOnly = renderUiOnly;
+    if (!renderUiOnly)
+    {
+        pendingHistoryReset = false;
+        previousFilterEnabled = filterEnabledNow;
+    }
+}
+
 bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
                                 FrameSubmissionSynchronization &submission)
 {
@@ -960,7 +981,8 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     // The frame context owns the frame model: BeginSlot waits for the slot's previous submission,
     // drains the slot's retire queue and opens its list, so no long-lived list is opened here.
     cpuProfiler = sky.cpuProfiler;
-    const bool resetHistory = previousFrameUiOnly && !sky.renderUiOnly;
+    bool filterEnabledNow = false;
+    const bool resetHistory = ShouldResetHistory(sky, filterEnabledNow);
     frameContext->BeginSlot(frameIndex, cpuProfiler);
     CompleteFrameReadback(frameIndex);
 
@@ -2135,7 +2157,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         assert(submission.semaphoreToSignal != VK_NULL_HANDLE);
         frameContext->EndSlot(frameIndex, submission.semaphoreToWait, submission.semaphoreToSignal);
     }
-    previousFrameUiOnly = sky.renderUiOnly;
+    UpdateHistoryTracking(sky.renderUiOnly, filterEnabledNow);
 
     if (screenshotPending)
     {
@@ -2694,6 +2716,7 @@ void NvrhiFrameSkeleton::ReleaseFramebufferTargets()
         // of Framebuffers::PrepareForSize or destructor teardown.
         device->waitForIdle();
     }
+    pendingHistoryReset = true;
 
     // The sky pass wraps the engine's ALBEDO images and keeps one wrapped target per frame slot.
     // Dropping them here is what lets the engine destroy and re-create its framebuffers, and the

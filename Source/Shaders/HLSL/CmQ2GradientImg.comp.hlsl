@@ -142,6 +142,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         framebufNormal[grad_sample_pos_curr] = (uint4)restored_normal_enc;
         framebufMetallicRoughness[grad_sample_pos_curr] =
             float4(framebufQ2Metallic_Sampled.Load(int3(grad_sample_pos_curr, 0)).xy, 0.0, 0.0);
+        framebufSurfacePosition[grad_sample_pos_curr] = framebufQ2GradSavedSurfPos_Sampled.Load(int3(ipos, 0));
+        const float4 savedViewDir = framebufQ2GradSavedViewDir_Sampled.Load(int3(ipos, 0));
+        framebufViewDirection[grad_sample_pos_curr] = float4(savedViewDir.xyz, -1.0);
     }
 
     // Accumulate the LF luminances over the whole 3x3 square

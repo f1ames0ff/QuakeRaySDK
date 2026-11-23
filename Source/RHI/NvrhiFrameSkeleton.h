@@ -730,6 +730,8 @@ private:
     uint64_t uiFrameImageHandles[MAX_FRAMES_IN_FLIGHT] = {};
     CpuFrameProfiler *cpuProfiler = nullptr;
     bool previousFrameUiOnly = true;
+    bool pendingHistoryReset = true;
+    bool previousFilterEnabled = false;
 
     // The frame mode of the whole run: which chain Render records into ALBEDO. The host hard-wires
     // it to Traced (VulkanDevice_Init.cpp) and it does not change while the skeleton lives.
@@ -821,6 +823,8 @@ private:
     };
 
     void CreateGpuTimers();
+    bool ShouldResetHistory(const SkyFrameInputs &sky, bool &outFilterEnabled) const;
+    void UpdateHistoryTracking(bool renderUiOnly, bool filterEnabledNow);
     static QrCpuPassIndex CpuPassForGpuPass(uint32_t pass);
     void ReadGpuTimings(uint32_t frameIndex);
     void BeginGpuPass(nvrhi::ICommandList *pCommandList, uint32_t frameIndex, uint32_t pass);

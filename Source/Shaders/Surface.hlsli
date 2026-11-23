@@ -43,11 +43,12 @@ struct Surface
 
 Surface fetchGbufferSurface(const int2 pix)
 {
-    Surface s;
+    Surface s = (Surface)0;
     s.isSky = isSkyPix(pix);
 
     if (s.isSky)
     {
+        s.toViewerDir = -framebufViewDirection.Load(pix).xyz;
         return s;
     }
 

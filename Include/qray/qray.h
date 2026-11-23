@@ -1438,6 +1438,9 @@ typedef enum QrDebugDrawFlagBits
     QR_DEBUG_DRAW_LUMA_BIT = 8192,
 
     QR_DEBUG_DRAW_PASS_STATS_BIT = 16384,
+
+    QR_DEBUG_DRAW_SPEC_HISTORY_LEN_BIT = (1 << 20),
+    QR_DEBUG_DRAW_SPEC_GRADIENT_BIT = (1 << 21),
 } QrDebugDrawFlagBits;
 typedef QrFlags QrDebugDrawFlags;
 
