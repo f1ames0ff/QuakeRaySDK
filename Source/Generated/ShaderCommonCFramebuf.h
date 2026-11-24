@@ -143,6 +143,9 @@ enum FramebufferImageIndex
     FB_IMAGE_INDEX_Q2_GLASS_HISTORY = 129,
     FB_IMAGE_INDEX_Q2_GLASS_HISTORY_PREV = 130,
     FB_IMAGE_INDEX_Q2_PARTICLE_LAYER = 131,
+    FB_IMAGE_INDEX_Q2_SUBSURFACE = 132,
+    FB_IMAGE_INDEX_Q2_SSS_DIFFUSE = 133,
+    FB_IMAGE_INDEX_Q2_SSS_TEMP = 134,
 };
 
 enum FramebufferImageFlagBits
@@ -161,7 +164,7 @@ enum FramebufferImageFlagBits
 };
 typedef uint32_t FramebufferImageFlags;
 
-inline constexpr uint32_t ShFramebuffers_Count = 132;
+inline constexpr uint32_t ShFramebuffers_Count = 135;
 extern const VkFormat ShFramebuffers_Formats[];
 extern const FramebufferImageFlags ShFramebuffers_Flags[];
 extern const uint32_t ShFramebuffers_Bindings[];

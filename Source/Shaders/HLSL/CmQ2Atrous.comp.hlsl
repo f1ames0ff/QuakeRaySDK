@@ -73,6 +73,7 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "BRDF.hlsli"
 #include "Q2Asvgf.hlsli"
+#include "Subsurface.hlsli"
 
 [[vk::constant_id(0)]] const uint q2AtrousIteration = 0;
 
@@ -418,6 +419,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3 throughput = framebufThroughput_Sampled.Load(int3( ipos, 0 )).rgb;
 
         float3 illuminated;
+        float3 sssDiffuse = (float3)0.0;
 
         if(!isSkyPix(ipos))
         {
@@ -450,9 +452,21 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                 ro_d = (float3)globalUniform.fixedAlbedo.x;
             }
 
+            const bool debugDisableSss = (globalUniform.debugShowFlags &
+                (DEBUG_SHOW_FLAG_ONLY_DIRECT_DIFFUSE |
+                 DEBUG_SHOW_FLAG_ONLY_SPECULAR |
+                 DEBUG_SHOW_FLAG_ONLY_INDIRECT_DIFFUSE)) != 0u;
+            const float sssMask = debugDisableSss
+                ? 0.0
+                : getSubsurfaceMask(framebufQ2Subsurface_Sampled.Load(int3(ipos, 0)));
+
             illuminated =
-                (diffuse + indirect) * ro_d +
+                (diffuse + indirect) * ((1.0 - sssMask) * ro_d) +
                 specular * ro_s;
+            if (sssMask > 0.0)
+            {
+                sssDiffuse = max(diffuse + indirect, (float3)0.0);
+            }
 
             if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ONLY_DIRECT_DIFFUSE) != 0)
             {
@@ -485,5 +499,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         illuminated = fogAccum.rgb + illuminated * (1.0 - fogAccum.a);
 
         framebufQ2Color[ipos] = float4(max((float3)0.0, illuminated), 0);
+        framebufQ2SssDiffuse[ipos] = float4(sssDiffuse, 0);
     }
 }

@@ -72,6 +72,56 @@ QrSpatialConvention MakeConvention(QrAxis x, QrAxis y, QrAxis z)
     };
 }
 
+bool TestGeometrySpatialContracts(const qray::SpatialFrame &upY, const QrTransform &transform)
+{
+    QrGeometryUploadInfo glassGeometry = {};
+    glassGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT;
+    glassGeometry.transform = transform;
+    glassGeometry.layerColors[2].data[0] = 1.5f;
+    glassGeometry.layerColors[2].data[1] = 0.25f;
+    const QrGeometryUploadInfo convertedGlass = upY.Geometry(glassGeometry);
+    if (!Check(NearlyEqual(convertedGlass.layerColors[2].data[0], 1.5f) &&
+               NearlyEqual(convertedGlass.layerColors[2].data[1], 0.25f) &&
+               NearlyEqual(convertedGlass.transform.matrix[0][3], 1.0f),
+               "glass thickness conversion failed"))
+    {
+        return false;
+    }
+
+    glassGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
+    if (!Check(NearlyEqual(upY.Geometry(glassGeometry).layerColors[2].data[1], 0.25f),
+               "non-glass material color was changed"))
+    {
+        return false;
+    }
+
+    QrGeometryUploadInfo sssGeometry = {};
+    sssGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
+    sssGeometry.transform = transform;
+    sssGeometry.flags = QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT;
+    sssGeometry.subsurfaceColor = { { 1.0f, 0.35f, 0.2f } };
+    sssGeometry.subsurfaceRadius = 0.08f;
+    sssGeometry.subsurfaceStrength = 0.75f;
+    const QrGeometryUploadInfo convertedSss = upY.Geometry(sssGeometry);
+    if (!Check(NearlyEqual(convertedSss.subsurfaceRadius, 0.08f) &&
+               NearlyEqual(convertedSss.subsurfaceStrength, 0.75f),
+               "subsurface scalar spatial conversion failed"))
+    {
+        return false;
+    }
+    if (!Check(NearlyEqual(convertedSss.subsurfaceColor.data[0], 1.0f) &&
+               NearlyEqual(convertedSss.transform.matrix[0][3], 1.0f),
+               "subsurface color/transform conversion failed"))
+    {
+        return false;
+    }
+
+    sssGeometry.flags = 0;
+    sssGeometry.subsurfaceRadius = -3.0f;
+    return Check(NearlyEqual(upY.Geometry(sssGeometry).subsurfaceRadius, -3.0f),
+                 "subsurface radius changed without subsurface flag");
+}
+
 }
 
 int main()
@@ -164,23 +214,7 @@ int main()
         return 1;
     }
 
-    QrGeometryUploadInfo glassGeometry = {};
-    glassGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT;
-    glassGeometry.transform = transform;
-    glassGeometry.layerColors[2].data[0] = 1.5f;
-    glassGeometry.layerColors[2].data[1] = 0.25f;
-    const QrGeometryUploadInfo convertedGlass = upY.Geometry(glassGeometry);
-    if (!Check(NearlyEqual(convertedGlass.layerColors[2].data[0], 1.5f) &&
-               NearlyEqual(convertedGlass.layerColors[2].data[1], 0.25f) &&
-               NearlyEqual(convertedGlass.transform.matrix[0][3], 1.0f),
-               "glass thickness conversion failed"))
-    {
-        return 1;
-    }
-
-    glassGeometry.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
-    if (!Check(NearlyEqual(upY.Geometry(glassGeometry).layerColors[2].data[1], 0.25f),
-               "non-glass material color was changed"))
+    if (!TestGeometrySpatialContracts(upY, transform))
     {
         return 1;
     }

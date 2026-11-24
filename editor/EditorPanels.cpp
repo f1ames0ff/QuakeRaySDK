@@ -74,6 +74,8 @@ std::string *SlotTexturePtr(EditorMaterialParams &params, EditorApp::EditorTextu
         return &params.overlayTexture;
     case EditorApp::EditorTextureSlot::Gloss:
         return &params.glossTexture;
+    case EditorApp::EditorTextureSlot::Subsurface:
+        return &params.textureSss;
     }
     return &params.baseTexture;
 }
@@ -231,6 +233,8 @@ bool DrawMaterialTexturesSection(
           "Override explicit emissive mask texture (disables color_emissive blocks)." },
         { "texture_overlay", EditorApp::EditorTextureSlot::Overlay, "Alpha-stamped overlay decal." },
         { "texture_gloss", EditorApp::EditorTextureSlot::Gloss, "Gloss / smoothness map." },
+        { "texture_sss", EditorApp::EditorTextureSlot::Subsurface,
+          "Greyscale/luminance subsurface scattering mask texture." },
     };
 
     bool edited = false;
@@ -611,154 +615,150 @@ bool DrawUvPolygonMaskPreview(const char *maskId, std::vector<float> &polyUv,
     return edited;
 }
 
-bool DrawLumaBlockHeader(size_t index, EditorEmissiveBlock &block, EditorEmissiveBlock &clipboard,
-                         bool &clipboardValid, bool &outRemove)
+struct BlockColorUiLabels
 {
-    return DrawMaskBlockHeader("##blkact", index, block, clipboard, clipboardValid, outRemove);
+    const char *colorId;
+    const char *pickId;
+    const char *thresholdLabel;
+    const char *colorTip;
+    const char *thresholdTip;
+};
+
+template <typename Block>
+bool DrawColorBlockPickerAndThreshold(const BlockColorUiLabels &ui, Block &block,
+                                      const Block *baseBlock, uint64_t previewHandle,
+                                      const EditorTexture *previewTex)
+{
+    bool edited = false;
+    const bool clrChanged = baseBlock != nullptr && !ColorEq(block.color, baseBlock->color);
+    bool clrReset = false;
+
+    edited |= EditorGuiColorRow(
+        ui.colorId, block.color,
+        { clrChanged, true, ui.colorTip, nullptr, baseBlock ? &clrReset : nullptr });
+
+    if (baseBlock != nullptr)
+    {
+        edited |= ResetVec3IfClicked(block.color, baseBlock->color, &clrReset);
+    }
+
+    edited |= PickTextureColorPixel(ui.pickId, previewHandle, previewTex, block.color);
+
+    const bool thrChanged = baseBlock != nullptr && !AlmostEq(block.threshold, baseBlock->threshold);
+    bool thrReset = false;
+    edited |= EditorGuiSliderFloat(
+        ui.thresholdLabel, &block.threshold, 0.0f, 1.0f,
+        { thrChanged, true, ui.thresholdTip, "%.3f", baseBlock ? &thrReset : nullptr });
+
+    if (baseBlock != nullptr)
+    {
+        edited |= ResetIfClicked(block.threshold, baseBlock->threshold, &thrReset);
+    }
+
+    return edited;
+}
+
+template <typename Block>
+bool DrawMaskBlockFeatherSlider(const char *label, Block &block, const Block *baseBlock)
+{
+    bool edited = false;
+    const bool ftChanged = baseBlock != nullptr && !AlmostEq(block.feather, baseBlock->feather);
+    bool ftReset = false;
+    int32_t feather = int32_t(std::lround(block.feather));
+
+    if (EditorGuiSliderInt(label, &feather, 0, 16,
+                           { ftChanged, true, "Outward mask edge blur radius in pixels.", "%d",
+                             baseBlock ? &ftReset : nullptr }))
+    {
+        block.feather = float(feather);
+        edited = true;
+    }
+
+    if (baseBlock != nullptr)
+    {
+        edited |= ResetIfClicked(block.feather, baseBlock->feather, &ftReset);
+    }
+
+    return edited;
+}
+
+bool DrawBlockUnitFloatSlider(const char *label, const char *tip, float &value, const float *baseVal)
+{
+    const bool changed = baseVal != nullptr && !AlmostEq(value, *baseVal);
+    bool reset = false;
+    bool edited = EditorGuiSliderFloat(
+        label, &value, 0.0f, 1.0f,
+        { changed, true, tip, "%.2f", baseVal != nullptr ? &reset : nullptr });
+    if (baseVal != nullptr)
+    {
+        edited |= ResetIfClicked(value, *baseVal, &reset);
+    }
+    return edited;
 }
 
 bool DrawLumaColorPreview(EditorEmissiveBlock &block, const EditorEmissiveBlock *baseBlock,
                           uint64_t previewHandle, const EditorTexture *previewTex)
 {
-    bool edited = false;
-    const bool clrChanged = baseBlock != nullptr && !ColorEq(block.color, baseBlock->color);
-    bool clrReset = false;
-
-    edited |= EditorGuiColorRow(
-        "##color", block.color,
-        { clrChanged, true, "The color this block matches, up to the threshold distance.", nullptr,
-          baseBlock ? &clrReset : nullptr });
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetVec3IfClicked(block.color, baseBlock->color, &clrReset);
-    }
-
-    edited |= PickTextureColorPixel("##color_pick", previewHandle, previewTex, block.color);
-
-    const bool thrChanged = baseBlock != nullptr && !AlmostEq(block.threshold, baseBlock->threshold);
-    bool thrReset = false;
-    edited |= EditorGuiSliderFloat(
-        "luma_threshold", &block.threshold, 0.0f, 1.0f,
-        { thrChanged, true, "Color cube distance within which pixels emit.", "%.3f",
-          baseBlock ? &thrReset : nullptr });
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetIfClicked(block.threshold, baseBlock->threshold, &thrReset);
-    }
-
-    return edited;
-}
-
-bool DrawLumaMaskPreview(EditorEmissiveBlock &block, uint64_t previewHandle,
-                         const EditorTexture *previewTex)
-{
-    return DrawUvPolygonMaskPreview("##mask_pick", block.polyUv, previewHandle, previewTex);
+    static constexpr BlockColorUiLabels kUi{
+        "##color",
+        "##color_pick",
+        "luma_threshold",
+        "The color this block matches, up to the threshold distance.",
+        "Color cube distance within which pixels emit.",
+    };
+    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex);
 }
 
 bool DrawGlossColorPreview(EditorGlossBlock &block, const EditorGlossBlock *baseBlock,
                            uint64_t previewHandle, const EditorTexture *previewTex)
 {
-    bool edited = false;
-    const bool clrChanged = baseBlock != nullptr && !ColorEq(block.color, baseBlock->color);
-    bool clrReset = false;
+    static constexpr BlockColorUiLabels kUi{
+        "##gloss_color",
+        "##gloss_color_pick",
+        "gloss_threshold",
+        "The color this gloss block matches, up to the threshold distance.",
+        "Color cube distance within which pixels apply gloss.",
+    };
+    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex);
+}
 
-    edited |= EditorGuiColorRow(
-        "##gloss_color", block.color,
-        { clrChanged, true, "The color this gloss block matches, up to the threshold distance.",
-          nullptr, baseBlock ? &clrReset : nullptr });
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetVec3IfClicked(block.color, baseBlock->color, &clrReset);
-    }
-
-    edited |= PickTextureColorPixel("##gloss_color_pick", previewHandle, previewTex, block.color);
-
-    const bool thrChanged = baseBlock != nullptr && !AlmostEq(block.threshold, baseBlock->threshold);
-    bool thrReset = false;
-    edited |= EditorGuiSliderFloat(
-        "gloss_threshold", &block.threshold, 0.0f, 1.0f,
-        { thrChanged, true, "Color cube distance within which pixels apply gloss.", "%.3f",
-          baseBlock ? &thrReset : nullptr });
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetIfClicked(block.threshold, baseBlock->threshold, &thrReset);
-    }
-
-    return edited;
+bool DrawSssColorPreview(EditorSssBlock &block, const EditorSssBlock *baseBlock,
+                         uint64_t previewHandle, const EditorTexture *previewTex)
+{
+    static constexpr BlockColorUiLabels kUi{
+        "##sss_color",
+        "##sss_color_pick",
+        "sss_threshold",
+        "The color this subsurface block matches, up to the threshold distance.",
+        "Color cube distance within which pixels receive subsurface scattering.",
+    };
+    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex);
 }
 
 bool DrawGlossBlockShadingControls(EditorGlossBlock &block, const EditorGlossBlock *baseBlock)
 {
-    bool edited = false;
+    bool edited = DrawMaskBlockFeatherSlider("gloss_feather", block, baseBlock);
+    edited |= DrawBlockUnitFloatSlider(
+        "roughness", "Target roughness for matched pixels (0 = mirror, 1 = matte).",
+        block.roughness, baseBlock != nullptr ? &baseBlock->roughness : nullptr);
+    edited |= DrawBlockUnitFloatSlider(
+        "metalness", "Target metalness for matched pixels (0 = dielectric, 1 = metal).",
+        block.metalness, baseBlock != nullptr ? &baseBlock->metalness : nullptr);
+    return edited;
+}
 
-    const bool ftChanged = baseBlock != nullptr && !AlmostEq(block.feather, baseBlock->feather);
-    bool ftReset = false;
-    int32_t feather = int32_t(std::lround(block.feather));
-
-    if (EditorGuiSliderInt("gloss_feather", &feather, 0, 16,
-                           { ftChanged, true, "Outward mask edge blur radius in pixels.", "%d",
-                             baseBlock ? &ftReset : nullptr }))
-    {
-        block.feather = float(feather);
-        edited = true;
-    }
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetIfClicked(block.feather, baseBlock->feather, &ftReset);
-    }
-
-    const bool rgChanged = baseBlock != nullptr && !AlmostEq(block.roughness, baseBlock->roughness);
-    bool rgReset = false;
-    edited |= EditorGuiSliderFloat(
-        "roughness", &block.roughness, 0.0f, 1.0f,
-        { rgChanged, true, "Target roughness for matched pixels (0 = mirror, 1 = matte).",
-          "%.2f", baseBlock ? &rgReset : nullptr });
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetIfClicked(block.roughness, baseBlock->roughness, &rgReset);
-    }
-
-    const bool mtChanged = baseBlock != nullptr && !AlmostEq(block.metalness, baseBlock->metalness);
-    bool mtReset = false;
-    edited |= EditorGuiSliderFloat(
-        "metalness", &block.metalness, 0.0f, 1.0f,
-        { mtChanged, true, "Target metalness for matched pixels (0 = dielectric, 1 = metal).",
-          "%.2f", baseBlock ? &mtReset : nullptr });
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetIfClicked(block.metalness, baseBlock->metalness, &mtReset);
-    }
-
+bool DrawSssBlockControls(EditorSssBlock &block, const EditorSssBlock *baseBlock)
+{
+    bool edited = DrawMaskBlockFeatherSlider("sss_feather", block, baseBlock);
+    edited |= DrawBlockUnitFloatSlider(
+        "factor", "Subsurface mask multiplier for this block.",
+        block.factor, baseBlock != nullptr ? &baseBlock->factor : nullptr);
     return edited;
 }
 
 bool DrawLumaBlockToneControls(EditorEmissiveBlock &block, const EditorEmissiveBlock *baseBlock)
 {
-    bool edited = false;
-
-    const bool ftChanged = baseBlock != nullptr && !AlmostEq(block.feather, baseBlock->feather);
-    bool ftReset = false;
-    int32_t feather = int32_t(std::lround(block.feather));
-
-    if (EditorGuiSliderInt("luma_feather", &feather, 0, 16,
-                           { ftChanged, true, "Outward mask edge blur radius in pixels.", "%d",
-                             baseBlock ? &ftReset : nullptr }))
-    {
-        block.feather = float(feather);
-        edited = true;
-    }
-
-    if (baseBlock != nullptr)
-    {
-        edited |= ResetIfClicked(block.feather, baseBlock->feather, &ftReset);
-    }
+    bool edited = DrawMaskBlockFeatherSlider("luma_feather", block, baseBlock);
 
     const bool fcChanged = baseBlock != nullptr && !AlmostEq(block.factor, baseBlock->factor);
     bool fcReset = false;
@@ -2814,10 +2814,10 @@ void DrawMaterialTextureInfoHeader(const EditorScene &scene, const EditorMateria
     }
 
     const auto slotStr = [](const std::string &s) { return s.empty() ? "-" : s.c_str(); };
-    ImGui::Text("maps: base %s | normals %s | emissive %s | overlay %s | gloss %s",
+    ImGui::Text("maps: base %s | normals %s | emissive %s | overlay %s | gloss %s | sss %s",
                 slotStr(params.baseTexture), slotStr(params.normalTexture),
                 slotStr(params.emissiveTexture), slotStr(params.overlayTexture),
-                slotStr(params.glossTexture));
+                slotStr(params.glossTexture), slotStr(params.textureSss));
     ImGui::Text("uv: scale %.2f x %.2f  offset %.2f, %.2f", double(params.textureScaleU),
                 double(params.textureScaleV), double(params.textureOffsetU),
                 double(params.textureOffsetV));
@@ -2896,6 +2896,12 @@ struct LumaClipboardState
 struct GlossClipboardState
 {
     EditorGlossBlock &block;
+    bool &valid;
+};
+
+struct SssClipboardState
+{
+    EditorSssBlock &block;
     bool &valid;
 };
 
@@ -2995,6 +3001,28 @@ void AppendGlossBlock(EditorMaterialParams &params, bool isMask, int32_t &select
     selectedBlock = int32_t(params.glossBlocks.size()) - 1;
 }
 
+void AppendSssBlock(EditorMaterialParams &params, bool isMask, int32_t &selectedBlock,
+                    const EditorTexture *previewTex = nullptr)
+{
+    EditorSssBlock blk;
+    SeedGlossBlockColor(previewTex, blk.color);
+    blk.threshold = params.sssThreshold > 0.0f ? params.sssThreshold : 0.02f;
+    blk.feather = params.sssFeather;
+    blk.factor = 1.0f;
+
+    if (isMask)
+    {
+        blk.polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
+    }
+
+    params.sssBlocks.push_back(std::move(blk));
+    selectedBlock = int32_t(params.sssBlocks.size()) - 1;
+    if (params.sssStrength <= 0.0f)
+    {
+        params.sssStrength = 1.0f;
+    }
+}
+
 bool DrawMaterialGlossSection(EditorMaterialParams &params, const EditorMaterialParams &base,
                               int32_t &selectedBlock, const EditorTexture *previewTex)
 {
@@ -3062,6 +3090,52 @@ bool DrawMaterialGlossSection(EditorMaterialParams &params, const EditorMaterial
     return edited;
 }
 
+bool IsSssLockedByMaterial(const EditorMaterialParams &params)
+{
+    return params.type == EditorMaterialType::Glass ||
+           params.type == EditorMaterialType::Water || params.mirror;
+}
+
+bool DrawSssScalarRow(const char *label, float &value, float baseValue, bool enabled,
+                      const char *fmt, const char *tip)
+{
+    bool reset = false;
+    bool edited = EditorGuiSliderFloat(
+        label, &value, 0.0f, 1.0f,
+        { !AlmostEq(value, baseValue), enabled, tip, fmt, &reset });
+    edited |= ResetIfClicked(value, baseValue, &reset);
+    return edited;
+}
+
+bool DrawMaterialSssSection(EditorMaterialParams &params, const EditorMaterialParams &base)
+{
+    EditorGuiSectionHeader(
+        "Subsurface", "Subsurface scattering tint, radius, strength, and procedural mask blocks.");
+    const bool enabled = !IsSssLockedByMaterial(params);
+    if (!enabled)
+    {
+        ImGui::TextDisabled("Disabled on glass, water, and mirror materials.");
+    }
+
+    bool edited = false;
+    edited |= DrawSssScalarRow("sss_strength", params.sssStrength, base.sssStrength, enabled, "%.2f",
+                               "Global subsurface scattering intensity (0 disables).");
+    edited |= DrawSssScalarRow("sss_radius", params.sssRadius, base.sssRadius, enabled, "%.3f",
+                               "Subsurface scatter blur radius in meters.");
+
+    bool colorReset = false;
+    edited |= EditorGuiColorHex("sss_color", params.sssColor,
+                                { !ColorEq(params.sssColor, base.sssColor), enabled,
+                                  "Subsurface scattering tint color.", nullptr, &colorReset });
+    edited |= ResetVec3IfClicked(params.sssColor, base.sssColor, &colorReset);
+
+    edited |= DrawSssScalarRow("sss_threshold", params.sssThreshold, base.sssThreshold, enabled,
+                               "%.3f", "Default color distance threshold for new subsurface blocks.");
+    edited |= DrawSssScalarRow("sss_feather", params.sssFeather, base.sssFeather, enabled, "%.3f",
+                               "Default edge feathering for new subsurface blocks.");
+    return edited;
+}
+
 template <typename Block>
 bool DrawMaskBlockSelector(const char *kindTooltip, std::vector<Block> &blocks,
                            int32_t &selectedBlock, bool &outIsPoly)
@@ -3117,89 +3191,106 @@ bool DrawAddColorOrMaskButtons(bool canAdd, bool &outAddColor, bool &outAddMask)
     return outAddColor || outAddMask;
 }
 
-bool DrawActiveLumaBlock(EditorMaterialParams &params, const EditorMaterialParams &base,
-                         LumaClipboardState clipboard, const BlockPreviewTarget &preview,
+template <typename DrawColorFn, typename DrawControlsFn>
+struct MaskBlockPanelUi
+{
+    const char *selectorTip;
+    const char *actionId;
+    const char *maskPickId;
+    bool *hasColorFlag;
+    DrawColorFn drawColor;
+    DrawControlsFn drawControls;
+};
+
+template <typename Block, typename ClipboardState, typename DrawColorFn, typename DrawControlsFn>
+bool DrawActiveMaskBlock(const MaskBlockPanelUi<DrawColorFn, DrawControlsFn> &ui,
+                         std::vector<Block> &blocks, const std::vector<Block> &baseBlocks,
+                         ClipboardState clipboard, const BlockPreviewTarget &preview,
                          int32_t &selectedBlock)
 {
     bool isPoly = false;
-    if (!DrawMaskBlockSelector("The luma block the form below edits.", params.emissiveBlocks,
-                               selectedBlock, isPoly))
+    if (!DrawMaskBlockSelector(ui.selectorTip, blocks, selectedBlock, isPoly))
     {
         return false;
     }
 
     const size_t blkIndex = size_t(selectedBlock);
-    EditorEmissiveBlock &block = params.emissiveBlocks[blkIndex];
-    const EditorEmissiveBlock *baseBlock =
-        blkIndex < base.emissiveBlocks.size() ? &base.emissiveBlocks[blkIndex] : nullptr;
+    Block &block = blocks[blkIndex];
+    const Block *baseBlock = blkIndex < baseBlocks.size() ? &baseBlocks[blkIndex] : nullptr;
 
     ImGui::PushID(selectedBlock);
     bool removeThis = false;
-    bool edited = DrawLumaBlockHeader(blkIndex, block, clipboard.block, clipboard.valid, removeThis);
+    bool edited = DrawMaskBlockHeader(ui.actionId, blkIndex, block, clipboard.block,
+                                      clipboard.valid, removeThis);
 
     if (removeThis)
     {
-        params.emissiveBlocks.erase(params.emissiveBlocks.begin() + ptrdiff_t(blkIndex));
-        selectedBlock = std::min(selectedBlock, int32_t(params.emissiveBlocks.size()) - 1);
-        if (params.emissiveBlocks.empty())
+        blocks.erase(blocks.begin() + ptrdiff_t(blkIndex));
+        selectedBlock = std::min(selectedBlock, int32_t(blocks.size()) - 1);
+        if (blocks.empty() && ui.hasColorFlag != nullptr)
         {
-            params.hasColorEmissive = false;
+            *ui.hasColorFlag = false;
         }
         edited = true;
     }
     else
     {
-        edited |= isPoly ? DrawLumaMaskPreview(block, preview.handle, preview.tex)
-                         : DrawLumaColorPreview(block, baseBlock, preview.handle, preview.tex);
-        edited |= DrawLumaBlockToneControls(block, baseBlock);
+        edited |= isPoly ? DrawUvPolygonMaskPreview(ui.maskPickId, block.polyUv, preview.handle,
+                                                    preview.tex)
+                         : ui.drawColor(block, baseBlock, preview.handle, preview.tex);
+        edited |= ui.drawControls(block, baseBlock);
     }
 
     ImGui::PopID();
     return edited;
 }
 
+bool DrawActiveLumaBlock(EditorMaterialParams &params, const EditorMaterialParams &base,
+                         LumaClipboardState clipboard, const BlockPreviewTarget &preview,
+                         int32_t &selectedBlock)
+{
+    const MaskBlockPanelUi ui{
+        "The luma block the form below edits.",
+        "##blkact",
+        "##mask_pick",
+        &params.hasColorEmissive,
+        DrawLumaColorPreview,
+        DrawLumaBlockToneControls,
+    };
+    return DrawActiveMaskBlock(ui, params.emissiveBlocks, base.emissiveBlocks, clipboard, preview,
+                               selectedBlock);
+}
+
 bool DrawActiveGlossBlock(EditorMaterialParams &params, const EditorMaterialParams &base,
                           GlossClipboardState clipboard, const BlockPreviewTarget &preview,
                           int32_t &selectedBlock)
 {
-    bool isPoly = false;
-    if (!DrawMaskBlockSelector("The gloss block the form below edits.", params.glossBlocks,
-                               selectedBlock, isPoly))
-    {
-        return false;
-    }
+    const MaskBlockPanelUi ui{
+        "The gloss block the form below edits.",
+        "##glossact",
+        "##gloss_mask_pick",
+        &params.hasColorGloss,
+        DrawGlossColorPreview,
+        DrawGlossBlockShadingControls,
+    };
+    return DrawActiveMaskBlock(ui, params.glossBlocks, base.glossBlocks, clipboard, preview,
+                               selectedBlock);
+}
 
-    const size_t blkIndex = size_t(selectedBlock);
-    EditorGlossBlock &block = params.glossBlocks[blkIndex];
-    const EditorGlossBlock *baseBlock =
-        blkIndex < base.glossBlocks.size() ? &base.glossBlocks[blkIndex] : nullptr;
-
-    ImGui::PushID(selectedBlock);
-    bool removeThis = false;
-    bool edited = DrawMaskBlockHeader("##glossact", blkIndex, block, clipboard.block,
-                                      clipboard.valid, removeThis);
-
-    if (removeThis)
-    {
-        params.glossBlocks.erase(params.glossBlocks.begin() + ptrdiff_t(blkIndex));
-        selectedBlock = std::min(selectedBlock, int32_t(params.glossBlocks.size()) - 1);
-        if (params.glossBlocks.empty())
-        {
-            params.hasColorGloss = false;
-        }
-        edited = true;
-    }
-    else
-    {
-        edited |= isPoly
-                      ? DrawUvPolygonMaskPreview("##gloss_mask_pick", block.polyUv, preview.handle,
-                                                 preview.tex)
-                      : DrawGlossColorPreview(block, baseBlock, preview.handle, preview.tex);
-        edited |= DrawGlossBlockShadingControls(block, baseBlock);
-    }
-
-    ImGui::PopID();
-    return edited;
+bool DrawActiveSssBlock(EditorMaterialParams &params, const EditorMaterialParams &base,
+                        SssClipboardState clipboard, const BlockPreviewTarget &preview,
+                        int32_t &selectedBlock)
+{
+    const MaskBlockPanelUi ui{
+        "The subsurface block the form below edits.",
+        "##sssact",
+        "##sss_mask_pick",
+        static_cast<bool *>(nullptr),
+        DrawSssColorPreview,
+        DrawSssBlockControls,
+    };
+    return DrawActiveMaskBlock(ui, params.sssBlocks, base.sssBlocks, clipboard, preview,
+                               selectedBlock);
 }
 
 int32_t FindDefaultPreviewModelIndex(const std::vector<EditorAssetCatalogEntry> &catalog)
@@ -3225,36 +3316,68 @@ std::string LowercaseCopy(const std::string &text)
     return out;
 }
 
+struct MaskBlockContext
+{
+    EditorMaterialParams base;
+    BlockPreviewTarget preview;
+};
+
+template <typename ResolveTexFn>
+MaskBlockContext BuildMaskBlockContext(const EditorMaterialTable &baseline, const EditorScene &scene,
+                                       const std::vector<QrMaterial> &textureMaterials,
+                                       const std::string &name, const EditorMaterialParams &params,
+                                       ResolveTexFn resolveTex)
+{
+    const int32_t baseIdx = baseline.IndexOf(name);
+    EditorMaterialParams base =
+        baseIdx >= 0 ? baseline.At(size_t(baseIdx)) : EditorMaterialParams{};
+    int32_t texIdx = resolveTex(params.baseTexture);
+    if (texIdx < 0)
+    {
+        texIdx = resolveTex(name);
+    }
+    return MaskBlockContext{ std::move(base),
+                             MakeBlockPreviewTarget(scene, textureMaterials, texIdx) };
+}
+
+template <typename DrawFn, typename AppendFn>
+bool RunMaskBlockPanel(const char *pushId, bool canAdd, DrawFn drawActive, AppendFn appendBlock)
+{
+    if (pushId != nullptr)
+    {
+        ImGui::PushID(pushId);
+    }
+    bool edited = drawActive();
+    bool addColor = false;
+    bool addMask = false;
+    if (DrawAddColorOrMaskButtons(canAdd, addColor, addMask))
+    {
+        appendBlock(addMask);
+        edited = true;
+    }
+    if (pushId != nullptr)
+    {
+        ImGui::PopID();
+    }
+    return edited;
+}
+
 } // namespace
 
 void EditorApp::DrawMaterialEditorLumaBlocks(const std::string &name, EditorMaterialParams &params,
                                              int32_t materialIndex)
 {
-    const int32_t baseIdx = m_baselineMaterials.IndexOf(name);
-    const EditorMaterialParams base =
-        baseIdx >= 0 ? m_baselineMaterials.At(size_t(baseIdx)) : EditorMaterialParams{};
-
-    int32_t lumaTex = ResolveOrLoadTexture(params.baseTexture);
-    if (lumaTex < 0)
-    {
-        lumaTex = ResolveOrLoadTexture(name);
-    }
-
-    const BlockPreviewTarget preview =
-        MakeBlockPreviewTarget(m_scene, m_textureMaterials, lumaTex);
-
-    bool edited = DrawActiveLumaBlock(
-        params, base, LumaClipboardState{ m_lumaClipboard, m_lumaClipboardValid }, preview,
-        m_selectedLumaBlock);
-
-    bool addColor = false;
-    bool addMask = false;
-    if (DrawAddColorOrMaskButtons(params.emissiveBlocks.size() < kEditorEmissiveBlockMax, addColor,
-                                  addMask))
-    {
-        AppendLumaBlock(params, addMask, m_selectedLumaBlock);
-        edited = true;
-    }
+    const MaskBlockContext ctx = BuildMaskBlockContext(
+        m_baselineMaterials, m_scene, m_textureMaterials, name, params,
+        [this](const std::string &n) { return ResolveOrLoadTexture(n); });
+    const bool edited = RunMaskBlockPanel(
+        nullptr, params.emissiveBlocks.size() < kEditorEmissiveBlockMax,
+        [&] {
+            return DrawActiveLumaBlock(
+                params, ctx.base, LumaClipboardState{ m_lumaClipboard, m_lumaClipboardValid },
+                ctx.preview, m_selectedLumaBlock);
+        },
+        [&](bool addMask) { AppendLumaBlock(params, addMask, m_selectedLumaBlock); });
 
     if (edited)
     {
@@ -3265,33 +3388,42 @@ void EditorApp::DrawMaterialEditorLumaBlocks(const std::string &name, EditorMate
 void EditorApp::DrawMaterialEditorGlossBlocks(const std::string &name, EditorMaterialParams &params,
                                               int32_t materialIndex)
 {
-    const int32_t baseIdx = m_baselineMaterials.IndexOf(name);
-    const EditorMaterialParams base =
-        baseIdx >= 0 ? m_baselineMaterials.At(size_t(baseIdx)) : EditorMaterialParams{};
+    const MaskBlockContext ctx = BuildMaskBlockContext(
+        m_baselineMaterials, m_scene, m_textureMaterials, name, params,
+        [this](const std::string &n) { return ResolveOrLoadTexture(n); });
+    const bool edited = RunMaskBlockPanel(
+        "gloss_blocks", params.glossBlocks.size() < kEditorGlossBlockMax,
+        [&] {
+            return DrawActiveGlossBlock(
+                params, ctx.base, GlossClipboardState{ m_glossClipboard, m_glossClipboardValid },
+                ctx.preview, m_selectedGlossBlock);
+        },
+        [&](bool addMask) {
+            AppendGlossBlock(params, addMask, m_selectedGlossBlock, ctx.preview.tex);
+        });
 
-    int32_t glossTex = ResolveOrLoadTexture(params.baseTexture);
-    if (glossTex < 0)
+    if (edited)
     {
-        glossTex = ResolveOrLoadTexture(name);
+        MarkMaterialEdited(materialIndex);
     }
+}
 
-    const BlockPreviewTarget preview =
-        MakeBlockPreviewTarget(m_scene, m_textureMaterials, glossTex);
-
-    ImGui::PushID("gloss_blocks");
-    bool edited = DrawActiveGlossBlock(
-        params, base, GlossClipboardState{ m_glossClipboard, m_glossClipboardValid }, preview,
-        m_selectedGlossBlock);
-
-    bool addColor = false;
-    bool addMask = false;
-    if (DrawAddColorOrMaskButtons(params.glossBlocks.size() < kEditorGlossBlockMax, addColor,
-                                  addMask))
-    {
-        AppendGlossBlock(params, addMask, m_selectedGlossBlock, preview.tex);
-        edited = true;
-    }
-    ImGui::PopID();
+void EditorApp::DrawMaterialEditorSssBlocks(const std::string &name, EditorMaterialParams &params,
+                                            int32_t materialIndex)
+{
+    const MaskBlockContext ctx = BuildMaskBlockContext(
+        m_baselineMaterials, m_scene, m_textureMaterials, name, params,
+        [this](const std::string &n) { return ResolveOrLoadTexture(n); });
+    const bool edited = RunMaskBlockPanel(
+        "sss_blocks", params.sssBlocks.size() < kEditorSssBlockMax,
+        [&] {
+            return DrawActiveSssBlock(
+                params, ctx.base, SssClipboardState{ m_sssClipboard, m_sssClipboardValid },
+                ctx.preview, m_selectedSssBlock);
+        },
+        [&](bool addMask) {
+            AppendSssBlock(params, addMask, m_selectedSssBlock, ctx.preview.tex);
+        });
 
     if (edited)
     {
@@ -3360,6 +3492,7 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
         m_lastInspectedMaterial = materialIndex;
         m_selectedLumaBlock = 0;
         m_selectedGlossBlock = 0;
+        m_selectedSssBlock = 0;
     }
 
     const std::string &matName = m_materials.NameAt(size_t(materialIndex));
@@ -3416,6 +3549,16 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
     {
         DrawMaterialEditorGlossBlocks(matName, params, materialIndex);
     }
+
+    if (DrawMaterialSssSection(params, base))
+    {
+        MarkMaterialEdited(materialIndex);
+    }
+
+    if (!IsSssLockedByMaterial(params))
+    {
+        DrawMaterialEditorSssBlocks(matName, params, materialIndex);
+    }
 }
 
 void EditorApp::DrawMaterialEditorMaterialsTab()
@@ -3446,6 +3589,7 @@ void EditorApp::DrawMaterialEditorMaterialsTab()
     {
         m_selectedLumaBlock = 0;
         m_selectedGlossBlock = 0;
+        m_selectedSssBlock = 0;
         m_lastInspectedMaterial = m_selectedMaterial;
         m_materialsChanged = true;
     }

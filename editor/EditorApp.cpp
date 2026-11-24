@@ -2310,6 +2310,7 @@ void EditorApp::SelectPreviewModelSkin(int32_t skinIndex)
     m_previewMaterialIndex = EnsureModelSkinMaterial(skinName);
     m_selectedLumaBlock = 0;
     m_selectedGlossBlock = 0;
+    m_selectedSssBlock = 0;
 }
 
 bool EditorApp::SelectPreviewModel(int32_t catalogIndex)
@@ -8146,6 +8147,7 @@ void EditorApp::DrawMaterials()
             textureCombo("Normal##tex", material.normalTexture);
             textureCombo("Emissive##tex", material.emissiveTexture);
             textureCombo("Overlay##tex", material.overlayTexture);
+            textureCombo("Subsurface##tex", material.textureSss);
 
             if (ImGui::Button("Reset extra textures"))
             {
@@ -8153,6 +8155,7 @@ void EditorApp::DrawMaterials()
                 material.normalTexture.clear();
                 material.emissiveTexture.clear();
                 material.overlayTexture.clear();
+                material.textureSss.clear();
                 changed = true;
             }
         }
@@ -8552,6 +8555,8 @@ std::string &MaterialSlotRef(EditorMaterialParams &params, EditorApp::EditorText
         return params.overlayTexture;
     case EditorApp::EditorTextureSlot::Gloss:
         return params.glossTexture;
+    case EditorApp::EditorTextureSlot::Subsurface:
+        return params.textureSss;
     default:
         return params.baseTexture;
     }

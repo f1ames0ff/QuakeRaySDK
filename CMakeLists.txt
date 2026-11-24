@@ -300,6 +300,18 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_spatial_contract_tests COMMAND qray_spatial_contract_tests)
     set_tests_properties(qray_spatial_contract_tests PROPERTIES TIMEOUT 30)
 
+    add_executable(qray_subsurface_tests Tests/SubsurfaceTests.cpp editor/EditorMaterial.cpp)
+    target_compile_features(qray_subsurface_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_subsurface_tests PRIVATE QR_STATIC)
+    if(WIN32)
+        target_compile_definitions(qray_subsurface_tests PRIVATE QR_USE_SURFACE_WIN32 NOMINMAX)
+    else()
+        target_compile_definitions(qray_subsurface_tests PRIVATE QR_USE_SURFACE_XLIB)
+    endif()
+    target_include_directories(qray_subsurface_tests PRIVATE Include Source editor)
+    add_test(NAME qray_subsurface_tests COMMAND qray_subsurface_tests)
+    set_tests_properties(qray_subsurface_tests PROPERTIES TIMEOUT 30)
+
     add_executable(qray_worldlights_tests Tests/WorldLightsTests.cpp Source/WorldLights.cpp
         Source/QrException.cpp Source/UserFunction.cpp)
     target_compile_features(qray_worldlights_tests PRIVATE cxx_std_20)
@@ -445,6 +457,7 @@ if(QR_BUILD_TESTS)
     set(QR_REFLECTIONS_SHADER_DEPS
         Source/Shaders/Q2Asvgf.hlsli
         Source/Shaders/BRDF.hlsli
+        Source/Shaders/Subsurface.hlsli
         Source/Shaders/ShaderCommonHLSLFunc.hlsli
         Source/Shaders/ShaderCommonHLSL.hlsli
         Source/Generated/ShaderCommonHLSL.hlsli

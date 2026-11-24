@@ -66,6 +66,20 @@ struct EditorGlossBlock
 
 inline constexpr size_t kEditorGlossBlockMax = 10;
 
+// Colour-key or polygon region driving per-pixel subsurface scattering mask in Normal.a.
+struct EditorSssBlock
+{
+    float color[3] = { 1.0f, 1.0f, 1.0f };
+    float threshold = 0.02f;
+    float feather = 0.0f;
+    float factor = 1.0f;
+    std::vector<float> polyUv;
+
+    bool operator==(const EditorSssBlock &) const = default;
+};
+
+inline constexpr size_t kEditorSssBlockMax = 10;
+
 // The subset of the game's rt_material_t the editor expresses. The keys whose only consumer is
 // a packed material texture -- the extra images, bump_scale, transparency, luma_blend -- are
 // baked into the albedo / normal / roughness-metallic-emission set by EditorMaterialBakes, the
@@ -191,11 +205,35 @@ struct EditorMaterialParams
     float lightShaftsFalloff = 1.0f;
     bool enabled = true;
 
+    // Subsurface scattering: optional explicit mask texture, global strength in [0, 1], linear
+    // scatter tint, scatter radius in meters (clamped to [0, 1]), and colour-key / polygon
+    // blocks that bake per-pixel SSS strength into Normal.a.
+    std::string textureSss;
+    float sssStrength = 0.0f;
+    float sssColor[3] = { 1.0f, 0.35f, 0.2f };
+    float sssRadius = 0.02f;
+    std::vector<EditorSssBlock> sssBlocks;
+    float sssThreshold = 0.02f;
+    float sssFeather = 0.0f;
+
     bool operator==(const EditorMaterialParams &) const = default;
 };
 
 // Default roughness matching the game's rt_brush_rough ("1.0") when a material has no override.
 inline constexpr float kEditorDefaultRoughness = 1.0f;
+
+bool HasEditorSubsurface(const EditorMaterialParams &material);
+
+void ApplyEditorSubsurface(const EditorMaterialParams &material,
+                           QrGeometryUploadInfo &upload);
+
+std::vector<uint8_t> BuildEditorSssMask(const EditorMaterialParams &params,
+                                        uint32_t width,
+                                        uint32_t height,
+                                        const uint8_t *albedoRgba,
+                                        const uint8_t *textureSssRgba = nullptr,
+                                        uint32_t textureSssWidth = 0,
+                                        uint32_t textureSssHeight = 0);
 
 // Writes one material into an upload info: the albedo tint from baseFactor, the shading
 // scalars, the texcoord transform and the exact-normals flag. `passThroughType` is passed in
@@ -314,6 +352,7 @@ private:
         int32_t normal = -1;
         int32_t emissive = -1;
         int32_t overlay = -1;
+        int32_t sssTex = -1;
         uint32_t width = 0;
         uint32_t height = 0;
         float bumpScale = 1.0f;
@@ -326,10 +365,12 @@ private:
         bool hasRoughnessOverride = false;
         bool mirror = false;
         bool enabled = true;
+        bool sssEnabled = false;
         // The colour blocks, serialized: two materials that differ in any block's colour,
         // threshold, feather, factor, blend or polygon are different bakes.
         std::string emissiveMask;
         std::string glossMask;
+        std::string sssMask;
         bool operator==(const Key &other) const = default;
     };
 

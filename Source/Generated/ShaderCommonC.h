@@ -97,7 +97,7 @@ namespace qray
 #define MATERIAL_BLENDING_MASK_THIRD_LAYER (3840)
 #define GEOM_INST_FLAG_TURB_WARP (1 << 13)
 #define GEOM_INST_FLAG_ALPHA_TRANSMISSION (1 << 14)
-#define GEOM_INST_FLAG_RESERVED_2 (1 << 15)
+#define GEOM_INST_FLAG_SUBSURFACE (1 << 15)
 #define GEOM_INST_FLAG_EMISSION_RAY_ONLY (1 << 16)
 #define GEOM_INST_FLAG_GLASS_CUTOUT (1 << 17)
 #define GEOM_INST_FLAG_MEDIA_TYPE_ACID (1 << 18)
@@ -370,7 +370,7 @@ struct ShGeometryInstance
     float defaultRoughness;
     float defaultMetallicity;
     float defaultEmission;
-    uint32_t _unused1;
+    uint32_t subsurfacePacked;
 };
 
 struct ShTonemapping
