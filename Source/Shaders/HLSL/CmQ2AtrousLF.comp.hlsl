@@ -124,13 +124,28 @@ void filter_image(
         field_right = width;
     }
 
+    // Zero-mean centrosymmetric 2x2 Bayer tap rotation on coarse LF steps prevents
+    // blocky square grid ringing without temporal jitter.
+    const int lf_rot_hi = (step_size >= 2) ? max(1, step_size / 2) : 0;
+    const int lf_rot_lo = (step_size >= 4) ? max(1, step_size / 4) : 0;
+    const uint lf_tile_hash = (((uint(ipos_lowres.x) & 1u) | ((uint(ipos_lowres.y) & 1u) << 1u)) + push.iteration) & 3u;
+    int lf_rot = 0;
+    if (lf_rot_hi > 0)
+    {
+        if (lf_tile_hash == 0u)      lf_rot =  lf_rot_hi;
+        else if (lf_tile_hash == 1u) lf_rot = -lf_rot_hi;
+        else if (lf_tile_hash == 2u) lf_rot =  lf_rot_lo;
+        else                         lf_rot = -lf_rot_lo;
+    }
+    const float lf_eff_step = sqrt((float)(step_size * step_size + lf_rot * lf_rot));
+
     // Compute the weighted average of color from a sparse 3x3 pattern around the target pixel
     const int r = 1;
     for(int yy = -r; yy <= r; yy++)
     {
         for(int xx = -r; xx <= r; xx++)
         {
-            int2 p_lowres = ipos_lowres + int2(xx, yy) * step_size;
+            int2 p_lowres = ipos_lowres + int2(xx * step_size + yy * lf_rot, yy * step_size - xx * lf_rot);
             int2 p_hires = p_lowres * Q2_GRAD_DWN + (int2)1;
 
             if(xx == 0 && yy == 0)
@@ -139,7 +154,8 @@ void filter_image(
             // Skip out-of-range neighbours instead of fetching them with a zero weight:
             // texelFetch with out-of-range integer coordinates is undefined, and a NaN
             // result would still poison the accumulated sum (NaN * 0 is NaN).
-            if(any(p_hires < int2(field_left, 0))
+            if(any(p_lowres < (int2)0)
+                    || any(p_hires < int2(field_left, 0))
                     || any(p_hires >= int2(field_right, height)))
                 continue;
 
@@ -152,7 +168,7 @@ void filter_image(
             float depth = framebufQ2ViewDepth_Sampled.Load(int3(p_hires, 0)).r;
 
             float dist_z = abs(depth_center - depth) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
-            w *= exp(-dist_z / (float)(step_size * Q2_GRAD_DWN));
+            w *= exp(-dist_z / (lf_eff_step * (float)Q2_GRAD_DWN));
             w *= Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
 
             float w_lf = w;
