@@ -1,4 +1,4 @@
-# AI Agent Playbook: Embedding QuakeRaySDK & Writing an Editor Format Adapter
+# QuakeRaySDK Integration Guide for Agents
 
 > **See also:** [AGENTS.md](../AGENTS.md) | [docs/README.md](README.md) | [embedding.md](embedding.md) | [host-contract.md](host-contract.md) | [spatial-contract.md](spatial-contract.md)
 

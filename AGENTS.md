@@ -2,7 +2,7 @@
 
 > **READ THIS FIRST BEFORE WRITING CODE IN THIS REPOSITORY OR ANY HOST ENGINE:**
 >
-> **Complete Playbook:** [docs/agent-integration-guide.md](docs/agent-integration-guide.md) — step-by-step guide to embedding `QuakeRaySDK`, connecting runtime renderers, writing external `EditorFormatAdapter` plugins for `quakerayeditor`, strict repository responsibility boundaries, and the full catalogue of pitfalls ("graveyard of gotchas") learned during the `ioq3-rt` (Quake III) integration.
+> **QuakeRaySDK Integration Guide for Agents:** [docs/agent-integration-guide.md](docs/agent-integration-guide.md) — step-by-step guide to embedding `QuakeRaySDK`, connecting runtime renderers, writing external `EditorFormatAdapter` plugins for `quakerayeditor`, strict repository responsibility boundaries, and the full catalogue of pitfalls ("graveyard of gotchas") learned during the `ioq3-rt` (Quake III) integration.
 >
 > **Full Documentation Map:** [docs/README.md](docs/README.md).
 
