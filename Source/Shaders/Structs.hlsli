@@ -36,6 +36,7 @@ struct ShTriangle
     uint     portalIndex;
     uint     cluster;
     uint     lightStyleIndices;
+    uint     subsurfacePacked;
 };
 
 struct ShPayload
@@ -75,6 +76,7 @@ struct ShHitInfo
     float  transparency;
     float2 glassParams;
     float3 glassColor;
+    float4 subsurface;
 };
 
 #endif

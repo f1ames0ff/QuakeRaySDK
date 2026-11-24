@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block set 1 binding 0
 
 [0] offset 0 m4(v4(float32)) matrixstride 16
@@ -157,7 +157,7 @@ image:2D:0:0:0:2:R32ui
 === descriptor set 0 binding 107: storage class
 UniformConstant
 === descriptor set 0 binding 109
-image:2D:0:0:0:2:Rg16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 109: storage class
 UniformConstant
 === descriptor set 0 binding 135
@@ -180,6 +180,10 @@ UniformConstant
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 139: storage class
 UniformConstant
+=== descriptor set 0 binding 140
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 140: storage class
+UniformConstant
 === descriptor set 0 binding 143
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 143: storage class
@@ -188,9 +192,25 @@ UniformConstant
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 145: storage class
 UniformConstant
+=== descriptor set 0 binding 151
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 151: storage class
+UniformConstant
+=== descriptor set 0 binding 152
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 152: storage class
+UniformConstant
+=== descriptor set 0 binding 155
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 155: storage class
+UniformConstant
 === descriptor set 0 binding 158
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 158: storage class
+UniformConstant
+=== descriptor set 0 binding 170
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 170: storage class
 UniformConstant
 === descriptor set 0 binding 205
 image:2D:0:0:0:1:Unknown
@@ -244,6 +264,14 @@ UniformConstant
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 246: storage class
 UniformConstant
+=== descriptor set 0 binding 247
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 247: storage class
+UniformConstant
+=== descriptor set 0 binding 37
+image:2D:0:0:0:2:Rg32f
+=== descriptor set 0 binding 37: storage class
+UniformConstant
 === descriptor set 0 binding 91
 image:2D:0:0:0:2:Rgba16f
 === descriptor set 0 binding 91: storage class
@@ -253,7 +281,7 @@ image:2D:0:0:0:2:Rg16f
 === descriptor set 0 binding 93: storage class
 UniformConstant
 === descriptor set 0 binding 97
-image:2D:0:0:0:2:Rgba16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 97: storage class
 UniformConstant
 === descriptor set 0 binding 99

@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block pushconstant
 
 [0] offset 0 uint32
@@ -290,7 +290,7 @@ image:2D:0:0:0:2:R32ui
 === descriptor set 0 binding 108: storage class
 UniformConstant
 === descriptor set 0 binding 109
-image:2D:0:0:0:2:Rg16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 109: storage class
 UniformConstant
 === descriptor set 0 binding 10: storage class
@@ -298,7 +298,7 @@ UniformConstant
 === descriptor set 0 binding 11
 image:2D:0:0:0:2:R16f
 === descriptor set 0 binding 110
-image:2D:0:0:0:2:Rg16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 110: storage class
 UniformConstant
 === descriptor set 0 binding 111
@@ -1448,7 +1448,7 @@ UniformConstant
 === descriptor set 0 binding 36: storage class
 UniformConstant
 === descriptor set 0 binding 37
-image:2D:0:0:0:2:Rg16f
+image:2D:0:0:0:2:Rg32f
 === descriptor set 0 binding 370
 sampler
 === descriptor set 0 binding 370: storage class
@@ -1492,7 +1492,7 @@ UniformConstant
 === descriptor set 0 binding 37: storage class
 UniformConstant
 === descriptor set 0 binding 38
-image:2D:0:0:0:2:Rg16f
+image:2D:0:0:0:2:Rg32f
 === descriptor set 0 binding 380
 sampler
 === descriptor set 0 binding 380: storage class
@@ -1536,7 +1536,7 @@ UniformConstant
 === descriptor set 0 binding 38: storage class
 UniformConstant
 === descriptor set 0 binding 39
-image:2D:0:0:0:2:Rgba16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 390
 sampler
 === descriptor set 0 binding 390: storage class
@@ -1672,7 +1672,7 @@ image:2D:0:0:0:2:R11fG11fB10f
 === descriptor set 0 binding 63: storage class
 UniformConstant
 === descriptor set 0 binding 64
-image:2D:0:0:0:2:R11fG11fB10f
+image:2D:0:0:0:2:Rgba16f
 === descriptor set 0 binding 64: storage class
 UniformConstant
 === descriptor set 0 binding 65
@@ -1816,11 +1816,11 @@ image:2D:0:0:0:2:R32ui
 === descriptor set 0 binding 96: storage class
 UniformConstant
 === descriptor set 0 binding 97
-image:2D:0:0:0:2:Rgba16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 97: storage class
 UniformConstant
 === descriptor set 0 binding 98
-image:2D:0:0:0:2:Rgba16f
+image:2D:0:0:0:2:Rgba32f
 === descriptor set 0 binding 98: storage class
 UniformConstant
 === descriptor set 0 binding 99

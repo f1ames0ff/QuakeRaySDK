@@ -33,6 +33,7 @@ class VulkanTestContext
 {
 public:
     std::atomic_uint errors = 0;
+    bool validationActive = false;
     qray::NvrhiContext context;
 
     VulkanTestContext()
@@ -45,6 +46,7 @@ public:
         for (const auto &layer : layers)
             if (std::strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0)
                 enabledLayers.push_back("VK_LAYER_KHRONOS_validation");
+        validationActive = !enabledLayers.empty();
 
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         app.pApplicationName = "QuakeRay cloud regression";

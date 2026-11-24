@@ -18,6 +18,7 @@
 #ifdef DESC_SET_VERTEX_DATA
 #ifdef DESC_SET_GLOBAL_UNIFORM
 #ifdef DESC_SET_TEXTURES
+#include "Subsurface.hlsli"
 
 #if defined(HITINFO_INL_PRIM)
 float3 processAlbedoGrad(uint geometryInstanceFlags, const float2 texCoords[3], const uint3 materials[3], const float4 materialColors[3], const float2 dPdx[3], const float2 dPdy[3])
@@ -177,6 +178,7 @@ ShHitInfo getHitInfoBounce(
     h.transparency = 1.0f;
     h.glassParams = (float2)0.0f;
     h.glassColor = (float3)1.0f;
+    h.subsurface = (float4)0.0f;
 
     int instanceId, instCustomIndex;
     int geomIndex, primIndex;
@@ -378,6 +380,25 @@ ShHitInfo getHitInfoBounce(
         h.metallic  = rme[ 1 ];
         h.emission  = rme[ 2 ];
 
+    #if defined(HITINFO_INL_PRIM)
+        const bool skipRoughReg =
+            (tr.geometryInstanceFlags & (GEOM_INST_FLAG_REFLECT | GEOM_INST_FLAG_REFRACT |
+                                         GEOM_INST_FLAG_MEDIA_TYPE_GLASS | GEOM_INST_FLAG_MEDIA_TYPE_WATER)) != 0u
+            || h.roughness < globalUniform.minRoughness;
+        if (!skipRoughReg && (any(dTdx[0] != 0.0) || any(dTdy[0] != 0.0)))
+        {
+            const uint rmeTex = tr.materials[0][MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX];
+            const float r_dx = getTextureSampleGrad(rmeTex, texCoords[0] + dTdx[0], dTdx[0], dTdy[0]).r;
+            const float r_dy = getTextureSampleGrad(rmeTex, texCoords[0] + dTdy[0], dTdx[0], dTdy[0]).r;
+            const float alpha0 = square(max(h.roughness, MIN_GGX_ROUGHNESS));
+            const float alphaDx = square(max(r_dx, MIN_GGX_ROUGHNESS));
+            const float alphaDy = square(max(r_dy, MIN_GGX_ROUGHNESS));
+            const float varAlpha = 0.25 * (square(alphaDx - alpha0) + square(alphaDy - alpha0));
+            const float alphaReg = sqrt(clamp(square(alpha0) + 0.5 * varAlpha, 0.0, 1.0));
+            h.roughness = clamp(max(h.roughness, sqrt(alphaReg)), MIN_GGX_ROUGHNESS, 1.0);
+        }
+    #endif
+
     #if defined(HITINFO_INL_PRIM) || defined(HITINFO_INL_RFL)
         emissionBlendCode = uint( rme.a * 255.0 + 0.5 );
     #endif
@@ -418,6 +439,7 @@ ShHitInfo getHitInfoBounce(
 
 
 #if !defined(HITINFO_INL_INDIR)
+    float sssMaskAlpha = 1.0f;
     if (tr.materials[0][MATERIAL_NORMAL_INDEX] != MATERIAL_NO_TEXTURE)
     {
         const bool isGlassNormal = (tr.geometryInstanceFlags & GEOM_INST_FLAG_MEDIA_TYPE_GLASS) != 0u;
@@ -434,6 +456,18 @@ ShHitInfo getHitInfoBounce(
         float2 nrm = nrmSample.xy;
         // the normal map's alpha carries the material's glass transparency
         h.transparency = nrmSample.a;
+    #if defined(HITINFO_INL_PRIM)
+        if ((tr.geometryInstanceFlags & GEOM_INST_FLAG_SUBSURFACE) != 0u)
+        {
+            sssMaskAlpha = getTextureSampleGrad(tr.materials[0][MATERIAL_NORMAL_INDEX], texCoords[0], dTdx[0], dTdy[0]).a;
+        }
+        else
+        {
+            sssMaskAlpha = nrmSample.a;
+        }
+    #else
+        sssMaskAlpha = nrmSample.a;
+    #endif
         nrm.xy = nrm.xy * 2.0 - (float2)1.0;
 
         const float3 bitangent = cross(h.normalGeom, tr.tangent.xyz) * tr.tangent.w;
@@ -449,6 +483,31 @@ ShHitInfo getHitInfoBounce(
         }
 
         h.normal = safeNormalize(lerp(h.normalGeom, h.normal, globalUniform.normalMapStrength));
+
+    #if defined(HITINFO_INL_PRIM)
+        const bool skipNormalRoughReg =
+            (tr.geometryInstanceFlags & (GEOM_INST_FLAG_REFLECT | GEOM_INST_FLAG_REFRACT |
+                                         GEOM_INST_FLAG_MEDIA_TYPE_GLASS | GEOM_INST_FLAG_MEDIA_TYPE_WATER)) != 0u
+            || h.roughness < globalUniform.minRoughness;
+        if (!skipNormalRoughReg && globalUniform.normalMapStrength > 0.0 && (any(dTdx[0] != 0.0) || any(dTdy[0] != 0.0)))
+        {
+            // LEADR/Kaplanyan bump-to-roughness regularization: fold normal variation
+            // suppressed by the 5x normal-map derivative scale and sub-pixel gradient into
+            // effective GGX roughness so noisy bump maps do not spark 1-spp fireflies.
+            const uint nrmTex = tr.materials[0][MATERIAL_NORMAL_INDEX];
+            const float2 nrmFine0 = getTextureSampleGrad(nrmTex, texCoords[0], dTdx[0], dTdy[0]).xy * 2.0 - (float2)1.0;
+            const float2 nrmFineDx = getTextureSampleGrad(nrmTex, texCoords[0] + dTdx[0], dTdx[0], dTdy[0]).xy * 2.0 - (float2)1.0;
+            const float2 nrmFineDy = getTextureSampleGrad(nrmTex, texCoords[0] + dTdy[0], dTdx[0], dTdy[0]).xy * 2.0 - (float2)1.0;
+            const float2 diffSupp = nrmFine0 - nrm.xy;
+            const float2 diffDx = nrmFineDx - nrmFine0;
+            const float2 diffDy = nrmFineDy - nrmFine0;
+            const float slopeVar = square(globalUniform.normalMapStrength) *
+                                   (0.25 * (dot(diffDx, diffDx) + dot(diffDy, diffDy)) + 0.5 * dot(diffSupp, diffSupp));
+            const float alpha0 = square(h.roughness);
+            const float alphaReg = sqrt(clamp(square(alpha0) + 0.125 * slopeVar, 0.0, 1.0));
+            h.roughness = clamp(max(h.roughness, sqrt(alphaReg)), MIN_GGX_ROUGHNESS, 1.0);
+        }
+    #endif
     }
     else
 #endif
@@ -461,6 +520,13 @@ ShHitInfo getHitInfoBounce(
     h.portalIndex = tr.portalIndex;
 
     h.cluster = tr.cluster;
+
+#if !defined(HITINFO_INL_INDIR)
+    if ((tr.geometryInstanceFlags & GEOM_INST_FLAG_SUBSURFACE) != 0u)
+    {
+        h.subsurface = buildSubsurfaceGBuffer(tr.subsurfacePacked, sssMaskAlpha);
+    }
+#endif
 
     return h;
 }

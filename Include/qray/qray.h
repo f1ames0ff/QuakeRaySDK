@@ -371,6 +371,10 @@ typedef enum QrGeometryUploadFlagBits
     /* The layer-0 texture coordinates are scaled and shifted per material
        (texture_scale_u/v, texture_offset_u/v) before they reach the shaders. */
     QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT = 2048,
+    /* Enable screen-space subsurface scattering and back-lit translucency for
+       opaque / alpha-tested materials using subsurfaceColor, subsurfaceRadius,
+       and subsurfaceStrength (plus Normal.a when a normal map is bound). */
+    QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT = 4096,
 } QrGeometryUploadFlagBits;
 typedef QrFlags QrGeometryUploadFlags;
 
@@ -407,6 +411,13 @@ typedef struct QrGeometryUploadInfo
 
     QrLayeredMaterial               geomMaterial;
     QrTransform                     transform;
+
+    /* Subsurface scattering parameters when QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT
+       is set: linear RGB scatter tint in [0, 1], scatter radius in meters
+       (clamped to [0, 1]), and global strength multiplier in [0, 1]. */
+    QrFloat3D                       subsurfaceColor;
+    float                           subsurfaceRadius;
+    float                           subsurfaceStrength;
 } QrGeometryUploadInfo;
 
 typedef struct QrUpdateTransformInfo
@@ -1136,6 +1147,12 @@ typedef enum QrSamplerFilter
     QR_SAMPLER_FILTER_NEAREST,
 } QrSamplerFilter;
 
+typedef enum QrSamplerMipmapMode QR_ENUM_UINT32
+{
+    QR_SAMPLER_MIPMAP_MODE_LINEAR = 0,
+    QR_SAMPLER_MIPMAP_MODE_NEAREST = 1,
+} QrSamplerMipmapMode;
+
 typedef struct QrTextureSet
 {
     const void *pDataAlbedoAlpha;
@@ -1401,8 +1418,16 @@ typedef struct QrDrawFrameTexturesParams
 
     uint32_t        emissionBlendMode;
 
-    float           emissionBlendStrength;
-    float           lightStyleScales[QR_LIGHT_STYLE_COUNT];
+    float               emissionBlendStrength;
+    float               lightStyleScales[QR_LIGHT_STYLE_COUNT];
+
+    /* World texture mipmap filter mode (0 = trilinear, 1 = bilinear). */
+    QrSamplerMipmapMode samplerMipmapMode;
+    /* World texture anisotropic filtering level:
+       0 = renderer default (16x, clamped to device maxSamplerAnisotropy),
+       1 = off (isotropic),
+       2 / 4 / 8 / 16 = 2x / 4x / 8x / 16x anisotropy. */
+    uint32_t            samplerAnisotropy;
 } QrDrawFrameTexturesParams;
 
 typedef enum QrDebugDrawFlagBits
@@ -1424,6 +1449,9 @@ typedef enum QrDebugDrawFlagBits
     QR_DEBUG_DRAW_LUMA_BIT = 8192,
 
     QR_DEBUG_DRAW_PASS_STATS_BIT = 16384,
+
+    QR_DEBUG_DRAW_SPEC_HISTORY_LEN_BIT = (1 << 20),
+    QR_DEBUG_DRAW_SPEC_GRADIENT_BIT = (1 << 21),
 } QrDebugDrawFlagBits;
 typedef QrFlags QrDebugDrawFlags;
 

@@ -22,6 +22,7 @@
 
 #include "QrException.h"
 #include "RHI/RhiTextureTable.h"
+#include "SamplerFilterPolicy.h"
 
 using namespace qray;
 
@@ -99,7 +100,7 @@ namespace
         desc.addressV = VkAddressModeToNvrhi(info.addressModeV);
         desc.addressW = VkAddressModeToNvrhi(info.addressModeW);
         desc.mipBias = info.mipLodBias;
-        desc.maxAnisotropy = info.maxAnisotropy;
+        desc.maxAnisotropy = info.anisotropyEnable == VK_TRUE ? info.maxAnisotropy : 1.0f;
         desc.reductionType = nvrhi::SamplerReductionType::Standard;
         desc.borderColor = nvrhi::Color(0.0f, 0.0f, 0.0f, 0.0f);
         return desc;
@@ -128,14 +129,17 @@ namespace
 
 SamplerManager::SamplerManager(
     VkDevice _device, uint32_t _anisotropy, bool _forceMinificationFilterLinear,
-    rhi::RhiTextureTable *pRhiTextureTable)
+    rhi::RhiTextureTable *pRhiTextureTable, uint32_t _maxSupportedAnisotropy,
+    QrSamplerMipmapMode _mipmapMode)
     : device(_device)
     , mipLodBias(0.0f)
-    , anisotropy(_anisotropy)
+    , maxSupportedAnisotropy(ClampSamplerAnisotropy(_maxSupportedAnisotropy, kMaxWorldAnisotropy))
+    , anisotropy(ClampSamplerAnisotropy(_anisotropy, maxSupportedAnisotropy))
+    , mipmapMode(ToVkSamplerMipmapMode(_mipmapMode))
     , forceMinificationFilterLinear(_forceMinificationFilterLinear)
     , rhiTextureTable(pRhiTextureTable)
 {
-    CreateAllSamplers(anisotropy, mipLodBias);
+    CreateAllSamplers(anisotropy, mipmapMode, mipLodBias);
 }
 
 SamplerManager::~SamplerManager()
@@ -163,18 +167,18 @@ void SamplerManager::SetRhiTextureTable(rhi::RhiTextureTable *pTable)
     rhiTextureTable = pTable;
 }
 
-void qray::SamplerManager::CreateAllSamplers(uint32_t _anisotropy, float _mipLodBias)
+void qray::SamplerManager::CreateAllSamplers(uint32_t _anisotropy, VkSamplerMipmapMode _mipmapMode, float _mipLodBias)
 {
     assert(samplers.empty());
-    assert(_anisotropy == 0 || _anisotropy == 2 || _anisotropy == 4 || _anisotropy == 8 || _anisotropy == 16);
+    assert(_anisotropy == 1 || _anisotropy == 2 || _anisotropy == 4 || _anisotropy == 8 || _anisotropy == 16);
 
     VkSamplerCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info.mipmapMode = _mipmapMode;
     info.mipLodBias = _mipLodBias;
-    info.anisotropyEnable = _anisotropy > 0 ? VK_TRUE : VK_FALSE;
-    info.maxAnisotropy = _anisotropy;
+    info.anisotropyEnable = IsSamplerAnisotropyEnabled(_anisotropy) ? VK_TRUE : VK_FALSE;
+    info.maxAnisotropy = static_cast<float>(_anisotropy);
     info.compareEnable = VK_FALSE;
     info.minLod = 0.0f;
     info.maxLod = VK_LOD_CLAMP_NONE;
@@ -298,22 +302,41 @@ VkSampler qray::SamplerManager::GetSampler(const Handle &handle) const
 
 bool qray::SamplerManager::TryChangeMipLodBias(uint32_t frameIndex, float newMipLodBias)
 {
+    const QrSamplerMipmapMode currentMode = mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST
+        ? QR_SAMPLER_MIPMAP_MODE_NEAREST
+        : QR_SAMPLER_MIPMAP_MODE_LINEAR;
+    return TryUpdateSamplerState(frameIndex, newMipLodBias, anisotropy, currentMode);
+}
+
+bool qray::SamplerManager::TryUpdateSamplerState(uint32_t frameIndex, float newMipLodBias,
+                                                 uint32_t newAnisotropy, QrSamplerMipmapMode newMipmapMode)
+{
     constexpr float delta = 0.025f;
 
-    if (std::abs(newMipLodBias - mipLodBias) < delta)
+    const uint32_t clampedAnisotropy = ClampSamplerAnisotropy(newAnisotropy, maxSupportedAnisotropy);
+    const VkSamplerMipmapMode targetMipmapMode = ToVkSamplerMipmapMode(newMipmapMode);
+    const bool mipLodBiasChanged = std::abs(newMipLodBias - mipLodBias) >= delta;
+    const bool anisotropyChanged = clampedAnisotropy != anisotropy;
+    const bool mipmapModeChanged = targetMipmapMode != mipmapMode;
+
+    if (!(mipLodBiasChanged || anisotropyChanged || mipmapModeChanged))
     {
         return false;
     }
 
+    const float effectiveMipLodBias = mipLodBiasChanged ? newMipLodBias : mipLodBias;
+
     AddAllSamplersToDestroy(frameIndex);
-    CreateAllSamplers(anisotropy, newMipLodBias);
+    CreateAllSamplers(clampedAnisotropy, targetMipmapMode, effectiveMipLodBias);
 
     if (rhiTextureTable != nullptr)
     {
         rhiTextureTable->RebuildSamplers();
     }
 
-    mipLodBias = newMipLodBias;
+    mipLodBias = effectiveMipLodBias;
+    anisotropy = clampedAnisotropy;
+    mipmapMode = targetMipmapMode;
     return true;
 }
 

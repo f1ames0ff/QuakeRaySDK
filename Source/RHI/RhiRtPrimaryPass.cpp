@@ -77,7 +77,7 @@ static_assert(SET_TLAS == 0 && SET_FRAMEBUFFERS == 1 && SET_GLOBAL_UNIFORM == 2 
 // other 98 framebuffer images are neither referenced by the raygen's interface nor declared by its
 // module, so set 1 stays a partial layout exactly like the world pass's framebuffer layout - an
 // unwritten binding needs no descriptor (a4_recon §2.3).
-constexpr uint32_t FRAMEBUFFER_UAV_COUNT = 28;
+constexpr uint32_t FRAMEBUFFER_UAV_COUNT = 29;
 constexpr FramebufferImageIndex FRAMEBUFFER_UAV_IMAGES[FRAMEBUFFER_UAV_COUNT] =
 {
     FB_IMAGE_INDEX_ALBEDO,                       //  0  framebufAlbedo
@@ -108,6 +108,7 @@ constexpr FramebufferImageIndex FRAMEBUFFER_UAV_IMAGES[FRAMEBUFFER_UAV_COUNT] =
     FB_IMAGE_INDEX_Q2_CLUSTER,                   // 123 framebufQ2Cluster
     FB_IMAGE_INDEX_Q2_GLASS_FILTER,
     FB_IMAGE_INDEX_Q2_GLASS_REFLECTION,
+    FB_IMAGE_INDEX_Q2_SUBSURFACE,
 };
 
 // Set 3's bindings: vertex data, indices and the geometry-instance buffer `getTriangle` reads.
@@ -395,7 +396,7 @@ bool RhiRtPrimaryPass::Create(nvrhi::IDevice *pDevice,
     {
         // Set 2: the global uniform at raw binding 0 (DXC's default would put it at 256).
         nvrhi::BindingLayoutDesc desc;
-        desc.visibility = nvrhi::ShaderType::AllRayTracing;
+        desc.visibility = nvrhi::ShaderType::AllRayTracing | nvrhi::ShaderType::Compute;
         desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setConstantBufferOffset(0));
         desc.addItem(nvrhi::BindingLayoutItem::ConstantBuffer(BINDING_GLOBAL_UNIFORM));
 

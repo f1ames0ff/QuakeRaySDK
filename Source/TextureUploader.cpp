@@ -141,8 +141,8 @@ void TextureUploader::PrepareMipmaps(VkCommandBuffer cmd, VkImage image, uint32_
         const uint32_t srcWidth = mipWidth;
         const uint32_t srcHeight = mipHeight;
 
-        mipWidth >>= 1;
-        mipHeight >>= 1;
+        mipWidth = std::max(1u, mipWidth >> 1);
+        mipHeight = std::max(1u, mipHeight >> 1);
 
         assert(mipWidth > 0 && mipHeight > 0);
         assert(mipLevel != mipmapCount - 1 || (mipWidth == 1 || mipHeight == 1));
@@ -224,8 +224,8 @@ void TextureUploader::CopyStagingToImageMipmaps(VkCommandBuffer cmd, VkBuffer st
         region.imageSubresource.baseArrayLayer = layerIndex;
         region.imageSubresource.layerCount = 1;
 
-        mipWidth >>= 1;
-        mipHeight >>= 1;
+        mipWidth = std::max(1u, mipWidth >> 1);
+        mipHeight = std::max(1u, mipHeight >> 1);
     }
 
     vkCmdCopyBufferToImage(cmd, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, levelCount, copyRegions);

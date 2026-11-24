@@ -5,10 +5,10 @@ Standalone QuakeRay editor executable. It is a host application around
 
 ## Current stage
 
-The application creates its own Win32 window, creates a `QrInstance`, loads a
-Wavefront OBJ or a Quake BSP29 scene, uploads it as a static scene, adds a
-directional light and renders the scene through the SDK. The default asset is
-`assets/editor_scene.obj`.
+The application creates its own platform window (Win32 on Windows, X11/Xlib on
+Linux), creates a `QrInstance`, loads a Wavefront OBJ or a Quake BSP29 scene,
+uploads it as a static scene, adds a directional light and renders the scene
+through the SDK. The default asset is `assets/editor_scene.obj`.
 
 For a BSP29 map, the loader reads the world geometry, computes per-face UVs from
 the BSP texinfo data, decodes the miptex entries of the texture lump into RGBA
@@ -43,6 +43,21 @@ Global render settings are authored from the scrolling block below the sun:
 exactly as `Quake/gl_vidsdl.c` does, and `EditorApp::Frame` hands the four
 structs to `qrDrawFrame`, so the panel edits the same fields the game's cvars
 feed.
+
+## Units
+
+The editor is a host, so it states what it hands the SDK in meters: the scene is
+authored, picked and saved in Quake units (40 per meter, `kEditorUnitsPerMeter`
+in `Scene.h`), and `EditorSpatial.{h,cpp}` converts at the one boundary every
+value crosses - vertex positions, cluster bounds, light positions and radii,
+area-light corners and areas, and the whole frame block down to fog density,
+water transmittance, cloud height and near-DOF focus distance. Each conversion
+is the one `Quake/qr_spatial_adapter.cpp` applies to the same field, so a level
+lit here is lit the way the game lights it. Nothing else in the editor divides
+a length by `kEditorUnitsPerMeter` on its way to the renderer. A setting the
+panel authors in meters is stated in units by its builder first - the same
+`METRIC_TO_QUAKEUNIT` the game wraps its metric cvars in - so the boundary
+stays the only place the two spaces meet.
 
 The panel has four tabs: `Scene` (frame stats, the selection and the light
 authoring above), `Entities` (the map and custom light lists), `Render` (the
@@ -172,6 +187,8 @@ state and the remaining gap are listed in
 
 ## Build
 
+### Windows
+
 ```powershell
 cmake -S . -B build `
     -DQR_BUILD_EDITOR=ON `
@@ -181,14 +198,33 @@ cmake -S . -B build `
 cmake --build build --config Debug --target quakerayeditor
 ```
 
+### Linux (X11/Xlib)
+
+First build the FidelityFX Vulkan provider (`libamd_fidelityfx_vk.so`), then
+configure and build `quakerayeditor`:
+
+```bash
+Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh
+cmake -S . -B build/linux-editor -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DQR_BUILD_EDITOR=ON \
+    -DQR_NVRHI_SOURCE_DIR=/path/to/nvrhi \
+    -DQR_FFX_VK_SO="$PWD/build/ffx/libamd_fidelityfx_vk.so" \
+    -DQR_EDITOR_SHADER_DIR=/path/to/shaders \
+    -DQR_EDITOR_TEXTURE_DIR=/path/to/gfx/textures
+cmake --build build/linux-editor --target quakerayeditor --parallel
+```
+
 The NVRHI source tree needs the pinned QuakeRay patch
-`third_party/nvrhi-max-binding-layouts.patch` for the ray-tracing pipeline.
+`cmake/nvrhi-max-binding-layouts.patch` for the ray-tracing pipeline.
 `build_win.ps1` applies it automatically; a standalone editor build must apply
 it before configuring or building NVRHI.
 
-The executable is `quakerayeditor.exe`. The FSR provider DLL, the default OBJ,
-the shader directory and the blue-noise texture are copied next to it by the
-build when the corresponding source directories are configured.
+The executable is `quakerayeditor.exe` on Windows and `quakerayeditor` on Linux.
+The FSR provider (`amd_fidelityfx_vk.dll` / `libamd_fidelityfx_vk.so`), the
+default OBJ, the fonts, the shader directory and the blue-noise texture are
+copied next to it by the build when the corresponding source directories are
+configured.
 
 ## Run
 
@@ -197,9 +233,14 @@ build when the corresponding source directories are configured.
     --scene C:\path\to\e1m1.bsp
 ```
 
+```bash
+./quakerayeditor --scene /path/to/e1m1.bsp
+```
+
 The editor defaults to `editor_scene.obj`, `shaders/` and
-`textures/BlueNoise_LDR_RGBA_128.png` next to the executable. The explicit
-options remain available for a different deployment layout:
+`textures/BlueNoise_LDR_RGBA_128.png` in the working directory or next to the
+executable. The explicit options remain available for a different deployment
+layout:
 
 ```powershell
 .\quakerayeditor.exe `
@@ -208,7 +249,8 @@ options remain available for a different deployment layout:
     --scene C:\path\to\e1m1.bsp `
     --materials C:\path\to\qray.materials.yaml `
     --lights C:\path\to\qray.lights.yaml `
-    --tab Entities
+    --tab Entities `
+    --max-frames 10
 ```
 
 `--materials` names the material document the session reads on start and writes
@@ -225,6 +267,9 @@ click the tab bar. It takes the tab label, not a pixel position, because the tab
 rectangles move with the panel; the panel logs them as `panel tabs:` on the
 first frame, next to the `light list rect:`, `panel rect:` and `style items:`
 lines that let a script find the widgets without reading pixels.
+
+`--max-frames <N>` exits cleanly after rendering `N` frames, useful for
+automated smoke checks.
 
 The BSP loader currently accepts Quake BSP29 files directly. Extracting a map
 from a PAK remains an adapter step.
@@ -244,8 +289,8 @@ field for - `texture_overlay`, `force_rasterize`, the `luma:` colour blocks and
 the `light_*` emitter group - which need new upload fields first.
 
 PAK handling and WAL textures from the game archive also remain. The current
-loader still uploads BSP/OBJ coordinates unchanged and does not call
-`qrSetSpatialConvention`. API 1.06 requires meter-valued host input, so the
-editor needs the same unit conversion as the Quake reference host before it can
-be treated as a host-independent scene consumer. This is a known editor
-limitation; it does not change the renderer API contract.
+loader uses Quake units and Z-up. API 1.06 accepts the Z-up orientation, but
+every spatial input reaches the SDK in meters, so the editor converts at one
+boundary: `EditorSpatial.{h,cpp}` is the editor's own counterpart of
+`Quake/qr_spatial_adapter.cpp`, and no other file divides a length by
+`kEditorUnitsPerMeter` on its way to the renderer.

@@ -31,6 +31,7 @@
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
 #include "GlobalLightSampling.hlsli"
+#include "SubsurfaceTranslucency.hlsli"
 
 #define Q2_RNG_CELL_SELECT 200
 #define Q2_RNG_LIGHT_POINT 208
@@ -52,6 +53,7 @@ void main()
     {
         framebufUnfilteredDirect[pix] = (uint4)0;
         framebufUnfilteredSpecular[pix] = (uint4)0;
+        framebufViewDirection[pix] = float4(-surf.toViewerDir, -1.0);
         return;
     }
 
@@ -68,6 +70,9 @@ void main()
 
     float3 directDiffuse = (float3)0.0;
     float3 directSpecular = (float3)0.0;
+    float directSpecHitDistSum = 0.0;
+    float directSpecHitLumSum = 0.0;
+    const float4 sssData = framebufQ2Subsurface_Sampled.Load(int3(pix, 0));
 
     const int numNeeSamples = clamp((int)globalUniform.neeLightSamples, 1, 2);
 
@@ -129,14 +134,25 @@ void main()
                 }
 
                 float3 d, s;
-                shade(surf, light, 1.0 / max(lightPdf * memberPdf, 1e-9), d, s);
+                const float oneOverPdf = 1.0 / max(lightPdf * memberPdf, 1e-9);
+                shade(surf, light, oneOverPdf, d, s);
+                const float3 specContrib = s * vis;
                 directDiffuse += d * vis;
-                directSpecular += s * vis;
+                directSpecular += specContrib;
+                const float specLum = getLuminance(specContrib);
+                directSpecHitDistSum += min(length(light.position - surf.position), Q2_MAX_VIEW_DIR_HIT_DIST) * specLum;
+                directSpecHitLumSum += specLum;
+                if (!lightTraced)
+                {
+                    directDiffuse += shadeSubsurfaceBackLit(surf, light, oneOverPdf, sssData, lightIndex, false);
+                }
             }
         }
     }
     directDiffuse  *= (1.0 / (float)numNeeSamples);
     directSpecular *= (1.0 / (float)numNeeSamples);
+    directSpecHitDistSum *= (1.0 / (float)numNeeSamples);
+    directSpecHitLumSum *= (1.0 / (float)numNeeSamples);
 
     if (globalUniform.directionalLightExists != 0)
     {
@@ -154,11 +170,22 @@ void main()
 
         float3 d, s;
         shade(surf, sunLight, 1.0, d, s);
+        const float3 sunSpec = s * sunVis;
         directDiffuse += d * sunVis;
-        directSpecular += s * sunVis;
+        directSpecular += sunSpec;
+        const float sunSpecLum = getLuminance(sunSpec);
+        directSpecHitDistSum += Q2_MAX_VIEW_DIR_HIT_DIST * sunSpecLum;
+        directSpecHitLumSum += sunSpecLum;
+        if (!sunTraced && getLuminance(sunLight.color) > 0.0)
+        {
+            directDiffuse += shadeSubsurfaceBackLit(surf, sunLight, 1.0, sssData, LIGHT_INDEX_NONE, true);
+        }
     }
 
     imageStoreUnfilteredDirect(pix, directDiffuse);
     imageStoreUnfilteredSpecular(pix, demodulateSpecular(directSpecular, surf.specularColor));
-    framebufViewDirection[pix] = float4(-surf.toViewerDir, globalUniform.rayLength);
+    const float directHitDist = directSpecHitLumSum > 1e-6
+        ? clamp(directSpecHitDistSum / directSpecHitLumSum, 0.0, Q2_MAX_VIEW_DIR_HIT_DIST)
+        : -1.0;
+    framebufViewDirection[pix] = float4(-surf.toViewerDir, directHitDist);
 }

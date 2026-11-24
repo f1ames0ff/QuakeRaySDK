@@ -28,6 +28,7 @@
 #include "LocalExposure.hlsli"
 #include "ColorCompositing.hlsli"
 #include "NearDof.hlsli"
+#include "Q2Asvgf.hlsli"
 
 
 struct PostEffectsControl_BT
@@ -39,8 +40,8 @@ struct PostEffectsControl_BT
 
 [[vk::push_constant]] ConstantBuffer<PostEffectsControl_BT> postEffectsControl;
 
-[[vk::binding(400, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> bloomResultTexture;
-[[vk::binding(402, DESC_SET_FRAMEBUFFERS)]] SamplerState opticalResultSampler;
+[[vk::binding(500, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> bloomResultTexture;
+[[vk::binding(502, DESC_SET_FRAMEBUFFERS)]] SamplerState opticalResultSampler;
 
 
 #define DEBUG_LPM 0
@@ -514,6 +515,265 @@ void main( uint3 dispatchThreadID : SV_DispatchThreadID )
 }
 
 
+bool q2PrepareIsCurrGradientSample(const int2 p, const int width, const int height)
+{
+    if (globalUniform.fltEnable.x < 0.5 || !q2InGradBounds(p, width, height))
+    {
+        return false;
+    }
+
+    const int2 pos_grad = p / Q2_GRAD_DWN;
+    const uint u = framebufQ2GradSmplPos_Sampled.Load(int3(pos_grad, 0)).r;
+    if ((u & (1u << 31)) == 0u)
+    {
+        return false;
+    }
+
+    const int2 stratum = int2(
+        (u >> (Q2_STRATUM_OFFSET_SHIFT * 0)) & Q2_STRATUM_OFFSET_MASK,
+        (u >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
+    return all(pos_grad * Q2_GRAD_DWN + stratum == p);
+}
+
+bool q2PrepareEvalNeighborWeight(const int2 nCbPix, const float depth_c, const float3 normal_c,
+                                 const int width, const int height,
+                                 out float outWDepth, out float outWBi)
+{
+    outWDepth = 0.0;
+    outWBi = 0.0;
+    const float depth_n = framebufDepthWorld_Sampled.Load(int3(nCbPix, 0)).r;
+    if (depth_n > globalUniform.rayLength || q2PrepareIsCurrGradientSample(nCbPix, width, height))
+    {
+        return false;
+    }
+
+    const float3 normal_n = texelFetchNormal(nCbPix);
+    outWDepth = exp(-abs(depth_n - depth_c) / max(0.05 * abs(depth_c), 1e-4));
+    const float wNormal = pow(saturate(dot(normal_n, normal_c)), 8.0);
+    outWBi = max(outWDepth * wNormal, 1e-3 * outWDepth);
+    return true;
+}
+
+float3 q2PrepareUnfilteredIndirectSpec(const int2 pix, const int2 cbPix)
+{
+    const float4 raw = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(cbPix, 0));
+    const bool halfRes = globalUniform.giBounceRays.x < 0.75;
+    const float expectedTag = float(globalUniform.frameId & 1u) + 1.0;
+    if (globalUniform.giBounceRays.x < 0.25)
+    {
+        return (float3)0.0;
+    }
+    if (!halfRes || abs(raw.a - expectedTag) <= 0.25)
+    {
+        return raw.rgb;
+    }
+
+    const float depth_c = framebufDepthWorld_Sampled.Load(int3(cbPix, 0)).r;
+    if (depth_c > globalUniform.rayLength)
+    {
+        return (float3)0.0;
+    }
+
+    const int width = (int)globalUniform.renderWidth;
+    const int height = (int)globalUniform.renderHeight;
+    const int halfWidth = width / 2;
+    const int fieldLeft = (cbPix.x >= halfWidth) ? halfWidth : 0;
+    const int fieldRight = (cbPix.x >= halfWidth) ? width : halfWidth;
+    const bool canCrossFields = framebufThroughput_Sampled.Load(int3(cbPix, 0)).a <= 0.5;
+    const float3 normal_c = texelFetchNormal(cbPix);
+
+    float3 sumSpec = (float3)0.0;
+    float sumW = 0.0;
+    float3 sumSideSpec = (float3)0.0;
+    float sumSideW = 0.0;
+    float3 sumFallback = (float3)0.0;
+    float sumFallbackW = 0.0;
+
+    if (canCrossFields)
+    {
+        [unroll]
+        for (int yy = -1; yy <= 1; yy += 2)
+        {
+            const int fy = pix.y + yy;
+            if (fy < 0 || fy >= height)
+            {
+                continue;
+            }
+            const int2 nCb = q2FlatToChecker(int2(pix.x, fy), width);
+            const float4 s = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(nCb, 0));
+            float wDepth, wBi;
+            if (abs(s.a - expectedTag) <= 0.25
+                && q2PrepareEvalNeighborWeight(nCb, depth_c, normal_c, width, height, wDepth, wBi))
+            {
+                sumSpec += s.rgb * wBi;
+                sumW += wBi;
+                if (wDepth > 0.1)
+                {
+                    sumFallback += s.rgb * wDepth;
+                    sumFallbackW += wDepth;
+                }
+            }
+        }
+    }
+
+    [unroll]
+    for (int yy = -1; yy <= 1; yy += 2)
+    {
+        [unroll]
+        for (int xx = -1; xx <= 1; xx++)
+        {
+            const int2 nCb = cbPix + int2(xx, yy);
+            if (nCb.x < fieldLeft || nCb.x >= fieldRight || nCb.y < 0 || nCb.y >= height)
+            {
+                continue;
+            }
+            if (abs(q2CheckerToFlat(nCb, width).x - pix.x) > 1)
+            {
+                continue;
+            }
+            const float4 s = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(nCb, 0));
+            float wDepth, wBi;
+            if (abs(s.a - expectedTag) <= 0.25
+                && q2PrepareEvalNeighborWeight(nCb, depth_c, normal_c, width, height, wDepth, wBi))
+            {
+                const float wSpatial = 0.5;
+                sumSideSpec += s.rgb * (wSpatial * wBi);
+                sumSideW += wSpatial * wBi;
+                if (wDepth > 0.1)
+                {
+                    sumFallback += s.rgb * (wSpatial * wDepth);
+                    sumFallbackW += wSpatial * wDepth;
+                }
+            }
+        }
+    }
+
+    if (sumW > 1e-6)
+    {
+        return sumSpec / sumW;
+    }
+    if (sumSideW > 1e-6)
+    {
+        return sumSideSpec / sumSideW;
+    }
+    if (!q2PrepareIsCurrGradientSample(cbPix, width, height) && sumFallbackW > 1e-6)
+    {
+        return sumFallback / sumFallbackW;
+    }
+    return (float3)0.0;
+}
+
+SH q2PrepareUnfilteredIndirectSH(const int2 pix, const int2 cbPix)
+{
+    if (globalUniform.giBounceRays.x < 0.25)
+    {
+        return newSH();
+    }
+
+    const float depth_c = framebufDepthWorld_Sampled.Load(int3(cbPix, 0)).r;
+    if (depth_c > globalUniform.rayLength)
+    {
+        return newSH();
+    }
+
+    const bool halfRes = globalUniform.giBounceRays.x < 0.75;
+    const int currParity = (int)(globalUniform.frameId & 1u);
+    if (!halfRes || ((cbPix.y & 1) == currParity))
+    {
+        return imageLoadUnfilteredIndirectSH(cbPix);
+    }
+
+    const int width = (int)globalUniform.renderWidth;
+    const int height = (int)globalUniform.renderHeight;
+    const int halfWidth = width / 2;
+    const int fieldLeft = (cbPix.x >= halfWidth) ? halfWidth : 0;
+    const int fieldRight = (cbPix.x >= halfWidth) ? width : halfWidth;
+    const bool canCrossFields = framebufThroughput_Sampled.Load(int3(cbPix, 0)).a <= 0.5;
+    const float3 normal_c = texelFetchNormal(cbPix);
+
+    SH sumSh = newSH();
+    float sumW = 0.0;
+    SH sumSideSh = newSH();
+    float sumSideW = 0.0;
+    SH sumFallback = newSH();
+    float sumFallbackW = 0.0;
+
+    if (canCrossFields)
+    {
+        [unroll]
+        for (int yy = -1; yy <= 1; yy += 2)
+        {
+            const int fy = pix.y + yy;
+            if (fy < 0 || fy >= height)
+            {
+                continue;
+            }
+            const int2 nCb = q2FlatToChecker(int2(pix.x, fy), width);
+            float wDepth, wBi;
+            if (q2PrepareEvalNeighborWeight(nCb, depth_c, normal_c, width, height, wDepth, wBi))
+            {
+                const SH nSh = imageLoadUnfilteredIndirectSH(nCb);
+                accumulateSH(sumSh, nSh, wBi);
+                sumW += wBi;
+                if (wDepth > 0.1)
+                {
+                    accumulateSH(sumFallback, nSh, wDepth);
+                    sumFallbackW += wDepth;
+                }
+            }
+        }
+    }
+
+    [unroll]
+    for (int yy = -1; yy <= 1; yy += 2)
+    {
+        [unroll]
+        for (int xx = -1; xx <= 1; xx++)
+        {
+            const int2 nCb = cbPix + int2(xx, yy);
+            if (nCb.x < fieldLeft || nCb.x >= fieldRight || nCb.y < 0 || nCb.y >= height)
+            {
+                continue;
+            }
+            if (abs(q2CheckerToFlat(nCb, width).x - pix.x) > 1)
+            {
+                continue;
+            }
+            float wDepth, wBi;
+            if (((nCb.y & 1) == currParity)
+                && q2PrepareEvalNeighborWeight(nCb, depth_c, normal_c, width, height, wDepth, wBi))
+            {
+                const SH nSh = imageLoadUnfilteredIndirectSH(nCb);
+                const float wSpatial = 0.5;
+                accumulateSH(sumSideSh, nSh, wSpatial * wBi);
+                sumSideW += wSpatial * wBi;
+                if (wDepth > 0.1)
+                {
+                    accumulateSH(sumFallback, nSh, wSpatial * wDepth);
+                    sumFallbackW += wSpatial * wDepth;
+                }
+            }
+        }
+    }
+
+    if (sumW > 1e-6)
+    {
+        multiplySH(sumSh, 1.0 / sumW);
+        return sumSh;
+    }
+    if (sumSideW > 1e-6)
+    {
+        multiplySH(sumSideSh, 1.0 / sumSideW);
+        return sumSideSh;
+    }
+    if (!q2PrepareIsCurrGradientSample(cbPix, width, height) && sumFallbackW > 1e-6)
+    {
+        multiplySH(sumFallback, 1.0 / sumFallbackW);
+        return sumFallback;
+    }
+    return newSH();
+}
+
 float3 processDebug(const int2 pix, const float3 fallback)
 {
     if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_GOD_RAYS) != 0)
@@ -531,13 +791,40 @@ float3 processDebug(const int2 pix, const float3 fallback)
     }
     else if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_UNFILTERED_SPECULAR) != 0)
     {
-        return texelFetchUnfilteredSpecular(getCheckerboardPix(pix));
+        const int2 cbPix = getCheckerboardPix(pix);
+        float3 unfiltSpec = texelFetchUnfilteredSpecular(cbPix);
+        if (globalUniform.giBounceRays.x >= 0.25)
+        {
+            unfiltSpec += q2PrepareUnfilteredIndirectSpec(pix, cbPix);
+        }
+        return unfiltSpec;
     }
     else if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_UNFILTERED_INDIRECT) != 0)
     {
-        const SH sh = imageLoadUnfilteredIndirectSH(getCheckerboardPix(pix));
-        const float3 normal = texelFetchNormal(getCheckerboardPix(pix));
+        const int2 cbPix = getCheckerboardPix(pix);
+        const SH sh = q2PrepareUnfilteredIndirectSH(pix, cbPix);
+        const float3 normal = texelFetchNormal(cbPix);
         return SHToIrradiance(sh, normal);
+    }
+    else if ((globalUniform.debugShowFlags & (1u << 20)) != 0u)
+    {
+        if (globalUniform.fltEnable.x < 0.5)
+        {
+            return (float3)0.0;
+        }
+        const float histLenSpec = framebufQ2FilteredSpec_Sampled.Load(int3(getCheckerboardPix(pix), 0)).a;
+        return (float3)saturate(histLenSpec / 64.0);
+    }
+    else if ((globalUniform.debugShowFlags & (1u << 21)) != 0u)
+    {
+        if (globalUniform.fltEnable.x < 0.5)
+        {
+            return (float3)0.0;
+        }
+        const int2 cbPix = getCheckerboardPix(pix);
+        const int2 gp = q2ClampGradPos(cbPix, (int)globalUniform.renderWidth, (int)globalUniform.renderHeight);
+        const float gradSpecDbg = framebufQ2GradHFSpecPong_Sampled.Load(int3(gp, 0)).y;
+        return (float3)saturate(gradSpecDbg);
     }
     else if ((globalUniform.debugShowFlags & DEBUG_SHOW_FLAG_ALBEDO_WHITE) != 0)
     {

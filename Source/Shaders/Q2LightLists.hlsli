@@ -42,8 +42,10 @@
 //     framebufQ2GradSmplPos_Sampled.Load(int3(pix / Q2_GRAD_DWN, 0)), the spelling the accessor
 //     layer of the ported base uses for the same resource, the samplerless utexture2D of
 //     ShaderCommonGLSL.h binding 239 at set DESC_SET_FRAMEBUFFERS (Texture2D<uint4> in
-//     ShaderCommonHLSL.hlsli:834). The .r stays .r, the rgba swizzle set of HLSL is the same one.
-//   * q2GetIsGradient: all(equal(gradStrataPos, pix % Q2_GRAD_DWN)) -> all(gradStrataPos == pix % Q2_GRAD_DWN).
+//     ShaderCommonHLSL.hlsli:834). Additionally guarded with q2InGradBounds(...) and bit-31
+//     valid-sample mask ((u & (1u << 31)) == 0u) so non-divisible-by-3 resolutions never perform
+//     out-of-bounds loads or misclassify uninitialized border texels as gradient samples.
+//   * q2GetIsGradient: all(equal(gradStrataPos, pix % Q2_GRAD_DWN)) -> all(posGrad * Q2_GRAD_DWN + gradStrataPos == pix).
 //     dxc has no equal() intrinsic for integer vectors ("use of undeclared identifier 'equal'"),
 //     because the HLSL comparison operators are already componentwise and yield the same bool2 that
 //     glslc lowers both spellings to (OpIEqual + OpAll). EfCommon.hlsli:53 is the same spelling on
@@ -107,6 +109,7 @@
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "Q2ClusterLights.hlsli"
 #include "Light.hlsli"
+#include "Q2Asvgf.hlsli"
 
 #define Q2_MAX_BRUTEFORCE_SAMPLING 16
 
@@ -122,14 +125,16 @@
 bool q2GetIsGradient(const int2 pix)
 {
     // The gradient sample positions are only produced by the denoiser; without
-    // it no pixel may be treated as a gradient sample (Q2RTX get_is_gradient).
-    if (globalUniform.fltEnable.x < 0.5)
+    // it (or outside full 3x3 strata) no pixel may be treated as a gradient sample.
+    if (globalUniform.fltEnable.x < 0.5
+        || !q2InGradBounds(pix, (int)globalUniform.renderWidth, (int)globalUniform.renderHeight))
     {
         return false;
     }
 
-    const uint u = framebufQ2GradSmplPos_Sampled.Load(int3(pix / Q2_GRAD_DWN, 0)).r;
-    if (u == 0u)
+    const int2 posGrad = pix / Q2_GRAD_DWN;
+    const uint u = framebufQ2GradSmplPos_Sampled.Load(int3(posGrad, 0)).r;
+    if ((u & (1u << 31)) == 0u)
     {
         return false;
     }
@@ -138,7 +143,7 @@ bool q2GetIsGradient(const int2 pix)
         (u >> (Q2_STRATUM_OFFSET_SHIFT * 0)) & Q2_STRATUM_OFFSET_MASK,
         (u >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
 
-    return all(gradStrataPos == pix % Q2_GRAD_DWN);
+    return all(posGrad * Q2_GRAD_DWN + gradStrataPos == pix);
 }
 
 float q2RoughnessSquareToSpecPower(const float alpha)

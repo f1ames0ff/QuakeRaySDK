@@ -98,7 +98,7 @@ struct FramebufferBinding
     bool allowNotRenderSized = false;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 28;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 29;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_ALBEDO,                      true  }, //   0  framebufAlbedo
@@ -131,6 +131,7 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     // particles' ambient term), so the render-sized guard has to let them through.
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_S_H,      false, true }, // 231  framebufQ2AtrousPingLF_SH_Sampled
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_C_O_C_G,  false, true }, // 233  framebufQ2AtrousPingLF_COCG_Sampled
+    { FB_IMAGE_INDEX_Q2_SUBSURFACE,               true },        // 132  framebufQ2Subsurface
 };
 
 // The engine raw binding of one entry: the UAV array for the storage images, the sampled array for

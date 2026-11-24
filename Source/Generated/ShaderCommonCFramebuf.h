@@ -48,11 +48,11 @@ enum FramebufferImageIndex
     FB_IMAGE_INDEX_DIFF_TEMPORARY = 34,
     FB_IMAGE_INDEX_DIFF_ACCUM_COLOR = 35,
     FB_IMAGE_INDEX_DIFF_ACCUM_COLOR_PREV = 36,
-    FB_IMAGE_INDEX_DIFF_ACCUM_MOMENTS = 37,
-    FB_IMAGE_INDEX_DIFF_ACCUM_MOMENTS_PREV = 38,
-    FB_IMAGE_INDEX_DIFF_COLOR_HISTORY = 39,
-    FB_IMAGE_INDEX_DIFF_PING_COLOR_AND_VARIANCE = 40,
-    FB_IMAGE_INDEX_DIFF_PONG_COLOR_AND_VARIANCE = 41,
+    FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC = 37,
+    FB_IMAGE_INDEX_Q2_HIST_MOMENTS_SPEC_PREV = 38,
+    FB_IMAGE_INDEX_Q2_GRAD_SAVED_SURF_POS = 39,
+    FB_IMAGE_INDEX_UNFILTERED_INDIRECT_SPECULAR = 40,
+    FB_IMAGE_INDEX_Q2_GRAD_SAVED_VIEW_DIR = 41,
     FB_IMAGE_INDEX_SPEC_ACCUM_COLOR = 42,
     FB_IMAGE_INDEX_SPEC_ACCUM_COLOR_PREV = 43,
     FB_IMAGE_INDEX_SPEC_PING_COLOR = 44,
@@ -143,6 +143,9 @@ enum FramebufferImageIndex
     FB_IMAGE_INDEX_Q2_GLASS_HISTORY = 129,
     FB_IMAGE_INDEX_Q2_GLASS_HISTORY_PREV = 130,
     FB_IMAGE_INDEX_Q2_PARTICLE_LAYER = 131,
+    FB_IMAGE_INDEX_Q2_SUBSURFACE = 132,
+    FB_IMAGE_INDEX_Q2_SSS_DIFFUSE = 133,
+    FB_IMAGE_INDEX_Q2_SSS_TEMP = 134,
 };
 
 enum FramebufferImageFlagBits
@@ -161,7 +164,7 @@ enum FramebufferImageFlagBits
 };
 typedef uint32_t FramebufferImageFlags;
 
-inline constexpr uint32_t ShFramebuffers_Count = 132;
+inline constexpr uint32_t ShFramebuffers_Count = 135;
 extern const VkFormat ShFramebuffers_Formats[];
 extern const FramebufferImageFlags ShFramebuffers_Flags[];
 extern const uint32_t ShFramebuffers_Bindings[];

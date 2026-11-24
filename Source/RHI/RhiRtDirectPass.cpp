@@ -97,7 +97,7 @@ struct FramebufferBinding
     bool isUAV;
 };
 
-constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 12;
+constexpr uint32_t FRAMEBUFFER_BINDING_COUNT = 13;
 constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_UNFILTERED_DIRECT,      true  }, //  14  framebufUnfilteredDirect
@@ -112,6 +112,7 @@ constexpr FramebufferBinding FRAMEBUFFER_BINDINGS[FRAMEBUFFER_BINDING_COUNT] =
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS,       false }, // 239  framebufQ2GradSmplPos_Sampled
     { FB_IMAGE_INDEX_Q2_RNG_SEED,            false }, // 245  framebufQ2RngSeed_Sampled
     { FB_IMAGE_INDEX_Q2_CLUSTER,             false }, // 247  framebufQ2Cluster_Sampled
+    { FB_IMAGE_INDEX_Q2_SUBSURFACE,          false }, // 267  framebufQ2Subsurface_Sampled
 };
 
 // The engine raw binding of one entry: the UAV array for the storage images, the sampled array for
@@ -506,7 +507,7 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         // VUID-VkGraphicsPipelineCreateInfo-layout-07988.
         nvrhi::BindingLayoutDesc desc;
         desc.visibility = nvrhi::ShaderType::AllRayTracing | nvrhi::ShaderType::Vertex |
-                          nvrhi::ShaderType::Compute;
+                          nvrhi::ShaderType::Pixel | nvrhi::ShaderType::Compute;
         desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
                                    .setShaderResourceOffset(0)
                                    .setUnorderedAccessViewOffset(0));

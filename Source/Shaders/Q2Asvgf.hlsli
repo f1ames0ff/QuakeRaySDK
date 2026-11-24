@@ -150,10 +150,13 @@
 #define Q2_FLT_ANTILAG_SPEC 2.0
 #define Q2_FLT_ANTILAG_SPEC_MOTION 0.004
 #define Q2_FLT_GRAD_WEAPON 0.25
+#define Q2_MAX_VIEW_DIR_HIT_DIST 32768.0
+
 #define Q2_FLT_MIN_ALPHA_COLOR_HF 0.02
 #define Q2_FLT_MIN_ALPHA_COLOR_LF 0.01
 #define Q2_FLT_MIN_ALPHA_COLOR_SPEC 0.01
 #define Q2_FLT_MIN_ALPHA_MOMENTS_HF 0.01
+#define Q2_FLT_MIN_ALPHA_MOMENTS_SPEC 0.01
 #define Q2_FLT_TEMPORAL_HF 1.0
 #define Q2_FLT_TEMPORAL_LF 1.0
 #define Q2_FLT_TEMPORAL_SPEC 1.0
@@ -167,6 +170,7 @@
 #define Q2_FLT_ATROUS_NORMAL_HF 16.0
 #define Q2_FLT_ATROUS_NORMAL_SPEC 1.0
 #define Q2_FLT_ATROUS_LUM_HF 16.0
+#define Q2_FLT_ATROUS_LUM_SPEC 16.0
 // Ratio against the mean of the valid neighbours used by the LF deflicker pass
 // (CmQ2AtrousLF.comp, iteration 0). It has to stay >= 1 so that flat regions are left
 // untouched; Q2RTX uses flt_atrous_deflicker_lf = 2.0, and 0.75 darkened flat regions.
@@ -286,19 +290,29 @@ float3 q2SHToIrradiance(const Q2SH sh, const float3 N)
 // Q2RTX packed RGBE (9 bit mantissa, 5 bit exponent)
 uint q2PackRGBE(float3 v)
 {
-    float3 va = max((float3)0.0, v);
+    float3 va = float3(
+        isfinite(v.r) ? max(0.0, v.r) : (v.r > 0.0 ? 4088.0 : 0.0),
+        isfinite(v.g) ? max(0.0, v.g) : (v.g > 0.0 ? 4088.0 : 0.0),
+        isfinite(v.b) ? max(0.0, v.b) : (v.b > 0.0 ? 4088.0 : 0.0));
     float max_abs = max(va.r, max(va.g, va.b));
-    if (max_abs == 0.0)
+    if (max_abs <= 0.0)
     {
         return 0u;
     }
 
-    float exponent = floor(log2(max_abs));
+    const float max_rgbe = 4088.0;
+    if (max_abs > max_rgbe)
+    {
+        va *= (max_rgbe / max_abs);
+        max_abs = max_rgbe;
+    }
 
-    uint result = uint(clamp(exponent + 20.0, 0.0, 31.0)) << 27;
+    const float exponent = clamp(floor(log2(max_abs)), -20.0, 11.0);
 
-    float scale = pow(2.0, -exponent) * 256.0;
-    uint3 vu = min((uint3)511, (uint3)round(va * scale));
+    uint result = uint(exponent + 20.0) << 27;
+
+    const float scale = pow(2.0, -exponent) * 256.0;
+    const uint3 vu = min((uint3)511, (uint3)round(va * scale));
     result |= vu.r;
     result |= vu.g << 9;
     result |= vu.b << 18;
@@ -357,6 +371,24 @@ int2 q2FlatToChecker(int2 pos, int width)
     return int2(
         (pos.x / 2) + (is_even_checkerboard ? 0 : half_width),
         pos.y);
+}
+
+bool q2InGradBounds(const int2 p, const int width, const int height)
+{
+    return p.x >= 0 && p.y >= 0
+        && (p.x / Q2_GRAD_DWN) < (width / Q2_GRAD_DWN)
+        && (p.y / Q2_GRAD_DWN) < (height / Q2_GRAD_DWN);
+}
+
+int2 q2ClampGradPos(const int2 p, const int width, const int height)
+{
+    const int2 maxGrad = max(int2(width / Q2_GRAD_DWN - 1, height / Q2_GRAD_DWN - 1), (int2)0);
+    return clamp(p / Q2_GRAD_DWN, (int2)0, maxGrad);
+}
+
+float q2SafePow(const float base, const float expVal)
+{
+    return (expVal <= 0.0) ? 1.0 : pow(max(base, 1e-6), expVal);
 }
 
 #endif // Q2_ASVGF_HLSLI_
