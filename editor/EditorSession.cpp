@@ -678,18 +678,60 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     return values;
 }
 
-void AppendPolygonOrColorYaml(std::string &out, const std::string &indent,
-                              const std::vector<float> &polyUv, const float color[3],
-                              float threshold)
+void AppendBrushRleTokens(std::string &out, const std::vector<uint8_t> &mask)
 {
-    if (polyUv.size() >= 6)
+    size_t i = 0;
+    while (i < mask.size())
+    {
+        const uint8_t value = mask[i];
+        size_t count = 1;
+        while (i + count < mask.size() && mask[i + count] == value)
+        {
+            count++;
+        }
+
+        if (i > 0)
+        {
+            out += ',';
+        }
+
+        char tok[32];
+        if (count > 1)
+        {
+            std::snprintf(tok, sizeof(tok), "%zu*%02x", count, unsigned(value));
+        }
+        else
+        {
+            std::snprintf(tok, sizeof(tok), "%02x", unsigned(value));
+        }
+        out += tok;
+        i += count;
+    }
+}
+
+template <typename Block>
+void AppendPolygonOrBrushYaml(std::string &out, const std::string &indent, const Block &block)
+{
+    if (IsBrushBlock(block))
+    {
+        char dims[32];
+        std::snprintf(dims, sizeof(dims), "%ux%u ", block.brushWidth, block.brushHeight);
+        out += indent + "  - brush: ";
+        out += dims;
+        AppendBrushRleTokens(out, block.brushMask);
+        out += '\n';
+        return;
+    }
+
+    if (IsPolygonBlock(block))
     {
         char buffer[64];
         out += indent + "  - polygon:";
 
-        for (size_t p = 0; p + 1 < polyUv.size(); p += 2)
+        for (size_t p = 0; p + 1 < block.polyUv.size(); p += 2)
         {
-            std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", polyUv[p], polyUv[p + 1]);
+            std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", double(block.polyUv[p]),
+                          double(block.polyUv[p + 1]));
             out += buffer;
         }
 
@@ -697,8 +739,8 @@ void AppendPolygonOrColorYaml(std::string &out, const std::string &indent,
         return;
     }
 
-    out += indent + "  - color: " + FormatColor(color) + "\n";
-    out += indent + "    threshold: " + FormatFloat(threshold) + "\n";
+    out += indent + "  - color: " + FormatColor(block.color) + "\n";
+    out += indent + "    threshold: " + FormatFloat(block.threshold) + "\n";
 }
 
 void AppendLumaBlocksYaml(std::string &out, const std::string &indent,
@@ -708,7 +750,7 @@ void AppendLumaBlocksYaml(std::string &out, const std::string &indent,
 
     for (const EditorEmissiveBlock &block : params.emissiveBlocks)
     {
-        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
+        AppendPolygonOrBrushYaml(out, indent, block);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
         out += indent + "    emissive_factor: " + FormatFloat(block.factor) + "\n";
         out += indent + "    blend: " + BlendNameOf(block.blend) + "\n";
@@ -722,7 +764,7 @@ void AppendGlossBlocksYaml(std::string &out, const std::string &indent,
 
     for (const EditorGlossBlock &block : params.glossBlocks)
     {
-        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
+        AppendPolygonOrBrushYaml(out, indent, block);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
         out += indent + "    roughness: " + FormatFloat(block.roughness) + "\n";
         out += indent + "    metalness: " + FormatFloat(block.metalness) + "\n";
@@ -841,8 +883,8 @@ std::string_view Trimmed(std::string_view text)
         text.remove_prefix(1);
     }
 
-    while (!text.empty() &&
-           (IsSpace(text.back()) || text.back() == '}' || text.back() == '\r'))
+    while (!text.empty() && (IsSpace(text.back()) || text.back() == '}' || text.back() == '\r' ||
+                             text.back() == '\n'))
     {
         text.remove_suffix(1);
     }
@@ -904,6 +946,197 @@ void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
     ReadUvPolygon(value, block.polyUv);
 }
 
+bool ParseBrushUint(std::string_view text, size_t &pos, uint64_t &out)
+{
+    if (pos >= text.size() || !std::isdigit(uint8_t(text[pos])))
+    {
+        return false;
+    }
+
+    uint64_t val = 0;
+    while (pos < text.size() && std::isdigit(uint8_t(text[pos])))
+    {
+        const uint64_t digit = uint64_t(text[pos] - '0');
+        if (val > (4096ull * 4096ull - digit) / 10ull)
+        {
+            return false;
+        }
+        val = val * 10ull + digit;
+        pos++;
+    }
+    out = val;
+    return true;
+}
+
+bool ParseBrushHexByte(std::string_view hex, uint8_t &out)
+{
+    if (hex.size() != 2)
+    {
+        return false;
+    }
+
+    uint8_t val = 0;
+    for (char c : hex)
+    {
+        val <<= 4;
+        if (c >= '0' && c <= '9')
+        {
+            val |= uint8_t(c - '0');
+        }
+        else if (c >= 'a' && c <= 'f')
+        {
+            val |= uint8_t(c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F')
+        {
+            val |= uint8_t(c - 'A' + 10);
+        }
+        else
+        {
+            return false;
+        }
+    }
+    out = val;
+    return true;
+}
+
+std::string_view TrimBrushWhitespace(std::string_view text)
+{
+    while (!text.empty() && (IsSpace(text.front()) || text.front() == '\r' || text.front() == '\n'))
+    {
+        text.remove_prefix(1);
+    }
+
+    while (!text.empty() && (IsSpace(text.back()) || text.back() == '\r' || text.back() == '\n'))
+    {
+        text.remove_suffix(1);
+    }
+
+    return text;
+}
+
+float ParseBlockFeather(std::string_view value, float fallback)
+{
+    const float pixels = FloatOf(value, fallback);
+    if (!std::isfinite(pixels))
+    {
+        return std::clamp(fallback, 0.0f, 16.0f);
+    }
+    return float(std::lround(std::clamp(pixels, 0.0f, 16.0f)));
+}
+
+bool ParseBrushRleToken(std::string_view token, size_t remaining, size_t &outCount,
+                        uint8_t &outByte)
+{
+    token = TrimBrushWhitespace(token);
+    if (token.empty())
+    {
+        return false;
+    }
+
+    const size_t star = token.find('*');
+    if (star == std::string_view::npos)
+    {
+        outCount = 1;
+        return outCount <= remaining && ParseBrushHexByte(token, outByte);
+    }
+
+    size_t pos = 0;
+    uint64_t count = 0;
+    if (!ParseBrushUint(token.substr(0, star), pos, count) || pos != star || count == 0 ||
+        count > remaining)
+    {
+        return false;
+    }
+    outCount = size_t(count);
+    return ParseBrushHexByte(token.substr(star + 1), outByte);
+}
+
+bool IsXSeparator(char ch)
+{
+    return ch == 'x' || ch == 'X';
+}
+
+bool ParseBrushDims(std::string_view value, size_t &pos, uint32_t &outW, uint32_t &outH)
+{
+    uint64_t w = 0;
+    uint64_t h = 0;
+    if (!ParseBrushUint(value, pos, w) || pos >= value.size() || !IsXSeparator(value[pos]))
+    {
+        return false;
+    }
+    pos++;
+    if (!ParseBrushUint(value, pos, h) || w == 0 || h == 0 || w * h > 4096ull * 4096ull)
+    {
+        return false;
+    }
+    if (pos >= value.size() || !IsSpace(value[pos]))
+    {
+        return false;
+    }
+    while (pos < value.size() && IsSpace(value[pos]))
+    {
+        pos++;
+    }
+    outW = uint32_t(w);
+    outH = uint32_t(h);
+    return true;
+}
+
+bool DecodeBrushRleStream(std::string_view stream, size_t total, std::vector<uint8_t> &decoded)
+{
+    decoded.reserve(std::min<size_t>(total, 65536));
+    size_t pos = 0;
+
+    while (pos <= stream.size())
+    {
+        const size_t comma = stream.find(',', pos);
+        const std::string_view token =
+            comma == std::string_view::npos ? stream.substr(pos) : stream.substr(pos, comma - pos);
+        size_t count = 0;
+        uint8_t byteVal = 0;
+        if (!ParseBrushRleToken(token, total - decoded.size(), count, byteVal))
+        {
+            return false;
+        }
+        decoded.insert(decoded.end(), count, byteVal);
+        if (comma == std::string_view::npos)
+        {
+            break;
+        }
+        pos = comma + 1;
+    }
+
+    return decoded.size() == total;
+}
+
+void ReadBrushMask(std::string_view value, uint32_t &outWidth, uint32_t &outHeight,
+                   std::vector<uint8_t> &outMask)
+{
+    outWidth = 0;
+    outHeight = 0;
+    outMask.clear();
+
+    size_t pos = 0;
+    uint32_t w = 0;
+    uint32_t h = 0;
+    if (!ParseBrushDims(value, pos, w, h))
+    {
+        return;
+    }
+
+    const size_t total = size_t(w) * size_t(h);
+    std::vector<uint8_t> decoded;
+    if (!DecodeBrushRleStream(value.substr(pos), total, decoded))
+    {
+        return;
+    }
+
+    outWidth = w;
+    outHeight = h;
+    outMask = std::move(decoded);
+}
+
 void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorEmissiveBlock &block,
                            uint32_t &has)
 {
@@ -915,6 +1148,10 @@ void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorE
     {
         ReadEmissivePolygon(value, block);
     }
+    else if (key == "brush")
+    {
+        ReadBrushMask(value, block.brushWidth, block.brushHeight, block.brushMask);
+    }
     else if (key == "threshold")
     {
         block.threshold = FloatOf(value, block.threshold);
@@ -923,8 +1160,7 @@ void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorE
     else if (key == "feather")
     {
         // The loader rounds to whole pixels and clamps to the 16 the blur can reach.
-        const float pixels = FloatOf(value, block.feather);
-        block.feather = std::clamp(float(int(pixels + 0.5f)), 0.0f, 16.0f);
+        block.feather = ParseBlockFeather(value, block.feather);
         has |= kOwnedFeather;
     }
     else if (key == "emissive_factor" || key == "factor")
@@ -1090,6 +1326,10 @@ void ApplyGlossBlockKey(std::string_view key, std::string_view value, EditorGlos
     {
         ReadUvPolygon(value, block.polyUv);
     }
+    else if (key == "brush")
+    {
+        ReadBrushMask(value, block.brushWidth, block.brushHeight, block.brushMask);
+    }
     else if (key == "threshold")
     {
         block.threshold = FloatOf(value, block.threshold);
@@ -1097,8 +1337,7 @@ void ApplyGlossBlockKey(std::string_view key, std::string_view value, EditorGlos
     }
     else if (key == "feather")
     {
-        const float pixels = FloatOf(value, block.feather);
-        block.feather = std::clamp(float(std::lround(pixels)), 0.0f, 16.0f);
+        block.feather = ParseBlockFeather(value, block.feather);
         has |= kOwnedFeather;
     }
     else if (key == "roughness")

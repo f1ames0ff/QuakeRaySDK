@@ -9348,8 +9348,8 @@ namespace
 
     void ConfigureRightDockedPanel(uint32_t clientWidth, uint32_t clientHeight)
     {
-        const float maxWidth = std::max(240.0f, float(clientWidth) * 0.45f);
-        const float panelWidth = std::min(std::max(352.0f, float(clientWidth) * 0.25f), maxWidth);
+        const float maxWidth = std::max(240.0f, float(clientWidth) * 0.50f);
+        const float panelWidth = std::min(std::max(388.0f, float(clientWidth) * 0.275f), maxWidth);
 
         ImGui::SetNextWindowPos(ImVec2(float(clientWidth) - panelWidth, 0.0f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(panelWidth, float(clientHeight)), ImGuiCond_Always);

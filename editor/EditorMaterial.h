@@ -43,6 +43,11 @@ struct EditorEmissiveBlock
     // The colour and threshold are then unused, which is what the game's polygon form does.
     std::vector<float> polyUv;
 
+    // Non-empty with non-zero dimensions selects by a painted grayscale texel mask [0..255].
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    std::vector<uint8_t> brushMask;
+
     bool operator==(const EditorEmissiveBlock &) const = default;
 };
 
@@ -60,11 +65,61 @@ struct EditorGlossBlock
     float roughness = 0.25f;
     float metalness = 0.0f;
     std::vector<float> polyUv;
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    std::vector<uint8_t> brushMask;
 
     bool operator==(const EditorGlossBlock &) const = default;
 };
 
 inline constexpr size_t kEditorGlossBlockMax = 10;
+
+template <typename Block>
+bool IsBrushBlock(const Block &block)
+{
+    return block.brushWidth > 0 && block.brushHeight > 0 &&
+           block.brushMask.size() == size_t(block.brushWidth) * size_t(block.brushHeight);
+}
+
+template <typename Block>
+bool IsPolygonBlock(const Block &block)
+{
+    return !IsBrushBlock(block) && block.polyUv.size() >= 6;
+}
+
+struct EditorMaskEvalSpec
+{
+    const float *color = nullptr;
+    float threshold = 0.02f;
+    float feather = 0.0f;
+    float scale = 1.0f;
+    const std::vector<float> *polyUv = nullptr;
+    const std::vector<uint8_t> *brushMask = nullptr;
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    bool isGloss = false;
+};
+
+void ComputeEditorMask(const EditorMaskEvalSpec &spec, const uint8_t *rgba, uint32_t width,
+                       uint32_t height, std::vector<float> &outMask,
+                       std::vector<float> *outDist = nullptr);
+
+struct EditorBrushStrokeSpec
+{
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+    float u1 = 0.0f;
+    float v1 = 0.0f;
+    float radiusTexels = 8.0f;
+    float hardness = 0.5f;
+    float opacity = 1.0f;
+    bool erase = false;
+};
+
+bool ApplyEditorBrushSegment(const EditorBrushStrokeSpec &stroke, uint32_t width,
+                             uint32_t height, const std::vector<uint8_t> &baseMask,
+                             std::vector<float> &strokeAccum,
+                             std::vector<uint8_t> &outMask);
 
 // The subset of the game's rt_material_t the editor expresses. The keys whose only consumer is
 // a packed material texture -- the extra images, bump_scale, transparency, luma_blend -- are

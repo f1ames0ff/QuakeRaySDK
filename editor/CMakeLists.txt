@@ -102,10 +102,13 @@ if(QR_BUILD_TESTS)
         EditorLightSelection.cpp
         EditorGui.cpp
         EditorSession.cpp
+        EditorMaterial.cpp
+        EditorUi.cpp
         Scene.cpp
         Assets.cpp
         "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb/stb_image.cpp")
     target_compile_features(qray_editor_multiselect_tests PRIVATE cxx_std_20)
+    target_compile_definitions(qray_editor_multiselect_tests PRIVATE QR_STATIC)
     target_include_directories(qray_editor_multiselect_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/../Include"

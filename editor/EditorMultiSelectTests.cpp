@@ -1,7 +1,9 @@
 #include "Assets.h"
 #include "EditorGui.h"
 #include "EditorLightSelection.h"
+#include "EditorMaterial.h"
 #include "EditorSession.h"
+#include "EditorUi.h"
 #include "Scene.h"
 
 #include <imgui.h>
@@ -11,8 +13,79 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
+
+namespace
+{
+QrMaterial g_nextTestMaterial = 1;
+std::vector<uint8_t> g_lastBakedRme;
+uint32_t g_testBakeCreateCount = 0;
+} // namespace
+
+extern "C" {
+QrResult QRCONV qrCreateMaterial(QrInstance qrInstance, const QrMaterialCreateInfo *pCreateInfo,
+                                 QrMaterial *pResult)
+{
+    (void)qrInstance;
+    if (pCreateInfo != nullptr && pCreateInfo->textures.pDataRoughnessMetallicEmission != nullptr)
+    {
+        const size_t bytes =
+            size_t(pCreateInfo->size.width) * size_t(pCreateInfo->size.height) * 4;
+        const auto *src =
+            static_cast<const uint8_t *>(pCreateInfo->textures.pDataRoughnessMetallicEmission);
+        g_lastBakedRme.assign(src, src + bytes);
+    }
+    g_testBakeCreateCount++;
+    if (pResult != nullptr)
+    {
+        *pResult = g_nextTestMaterial++;
+    }
+    return QR_SUCCESS;
+}
+
+QrResult QRCONV qrDestroyMaterial(QrInstance qrInstance, QrMaterial material)
+{
+    (void)qrInstance;
+    (void)material;
+    return QR_SUCCESS;
+}
+
+QrResult QRCONV qrUploadRasterizedGeometry(QrInstance qrInstance,
+                                           const QrRasterizedGeometryUploadInfo *pUploadInfo,
+                                           const float *pViewProjection,
+                                           const QrViewport *pViewport)
+{
+    (void)qrInstance;
+    (void)pUploadInfo;
+    (void)pViewProjection;
+    (void)pViewport;
+    return QR_SUCCESS;
+}
+
+const char *QRCONV qrGetResultDescription(QrResult result)
+{
+    (void)result;
+    return "ok";
+}
+}
+
+void EditorWindow::GetCursorPosition(float &outX, float &outY) const
+{
+    outX = 0.0f;
+    outY = 0.0f;
+}
+
+void EditorWindow::SetCursorVisible(bool visible)
+{
+    (void)visible;
+}
+
+void EditorWindow::SetMouseCapture(bool capture)
+{
+    (void)capture;
+}
 
 namespace
 {
@@ -1503,18 +1576,714 @@ bool TestColocatedExtraClaimPrefersClassName()
                  "Colocated light removal must preserve extra keys by matching className");
 }
 
+std::vector<uint8_t> MakeSplitBlackWhiteRgba(uint32_t width, uint32_t height, uint32_t splitX)
+{
+    std::vector<uint8_t> rgba(size_t(width) * size_t(height) * 4, 255);
+    for (uint32_t y = 0; y < height; y++)
+    {
+        for (uint32_t x = 0; x < width; x++)
+        {
+            const uint8_t v = x >= splitX ? 255 : 0;
+            const size_t off = (size_t(y) * width + x) * 4;
+            rgba[off + 0] = v;
+            rgba[off + 1] = v;
+            rgba[off + 2] = v;
+        }
+    }
+    return rgba;
+}
+
+bool VerifySmoothFeatherCurveAndThinStrip(const std::vector<uint8_t> &rgba)
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    std::vector<float> m4;
+    std::vector<float> m8;
+    ComputeEditorMask({ white, 0.25f, 4.0f, 1.0f, nullptr, nullptr, 0, 0, true }, rgba.data(), 64,
+                      64, m4, nullptr);
+    ComputeEditorMask({ white, 0.25f, 8.0f, 1.0f, nullptr, nullptr, 0, 0, true }, rgba.data(), 64,
+                      64, m8, nullptr);
+
+    const size_t row = 32u * 64u;
+    if (!Check(m4.size() == 4096 && m4[row + 60] > 0.99f && m4[row + 4] < 0.01f,
+               "gloss feathered endpoints mismatch") ||
+        !Check(m4[row + 31] < 0.85f && m4[row + 32] < 0.99f,
+               "gloss feather still leaves sharp cliff at edge"))
+    {
+        return false;
+    }
+
+    for (uint32_t x = 28; x < 35; x++)
+    {
+        if (!Check(m4[row + x + 1] > m4[row + x],
+                   "gloss feather transition must be strictly monotonic across edge"))
+        {
+            return false;
+        }
+    }
+
+    const float slope4 = m4[row + 33] - m4[row + 29];
+    const float slope8 = m8[row + 33] - m8[row + 29];
+    return Check(m4[row + 28] > 0.01f && m8[row + 24] > m4[row + 24] && m8[row + 24] > 0.02f &&
+                     slope8 < slope4,
+                 "feather=8 did not soften slope and widen tail relative to feather=4");
+}
+
+bool VerifyFeatherRange1To16(const std::vector<uint8_t> &rgba)
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    float prevTail = 0.0f;
+    for (int f = 1; f <= 16; f++)
+    {
+        std::vector<float> m;
+        ComputeEditorMask({ white, 0.25f, float(f), 1.0f, nullptr, nullptr, 0, 0, true },
+                          rgba.data(), 64, 64, m, nullptr);
+        const size_t row = 32u * 64u;
+        const bool mono = m[row + 33] > m[row + 32] && m[row + 32] > m[row + 31] &&
+                          m[row + 31] > m[row + 30];
+        const bool notFlat = m[row + 63] > 0.85f && m[row + 0] < 0.15f;
+        const bool tailGrew = m[row + 24] >= prevTail;
+        if (!Check(mono && notFlat && tailGrew, "gloss feather failed monotonic 1..16 check"))
+        {
+            return false;
+        }
+        prevTail = m[row + 24];
+    }
+    return Check(prevTail > 0.05f, "gloss feather=16 tail too narrow");
+}
+
+bool TestSmoothGlossFeathering()
+{
+    const std::vector<uint8_t> splitRgba = MakeSplitBlackWhiteRgba(64, 64, 32);
+    if (!VerifySmoothFeatherCurveAndThinStrip(splitRgba) || !VerifyFeatherRange1To16(splitRgba))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> stripRgba(64u * 64u * 4u, 0);
+    for (uint32_t y = 0; y < 64; y++)
+    {
+        const size_t off = (size_t(y) * 64u + 32u) * 4u;
+        stripRgba[off + 0] = 255;
+        stripRgba[off + 1] = 255;
+        stripRgba[off + 2] = 255;
+        stripRgba[off + 3] = 255;
+    }
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    std::vector<float> stripMask;
+    ComputeEditorMask({ white, 0.25f, 4.0f, 1.0f, nullptr, nullptr, 0, 0, true },
+                      stripRgba.data(), 64, 64, stripMask, nullptr);
+    return Check(stripMask[32u * 64u + 32u] >= 0.25f && stripMask[32u * 64u + 30u] > 0.01f,
+                 "thin 1px highlight collapsed under gloss feathering");
+}
+
+bool VerifySoftAndHardBrushDabs()
+{
+    const std::vector<uint8_t> empty(64u * 64u, 0);
+    std::vector<float> accum(64u * 64u, 0.0f);
+    std::vector<uint8_t> softOut = empty;
+    const bool softChanged =
+        ApplyEditorBrushSegment({ 0.5f, 0.5f, 0.5f, 0.5f, 8.0f, 0.0f, 1.0f, false }, 64, 64, empty,
+                                accum, softOut);
+    if (!Check(softChanged && softOut[32u * 64u + 32u] > softOut[32u * 64u + 36u] &&
+                   softOut[32u * 64u + 36u] > 0 && softOut[32u * 64u + 40u] == 0,
+               "soft brush falloff or radius mismatch"))
+    {
+        return false;
+    }
+
+    accum.assign(64u * 64u, 0.0f);
+    std::vector<uint8_t> hardOut = empty;
+    ApplyEditorBrushSegment({ 0.5f, 0.5f, 0.5f, 0.5f, 6.0f, 1.0f, 1.0f, false }, 64, 64, empty,
+                            accum, hardOut);
+    return Check(hardOut[32u * 64u + 32u] == 255 && hardOut[32u * 64u + 35u] == 255 &&
+                     hardOut[32u * 64u + 40u] == 0,
+                 "hard brush interior or outside radius mismatch");
+}
+
+bool VerifyBrushInvalidAndAdditiveStrokes()
+{
+    const std::vector<uint8_t> base(32u * 32u, 0);
+    std::vector<float> accum(32u * 32u, 0.0f);
+    std::vector<uint8_t> mask = base;
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    if (!Check(!ApplyEditorBrushSegment({ 0.5f, 0.5f, 0.5f, 0.5f, qnan, 0.5f, 1.0f, false }, 32,
+                                        32, base, accum, mask) &&
+                   !ApplyEditorBrushSegment({ qnan, 0.5f, 0.5f, 0.5f, 4.0f, 0.5f, 1.0f, false },
+                                            32, 32, base, accum, mask),
+               "non-finite brush stroke inputs must be rejected"))
+    {
+        return false;
+    }
+
+    accum.assign(32u * 32u, 0.0f);
+    ApplyEditorBrushSegment({ 0.5f, 0.5f, 0.5f, 0.5f, 1e20f, 1.0f, 0.5f, false }, 32, 32, base,
+                            accum, mask);
+    if (!Check(mask[0] == 128 && mask[32u * 32u - 1] == 128,
+               "huge brush radius overflowed or failed to fill canvas cleanly"))
+    {
+        return false;
+    }
+
+    const std::vector<uint8_t> halfBase(32u * 32u, 128);
+    accum.assign(32u * 32u, 0.0f);
+    std::vector<uint8_t> secondStroke = halfBase;
+    ApplyEditorBrushSegment({ 0.5f, 0.5f, 0.5f, 0.5f, 4.0f, 1.0f, 0.5f, false }, 32, 32,
+                            halfBase, accum, secondStroke);
+    return Check(secondStroke[16u * 32u + 16u] == 192,
+                 "second stroke at opacity=0.5 failed alpha-over buildup from 128 to 192");
+}
+
+bool TestBrushStrokeEvaluation()
+{
+    if (!VerifySoftAndHardBrushDabs() || !VerifyBrushInvalidAndAdditiveStrokes())
+    {
+        return false;
+    }
+
+    const std::vector<uint8_t> base(64u * 64u, 0);
+    std::vector<float> accum(64u * 64u, 0.0f);
+    std::vector<uint8_t> mask = base;
+    for (int pass = 0; pass < 4; pass++)
+    {
+        const float u0 = (pass % 2 == 0) ? 0.3f : 0.7f;
+        const float u1 = (pass % 2 == 0) ? 0.7f : 0.3f;
+        ApplyEditorBrushSegment({ u0, 0.5f, u1, 0.5f, 6.0f, 1.0f, 0.5f, false }, 64, 64, base,
+                                accum, mask);
+    }
+
+    const uint8_t maxByte = *std::max_element(mask.begin(), mask.end());
+    if (!Check(maxByte == 128 && mask[32u * 64u + 32u] == 128,
+               "single-stroke opacity=0.5 exceeded 128/255 cap across repeated passes"))
+    {
+        return false;
+    }
+
+    const std::vector<uint8_t> base2 = mask;
+    accum.assign(64u * 64u, 0.0f);
+    ApplyEditorBrushSegment({ 0.5f, 0.5f, 0.5f, 0.5f, 6.0f, 1.0f, 1.0f, true }, 64, 64, base2,
+                            accum, mask);
+    return Check(mask[32u * 64u + 32u] == 0, "erase brush stroke did not clear painted texel");
+}
+
+EditorMaterialParams MakeBrushRoundTripMaterial()
+{
+    EditorMaterialParams mat;
+    mat.hasColorEmissive = true;
+    EditorEmissiveBlock lumaBrush;
+    lumaBrush.brushWidth = 16;
+    lumaBrush.brushHeight = 16;
+    lumaBrush.brushMask.assign(256, 0);
+    for (size_t i = 0; i < 256; i++)
+    {
+        lumaBrush.brushMask[i] = (i < 40 || i > 200) ? uint8_t(0) : uint8_t((i * 17) & 0xffu);
+    }
+    lumaBrush.feather = 2.0f;
+    lumaBrush.factor = 1.5f;
+    lumaBrush.blend = 2;
+    mat.emissiveBlocks.push_back(lumaBrush);
+
+    EditorEmissiveBlock lumaColor;
+    lumaColor.color[0] = 0.2f;
+    lumaColor.color[1] = 0.8f;
+    lumaColor.color[2] = 0.4f;
+    lumaColor.threshold = 0.15f;
+    mat.emissiveBlocks.push_back(lumaColor);
+
+    mat.hasColorGloss = true;
+    EditorGlossBlock glossBrush;
+    glossBrush.brushWidth = 8;
+    glossBrush.brushHeight = 8;
+    glossBrush.brushMask.assign(64, 42);
+    glossBrush.brushMask[0] = 255;
+    glossBrush.brushMask[63] = 0;
+    glossBrush.feather = 3.0f;
+    glossBrush.roughness = 0.12f;
+    glossBrush.metalness = 0.85f;
+    mat.glossBlocks.push_back(glossBrush);
+    return mat;
+}
+
+bool VerifyMalformedBrushYamlRejected(const std::filesystem::path &tempDir)
+{
+    const std::string badYaml =
+        "qray_materials:\n"
+        "  - name: textures/bad_brush\n"
+        "    luma:\n"
+        "      - brush: 0x4 4*00\n"
+        "      - brush: 4097x4097 16785409*00\n"
+        "      - brush: 2x2 00,ff,80\n"
+        "      - brush: 2x2 5*00\n"
+        "      - brush: 2x2 4*00,\n"
+        "      - brush: 2x2 4*zz\n"
+        "      - brush: 2x2 {00},ff,00,ff\n"
+        "        feather: 1e20\n"
+        "    gloss:\n"
+        "      - brush: 2x2 0*ff,4*00\n"
+        "        feather: nan\n";
+    const std::filesystem::path badPath = tempDir / "bad.materials.yaml";
+    std::string err;
+    if (!Check(WriteEditorFile(badPath.string(), badYaml, err), "write bad brush yaml"))
+    {
+        return false;
+    }
+    EditorMaterialsDocument doc;
+    EditorMaterialParams readBad;
+    if (!Check(doc.Load(badPath.string(), err) && doc.ReadMaterial("bad_brush", readBad),
+               "load bad brush yaml"))
+    {
+        return false;
+    }
+    for (const EditorEmissiveBlock &blk : readBad.emissiveBlocks)
+    {
+        if (!Check(!IsBrushBlock(blk) && blk.brushMask.empty() && blk.feather >= 0.0f &&
+                       blk.feather <= 16.0f,
+                   "malformed luma brush YAML entry must be rejected cleanly"))
+        {
+            return false;
+        }
+    }
+    for (const EditorGlossBlock &blk : readBad.glossBlocks)
+    {
+        if (!Check(!IsBrushBlock(blk) && blk.brushMask.empty() && std::isfinite(blk.feather),
+                   "malformed gloss brush YAML entry must be rejected cleanly"))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VerifyBrushRoundTripMatch(const EditorMaterialParams &expected,
+                               const EditorMaterialParams &actual)
+{
+    if (!Check(actual.emissiveBlocks.size() == 2 && actual.glossBlocks.size() == 1,
+               "round-trip block counts mismatch"))
+    {
+        return false;
+    }
+    const EditorEmissiveBlock &el = expected.emissiveBlocks[0];
+    const EditorEmissiveBlock &al = actual.emissiveBlocks[0];
+    const EditorGlossBlock &eg = expected.glossBlocks[0];
+    const EditorGlossBlock &ag = actual.glossBlocks[0];
+    const bool lumaOk = IsBrushBlock(al) && al.brushWidth == el.brushWidth &&
+                        al.brushHeight == el.brushHeight && al.brushMask == el.brushMask;
+    const bool glossOk = IsBrushBlock(ag) && ag.brushWidth == eg.brushWidth &&
+                         ag.brushHeight == eg.brushHeight && ag.brushMask == eg.brushMask;
+    return Check(lumaOk && glossOk, "luma/gloss brush mask YAML round-trip mismatch");
+}
+
+bool TestBrushMaskYamlRoundTrip()
+{
+    std::error_code ec;
+    const std::filesystem::path tempDir =
+        std::filesystem::temp_directory_path() / "qray_brush_yaml_roundtrip";
+    std::filesystem::remove_all(tempDir, ec);
+    std::filesystem::create_directories(tempDir, ec);
+
+    const EditorMaterialParams expected = MakeBrushRoundTripMaterial();
+    EditorMaterialsDocument doc;
+    const std::string yaml = doc.WriteMerged({ { "brush_mat", expected } });
+    const std::filesystem::path yamlPath = tempDir / "qray.materials.yaml";
+    std::string err;
+    EditorMaterialParams actual;
+    const bool loaded = WriteEditorFile(yamlPath.string(), yaml, err) &&
+                        doc.Load(yamlPath.string(), err) &&
+                        doc.ReadMaterial("brush_mat", actual);
+
+    const bool ok = Check(loaded, "failed to load round-trip brush yaml") &&
+                    VerifyBrushRoundTripMatch(expected, actual) &&
+                    VerifyMalformedBrushYamlRejected(tempDir);
+    std::filesystem::remove_all(tempDir, ec);
+    return ok;
+}
+
+bool TestGlossMultiBlockBlendAndBakeInvalidation()
+{
+    EditorScene scene;
+    EditorTexture tex;
+    tex.name = "test_albedo";
+    tex.width = 16;
+    tex.height = 16;
+    tex.rgba.assign(16u * 16u * 4u, 255);
+    scene.textures.push_back(tex);
+
+    EditorMaterialParams params;
+    params.hasColorGloss = true;
+    EditorGlossBlock b0;
+    b0.brushWidth = 16;
+    b0.brushHeight = 16;
+    b0.brushMask.assign(256, 255);
+    b0.roughness = 0.0f;
+    EditorGlossBlock b1 = b0;
+    b1.roughness = 1.0f;
+    params.glossBlocks = { b0, b1 };
+
+    EditorMaterialBakes bakes;
+    const std::vector<QrMaterial> pool = { 10 };
+    const auto resolve = [](const std::string &n) -> int32_t {
+        return n == "test_albedo" ? 0 : -1;
+    };
+    const QrInstance dummyInstance = reinterpret_cast<QrInstance>(uintptr_t(1));
+    g_testBakeCreateCount = 0;
+    bakes.BeginPass();
+    const QrMaterial m0 = bakes.Get(dummyInstance, "test_albedo", params, scene, pool, resolve);
+    const uint8_t blendedRough = g_lastBakedRme.empty() ? 0 : g_lastBakedRme[0];
+    bakes.EndPass(dummyInstance);
+
+    params.glossBlocks[0].brushMask[0] = 128;
+    bakes.BeginPass();
+    const QrMaterial m1 = bakes.Get(dummyInstance, "test_albedo", params, scene, pool, resolve);
+    bakes.EndPass(dummyInstance);
+    bakes.Destroy(dummyInstance);
+
+    return Check(m0 != QR_NO_MATERIAL && m1 != QR_NO_MATERIAL && m0 != m1 &&
+                     g_testBakeCreateCount == 2,
+                 "brush mask edit did not invalidate EditorMaterialBakes cache") &&
+           Check(blendedRough >= 120 && blendedRough <= 135,
+                 "overlapping gloss blocks failed to blend roughness smoothly");
+}
+
+bool TestComputeMaskEdgeCases()
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    std::vector<float> zeroOut;
+    ComputeEditorMask({ white, 0.25f, 4.0f, 1.0f, nullptr, nullptr, 0, 0, true }, nullptr, 0, 0,
+                      zeroOut, nullptr);
+    if (!Check(zeroOut.empty(), "zero-size ComputeEditorMask must clear outMask"))
+    {
+        return false;
+    }
+
+    const uint8_t gradientRgba[12] = { 255, 255, 255, 255, 200, 200, 200, 255, 0, 0, 0, 255 };
+    std::vector<float> gradMask;
+    ComputeEditorMask({ white, 0.25f, -20.0f, 1.0f, nullptr, nullptr, 0, 0, true }, gradientRgba,
+                      3, 1, gradMask, nullptr);
+    if (!Check(gradMask.size() == 3 && Near(gradMask[0], 1.0f) && gradMask[1] > 0.05f &&
+                   gradMask[1] < 0.95f && Near(gradMask[2], 0.0f),
+               "isGloss negative/zero feather color-distance falloff failed to interpolate"))
+    {
+        return false;
+    }
+
+    const std::vector<uint8_t> brush2x2 = { 0, 255, 0, 255 };
+    std::vector<float> upsampled;
+    ComputeEditorMask({ nullptr, 0.0f, 0.0f, 1.0f, nullptr, &brush2x2, 2, 2, false }, nullptr, 4,
+                      4, upsampled, nullptr);
+    return Check(upsampled.size() == 16 && Near(upsampled[0], 0.0f) && Near(upsampled[3], 1.0f) &&
+                     upsampled[1] > 0.1f && upsampled[1] < 0.9f,
+                 "bilinear brush resampling with nullptr rgba mismatch");
+}
+
+int CountPurpleOverlayVertices(const ImDrawData *drawData, uint8_t *outMaxAlpha = nullptr)
+{
+    int count = 0;
+    uint8_t maxA = 0;
+    const uint32_t targetRgb = IM_COL32(216, 24, 255, 0) & 0x00ffffffu;
+    for (int i = 0; drawData != nullptr && i < drawData->CmdListsCount; ++i)
+    {
+        const ImDrawList *dl = drawData->CmdLists[i];
+        for (int v = 0; v < dl->VtxBuffer.Size; ++v)
+        {
+            const uint32_t col = dl->VtxBuffer[v].col;
+            const uint8_t a = uint8_t(col >> 24);
+            if ((col & 0x00ffffffu) == targetRgb && a > 0 && a <= 128)
+            {
+                count++;
+                maxA = std::max(maxA, a);
+            }
+        }
+    }
+    if (outMaxAlpha != nullptr)
+    {
+        *outMaxAlpha = maxA;
+    }
+    return count;
+}
+
+template <typename DrawFn>
+void RenderPanelUiFrame(float &outPanelW, ImVec2 &outMin, ImVec2 &outMax, DrawFn &&fn)
+{
+    ImGui::NewFrame();
+    EditorGuiBeginPanel("MATERIAL EDITOR", 1280.0f, 720.0f);
+    outPanelW = ImGui::GetWindowWidth();
+    fn();
+    outMin = ImGui::GetItemRectMin();
+    outMax = ImGui::GetItemRectMax();
+    EditorGuiEndPanel();
+    ImGui::Render();
+}
+
+bool VerifyImagePickAndOverlayCap(ImGuiIO &io)
+{
+    std::vector<float> overlay64(64u * 64u, 0.0f);
+    std::fill(overlay64.begin() + 32u * 64u, overlay64.end(), 1.0f);
+    float panelW = 0.0f;
+    ImVec2 rMin{};
+    ImVec2 rMax{};
+    float pickU = 0.0f;
+    float pickV = 0.0f;
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {
+        EditorImagePick("##pick", 1, 64, 64, pickU, pickV, &overlay64);
+    });
+
+    uint8_t maxAlpha = 0;
+    const int vtx64 = CountPurpleOverlayVertices(ImGui::GetDrawData(), &maxAlpha);
+    if (!Check(Near(panelW, 484.0f, 1.0f) && Near(kEditorGuiPanelWidth, 484.0f) &&
+                   Near(kEditorGuiLabelWidth, 186.0f) && maxAlpha == 128 && vtx64 == 32 * 4,
+               "widened panel or 1:1 run-merged purple overlay mismatch"))
+    {
+        return false;
+    }
+
+    io.AddMousePosEvent((rMin.x + rMax.x) * 0.5f, (rMin.y + rMax.y) * 0.5f);
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {});
+    io.AddMouseButtonEvent(0, true);
+    bool picked = false;
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {
+        picked = EditorImagePick("##pick", 1, 64, 64, pickU, pickV, &overlay64);
+    });
+    io.AddMouseButtonEvent(0, false);
+    if (!Check(picked && Near(pickU, 0.5f, 0.05f) && Near(pickV, 0.5f, 0.05f),
+               "EditorImagePick click coordinates mismatch"))
+    {
+        return false;
+    }
+
+    std::vector<float> checker256(256u * 256u, 0.0f);
+    for (size_t i = 0; i < checker256.size(); i++)
+    {
+        checker256[i] = ((i + i / 256) % 2 == 0) ? 1.0f : 0.25f;
+    }
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {
+        EditorImagePick("##pick256", 1, 256, 256, pickU, pickV, &checker256);
+    });
+    const int vtx256 = CountPurpleOverlayVertices(ImGui::GetDrawData());
+    return Check(vtx256 > 0 && vtx256 <= 96 * 96 * 4,
+                 "large texture purple overlay exceeded 96x96 grid vertex cap");
+}
+
+bool VerifyPolygonOverlaySuppression()
+{
+    std::vector<float> poly = { 0.2f, 0.2f, 0.8f, 0.2f, 0.8f, 0.8f, 0.2f, 0.8f };
+    float panelW = 0.0f;
+    ImVec2 rMin{};
+    ImVec2 rMax{};
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {
+        EditorPolygonEdit("##poly_nofill", 1, 64, 64, poly, 16, nullptr);
+    });
+    const uint32_t whitePolyFill = IM_COL32(255, 255, 255, 128);
+    if (!Check(ContainsColoredTextVertex(ImGui::GetDrawData(), whitePolyFill),
+               "EditorPolygonEdit without overlayMask must draw white concave fill"))
+    {
+        return false;
+    }
+
+    const std::vector<float> overlay64(64u * 64u, 1.0f);
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {
+        EditorPolygonEdit("##poly_with_overlay", 1, 64, 64, poly, 16, &overlay64);
+    });
+    return Check(!ContainsColoredTextVertex(ImGui::GetDrawData(), whitePolyFill) &&
+                     CountPurpleOverlayVertices(ImGui::GetDrawData()) > 0 &&
+                     ContainsColoredTextVertex(ImGui::GetDrawData(), IM_COL32(255, 255, 255, 220)),
+                 "EditorPolygonEdit with overlayMask must suppress white fill and keep outline");
+}
+
+bool VerifyBrushUiDragAndErase(ImGuiIO &io, std::vector<uint8_t> &mask, ImVec2 &outMin,
+                               ImVec2 &outMax)
+{
+    EditorBrushToolSettings tool{ 6.0f, 0.5f, 0.5f, false };
+    float panelW = 0.0f;
+    const auto renderBrush = [&](const EditorBrushToolSettings &t) {
+        bool edited = false;
+        RenderPanelUiFrame(panelW, outMin, outMax, [&]() {
+            edited = EditorBrushEdit("##ui_brush", 1, 64, 64, mask, t, nullptr);
+        });
+        return edited;
+    };
+
+    renderBrush(tool);
+    const float midY = (outMin.y + outMax.y) * 0.5f;
+    const float leftX = outMin.x + (outMax.x - outMin.x) * 0.25f;
+    const float rightX = outMin.x + (outMax.x - outMin.x) * 0.75f;
+    io.AddMousePosEvent((outMin.x + outMax.x) * 0.5f, midY);
+    renderBrush(tool);
+    const uint32_t outerRingCol = IM_COL32(236, 140, 255, 240);
+    const uint32_t innerRingCol = IM_COL32(255, 255, 255, 175);
+    if (!Check(ContainsColoredTextVertex(ImGui::GetDrawData(), outerRingCol) &&
+                   ContainsColoredTextVertex(ImGui::GetDrawData(), innerRingCol),
+               "hovered EditorBrushEdit missing cursor rings"))
+    {
+        return false;
+    }
+
+    io.AddMousePosEvent(leftX, midY);
+    renderBrush(tool);
+    io.AddMouseButtonEvent(0, true);
+    const bool downChanged = renderBrush(tool);
+    io.AddMousePosEvent(rightX, midY);
+    const bool dragChanged = renderBrush(tool);
+    io.AddMousePosEvent(outMax.x + 8.0f, midY);
+    renderBrush(tool);
+    const bool activeRingOk = ContainsColoredTextVertex(ImGui::GetDrawData(), outerRingCol);
+    io.AddMouseButtonEvent(0, false);
+    renderBrush(tool);
+
+    const uint8_t maxVal = *std::max_element(mask.begin(), mask.end());
+    if (!Check(downChanged && dragChanged && activeRingOk && maxVal == 128 &&
+                   mask[32u * 64u + 32u] == 128,
+               "EditorBrushEdit LMB paint stroke or active edge cursor ring failed"))
+    {
+        return false;
+    }
+
+    tool.hardness = 1.0f;
+    tool.opacity = 1.0f;
+    io.AddMousePosEvent((outMin.x + outMax.x) * 0.5f, midY);
+    renderBrush(tool);
+    if (!Check(!ContainsColoredTextVertex(ImGui::GetDrawData(), innerRingCol),
+               "hardness=1.0 brush should not draw inner hardness ring"))
+    {
+        return false;
+    }
+
+    io.AddMouseButtonEvent(1, true);
+    renderBrush(tool);
+    io.AddMousePosEvent(rightX, midY);
+    renderBrush(tool);
+    io.AddMouseButtonEvent(1, false);
+    renderBrush(tool);
+    return Check(mask[32u * 64u + 32u] == 0, "EditorBrushEdit RMB drag did not erase texel");
+}
+
+bool VerifyBrushUiCtrlWheelZoom(ImGuiIO &io, std::vector<uint8_t> &mask, const ImVec2 &rMin,
+                                const ImVec2 &rMax)
+{
+    std::fill(mask.begin(), mask.end(), uint8_t(0));
+    const EditorBrushToolSettings tool{ 2.0f, 1.0f, 1.0f, false };
+    float panelW = 0.0f;
+    ImVec2 bMin{};
+    ImVec2 bMax{};
+    const auto render = [&]() {
+        RenderPanelUiFrame(panelW, bMin, bMax, [&]() {
+            EditorBrushEdit("##ui_brush", 1, 64, 64, mask, tool, nullptr);
+        });
+    };
+
+    const float cx = rMin.x + (rMax.x - rMin.x) * 0.8f;
+    const float cy = rMin.y + (rMax.y - rMin.y) * 0.5f;
+    io.AddMousePosEvent(cx, cy);
+    render();
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddMouseWheelEvent(0.0f, 3.0f);
+    render();
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    render();
+
+    io.AddMousePosEvent(rMin.x + (rMax.x - rMin.x) * 0.2f, cy);
+    render();
+    io.AddMouseButtonEvent(0, true);
+    render();
+    io.AddMouseButtonEvent(0, false);
+    render();
+
+    const uint8_t unzoomedCol = mask[32u * 64u + 13u];
+    const uint8_t zoomedColMax =
+        *std::max_element(mask.begin() + 32u * 64u + 20u, mask.begin() + 32u * 64u + 64u);
+    return Check(unzoomedCol == 0 && zoomedColMax == 255,
+                 "EditorBrushEdit Ctrl+wheel zoom did not remap pointer UV");
+}
+
+bool TestEditorUiOverlayAndBrushCanvas()
+{
+    IMGUI_CHECKVERSION();
+    ImGuiTestContextGuard ctxGuard(ImGui::CreateContext());
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(1280.0f, 720.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    unsigned char *pixels = nullptr;
+    int texW = 0;
+    int texH = 0;
+    io.Fonts->AddFontDefault();
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &texW, &texH);
+    io.Fonts->SetTexID(ImTextureID(uintptr_t(1)));
+    EditorGuiApplyStyle(1280.0f, 720.0f);
+
+    std::vector<uint8_t> mask(64u * 64u, 0);
+    ImVec2 rMin{};
+    ImVec2 rMax{};
+    return VerifyImagePickAndOverlayCap(io) && VerifyPolygonOverlaySuppression() &&
+           VerifyBrushUiDragAndErase(io, mask, rMin, rMax) &&
+           VerifyBrushUiCtrlWheelZoom(io, mask, rMin, rMax);
+}
+
+bool TestEmissiveBrushBake()
+{
+    EditorScene scene;
+    EditorTexture tex;
+    tex.name = "emiss_brush_tex";
+    tex.width = 8;
+    tex.height = 8;
+    tex.rgba.assign(8u * 8u * 4u, 255);
+    scene.textures.push_back(tex);
+    EditorMaterialParams params;
+    params.hasColorEmissive = true;
+    EditorEmissiveBlock eb;
+    eb.brushWidth = 8;
+    eb.brushHeight = 8;
+    eb.brushMask.assign(64, 0);
+    eb.brushMask[3u * 8u + 4u] = 255;
+    params.emissiveBlocks.push_back(eb);
+
+    EditorMaterialBakes bakes;
+    const QrInstance dummyInstance = reinterpret_cast<QrInstance>(uintptr_t(1));
+    const auto resolve = [](const std::string &n) -> int32_t {
+        return n == "emiss_brush_tex" ? 0 : -1;
+    };
+    bakes.BeginPass();
+    const QrMaterial mat =
+        bakes.Get(dummyInstance, "emiss_brush_tex", params, scene, { 1 }, resolve);
+    const EditorMaterialEmission emiss = bakes.EmissionOf(mat);
+    const uint8_t bakedEmis =
+        g_lastBakedRme.size() >= 64u * 4u ? g_lastBakedRme[(3u * 8u + 4u) * 4u + 2] : 0;
+    bakes.EndPass(dummyInstance);
+    bakes.Destroy(dummyInstance);
+    return Check(mat != QR_NO_MATERIAL && bakedEmis == 255 && emiss.valid && emiss.hasGlow,
+                 "emissive brush bake did not emit expected RME channel and glow bounds");
+}
+
 } // namespace
 
 int main()
 {
-    if (!TestMarqueeVisibilityAndSelection() || !TestMixedAggregationAndBatchOverwrite() ||
-        !TestEmitterMixedAggregationAndEdgeCases() || !TestGroupEditEmitterDirPreservation() ||
-        !TestMixedStyleAggregationAndSteadyVsNone() || !TestImGuiMixedQuestionRenderingAndEdit() ||
-        !VerifyEmitterNameCandidatesAndReset() || !VerifyAssetReadIgnoresDirectory() ||
-        !TestLevelDocumentStandardAndCustomLightsRoundTrip() ||
-        !TestBaselineCustomAndMapLightGuards() || !TestColocatedExtraClaimPrefersClassName())
+    using TestFn = bool (*)();
+    static constexpr TestFn kTests[] = {
+        TestMarqueeVisibilityAndSelection,
+        TestMixedAggregationAndBatchOverwrite,
+        TestEmitterMixedAggregationAndEdgeCases,
+        TestGroupEditEmitterDirPreservation,
+        TestMixedStyleAggregationAndSteadyVsNone,
+        TestImGuiMixedQuestionRenderingAndEdit,
+        VerifyEmitterNameCandidatesAndReset,
+        VerifyAssetReadIgnoresDirectory,
+        TestLevelDocumentStandardAndCustomLightsRoundTrip,
+        TestBaselineCustomAndMapLightGuards,
+        TestColocatedExtraClaimPrefersClassName,
+        TestSmoothGlossFeathering,
+        TestBrushStrokeEvaluation,
+        TestBrushMaskYamlRoundTrip,
+        TestGlossMultiBlockBlendAndBakeInvalidation,
+        TestComputeMaskEdgeCases,
+        TestEmissiveBrushBake,
+        TestEditorUiOverlayAndBrushCanvas,
+    };
+
+    for (TestFn test : kTests)
     {
-        return 1;
+        if (!test())
+        {
+            return 1;
+        }
     }
     std::printf("All EditorMultiSelectTests passed.\n");
     return 0;
