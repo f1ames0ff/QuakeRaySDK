@@ -203,6 +203,30 @@ Surface traceBounce(const float3 originPosition, float originRoughness, uint ori
         bounceDir );
 }
 
+float3 q2RegularizeBounceEmission(const float3 emissionRadiance, float hitDistance,
+                                  float oneOverPdf, float maxCap)
+{
+    // Path-space firefly regularizer: bound 1-spp bounce emission spikes using ray travel
+    // distance and sample weight while leaving moderate or well-sampled emissive hits intact.
+    const float lum = getLuminance(emissionRadiance);
+    if (lum <= 0.0)
+    {
+        return (float3)0.0;
+    }
+
+    const float distScale = clamp(hitDistance, 0.35, 1.5);
+    const float pdfScale = 1.0 / (1.0 + 0.15 * max(oneOverPdf - 1.0, 0.0));
+    const float regCap = maxCap * distScale * pdfScale;
+    if (lum <= regCap)
+    {
+        return emissionRadiance;
+    }
+
+    const float excess = lum - regCap;
+    const float regLum = regCap + (excess * regCap) / (excess + regCap * 2.0);
+    return emissionRadiance * (regLum / lum);
+}
+
 float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const float3 bounceDir,
                                   float oneOverPdf)
 {
@@ -251,7 +275,9 @@ float3 processSecondDiffuseBounce(const uint seed, const Surface surf, const flo
 
     if ( ( hitSurf.geometryInstanceFlags & GEOM_INST_FLAG_EMISSION_RAY_ONLY ) != 0 )
     {
-        radiance += hitSurf.emission * hitSurf.albedo;
+        const float bounceDist = length( hitSurf.position - surf.position );
+        radiance += q2RegularizeBounceEmission(
+            hitSurf.emission * hitSurf.albedo, bounceDist, oneOverPdf, 18.0 );
     }
 
     return radiance * oneOverPdf;
@@ -453,10 +479,17 @@ void main()
                 LightSample light =
                     sampleLightNee( lightSources[ lightIndex ], hitSurf.position, pointRnd, memberRnd, memberPdf );
 
-                if ( lightSources[ lightIndex ].lightType == LIGHT_TYPE_SPHERE ||
-                     lightSources[ lightIndex ].lightType == LIGHT_TYPE_SPOT )
+                const uint indirLightType = lightSources[ lightIndex ].lightType;
+                if ( indirLightType == LIGHT_TYPE_SPHERE ||
+                     indirLightType == LIGHT_TYPE_SPOT )
                 {
                     light.dw = min( light.dw, indirMaxSphereSolidAngle() ) * indirSphotGain();
+                }
+                else if ( indirLightType == LIGHT_TYPE_TRIANGLE ||
+                          indirLightType == LIGHT_TYPE_TEXTURED_AREA ||
+                          indirLightType == LIGHT_TYPE_DTAL_GROUP )
+                {
+                    light.dw = min( light.dw, 0.5 );
                 }
 
                 if ( getLuminance( light.color ) > 0.0 )
@@ -537,7 +570,10 @@ void main()
 
         if ( ( hitSurf.geometryInstanceFlags & GEOM_INST_FLAG_EMISSION_RAY_ONLY ) != 0 )
         {
-            hitRadiance += hitSurf.emission * hitSurf.albedo;
+            const float bounceDist = length( hitSurf.position - surf.position );
+            const float bounceCap = lerp( 50.0, 20.0, smoothstep( 0.08, 0.45, surf.roughness ) );
+            hitRadiance += q2RegularizeBounceEmission(
+                hitSurf.emission * hitSurf.albedo, bounceDist, oneOverSourcePdf, bounceCap );
         }
     }
 
