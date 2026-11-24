@@ -89,17 +89,26 @@ the scene light itself.
 
 | Field | Meaning |
 |---|---|
-| `skyColorDefault`, `skyColorMultiplier` | Base sky color and final brightness. |
+| `skyColorDefault`, `skyColorMultiplier` | Base atmosphere scattering color and final brightness. |
 | `sunDiscColor`, `sunDiscSize` | Visible sun disc; size is relative to the SDK's baseline angular radius. |
 | `skyViewerPosition` | Camera/eye position in meters; important for clouds and atmosphere. |
 | `skyAmbientLod`, `skyLightMultiplier`, `skyNee` | Sky lighting and direct-sampling controls. |
 | `godRaysEnabled`, `godRaysIntensity`, `godRaysQuality` | Optional sun shafts. |
 | `godRaysFromSkyTexture`, `godRaysSkyDirection`, `godRaysSkyColor` | Destination of a host-provided sky-texture sun estimate. |
+| `proceduralAtmosphereConfigured` | Non-zero enables Rayleigh/Mie/ozone atmosphere, 3-tier starfield, phased moon, elevation-driven cloud sunset/night lighting and exact 3D cloud eclipse of solar/lunar discs. |
+| `proceduralSunEnabled`, `proceduralSunDirection`, `proceduralSunTint`, `proceduralSunStrength` | Explicit procedural sun direction toward the sun, pure linear star spectrum tint, and cloud/sky illumination strength (independent of whether directional world light is uploaded). |
+| `proceduralMoonDirection`, `proceduralMoonColor`, `proceduralMoonSize`, `proceduralMoonPhase` | Procedural moon direction toward the body, linear tint*intensity, size scale, and illumination phase (`0..1`, or `< 0` auto from sun-moon angle). |
+| `proceduralStarsEnabled`, `proceduralStarDensity`, `proceduralStarIntensity`, `celestialRotationRadians` | Toggle, density (`0..4`), brightness (`0..5`), and diurnal celestial sphere rotation for the 3-tier night starfield. |
+| `atmosphereDensity`, `atmosphereMie`, `atmosphereOzone` | Rayleigh/ozone thickness (`0..4`, `0` gives a dark void for space skies), aerosol haze/aureole (`0..4`), and Chappuis ozone crimson-blue sunset separation (`0..4`). |
 
 `QrDrawFrameVolumetricParams` is atmospheric in-scattering/fog, not the cloud
 layer. Configure it separately from `QrDrawFrameSkyParams`.
 
-## 4. Minimal validation
+## 4. Volumetric cloud occlusion in light shafts
+
+When `QR_SKY_TYPE_PROCEDURAL` and volumetric clouds are active, `RhiCloudsPass` computes a 3D optical-depth shadow volume (`cloudShadowVolume`) bound to direct RT sunlight, indirect GI sunlight, `CmGodRays` shafts, and `CmLightShaftVolume` (`rt_light_shafts_sun`) froxel shafts so moving clouds cast consistent volumetric shadows into the world.
+
+## 5. Minimal validation
 
 1. Render procedural sky with clouds disabled.
 2. Enable clouds and verify coverage, height and thickness change the image.

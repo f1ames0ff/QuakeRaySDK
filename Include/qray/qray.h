@@ -1397,6 +1397,26 @@ typedef struct QrDrawFrameSkyParams
     QrBool32    lightShaftsSun;
     uint32_t    lightShaftsDebug;
     uint32_t    lightShaftsRayBudget;
+
+    /* Procedural sky, atmosphere, moon and starfield parameters (active when
+       proceduralAtmosphereConfigured != 0; zero-initialized callers fall back
+       to legacy flat sky behavior and LightManager sun). */
+    QrBool32    proceduralAtmosphereConfigured;
+    QrBool32    proceduralSunEnabled;
+    QrFloat3D   proceduralSunDirection;
+    QrFloat3D   proceduralSunTint;
+    float       proceduralSunStrength;
+    QrFloat3D   proceduralMoonDirection;
+    QrFloat3D   proceduralMoonColor;
+    float       proceduralMoonSize;
+    float       proceduralMoonPhase;
+    QrBool32    proceduralStarsEnabled;
+    float       proceduralStarDensity;
+    float       proceduralStarIntensity;
+    float       celestialRotationRadians;
+    float       atmosphereDensity;
+    float       atmosphereMie;
+    float       atmosphereOzone;
 } QrDrawFrameSkyParams;
 
 #define QR_LIGHT_STYLE_COUNT 64

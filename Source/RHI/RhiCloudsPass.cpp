@@ -363,7 +363,7 @@ float RhiCloudsPass::GetWindSpeed(float setting, float altitude)
 std::array<float, 4> RhiCloudsPass::MakeShadowPlacement(const LayerParams &params)
 {
     const float extent = std::max(params.cloudLayer[0] * SHADOW_VOLUME_EXTENT_PER_ALTITUDE, 0.025f);
-    const bool enabled = params.sunDirection[3] > 0.5f && params.sunDirection[2] > 0.05f;
+    const bool enabled = params.sunDirection[3] > 0.5f && params.sunDirection[2] > 0.01f;
     return { enabled ? 1.0f : 0.0f, params.cloudAnchor[0] - extent * 0.5f,
              params.cloudAnchor[1] - extent * 0.5f, extent };
 }
@@ -408,12 +408,12 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
     }
     if (shadowPlacement[0] <= 0.5f)
     {
-        layer.sunDirection[3] = 0.0f;
         shadowValid = false;
     }
     LayerParams structuralLayer = layer;
     LayerParams structuralLast = lastLayerParams;
     structuralLayer.cloudColor[3] = structuralLast.cloudColor[3] = 0.0f;
+    structuralLayer.starParams[3] = structuralLast.starParams[3] = 0.0f;
     structuralLayer.cloudMarch[1] = structuralLast.cloudMarch[1] = 0.0f;
     std::fill(std::begin(structuralLayer.cloudAnchor), std::end(structuralLayer.cloudAnchor), 0.0f);
     std::fill(std::begin(structuralLast.cloudAnchor), std::end(structuralLast.cloudAnchor), 0.0f);

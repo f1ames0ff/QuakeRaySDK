@@ -240,6 +240,140 @@ std::array<float, 24> Probe(nvrhi::IDevice *device, qray::rhi::RhiFrameContext &
     return result;
 }
 
+qray::RhiProceduralSkyPass::Params MakeAaaBaseParams()
+{
+    qray::RhiProceduralSkyPass::Params aaa{};
+    FillBasis(aaa);
+    aaa.skyTint[0] = 0.0f;
+    aaa.skyTint[1] = 0.663f;
+    aaa.skyTint[2] = 1.0f;
+    aaa.skyTint[3] = 1.0f;
+    aaa.skyParams[0] = 1.0f;
+    aaa.skyParams[1] = 1.0f;
+    aaa.skyParams[2] = 6.0f;
+    aaa.skyParams[3] = 0.025f;
+    aaa.sunDiscColor[0] = aaa.sunTint[0] = 1.0f;
+    aaa.sunDiscColor[1] = aaa.sunTint[1] = 0.933f;
+    aaa.sunDiscColor[2] = aaa.sunTint[2] = 0.749f;
+    aaa.sunTint[3] = 1.0f;
+    aaa.atmosphereParams[0] = 1.0f;
+    aaa.atmosphereParams[1] = 1.0f;
+    aaa.atmosphereParams[2] = 1.0f;
+    aaa.cloudLayer[0] = 3500.0f;
+    aaa.cloudLayer[1] = 2250.0f;
+    aaa.cloudLayer[2] = aaa.cloudLayer[3] = 1.0f;
+    aaa.cloudAnchor[3] = 0.35f;
+    return aaa;
+}
+
+double CheckAaaZenithAndStars(nvrhi::IDevice *device,
+                              qray::rhi::RhiFrameContext &frames,
+                              qray::RhiProceduralSkyPass &sky)
+{
+    qray::RhiProceduralSkyPass::Params aaa = MakeAaaBaseParams();
+    aaa.sunDirection[0] = 0.6f;
+    aaa.sunDirection[2] = 0.8f;
+    aaa.sunDirection[3] = 1.0f;
+    frames.BeginSlot(0);
+    sky.Render(frames.GetCommandList(0), 0, aaa);
+    frames.EndSlot(0);
+    const auto dayEnv = ReadCube(device, sky.GetEnvironmentTexture(), 0, 32);
+    const size_t zenithIdx = (size_t(4) * 32 * 32 + 16 * 32 + 16) * 4;
+    Require(dayEnv[zenithIdx + 2] > dayEnv[zenithIdx] * 1.5f,
+            "AAA daytime zenith lost blue Rayleigh dominance");
+
+    aaa.sunDirection[0] = 0.0f;
+    aaa.sunDirection[2] = -0.8f;
+    aaa.sunDirection[3] = 0.0f;
+    aaa.moonDirection[0] = 0.9f;
+    aaa.moonDirection[2] = 0.43589f;
+    aaa.moonDirection[3] = 0.022f;
+    aaa.moonParams[0] = 0.5f;
+    aaa.moonParams[1] = 0.65f;
+    aaa.moonParams[2] = 1.0f;
+    aaa.moonParams[3] = 0.85f;
+    aaa.starParams[0] = 1.0f;
+    aaa.starParams[1] = 2.0f;
+    aaa.starParams[2] = 1.5f;
+    frames.BeginSlot(1);
+    sky.Render(frames.GetCommandList(1), 1, aaa);
+    frames.EndSlot(1);
+    const auto nightCube = ReadCube(device, sky.GetCubemapTexture(), 0, 256);
+    const size_t base = size_t(4) * 256 * 256 * 4;
+    double starsOnPeak = 0.0;
+    for (size_t i = 0; i < 256 * 256; ++i)
+    {
+        const double luma = nightCube[base + i * 4] + nightCube[base + i * 4 + 1] + nightCube[base + i * 4 + 2];
+        starsOnPeak = std::max(starsOnPeak, luma);
+    }
+
+    aaa.starParams[0] = 0.0f;
+    frames.BeginSlot(0);
+    sky.Render(frames.GetCommandList(0), 0, aaa);
+    frames.EndSlot(0);
+    const auto nightOffCube = ReadCube(device, sky.GetCubemapTexture(), 0, 256);
+    double starsOffPeak = 0.0;
+    for (size_t i = 0; i < 256 * 256; ++i)
+    {
+        const double luma = nightOffCube[base + i * 4] + nightOffCube[base + i * 4 + 1] + nightOffCube[base + i * 4 + 2];
+        starsOffPeak = std::max(starsOffPeak, luma);
+    }
+    Require(starsOnPeak > starsOffPeak * 4.0 + 0.1,
+            "AAA night starfield toggle failed to produce/hide distinct stars");
+    return starsOnPeak;
+}
+
+void CheckAaaCloudEclipse(nvrhi::IDevice *device,
+                          qray::rhi::RhiFrameContext &frames,
+                          qray::RhiCloudsPass &clouds,
+                          qray::RhiProceduralSkyPass &sky,
+                          double starsOnPeak)
+{
+    qray::RhiProceduralSkyPass::Params aaa = MakeAaaBaseParams();
+    aaa.sunDirection[2] = 1.0f;
+    aaa.sunDirection[3] = 1.0f;
+    aaa.cloudParams[3] = 0.0f;
+    frames.BeginSlot(1);
+    sky.Render(frames.GetCommandList(1), 1, aaa);
+    frames.EndSlot(1);
+    const auto clearCube = ReadCube(device, sky.GetCubemapTexture(), 0, 16);
+    const float clearSunCentre = clearCube[(size_t(4) * 16 * 16 + 8 * 16 + 8) * 4];
+
+    aaa.cloudColor[0] = aaa.cloudColor[1] = aaa.cloudColor[2] = 1.0f;
+    aaa.cloudAnchor[0] = 1600.0f;
+    aaa.cloudAnchor[1] = 3200.0f;
+    aaa.cloudParams[0] = 0.0f;
+    aaa.cloudParams[1] = 8.0f;
+    aaa.cloudParams[2] = 0.0f;
+    aaa.cloudParams[3] = 1.0f;
+    qray::RhiCloudsPass::LayerParams eclipseLayer{};
+    std::memcpy(&eclipseLayer, &aaa, sizeof(aaa));
+    eclipseLayer.cloudMarch[0] = 48.0f;
+    eclipseLayer.cloudMarch[2] = 0.35f;
+    eclipseLayer.cloudMarch[3] = 0.75f;
+    qray::RhiCloudsPass::ShadowParams eclipseShadow{};
+    std::memcpy(eclipseShadow.sunDirection, aaa.sunDirection, sizeof(eclipseShadow.sunDirection));
+    eclipseShadow.sunDirection[3] = aaa.cloudLayer[0];
+    eclipseShadow.cloudLayer[0] = aaa.cloudLayer[1];
+    eclipseShadow.cloudLayer[1] = aaa.cloudParams[0];
+    eclipseShadow.cloudLayer[2] = aaa.cloudParams[1];
+    eclipseShadow.cloudLayer[3] = eclipseLayer.cloudMarch[2];
+    frames.BeginSlot(0);
+    const bool eclipseChanged = clouds.Render(frames.GetCommandList(0), 0, eclipseLayer, eclipseShadow, 2);
+    Require(sky.SetCloudLayer(clouds.GetLayerTexture(), clouds.GetLayerSampler()), "rebind cloud layer for eclipse");
+    sky.Render(frames.GetCommandList(0), 0, aaa, eclipseChanged);
+    frames.EndSlot(0);
+    const auto eclipseCloudLayer = ReadCube(device, clouds.GetLayerTexture(), 0, 16);
+    const float eclipseCloudAlpha = eclipseCloudLayer[(size_t(4) * 16 * 16 + 8 * 16 + 8) * 4 + 3];
+    Require(eclipseCloudAlpha < 0.1f, "Overcast anchor did not cover the zenith cloud sample");
+    const auto eclipsedCube = ReadCube(device, sky.GetCubemapTexture(), 0, 16);
+    const float eclipsedCentre = eclipsedCube[(size_t(4) * 16 * 16 + 8 * 16 + 8) * 4];
+    Require(eclipsedCentre < clearSunCentre * 0.25f,
+            "Dense overcast clouds did not occlude the solar disc");
+    std::cout << "AAA sky & cloud eclipse passed: clearSun=" << clearSunCentre
+              << ", eclipsed=" << eclipsedCentre << ", starsPeak=" << starsOnPeak << '\n';
+}
+
 int main(int argc, char **argv)
 {
     try
@@ -595,6 +729,10 @@ int main(int argc, char **argv)
             p.cloudParams[3] = layer.cloudParams[3] = 0;
             Require(!render(2, 0), "disabled clouds recorded a volume march");
             CheckClear(ReadCube(device, sky.GetEnvironmentTexture(), 0, 16), p.skyTint);
+
+            const double starsOnPeak = CheckAaaZenithAndStars(device, frames, sky);
+            CheckAaaCloudEclipse(device, frames, clouds, sky, starsOnPeak);
+
             frames.WaitForIdle();
         }
         Require(gpu.errors == 0, "Vulkan/NVRHI validation errors=" + std::to_string(gpu.errors.load()));

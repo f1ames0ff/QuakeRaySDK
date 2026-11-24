@@ -70,7 +70,9 @@ void PopulateVolumetricParams(const EditorRenderSettings &settings, const float 
                               ambientBase[2] * ambientScale } };
 }
 
-void PopulateSkyParams(const EditorRenderSettings &settings, const float viewerPosition[3],
+void PopulateSkyParams(const EditorRenderSettings &settings, const float sunDirection[3],
+                       const float moonDirection[3], float celestialRotationRad,
+                       float sunIntensity, const float viewerPosition[3],
                        QrDrawFrameSkyParams &sky)
 {
     const float skyBrightness = kSkyRadianceScale * settings.skyBrightness * settings.brightness;
@@ -115,6 +117,29 @@ void PopulateSkyParams(const EditorRenderSettings &settings, const float viewerP
         clouds[6] = settings.clouds ? 1.0f : 0.0f;
         clouds[7] = settings.cloudsHeight;
         clouds[8] = settings.cloudsThickness;
+
+        sky.proceduralAtmosphereConfigured = 1;
+        sky.proceduralSunEnabled =
+            (sunIntensity > 0.0f || settings.timeOfDayEnable || settings.sunDiscScale > 0.0f) ? 1 : 0;
+        sky.proceduralSunDirection = { { sunDirection[0], sunDirection[1], sunDirection[2] } };
+        sky.proceduralSunTint = { { settings.sunColor[0], settings.sunColor[1], settings.sunColor[2] } };
+        sky.proceduralSunStrength = (sunIntensity > 0.0f)
+            ? std::max(sunIntensity / kEditorSkySunRadiance, 0.25f)
+            : 1.0f;
+        sky.proceduralMoonDirection = { { moonDirection[0], moonDirection[1], moonDirection[2] } };
+        const float moonGain = std::max(0.0f, settings.moonIntensity);
+        sky.proceduralMoonColor = { { settings.moonColor[0] * moonGain,
+                                      settings.moonColor[1] * moonGain,
+                                      settings.moonColor[2] * moonGain } };
+        sky.proceduralMoonSize = Clamp(settings.moonSize, 0.0f, 10.0f);
+        sky.proceduralMoonPhase = settings.moonPhase;
+        sky.proceduralStarsEnabled = settings.starsEnabled ? 1 : 0;
+        sky.proceduralStarDensity = Clamp(settings.starDensity, 0.0f, 4.0f);
+        sky.proceduralStarIntensity = Clamp(settings.starIntensity, 0.0f, 5.0f);
+        sky.celestialRotationRadians = celestialRotationRad;
+        sky.atmosphereDensity = Clamp(settings.atmosphereDensity, 0.0f, 4.0f);
+        sky.atmosphereMie = Clamp(settings.atmosphereMie, 0.0f, 4.0f);
+        sky.atmosphereOzone = Clamp(settings.atmosphereOzone, 0.0f, 4.0f);
     }
     else
     {
@@ -216,10 +241,12 @@ void PopulateIlluminationParams(const EditorRenderSettings &settings, EditorFram
 } // namespace
 
 void BuildEditorFrameParams(const EditorRenderSettings &settings, const float sunDirection[3],
+                            const float moonDirection[3], float celestialRotationRad,
                             float sunIntensity, const float viewerPosition[3],
                             const float *skyFlatColor, EditorFrameParams &out)
 {
-    PopulateSkyParams(settings, viewerPosition, out.sky);
+    PopulateSkyParams(settings, sunDirection, moonDirection, celestialRotationRad, sunIntensity,
+                      viewerPosition, out.sky);
 
     out.tonemap = {};
     out.tonemap.minLogLuminance = settings.tonemapMinLog;
@@ -355,4 +382,130 @@ void ApplySunDirectionFromRay(const float direction[3], EditorSunState &sun)
     }
     sun.yaw = yaw;
     sun.enabled = true;
+}
+
+void ComputeEditorCelestialFrame(const EditorRenderSettings &settings, const EditorSunState &sun,
+                                 double elapsedSeconds, float outSunDir[3], float outMoonDir[3],
+                                 float &outCelestialRotationRad)
+{
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kDegToRad = kPi / 180.0f;
+
+    if (!settings.timeOfDayEnable)
+    {
+        const float pitch = sun.pitch * kDegToRad;
+        const float yaw = sun.yaw * kDegToRad;
+        const float cosPitch = std::cos(pitch);
+        outSunDir[0] = -cosPitch * std::cos(yaw);
+        outSunDir[1] = -cosPitch * std::sin(yaw);
+        outSunDir[2] = std::sin(pitch);
+
+        float mx = -outSunDir[0] + 0.15f;
+        float my = -outSunDir[1] - 0.10f;
+        float mz = -outSunDir[2];
+        const float mLen = std::sqrt(mx * mx + my * my + mz * mz);
+        const float invMLen = mLen > 1e-6f ? 1.0f / mLen : 1.0f;
+        outMoonDir[0] = mx * invMLen;
+        outMoonDir[1] = my * invMLen;
+        outMoonDir[2] = mz * invMLen;
+        outCelestialRotationRad = 0.0f;
+        return;
+    }
+
+    double hours = double(settings.timeOfDay) +
+                   elapsedSeconds * (double(std::max(0.0f, settings.timeOfDaySpeed)) / 60.0);
+    hours = std::fmod(hours, 24.0);
+    if (hours < 0.0)
+    {
+        hours += 24.0;
+    }
+
+    const float hourAngle = float((hours - 12.0) * (kPi / 12.0));
+    const float lat = Clamp(settings.skyLatitude, -80.0f, 80.0f) * kDegToRad;
+    const float az = settings.skyAzimuth * kDegToRad;
+    const float cosAz = std::cos(az);
+    const float sinAz = std::sin(az);
+
+    const auto arcDir = [&](float hAngle, float latRad, float outVec[3]) {
+        const float localEast = -std::sin(hAngle);
+        const float localNorth = -std::cos(hAngle) * std::sin(latRad);
+        const float localUp = std::cos(hAngle) * std::cos(latRad);
+        outVec[0] = localEast * cosAz - localNorth * sinAz;
+        outVec[1] = localEast * sinAz + localNorth * cosAz;
+        outVec[2] = localUp;
+    };
+
+    arcDir(hourAngle, lat, outSunDir);
+    const float moonLatDeg = Clamp(settings.skyLatitude + (settings.skyLatitude >= 0.0f ? 15.0f : -15.0f),
+                                   -70.0f, 70.0f);
+    arcDir(hourAngle + kPi + 0.30f, moonLatDeg * kDegToRad, outMoonDir);
+    outCelestialRotationRad = hourAngle;
+}
+
+void EvalEditorSunGroundTransmittance(const EditorRenderSettings &settings,
+                                      const float sunDirection[3], float outTrans[3])
+{
+    const float z = sunDirection[2];
+    const float horizon = Clamp((z + 0.024f) / 0.039f, 0.0f, 1.0f);
+    const float smoothHorizon = horizon * horizon * (3.0f - 2.0f * horizon);
+    if (smoothHorizon <= 0.0f)
+    {
+        outTrans[0] = outTrans[1] = outTrans[2] = 0.0f;
+        return;
+    }
+
+    const float density = Clamp(settings.atmosphereDensity, 0.0f, 4.0f);
+    if (density <= 1e-5f)
+    {
+        outTrans[0] = outTrans[1] = outTrans[2] = smoothHorizon;
+        return;
+    }
+
+    const float mie = Clamp(settings.atmosphereMie, 0.0f, 4.0f);
+    const float ozone = Clamp(settings.atmosphereOzone, 0.0f, 4.0f);
+    const float skyPeak = std::max({ settings.skyColor[0], settings.skyColor[1], settings.skyColor[2], 0.0f });
+    const float invPeak = skyPeak > 1e-5f ? 1.0f / skyPeak : 0.0f;
+    const float skyNorm[3] = {
+        skyPeak > 1e-5f ? settings.skyColor[0] * invPeak : 0.0f,
+        skyPeak > 1e-5f ? settings.skyColor[1] * invPeak : 0.663f,
+        skyPeak > 1e-5f ? settings.skyColor[2] * invPeak : 1.0f,
+    };
+
+    const float earthExt[3] = { 5.8e-6f, 13.5e-6f, 33.1e-6f };
+    const float ozoneExt[3] = { 0.45e-6f * ozone * density, 2.35e-6f * ozone * density, 0.11e-6f * ozone * density };
+    const float mieExt = 4.7e-6f * mie * density;
+    float rayExt[3];
+    for (int c = 0; c < 3; c++)
+    {
+        const float custom = std::max(skyNorm[c], 0.08f) * 30.0e-6f;
+        rayExt[c] = (earthExt[c] + (custom - earthExt[c]) * 0.35f) * density;
+    }
+
+    constexpr float kPlanetR = 6360000.0f;
+    constexpr float kTopR = 6440000.0f;
+    const float roZ = kPlanetR + 10.0f;
+    const float rdZ = std::max(z, 0.004f);
+    const float rdH = std::sqrt(std::max(0.0f, 1.0f - rdZ * rdZ));
+    const float b = roZ * rdZ;
+    const float cTerm = roZ * roZ - kTopR * kTopR;
+    const float rayLen = std::max(0.0f, -b + std::sqrt(std::max(0.0f, b * b - cTerm)));
+
+    float odR = 0.0f, odM = 0.0f, odO = 0.0f;
+    const float stepLen = rayLen * 0.25f;
+    for (int i = 0; i < 4; i++)
+    {
+        const float dist = (float(i) + 0.5f) * stepLen;
+        const float px = rdH * dist;
+        const float pz = roZ + rdZ * dist;
+        const float h = std::max(std::sqrt(px * px + pz * pz) - kPlanetR, 0.0f);
+        odR += std::exp(-h / 8000.0f) * stepLen;
+        odM += std::exp(-h / 1200.0f) * stepLen;
+        odO += std::max(0.0f, 1.0f - std::abs(h - 25000.0f) / 15000.0f) * stepLen;
+    }
+
+    for (int ch = 0; ch < 3; ch++)
+    {
+        const float tau = rayExt[ch] * odR + mieExt * odM + ozoneExt[ch] * odO;
+        outTrans[ch] = smoothHorizon * std::exp(-tau);
+    }
 }

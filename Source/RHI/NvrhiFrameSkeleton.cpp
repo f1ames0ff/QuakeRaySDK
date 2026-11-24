@@ -173,6 +173,36 @@ void PopulateGodRaysParams(const NvrhiFrameSkeleton::SkyFrameInputs::GodRays &sr
     CopySkyLightShafts(src, dst.lightShafts);
 }
 
+struct CloudShadowTargets
+{
+    RhiRtDirectPass *direct = nullptr;
+    RhiRtIndirectPass *indirect = nullptr;
+    RhiRtGodRaysPass *godRays = nullptr;
+    RhiLightShaftVolumePass *lightShaftVolume = nullptr;
+};
+
+void BindCloudShadowTargets(const CloudShadowTargets &targets,
+                            nvrhi::ITexture *shadowTexture,
+                            nvrhi::ISampler *shadowSampler)
+{
+    if (targets.direct != nullptr)
+    {
+        targets.direct->SetCloudShadow(shadowTexture, shadowSampler);
+    }
+    if (targets.indirect != nullptr)
+    {
+        targets.indirect->SetCloudShadow(shadowTexture, shadowSampler);
+    }
+    if (targets.godRays != nullptr)
+    {
+        targets.godRays->SetCloudShadow(shadowTexture, shadowSampler);
+    }
+    if (targets.lightShaftVolume != nullptr)
+    {
+        targets.lightShaftVolume->SetCloudShadow(shadowTexture, shadowSampler);
+    }
+}
+
 }
 
 
@@ -1224,18 +1254,14 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                                     sky.cloudsShadowParams, sky.cloudsQuality);
                 EndGpuPass(commandList, frameIndex, GPU_PASS_CLOUDS);
                 proceduralSkyPass->SetCloudLayer(cloudsPass->GetLayerTexture(), cloudsPass->GetLayerSampler());
-                if (rtDirectPass != nullptr)
-                {
-                    rtDirectPass->SetCloudShadow(cloudsPass->GetShadowTexture(), cloudsPass->GetShadowSampler());
-                }
-                if (rtIndirectPass != nullptr)
-                {
-                    rtIndirectPass->SetCloudShadow(cloudsPass->GetShadowTexture(), cloudsPass->GetShadowSampler());
-                }
-                if (godRaysPass != nullptr)
-                {
-                    godRaysPass->SetCloudShadow(cloudsPass->GetShadowTexture(), cloudsPass->GetShadowSampler());
-                }
+                BindCloudShadowTargets(
+                    { rtDirectPass, rtIndirectPass, godRaysPass, lightShaftVolumePass },
+                    cloudsPass->GetShadowTexture(), cloudsPass->GetShadowSampler());
+            }
+            else
+            {
+                BindCloudShadowTargets({ nullptr, nullptr, nullptr, lightShaftVolumePass },
+                                       nullptr, nullptr);
             }
 
             BeginGpuPass(commandList, frameIndex, GPU_PASS_SKY);

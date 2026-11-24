@@ -27,6 +27,7 @@
 #include <nvrhi/vulkan.h>
 
 #include "../Common.h"
+#include "RhiCloudShadowBinding.h"
 
 namespace qray
 {
@@ -133,6 +134,10 @@ public:
     nvrhi::ITexture *GetInjectionTexture(uint32_t frameIndex) const;
     nvrhi::ISampler *GetSampler() const { return sampler; }
     bool ConsumeHistoryReset();
+    void SetCloudShadow(nvrhi::ITexture *pTexture, nvrhi::ISampler *pSampler)
+    {
+        cloudShadowBinding.SetTexture(pTexture, pSampler);
+    }
 
 private:
     struct Target
@@ -193,6 +198,7 @@ private:
     uint32_t volumeSizeZ = VOLUME_SIZE_Z;
     bool historyReset = true;
 
+    rhi::RhiCloudShadowBinding cloudShadowBinding;
     Target targets[MAX_FRAMES_IN_FLIGHT];
 };
 

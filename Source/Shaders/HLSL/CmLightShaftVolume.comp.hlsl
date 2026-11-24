@@ -23,10 +23,12 @@
 #define DESC_SET_LIGHT_SHAFT_VOLUME 3
 #define DESC_SET_TEXTURES 4
 #define DESC_SET_LIGHT_SOURCES 5
+#define DESC_SET_CLOUD_SHADOW 6
 
 #include "ShaderCommonHLSLFunc.hlsli"
 #include "LightShafts.hlsli"
 #include "Light.hlsli"
+#include "CloudShadowWorld.hlsli"
 
 [[vk::binding(0, DESC_SET_TLAS)]] RaytracingAccelerationStructure topLevelAS;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
@@ -713,6 +715,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             visibility = lightShaftVisible(center, center + sunDirection * MAX_RAY_LENGTH) ? 1.0 : 0.0;
         }
 
+        visibility *= getCloudSunTransmittance(center, sunDirection, true);
         radiance += params.sunColor.rgb * visibility * shaftPhase(dot(sunDirection, toViewer), 0.5);
     }
 

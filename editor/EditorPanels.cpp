@@ -1313,8 +1313,82 @@ void DrawGlobalSkySection(EditorRenderSettings &s, const EditorRenderSettings &b
     };
     DrawFloatSettingRows(rows, std::size(rows));
     DrawColorSettingRow("rt_sky_color", s.skyColor, b.skyColor, nullptr);
+    if (s.skyType == QR_SKY_TYPE_PROCEDURAL)
+    {
+        const FloatSettingRow atmoRows[] = {
+            { "rt_sky_atmosphere_density", &s.atmosphereDensity, b.atmosphereDensity, 0.0f, 4.0f, "%.2f",
+              "Rayleigh/ozone atmosphere optical thickness (0 = space void)." },
+            { "rt_sky_mie", &s.atmosphereMie, b.atmosphereMie, 0.0f, 4.0f, "%.2f",
+              "Aerosol haze and solar aureole strength." },
+            { "rt_sky_ozone", &s.atmosphereOzone, b.atmosphereOzone, 0.0f, 4.0f, "%.2f",
+              "Chappuis ozone band separating twilight crimson-orange from blue zenith." },
+        };
+        DrawFloatSettingRows(atmoRows, std::size(atmoRows));
+    }
     DrawIntSettingRow("rt_sky_ambient_lod", &s.skyAmbientLod, b.skyAmbientLod, 0, 10, nullptr);
     DrawBoolSettingRow("rt_sky_nee", &s.skyNee, b.skyNee, nullptr);
+}
+
+void DrawGlobalTimeAndNightSection(EditorRenderSettings &s, const EditorRenderSettings &b)
+{
+    if (s.skyType != QR_SKY_TYPE_PROCEDURAL)
+    {
+        return;
+    }
+
+    EditorGuiSectionHeader("Time of Day");
+    DrawBoolSettingRow("rt_sky_time_enable", &s.timeOfDayEnable, b.timeOfDayEnable,
+                       "Compute sun, moon and star rotation from 24-hour time of day and enable automatic sky sunlight.");
+
+    const FloatSettingRow todRows[] = {
+        { "rt_sky_time", &s.timeOfDay, b.timeOfDay, 0.0f, 24.0f, "%.2f",
+          "Time of day in hours (0 midnight, 6 dawn, 12 noon, 18 sunset)." },
+        { "rt_sky_time_speed", &s.timeOfDaySpeed, b.timeOfDaySpeed, 0.0f, 60.0f, "%.2f",
+          "Time-of-day speed in hours per real minute (0 = paused)." },
+        { "rt_sky_latitude", &s.skyLatitude, b.skyLatitude, -80.0f, 80.0f, "%.1f",
+          "Observer latitude in degrees (tilts the solar arc)." },
+        { "rt_sky_azimuth", &s.skyAzimuth, b.skyAzimuth, -180.0f, 180.0f, "%.1f",
+          "Compass azimuth offset for sunrise/sunset direction in degrees." },
+    };
+    DrawFloatSettingRows(todRows, std::size(todRows));
+
+    struct PresetTime { const char *label; float hour; };
+    static constexpr PresetTime kPresets[] = {
+        { "Dawn", 6.15f }, { "Noon", 12.0f }, { "Sunset", 17.85f }, { "Twilight", 18.25f }, { "Night", 0.0f },
+    };
+    for (size_t i = 0; i < std::size(kPresets); i++)
+    {
+        if (i > 0)
+        {
+            ImGui::SameLine();
+        }
+        if (ImGui::SmallButton(kPresets[i].label))
+        {
+            s.timeOfDayEnable = true;
+            s.timeOfDay = kPresets[i].hour;
+        }
+    }
+
+    EditorGuiSectionHeader("Moon & Stars");
+    DrawBoolSettingRow("rt_sky_stars_enable", &s.starsEnabled, b.starsEnabled,
+                       "Render the procedural 3-tier night starfield.");
+    const FloatSettingRow starRows[] = {
+        { "rt_sky_stars_density", &s.starDensity, b.starDensity, 0.0f, 4.0f, "%.2f",
+          "Count and spatial density of stars across all three magnitude tiers." },
+        { "rt_sky_stars", &s.starIntensity, b.starIntensity, 0.0f, 5.0f, "%.2f",
+          "Overall star brightness and bright-star glow." },
+        { "rt_sky_moon", &s.moonIntensity, b.moonIntensity, 0.0f, 4.0f, "%.2f",
+          "Moon disc brightness and night cloud illumination." },
+    };
+    DrawFloatSettingRows(starRows, std::size(starRows));
+    DrawColorSettingRow("rt_sky_moon_color", s.moonColor, b.moonColor, "Tint color of the moon and moonlight.");
+    const FloatSettingRow moonRows[] = {
+        { "rt_sky_moon_size", &s.moonSize, b.moonSize, 0.0f, 10.0f, "%.2f",
+          "Moon disc angular size multiplier." },
+        { "rt_sky_moon_phase", &s.moonPhase, b.moonPhase, -1.0f, 1.0f, "%.2f",
+          "Lunar illumination phase (0 new, 0.5 half, 1 full, < 0 auto from sun)." },
+    };
+    DrawFloatSettingRows(moonRows, std::size(moonRows));
 }
 
 void DrawGlobalLightingAndSky(EditorApp &app, EditorRenderSettings &s, const EditorRenderSettings &b,
@@ -1322,6 +1396,7 @@ void DrawGlobalLightingAndSky(EditorApp &app, EditorRenderSettings &s, const Edi
 {
     DrawGlobalLightingSection(s, b);
     DrawGlobalSkySection(s, b);
+    DrawGlobalTimeAndNightSection(s, b);
 
     DrawBoolSettingRow("rt_physical_sun", &sun.enabled, bsun.enabled, nullptr);
 

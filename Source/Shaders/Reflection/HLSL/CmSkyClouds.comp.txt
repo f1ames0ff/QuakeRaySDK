@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block set 0 binding 1
 
 [0] offset 0 array[18](v4(float32)) stride 16
@@ -13,6 +13,11 @@
 [8] offset 400 v4(float32)
 [9] offset 416 v4(float32)
 [10] offset 432 v4(float32)
+[11] offset 448 v4(float32)
+[12] offset 464 v4(float32)
+[13] offset 480 v4(float32)
+[14] offset 496 v4(float32)
+[15] offset 512 v4(float32)
 === builtin GlobalInvocationId
 v3(int32)
 === capability ImageQuery

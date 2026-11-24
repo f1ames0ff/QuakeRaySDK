@@ -41,8 +41,12 @@ radius. `sunDiscColor` belongs to the visible sky, while
 `QrDirectionalLightUploadInfo.color` belongs to scene lighting.
 
 The Quake host maps these from `rt_sky_sun_color`, `rt_sky_sun_disc` and
-`rt_sky_sun_size`. `rt_physical_sun` controls whether the host uploads the
-directional light; it is not an SDK field.
+`rt_sky_sun_size`. When `rt_sky_time_enable` is off, `rt_physical_sun` controls
+whether the host uploads the directional light; when `rt_sky_time_enable` is on,
+the host computes solar/lunar ephemeris from 24-hour time (`rt_sky_time`),
+automatically enables directional lighting (transmitted sunlight by day/sunset,
+soft moonlight at night), and populates the `proceduralSun*`, `proceduralMoon*`,
+`proceduralStar*`, and `atmosphere*` fields of `QrDrawFrameSkyParams`.
 
 Quake reference defaults are `rt_physical_sky=1`, `rt_physical_sun=0`,
 `rt_sky_sun=1`, disc scale `4`, disc size `1`, god rays enabled with intensity

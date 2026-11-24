@@ -167,6 +167,7 @@ private:
     static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
+    void AdvanceCelestialClock(float deltaSeconds);
     void UploadSun();
     void SunDirection(float direction[3]) const;
     void UploadLights();
@@ -646,6 +647,7 @@ private:
     bool m_notifyActive = false;
 
     float m_frameTimeMs = 0.0f;
+    double m_celestialClockSeconds = 0.0;
     uint32_t m_clientWidth = 0;
     uint32_t m_clientHeight = 0;
     uint32_t m_framesSinceSceneLoad = 0;

@@ -220,11 +220,30 @@ public:
         // (VulkanDevice.cpp:827-837); a value outside (0, 1) is how the host turns clouds off.
         float cloudParams[4];
 
-        // `drawInfo.pSkyParams->sunDiscColor`, defaulting to white when the host sends no sky params
-        // (VulkanDevice.cpp:772-778). Appended after every other field, like the legacy struct
-        // (RenderCubemap.h:46-49), so a stale compiled shader still reads all older fields at the
-        // same offsets.
+        // Offset 368. `drawInfo.pSkyParams->sunDiscColor`, defaulting to white when the host sends
+        // no sky params (VulkanDevice.cpp).
         float sunDiscColor[4];
+
+        // Offset 384. Pure linear sun spectrum tint (xyz) and sky/cloud direct sun strength (w).
+        float sunTint[4];
+
+        // Offset 400. xyz = unit direction TOWARD the moon; w = angular radius in radians.
+        float moonDirection[4];
+
+        // Offset 416. xyz = linear moon tint * intensity; w = moon phase (0..1, <0 auto).
+        float moonParams[4];
+
+        // Offset 432. x = density, y = mie, z = ozone, w = celestial rotation (radians).
+        float atmosphereParams[4];
+
+        // Offset 448. x = stars enabled (0/1), y = stars density, z = stars intensity, w = clock (s).
+        float starParams[4];
+
+        // Offset 464. x = cloud altitude (m), y = thickness (m), z = sun scale, w = sky fill scale.
+        float cloudLayer[4];
+
+        // Offset 480. xyz = viewer world anchor (m), w = cloud detail factor (0..0.9).
+        float cloudAnchor[4];
     };
 
     RhiProceduralSkyPass();
@@ -323,11 +342,10 @@ private:
     bool created = false;
 };
 
-// The CPU mirror has to match the measured member layout of the blob's `Params_BT` member by member
-// (offsets from the 2026-09-26 spirv-dis of renderer\Build\CmProceduralSky.comp.spv): member 0 at 0
-// with ArrayStride 16, then 288, 304, 320, 336, 352, 368 - and the block is 24 float4, 384 bytes.
-static_assert(sizeof(RhiProceduralSkyPass::Params) == 384,
-              "Params_BT is 24 float4; the constant buffer is created with sizeof(Params)");
+// The CPU mirror has to match the member layout of the shader's `Params_BT` member by member:
+// 31 float4 vectors, 496 bytes.
+static_assert(sizeof(RhiProceduralSkyPass::Params) == 496,
+              "Params_BT is 31 float4; the constant buffer is created with sizeof(Params)");
 static_assert(offsetof(RhiProceduralSkyPass::Params, faceBasis) == 0, "measured member offset");
 static_assert(offsetof(RhiProceduralSkyPass::Params, sunDirection) == 288, "measured member offset");
 static_assert(offsetof(RhiProceduralSkyPass::Params, skyTint) == 304, "measured member offset");
@@ -335,5 +353,12 @@ static_assert(offsetof(RhiProceduralSkyPass::Params, skyParams) == 320, "measure
 static_assert(offsetof(RhiProceduralSkyPass::Params, cloudColor) == 336, "measured member offset");
 static_assert(offsetof(RhiProceduralSkyPass::Params, cloudParams) == 352, "measured member offset");
 static_assert(offsetof(RhiProceduralSkyPass::Params, sunDiscColor) == 368, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, sunTint) == 384, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, moonDirection) == 400, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, moonParams) == 416, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, atmosphereParams) == 432, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, starParams) == 448, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, cloudLayer) == 464, "measured member offset");
+static_assert(offsetof(RhiProceduralSkyPass::Params, cloudAnchor) == 480, "measured member offset");
 
 }
