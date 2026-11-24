@@ -346,6 +346,32 @@ if(QR_BUILD_TESTS)
     set_tests_properties(qray_spatial_twin_gpu PROPERTIES TIMEOUT 180
         ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
+    add_executable(qray_emissive_denoiser_benchmark Tests/EmissiveDenoiserBenchmark.cpp)
+    target_compile_features(qray_emissive_denoiser_benchmark PRIVATE cxx_std_20)
+    target_include_directories(qray_emissive_denoiser_benchmark PRIVATE Include Source)
+    if(WIN32)
+        target_compile_definitions(qray_emissive_denoiser_benchmark PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+        target_link_libraries(qray_emissive_denoiser_benchmark PRIVATE renderer nvrhi_vk nvrhi user32)
+        add_custom_command(TARGET qray_emissive_denoiser_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:qray_emissive_denoiser_benchmark>/amd_fidelityfx_vk.dll"
+            VERBATIM)
+    else()
+        find_package(X11 REQUIRED)
+        target_compile_definitions(qray_emissive_denoiser_benchmark PRIVATE QR_STATIC QR_USE_SURFACE_XLIB)
+        target_link_libraries(qray_emissive_denoiser_benchmark PRIVATE renderer nvrhi_vk nvrhi X11::X11)
+        add_custom_command(TARGET qray_emissive_denoiser_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_SO}"
+                "$<TARGET_FILE_DIR:qray_emissive_denoiser_benchmark>/libamd_fidelityfx_vk.so"
+            VERBATIM)
+    endif()
+    add_test(NAME qray_emissive_denoiser_gpu COMMAND qray_emissive_denoiser_benchmark
+        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_EDITOR_TEXTURE_DIR}")
+    set_tests_properties(qray_emissive_denoiser_gpu PROPERTIES TIMEOUT 180
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
+
     # Prefer the Vulkan SDK's dxc. The Windows SDK also ships a dxc.exe on
     # PATH, but it is built without SPIR-V code generation and fails the
     # renderer probes with "SPIR-V CodeGen not available".
