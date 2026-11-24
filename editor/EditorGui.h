@@ -23,6 +23,9 @@ struct EditorGuiRowOpts
     std::function<void(const char *)> logRect;
     const char *rectName = nullptr;
     bool dimValue = false;
+    bool mixed = false;
+    uint8_t mixedAxisMask = 0;
+    uint8_t *editedAxisMask = nullptr;
 };
 
 // Action flags returned by EditorGuiBlockActions / EditorGuiHeaderActions.

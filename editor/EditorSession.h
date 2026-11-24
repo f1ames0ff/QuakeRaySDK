@@ -36,6 +36,7 @@ EditorSessionPaths BuildEditorSessionPaths(const std::string &materialsOverride,
 // RT_CustomLights_Ensure starts an entry with.
 struct EditorLevelLight
 {
+    std::string className;
     float origin[3] = {};
     bool hasOffset = false;
     float offset[3] = {};
@@ -52,6 +53,7 @@ struct EditorLevelLight
     float lightShaftsFalloff = 1.0f;
     int32_t style = 0;
     bool enabled = true;
+    bool forceRasterize = false;
 
     bool operator==(const EditorLevelLight &) const = default;
 };
@@ -139,7 +141,11 @@ extern const char *const kEditorStyleNames[kEditorStyleCount];
 // is also the fingerprint the session compares against to tell whether the level needs saving.
 std::string RenderEditorLevelSection(const std::string &level, const EditorLevelSky &sky,
                                      const EditorLevelFog &fog,
-                                     const std::vector<EditorLevelLight> &lights);
+                                     const std::vector<EditorLevelLight> &lights,
+                                     bool includeEmptyLights = false);
+
+bool IsSavedStandardLightEntry(const EditorLevelLight &entry);
+bool HasSavedStandardLightsBlock(const std::vector<EditorLevelLight> &entries);
 
 std::string RenderEmitterLightsBlock(const std::vector<EditorEmitterLightOverride> &emitters);
 std::string MergeEmitterLightsYaml(const std::string &yamlText,
@@ -166,6 +172,7 @@ public:
     bool Exists() const { return m_exists; }
     const std::string &Text() const { return m_text; }
     bool HasMaterial(const std::string &name) const;
+    bool HasMaterialWithPrefix(const std::string &prefix) const;
     // Reads the keys the editor owns out of `name`'s entry. Keys the entry does not carry leave
     // the matching field of `params` untouched.
     bool ReadMaterial(const std::string &name, EditorMaterialParams &params) const;
@@ -219,7 +226,8 @@ public:
     // carry at all gets its section appended at the end.
     std::string WriteMerged(const std::string &level, const EditorLevelSky &sky,
                             const EditorLevelFog &fog,
-                            const std::vector<EditorLevelLight> &lights) const;
+                            const std::vector<EditorLevelLight> &lights,
+                            bool includeEmptyLights = false) const;
 
 private:
     std::string m_text;

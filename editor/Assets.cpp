@@ -1,4 +1,5 @@
 #include "Assets.h"
+#include "Scene.h"
 
 #include <algorithm>
 #include <climits>
@@ -55,6 +56,12 @@ std::string NormalizeAssetName(const std::string &name)
 
 bool ReadWholeFile(const std::string &path, std::vector<uint8_t> &out)
 {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec))
+    {
+        return false;
+    }
+
     std::ifstream file(path, std::ios::binary);
 
     if (!file)
@@ -360,6 +367,55 @@ bool EditorAssetSource::AddPak(const std::string &path)
     return true;
 }
 
+bool ReadZipCentralDirectory(const std::string &path, uint16_t &outEntryCount,
+                             std::vector<uint8_t> &outCdBytes)
+{
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file)
+    {
+        return false;
+    }
+
+    const std::streamoff fileSize = file.tellg();
+    if (fileSize < std::streamoff(kZipEocdSize))
+    {
+        return false;
+    }
+
+    const size_t tailSize = size_t(std::min<std::streamoff>(
+        fileSize, std::streamoff(kZipEocdSize + kZipMaxComment)));
+    std::vector<uint8_t> tail(tailSize);
+    file.seekg(fileSize - std::streamoff(tailSize));
+    file.read(reinterpret_cast<char *>(tail.data()), std::streamsize(tailSize));
+
+    size_t eocdOffset = 0;
+    if (!file || !FindZipEocd(tail, eocdOffset))
+    {
+        return false;
+    }
+
+    outEntryCount = ReadUint16(&tail[eocdOffset + 10]);
+    const uint32_t cdSize = ReadUint32(&tail[eocdOffset + 12]);
+    const uint32_t cdOffset = ReadUint32(&tail[eocdOffset + 16]);
+    const std::streamoff eocdFilePos = fileSize - std::streamoff(tailSize) + std::streamoff(eocdOffset);
+
+    if (std::streamoff(cdOffset) > eocdFilePos ||
+        std::streamoff(cdSize) > eocdFilePos - std::streamoff(cdOffset) ||
+        cdSize > kZipMaxEntryBytes)
+    {
+        return false;
+    }
+
+    outCdBytes.resize(cdSize);
+    if (cdSize > 0)
+    {
+        file.seekg(std::streamoff(cdOffset));
+        file.read(reinterpret_cast<char *>(outCdBytes.data()), std::streamsize(cdSize));
+    }
+
+    return bool(file);
+}
+
 bool EditorAssetSource::AddZip(const std::string &path)
 {
     if (path.empty() || HasArchivePath(m_archives, path))
@@ -367,19 +423,9 @@ bool EditorAssetSource::AddZip(const std::string &path)
         return false;
     }
 
-    std::vector<uint8_t> bytes;
-    size_t eocdOffset = 0;
-
-    if (!ReadWholeFile(path, bytes) || !FindZipEocd(bytes, eocdOffset))
-    {
-        return false;
-    }
-
-    const uint16_t entryCount = ReadUint16(&bytes[eocdOffset + 10]);
-    const uint32_t cdSize = ReadUint32(&bytes[eocdOffset + 12]);
-    const uint32_t cdOffset = ReadUint32(&bytes[eocdOffset + 16]);
-
-    if (cdOffset > bytes.size() || cdSize > bytes.size() - cdOffset)
+    uint16_t entryCount = 0;
+    std::vector<uint8_t> cdBytes;
+    if (!ReadZipCentralDirectory(path, entryCount, cdBytes))
     {
         return false;
     }
@@ -388,19 +434,19 @@ bool EditorAssetSource::AddZip(const std::string &path)
     zip.path = path;
     zip.entries.reserve(entryCount);
 
-    size_t cursor = cdOffset;
-    const size_t cdEnd = size_t(cdOffset) + cdSize;
+    size_t cursor = 0;
+    const size_t cdEnd = cdBytes.size();
 
     while (cursor + 46 <= cdEnd && zip.entries.size() < entryCount)
     {
-        if (ReadUint32(&bytes[cursor]) != kZipCentralSignature)
+        if (ReadUint32(&cdBytes[cursor]) != kZipCentralSignature)
         {
             break;
         }
 
-        const uint16_t nameLen = ReadUint16(&bytes[cursor + 28]);
-        const uint16_t extraLen = ReadUint16(&bytes[cursor + 30]);
-        const uint16_t commentLen = ReadUint16(&bytes[cursor + 32]);
+        const uint16_t nameLen = ReadUint16(&cdBytes[cursor + 28]);
+        const uint16_t extraLen = ReadUint16(&cdBytes[cursor + 30]);
+        const uint16_t commentLen = ReadUint16(&cdBytes[cursor + 32]);
         const size_t next = cursor + 46 + nameLen + extraLen + commentLen;
 
         if (next > cdEnd)
@@ -408,18 +454,18 @@ bool EditorAssetSource::AddZip(const std::string &path)
             break;
         }
 
-        const uint16_t method = ReadUint16(&bytes[cursor + 10]);
+        const uint16_t method = ReadUint16(&cdBytes[cursor + 10]);
         std::string entryName =
-            NormalizeZipEntryName(reinterpret_cast<const char *>(&bytes[cursor + 46]), nameLen);
+            NormalizeZipEntryName(reinterpret_cast<const char *>(&cdBytes[cursor + 46]), nameLen);
 
         if (!entryName.empty() && entryName.back() != '/' && (method == 0 || method == 8))
         {
             ZipEntry entry;
             entry.name = std::move(entryName);
             entry.method = method;
-            entry.compressedSize = ReadUint32(&bytes[cursor + 20]);
-            entry.uncompressedSize = ReadUint32(&bytes[cursor + 24]);
-            entry.localHeaderOffset = ReadUint32(&bytes[cursor + 42]);
+            entry.compressedSize = ReadUint32(&cdBytes[cursor + 20]);
+            entry.uncompressedSize = ReadUint32(&cdBytes[cursor + 24]);
+            entry.localHeaderOffset = ReadUint32(&cdBytes[cursor + 42]);
             zip.entries.push_back(std::move(entry));
         }
 
@@ -639,10 +685,63 @@ bool EditorAssetSource::ReadFromPaks(const std::string &normalized, std::vector<
     return false;
 }
 
+namespace
+{
+
+bool ExistsInDirectories(const std::vector<std::string> &directories, const std::string &normalized)
+{
+    std::error_code ec;
+    for (const std::string &directory : directories)
+    {
+        std::filesystem::path direct = std::filesystem::path(directory) / normalized;
+        if (std::filesystem::is_regular_file(direct, ec))
+        {
+            return true;
+        }
+#if !defined(_WIN32)
+        std::string resolved;
+        if (ResolveCaseInsensitivePath(directory, normalized, resolved) &&
+            std::filesystem::is_regular_file(resolved, ec))
+        {
+            return true;
+        }
+#endif
+    }
+    return false;
+}
+
+} // namespace
+
 bool EditorAssetSource::Exists(const std::string &name) const
 {
-    std::vector<uint8_t> bytes;
-    return ReadFile(name, bytes);
+    const std::string normalized = NormalizeAssetName(name);
+    if (normalized.empty())
+    {
+        return false;
+    }
+
+    if (ExistsInDirectories(m_directories, normalized))
+    {
+        return true;
+    }
+
+    for (const ZipArchive &zip : m_zips)
+    {
+        if (FindInZip(zip, normalized) != nullptr)
+        {
+            return true;
+        }
+    }
+
+    for (const Pak &pak : m_paks)
+    {
+        if (FindInPak(pak, normalized) != nullptr)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool EditorAssetSource::ReadFile(const std::string &name, std::vector<uint8_t> &out) const
@@ -701,7 +800,24 @@ bool HasMapExtension(const std::string &path)
 
 bool HasModelExtension(const std::string &path)
 {
-    return ExtensionOf(path) == ".mdl";
+    const std::string ext = ExtensionOf(path);
+    if (ext == ".mdl")
+    {
+        return true;
+    }
+
+    if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter())
+    {
+        for (const std::string &extraExt : adapter->extraModelExtensions)
+        {
+            if (EqualsIgnoreCase(ext, extraExt))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 std::string TreeDirOf(const std::string &path)
@@ -783,6 +899,12 @@ void AppendModelCatalogEntry(const std::string &rawPath, const std::string &sour
                              std::unordered_set<std::string> &seen,
                              std::vector<EditorAssetCatalogEntry> &out)
 {
+    if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+        adapter != nullptr && adapter->shouldHideModelCatalogEntry != nullptr &&
+        adapter->shouldHideModelCatalogEntry(LowerString(NormalizeAssetName(rawPath))))
+    {
+        return;
+    }
     AppendMatchingCatalogEntry(rawPath, source, HasModelExtension, seen, out);
 }
 
@@ -1002,6 +1124,39 @@ void EditorAssetSource::ListMapAssets(std::vector<EditorAssetCatalogEntry> &out)
               });
 }
 
+namespace
+{
+
+void ScanDirectoryByPrefixAndExt(const std::string &directory, const std::string &prefixLower,
+                                 const std::string &extLower, std::unordered_set<std::string> &seen,
+                                 std::vector<EditorAssetCatalogEntry> &out)
+{
+    const std::string source = CatalogSourceLabel(directory);
+    std::error_code ec;
+    const std::filesystem::path root(directory);
+    if (!std::filesystem::is_directory(root, ec))
+    {
+        return;
+    }
+    const auto opts = std::filesystem::directory_options::skip_permission_denied;
+    for (std::filesystem::recursive_directory_iterator it(root, opts, ec), end; it != end; it.increment(ec))
+    {
+        if (ec || !it->is_regular_file(ec))
+        {
+            continue;
+        }
+        std::string rel = NormalizeAssetName(it->path().lexically_relative(root).generic_string());
+        const std::string relLower = LowerString(rel);
+        if ((prefixLower.empty() || relLower.compare(0, prefixLower.size(), prefixLower) == 0) &&
+            ExtensionOf(relLower) == extLower && seen.insert(relLower).second)
+        {
+            out.push_back(EditorAssetCatalogEntry{ std::move(rel), source, TreeDirOf(relLower) });
+        }
+    }
+}
+
+} // namespace
+
 void EditorAssetSource::ListModelAssets(std::vector<EditorAssetCatalogEntry> &out) const
 {
     out.clear();
@@ -1036,6 +1191,55 @@ void EditorAssetSource::ListModelAssets(std::vector<EditorAssetCatalogEntry> &ou
               [](const EditorAssetCatalogEntry &a, const EditorAssetCatalogEntry &b) {
                   return LowerString(a.path) < LowerString(b.path);
               });
+
+    if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+        adapter != nullptr && adapter->postProcessModelCatalog != nullptr)
+    {
+        adapter->postProcessModelCatalog(out);
+    }
+}
+
+void EditorAssetSource::ListFilesWithPrefixAndExtension(
+    const std::string &prefix, const std::string &extension,
+    std::vector<EditorAssetCatalogEntry> &out) const
+{
+    out.clear();
+    const std::string prefixLower = LowerString(NormalizeAssetName(prefix));
+    const std::string extLower = LowerString(extension);
+    std::unordered_set<std::string> seen;
+
+    for (const std::string &directory : m_directories)
+    {
+        ScanDirectoryByPrefixAndExt(directory, prefixLower, extLower, seen, out);
+    }
+
+    for (const ZipArchive &zip : m_zips)
+    {
+        const std::string source = CatalogSourceLabel(zip.path);
+        for (const ZipEntry &entry : zip.entries)
+        {
+            const std::string pathLower = LowerString(NormalizeAssetName(entry.name));
+            if ((prefixLower.empty() || pathLower.compare(0, prefixLower.size(), prefixLower) == 0) &&
+                ExtensionOf(pathLower) == extLower && seen.insert(pathLower).second)
+            {
+                out.push_back(EditorAssetCatalogEntry{ entry.name, source, TreeDirOf(entry.name) });
+            }
+        }
+    }
+
+    for (const Pak &pak : m_paks)
+    {
+        const std::string source = CatalogSourceLabel(pak.path);
+        for (const PakEntry &entry : pak.entries)
+        {
+            const std::string pathLower = LowerString(NormalizeAssetName(entry.name));
+            if ((prefixLower.empty() || pathLower.compare(0, prefixLower.size(), prefixLower) == 0) &&
+                ExtensionOf(pathLower) == extLower && seen.insert(pathLower).second)
+            {
+                out.push_back(EditorAssetCatalogEntry{ entry.name, source, TreeDirOf(entry.name) });
+            }
+        }
+    }
 }
 
 bool DecodeEditorImageRgba(const std::vector<uint8_t> &bytes, uint32_t &outWidth,

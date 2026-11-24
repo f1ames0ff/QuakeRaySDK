@@ -2,6 +2,10 @@ set(QR_EDITOR_SHADER_DIR "" CACHE PATH
     "Directory with compiled QuakeRay shaders copied next to the editor")
 set(QR_EDITOR_TEXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../gfx/textures" CACHE PATH
     "Directory with editor runtime textures")
+set(QR_EDITOR_ADAPTER_SOURCES "" CACHE STRING
+    "Optional external format adapter source files compiled into quakerayeditor")
+set(QR_EDITOR_ADAPTER_INCLUDE_DIRS "" CACHE STRING
+    "Optional include directories for external format adapter sources")
 
 set(QR_EDITOR_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imgui")
 
@@ -28,6 +32,8 @@ set(QR_EDITOR_COMMON_SOURCES
     EditorMaterial.cpp
     EditorSettings.cpp
     EditorSession.cpp
+    EditorLightSelection.cpp
+    EditorLightSelection.h
     EditorUi.cpp
     EditorViewport.cpp
     EditorSpatial.cpp
@@ -40,16 +46,26 @@ if(WIN32)
     target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui user32 gdi32 shell32)
 else()
     find_package(X11 REQUIRED)
+    find_package(Threads REQUIRED)
     add_executable(quakerayeditor ${QR_EDITOR_COMMON_SOURCES} EditorPlatformX11.cpp)
     target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_XLIB)
-    target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui X11::X11)
+    target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui X11::X11 Threads::Threads ${CMAKE_DL_LIBS})
     set_target_properties(quakerayeditor PROPERTIES
         BUILD_RPATH "$ORIGIN"
         INSTALL_RPATH "$ORIGIN")
 endif()
 
+if(QR_EDITOR_ADAPTER_SOURCES)
+    target_sources(quakerayeditor PRIVATE ${QR_EDITOR_ADAPTER_SOURCES})
+endif()
+
 target_compile_features(quakerayeditor PRIVATE cxx_std_20)
-target_include_directories(quakerayeditor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
+target_include_directories(quakerayeditor PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
+if(QR_EDITOR_ADAPTER_INCLUDE_DIRS)
+    target_include_directories(quakerayeditor PRIVATE ${QR_EDITOR_ADAPTER_INCLUDE_DIRS})
+endif()
 
 set(QR_EDITOR_DEPLOY_COMMANDS
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -78,6 +94,24 @@ if(QR_EDITOR_SHADER_DIR AND EXISTS "${QR_EDITOR_SHADER_DIR}")
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${QR_EDITOR_SHADER_DIR}"
             "$<TARGET_FILE_DIR:quakerayeditor>/shaders")
+endif()
+
+if(QR_BUILD_TESTS)
+    add_executable(qray_editor_multiselect_tests
+        EditorMultiSelectTests.cpp
+        EditorLightSelection.cpp
+        EditorGui.cpp
+        EditorSession.cpp
+        Scene.cpp
+        Assets.cpp
+        "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb/stb_image.cpp")
+    target_compile_features(qray_editor_multiselect_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_editor_multiselect_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../Include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
+    target_link_libraries(qray_editor_multiselect_tests PRIVATE quakerayeditor_imgui)
+    add_test(NAME qray_editor_multiselect_tests COMMAND qray_editor_multiselect_tests)
 endif()
 
 if(QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}")

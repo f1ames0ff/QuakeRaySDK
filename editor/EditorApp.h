@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -9,6 +10,7 @@
 #include <qray/qray.h>
 
 #include "Assets.h"
+#include "EditorLightSelection.h"
 #include "EditorMaterial.h"
 #include "EditorPlatform.h"
 #include "EditorSession.h"
@@ -16,6 +18,8 @@
 #include "EditorUi.h"
 #include "EditorViewport.h"
 #include "Scene.h"
+
+struct ImDrawList;
 
 // One textured area light the level's own light materials cast. The game rebuilds its list every
 // frame (RT_CollectWorldEmissiveLights) and uploads it through the same per-frame light registry,
@@ -185,10 +189,13 @@ private:
                                                           uint64_t uniqueID) const;
     EditorEmitterLightOverride EffectiveEmitterOverride(int32_t lightIndex) const;
     bool HasOwnEmitterInstanceOverride(int32_t lightIndex) const;
-    void ApplyEntityEmitterEdit(int32_t lightIndex, const EditorEmitterLightOverride &edited);
+    void ApplyEntityEmitterEdit(int32_t lightIndex, const EditorEmitterLightOverride &edited,
+                                bool reapply = true);
     void SetEntityLightGroupEdit(int32_t lightIndex, bool groupEdit);
     void ResetEntityEmitterLight(int32_t lightIndex);
     void ReapplyGeneratedLights();
+    void RestoreSceneLightsAfterSessionReload();
+    void ClearDirtyFlagIfClean();
     void RefreshGeneratedLightsIfSettingsChanged();
     // Reports whether one light is listed by the cluster it resolved into.
     void LogLightCluster(const EditorLight &light, uint64_t uniqueID, const char *label);
@@ -225,15 +232,22 @@ private:
     // Takes the scope and the level's keys from a section read out of the file, which is what a
     // load and a save both have to leave the panel agreeing with.
     void AdoptSkyScope(const EditorLevelDocument::ReadResult &read);
-    EditorLevelLight LevelLight(const EditorLight &light) const;
+    EditorLevelLight LevelLight(const EditorLight &light, bool isCustom) const;
     std::vector<EditorLevelLight> LevelLights() const;
+    bool ShouldWriteEmptyLightsBlock() const;
     // Renders the section the live state stands for, which is both what a save writes and how an
     // edit is noticed: a frame whose section differs from the loaded one is unsaved level work.
     std::string LevelFingerprint() const;
     bool IsMaterialInActiveMod(const std::string &name) const;
     bool IsMaterialFromBaseMod(const std::string &name) const;
+    bool IsModelCatalogEntryInActiveMod(const EditorAssetCatalogEntry &entry) const;
+    bool IsModelCatalogEntryFromBaseMod(const EditorAssetCatalogEntry &entry) const;
+    bool IsPreviewPresetInActiveMod(int32_t skinIndex) const;
+    bool IsPreviewPresetFromBaseMod(int32_t skinIndex) const;
     std::string FormatMaterialListLabel(const std::string &name) const;
     void TouchMaterial(const std::string &name);
+    bool SaveMaterialsSession();
+    bool SaveLevelLightsSession();
     bool ApplySession();
     void DiscardSession();
     void RequestExit();
@@ -269,9 +283,11 @@ private:
     int32_t PickLight(const float origin[3], const float direction[3], float &outDistance,
                       bool &outCustom) const;
     void DrawSelectionOverlay();
+    void DrawCustomLightGizmoAndLog(ImDrawList *drawList, const EditorCameraBasis &cam);
     // The game's viewport overlay: the crosshair a look-mode click picks from, the hint block
     // that says what the keys do, and the line a drag in flight shows.
     void DrawViewportOverlay();
+    void DrawViewportMarquee(ImDrawList *draw, float width, float height) const;
     void ClearSelection();
 
     // Projects a world point the way ViewBasis casts a ray, so an overlay marker or a gizmo grab
@@ -294,6 +310,10 @@ private:
     // surface under the ray, 8 units in front of it, and hangs 128 units ahead of the camera when
     // the ray hits nothing. A press that does not travel stays a selection.
     bool BeginLightGrab();
+    bool IsCursorNearProjectedLight(const EditorLight &light) const;
+    bool ResolveGrabTargetLight(int32_t &outIndex, bool &outCustom) const;
+    bool LoadOverlayMaterialPixels(const std::string &imageName, std::vector<uint8_t> &outRgba,
+                                   uint32_t &outWidth, uint32_t &outHeight) const;
     void UpdateLightGrab();
     void FinishLightGrab(bool kept);
 
@@ -313,6 +333,14 @@ private:
     uint64_t SelectedLightUniqueID() const;
     // Selects one light and makes its origin the pick point, the way a click on its gizmo does.
     void SelectLight(int32_t index, bool custom);
+    size_t TotalSelectedLights() const;
+    bool HasMultiLightSelection() const;
+    bool IsLightSelected(int32_t index, bool custom) const;
+    LightProjectionCamera MarqueeCamera() const;
+    void CancelMarqueeSelection();
+    void CommitMarqueeSelection();
+    void SyncPrimaryLightSelection();
+    void ResetMultiSelectedLightsToBaseline();
 
     // How a light the editor invents is placed: the game editor's Add, Duplicate and Clone
     // differ only in where the copy starts.
@@ -331,16 +359,25 @@ private:
     void AddCustomLight(const EditorLight *source, LightSpawn spawn);
     void DuplicateSelectedLight();
     void CloneSelectedLight();
+    void RemoveSelectedLights();
     void RemoveSelectedCustomLight();
+    void HandleUnmodifiedEditorKey(EditorKey key);
 
     void Frame();
     void RenderSceneFrameContents(float deltaSeconds);
     void SubmitSceneFrame();
     void Shutdown();
+    QrMaterial GetCutoutBackingMaterial();
+    QrMaterial GetOverlayStageMaterial(const std::string &imageName, bool clampMap,
+                                       bool cleanAdditiveBlack, bool addScreenEmission = false);
+    void DestroyOverlayMaterials();
+    void UploadOverlayGeometry(float timeSeconds);
 
     void HandleEvent(const EditorEvent &event);
     void HandleMouseMoveEvent(const EditorEvent &event);
     void HandleMouseButtonEvent(const EditorEvent &event);
+    void HandleViewportLeftPress(const EditorEvent &event);
+    void HandleViewportLeftRelease(const EditorEvent &event);
     void HandleMouseWheelEvent(const EditorEvent &event);
     void UpdatePreviewOrbitDrag(int32_t x, int32_t y);
     void HandlePreviewOrbitMouseButton(const EditorEvent &event);
@@ -355,6 +392,8 @@ private:
     std::vector<QrMaterial> m_textureMaterials;
     std::vector<EditorMaterialEmission> m_textureEmissions;
     std::unordered_set<std::string> m_missingExternalTextures;
+    QrMaterial m_cutoutBackingMaterial = QR_NO_MATERIAL;
+    std::unordered_map<std::string, QrMaterial> m_overlayMaterials;
     QrMaterial m_skySolidMaterial = QR_NO_MATERIAL;
     QrMaterial m_skyAlphaMaterial = QR_NO_MATERIAL;
     QrMaterial m_skyboxMaterials[6] = {
@@ -415,6 +454,8 @@ private:
     void DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeader);
     void DrawMaterialEditorMaterialsTab();
     void DrawMaterialEditorModelsTab();
+    void DrawModelTabSkinSelector();
+    void DrawModelTabSurfaceSelector();
     void DrawMaterialEditorLumaBlocks(const std::string &name, EditorMaterialParams &params,
                                      int32_t materialIndex);
     void DrawMaterialEditorGlossBlocks(const std::string &name, EditorMaterialParams &params,
@@ -422,9 +463,40 @@ private:
     void DrawMaterialEditorEntitiesTab();
     void DrawMaterialEditorSystemTab();
     void ResetActiveMaterialTab();
+    struct MultiLightEditTargets
+    {
+        std::vector<const EditorLight *> constPtrs;
+        std::vector<bool> isCustomFlags;
+        std::vector<EditorLight *> directLightPtrs;
+        std::vector<EditorLight *> directSceneLightPtrs;
+        std::vector<EditorLight *> customLightPtrs;
+        std::vector<int32_t> emitterIndices;
+    };
+
     void DrawLightEditorPanel();
     void DrawLightEditorEntityTab();
     void DrawEmitterControlsForSelected();
+    void CollectMultiLightEditTargets(MultiLightEditTargets &outTargets);
+    void ApplyEmitterFieldBatch(const std::vector<int32_t> &emitterIndices,
+                                const std::function<void(EditorEmitterLightOverride &,
+                                                         const EditorGeneratedLightBase *)> &mutator);
+    void ApplyMultiEmitterOverrideBatch(const std::vector<int32_t> &emitterIndices,
+                                      std::vector<EditorEmitterLightOverride> &ovs,
+                                      const std::function<void(EditorEmitterLightOverride &)> &mutator);
+    bool DrawMultiEmitterBasicFields(const std::vector<int32_t> &emitterIndices,
+                                     std::vector<EditorEmitterLightOverride> &ovs,
+                                     const MultiEmitterAggregate &agg);
+    bool DrawMultiEmitterSpotAndRasterFields(const std::vector<int32_t> &emitterIndices,
+                                             std::vector<EditorEmitterLightOverride> &ovs,
+                                             const MultiEmitterAggregate &agg);
+    bool DrawMultiLightBasicFields(const MultiLightAggregate &agg,
+                                   const MultiLightEditTargets &targets);
+    bool DrawMultiLightColorAndStyleFields(const MultiLightAggregate &agg,
+                                           const MultiLightEditTargets &targets);
+    bool DrawMultiLightSpotAndShaftFields(const MultiLightAggregate &agg,
+                                          const MultiLightEditTargets &targets);
+    void DrawMultiSelectedLightsInspector();
+    void DrawMultiSelectedEmitterFields(const std::vector<int32_t> &emitterIndices);
     void DrawLightEditorCustomTab();
     void DrawLightEditorGlobalTab();
     void DrawPanelActionBar(bool isLightEditor);
@@ -432,7 +504,11 @@ private:
     void UploadTorchLight(QrResult &lastResult);
     void BuildPreviewLight(EditorLight &outLight) const;
     void UploadPreviewLight(QrResult &lastResult);
+    bool CancelActivePlacementOrDialog();
     bool HandleEditorModeKeyDown(int key);
+    void PlaceLightOrSunFromPick(const float direction[3], float surfaceDistance, bool hitSurface);
+    void ToggleAdditiveLightSelection(int32_t light, bool lightCustom);
+    void SetSingleLightSelection(int32_t light, bool lightCustom);
     void HandleLightModePick(const float direction[3], float surfaceDistance, bool hitSurface);
     void OpenTextureBrowserForSlot(const std::string &materialName, EditorTextureSlot slot);
     void MarkMaterialsEdited();
@@ -445,10 +521,14 @@ private:
     int32_t EnsureModelSkinMaterial(const std::string &skinName);
     bool SelectPreviewModel(int32_t catalogIndex);
     void SelectPreviewModelSkin(int32_t skinIndex);
+    void SelectPreviewModelSection(int32_t sectionIndex);
+    std::string ActivePreviewSectionMaterialName(const EditorPreviewModelSection &section) const;
+    int32_t ActivePreviewSkinCount() const;
+    const char *ActivePreviewSkinName(int32_t index) const;
     void ResetPreviewView();
     void ComputePreviewPose(float outCenter[3], float &outScale, float outRotation[3][3]) const;
     QrMaterial ResolvePreviewMaterial(const std::string &skinName, const EditorMaterialParams &params);
-    void UploadPreviewModel();
+    void UploadPreviewModel(float timeSeconds = 0.0f);
     bool SaveSessionToDisk();
     void CancelSessionChanges();
     void RequestEditorExit();
@@ -530,9 +610,10 @@ private:
     uint32_t m_maxFrames = 0;
     uint32_t m_renderedFrames = 0;
 
-    // Left edge of the right-docked panel so viewport drag hints stay clear of it.
+    // Left edge of the right-docked panel and bottom edge of menu bar so overlays stay inside the 3D view.
     bool m_panelVisible = false;
     float m_panelLeft = 0.0f;
+    float m_menuBarBottom = 0.0f;
 
     // The sun of the level: rt_physical_sun, rt_sky_sun, rt_sky_sun_size and the two angles. Off
     // uploads no directional light, which is what the game does while rt_physical_sun is 0.
@@ -573,6 +654,7 @@ private:
     bool m_previewModelLoaded = false;
     int32_t m_previewModelSkin = 0;
     int32_t m_previewModelFrame = 0;
+    int32_t m_previewModelSection = 0;
     int32_t m_previewMaterialIndex = -1;
     float m_previewYaw = -0.35f;
     float m_previewPitch = 0.12f;
@@ -625,11 +707,9 @@ private:
     // The reset question the game's tab bar opens when the open tab is clicked again: 1 shows the
     // prompt, 0 means no prompt, and Escape returns to editing like the game's own dialog.
     int32_t m_resetPrompt = 0;
-    // The regenerate question: 1 shows it, 0 means none. `m_regenModels` is the list it asks
-    // about -- the game reads rt_level_light_models, and this editor has no cvars, so the dialog
-    // carries the same default list and lets the author state the models it must mark.
+    // The regenerate question: 1 shows it, 0 means none. Restores standard predefined lights from
+    // the map into `m_scene.lights` and writes them to qray.lights.yaml.
     int32_t m_regenPrompt = 0;
-    char m_regenModels[256] = "flame.mdl flame2.mdl lavaball.mdl proj_balllava.mdl";
     // The panel tab that was open last frame: a click that lands on it again is the reset
     // gesture rather than a switch to another tab.
     std::string m_activePanelTab;
@@ -652,6 +732,7 @@ private:
     int32_t m_selectedSurface = -1;
     int32_t m_selectedFace = -1;
     int32_t m_selectedLight = -1;
+    std::vector<int32_t> m_selectedLights;
     int32_t m_hoverSurface = -1;
     int32_t m_hoverFace = -1;
     int32_t m_hoverLight = -1;
@@ -661,6 +742,13 @@ private:
     // and a map light cannot be removed from the scene by an editor action.
     std::vector<EditorLight> m_customLights;
     int32_t m_selectedCustomLight = -1;
+    std::vector<int32_t> m_selectedCustomLights;
+    bool m_marqueePending = false;
+    bool m_marqueeDragging = false;
+    bool m_marqueeAdditive = false;
+    bool m_pendingAdditivePick = false;
+    float m_marqueeStart[2] = {};
+    float m_marqueeEnd[2] = {};
     // Surface lights, rebuilt with the geometry: a textured area light stands for one emissive
     // face of the level, so it is not something the editor owns or edits the way a custom light
     // is. Rebuilt rather than patched because the material bake decides whether a surface is a
