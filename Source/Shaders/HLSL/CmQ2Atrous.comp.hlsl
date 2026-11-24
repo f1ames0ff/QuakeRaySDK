@@ -119,12 +119,83 @@ filter_image(
     float hist_len_spec = max(framebufQ2FilteredSpec_Sampled.Load(int3( ipos, 0 )).a, 1.0);
     float spec_hit_dist = framebufViewDirection_Sampled.Load(int3( ipos, 0 )).w;
 
+    // Boundaries for the checkerboard field, either left or right half of the screen
+    const int width = (int)globalUniform.renderWidth;
+    const int height = (int)globalUniform.renderHeight;
+    int field_left = 0;
+    int field_right = width / 2;
+    if(ipos.x >= field_right)
+    {
+        field_left = field_right;
+        field_right = width;
+    }
+
     if(Q2_FLT_ATROUS_LUM_HF != 0 && hist_len_hf > 1)
     {
-        // Compute luminance variance from the statistical moments: Var(X) = E[X^2] - E[X]^2
+        // Pre-filter per-pixel temporal HF variance over a bilateral 3x3 checkerboard neighbourhood
+        // so an isolated noisy emissive pixel cannot stall filtering, while keeping lum_mean_hf at
+        // moments_center.x so sharp static contact shadow edges do not blur.
+        static const float kGauss3x3[3] = { 0.25, 0.5, 0.25 };
+        const float center_w = kGauss3x3[1] * kGauss3x3[1];
+        const float center_var_hf = max(1e-8, moments_center.y - moments_center.x * moments_center.x);
+        float sum_var_hf = center_var_hf * center_w;
+        float sum_var_w = center_w;
+        const float center_l_hf = getLuminance(color_center_hf);
+        float spatial_s1 = center_l_hf * center_w;
+        float spatial_s2 = center_l_hf * center_l_hf * center_w;
+        float spatial_w = center_w;
+
+        [unroll]
+        for(int dy = -1; dy <= 1; dy++)
+        {
+            [unroll]
+            for(int dx = -1; dx <= 1; dx++)
+            {
+                if(dx == 0 && dy == 0)
+                    continue;
+                const int2 np = ipos + int2(dx, dy);
+                if(any(np < int2(field_left, 0)) || any(np >= int2(field_right, height)))
+                    continue;
+
+                const float nDepth = framebufQ2ViewDepth_Sampled.Load(int3(np, 0)).r;
+                const float3 nNormal = texelFetchNormal(np);
+                const float dist_z_n = abs(depth_center - nDepth) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
+                const float n_dot = max(0.0, dot(normal_center, nNormal));
+                if(dist_z_n > 2.5 || n_dot < 0.85)
+                    continue;
+
+                const float gw = kGauss3x3[dx + 1] * kGauss3x3[dy + 1] * exp(-dist_z_n);
+                const float2 nMom = img_moments.Load(np).xy;
+                const float nVar = max(1e-8, nMom.y - nMom.x * nMom.x);
+                sum_var_hf += nVar * gw;
+                sum_var_w += gw;
+
+                const float nLum = getLuminance(q2UnpackRGBE(img_hf.Load(np).r));
+                spatial_s1 += nLum * gw;
+                spatial_s2 += nLum * nLum * gw;
+                spatial_w += gw;
+            }
+        }
+
         lum_mean_hf = moments_center.x;
-        float lum_variance_hf = max(1e-8, moments_center.y - moments_center.x * moments_center.x);
-        sigma_l_hf = min(hist_len_hf, Q2_FLT_ATROUS_LUM_HF) / (2.0 * lum_variance_hf);
+        float lum_variance_hf = max(1e-8, sum_var_hf / max(sum_var_w, 1e-6));
+
+        // Short-history spatial variance floor prevents newly disoccluded noisy emissive regions
+        // from locking out filtering when temporal moments have not yet converged.
+        if(hist_len_hf < 8.0)
+        {
+            const float sp_mean = spatial_s1 / max(spatial_w, 1e-6);
+            const float sp_var = max(0.0, spatial_s2 / max(spatial_w, 1e-6) - sp_mean * sp_mean);
+            const float short_hist_weight = lerp(1.0, 0.15, saturate((hist_len_hf - 1.0) / 7.0));
+            lum_variance_hf = max(lum_variance_hf, sp_var * short_hist_weight);
+        }
+
+        // Adapt luminance edge-stopping by history length and relative variance so noisy
+        // emissive penumbras blend smoothly while converged shadow edges stay crisp.
+        const float rel_var_hf = lum_variance_hf / max(lum_mean_hf * lum_mean_hf, 1e-4);
+        const float var_relax = 1.0 + 3.0 * smoothstep(0.015, 0.25, rel_var_hf);
+        const float eff_hist_hf = min(hist_len_hf, Q2_FLT_ATROUS_LUM_HF) / var_relax;
+        sigma_l_hf = eff_hist_hf / (2.0 * lum_variance_hf);
     }
     else
     {
@@ -145,7 +216,9 @@ filter_image(
     float normal_weight_scale_hf = clamp(hist_len_hf / 8.0, 0.0, 1.0);
     float normal_weight_scale_spec = clamp(hist_len_spec / 8.0, 0.0, 1.0);
 
-    float normal_weight_hf = Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf;
+    float normal_weight_hf = (Q2_FLT_ATROUS_NORMAL_HF > 0.0)
+        ? max(4.0, Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf)
+        : 0.0;
     float normal_weight_spec = roughnessSquaredToSpecPower(square(roughness_center)) * Q2_FLT_ATROUS_NORMAL_SPEC;
     normal_weight_spec = clamp(normal_weight_spec, 8.0, 1024.0) * normal_weight_scale_spec;
 
@@ -157,17 +230,6 @@ filter_image(
 
     float sum_w_hf = 1.0;
     float sum_w_spec = 1.0;
-
-    // Boundaries for the checkerboard field, either left or right half of the screen
-    const int width = (int)globalUniform.renderWidth;
-    const int height = (int)globalUniform.renderHeight;
-    int field_left = 0;
-    int field_right = width / 2;
-    if(ipos.x >= field_right)
-    {
-        field_left = field_right;
-        field_right = width;
-    }
 
     if (spec_hit_dist < 0.0 && depth_center > 1e-4 && !isSkyPix(ipos) && dot(normal_center, normal_center) > 0.5)
     {
