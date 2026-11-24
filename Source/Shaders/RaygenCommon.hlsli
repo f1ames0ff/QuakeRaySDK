@@ -219,16 +219,14 @@ ShPayload tracePrimaryRay(float3 origin, float3 direction)
     return g_payload;
 }
 
-ShPayload traceReflectionRefractionRay(float3 origin, float3 direction, uint surfInstCustomIndex, uint geometryInstanceFlags, bool isRefraction)
+ShPayload traceReflectionRefractionRayWithMask(float3 origin, float3 direction, uint cullMask, float tMin)
 {
     ShPayload g_payload;
     resetPayload(g_payload);
 
-    uint cullMask = getReflectionRefractionCullMask(surfInstCustomIndex, geometryInstanceFlags, isRefraction);
-
     RayDesc rayDesc;
     rayDesc.Origin = origin;
-    rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
+    rayDesc.TMin = tMin;
     rayDesc.Direction = direction;
     rayDesc.TMax = globalUniform.rayLength;
 
@@ -244,6 +242,12 @@ ShPayload traceReflectionRefractionRay(float3 origin, float3 direction, uint sur
     return g_payload;
 }
 
+ShPayload traceReflectionRefractionRay(float3 origin, float3 direction, uint surfInstCustomIndex, uint geometryInstanceFlags, bool isRefraction)
+{
+    const uint cullMask = getReflectionRefractionCullMask(surfInstCustomIndex, geometryInstanceFlags, isRefraction);
+    return traceReflectionRefractionRayWithMask(origin, direction, cullMask, 2.5e-5 * globalUniform.sceneUnitsPerHostUnit);
+}
+
 ShPayload traceIndirectRay(uint surfInstCustomIndex, float3 surfPosition, float3 bounceDirection)
 {
     ShPayload g_payload;
@@ -253,7 +257,7 @@ ShPayload traceIndirectRay(uint surfInstCustomIndex, float3 surfPosition, float3
 
     RayDesc rayDesc;
     rayDesc.Origin = surfPosition;
-    rayDesc.TMin = 0.001 * globalUniform.sceneUnitsPerHostUnit;
+    rayDesc.TMin = 2.5e-5 * globalUniform.sceneUnitsPerHostUnit;
     rayDesc.Direction = bounceDirection;
     rayDesc.TMax = globalUniform.rayLength;
 
