@@ -4,8 +4,7 @@ Source-level renderer package for QuakeRay. It owns the Vulkan/NVRHI ray-tracing
 renderer, the public `qray.h` C ABI, and the CMake package interface used by a
 host engine.
 
-Start with [docs/README.md](docs/README.md) for the complete integration
-documentation map.
+Start with [AGENTS.md](AGENTS.md) and [docs/agent-integration-guide.md](docs/agent-integration-guide.md) (**QuakeRaySDK Integration Guide for Agents**) for strict SDK vs. host boundaries and engine adapter integration rules, or [docs/README.md](docs/README.md) for the complete documentation map.
 
 The renderer core does not include Quake game logic, map loaders, or host
 assets. The QuakeRay engine is the reference host; textures, materials, and
@@ -27,7 +26,9 @@ Its meter conversion and generic authoring core remain future editor work.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `cmake/nvrhi-max-binding-layouts.patch` — required NVRHI pin adjustment for the RT pipelines.
 - `Tests/` — engine-free GPU and policy tests.
+- `AGENTS.md` — mandatory rules, responsibility boundaries, and quality gates for AI agents.
 - `docs/README.md` — entry point and complete reading map for every SDK document.
+- `docs/agent-integration-guide.md` — QuakeRaySDK Integration Guide for Agents (runtime & `EditorFormatAdapter` guide and pitfalls).
 - `docs/api.md` — concise catalogue of the complete public renderer API.
 - `docs/host-contract.md` — adapter boundary and legacy-renderer feature mapping.
 - `docs/gpu-context.md` — device ownership, requirements, shared handles and

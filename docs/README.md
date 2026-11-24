@@ -6,6 +6,12 @@ ownership boundaries and renderer features.
 
 ## Choose a reading path
 
+### QuakeRaySDK Integration Guide for Agents (Runtime + Editor Adapter)
+
+1. [../AGENTS.md](../AGENTS.md) - repository rules, strict SDK vs. host boundaries, and mandatory quality checks.
+2. [agent-integration-guide.md](agent-integration-guide.md) - **QuakeRaySDK Integration Guide for Agents**: end-to-end runtime embedding, `EditorFormatAdapter` authoring, PVS clusters, multi-stage shaders, light extraction, and pitfalls to avoid.
+3. [host-contract.md](host-contract.md) & [spatial-contract.md](spatial-contract.md) - normative host/SDK data contract and meter conversions.
+
 ### C host or scene-only host
 
 1. [embedding.md](embedding.md) - minimal end-to-end integration.
@@ -46,6 +52,7 @@ The C++ contracts lower to `qray.h`; they do not create a second scene path.
 | Document | Purpose |
 |---|---|
 | [embedding.md](embedding.md) | First integration, build/package setup, instance creation and frame lifecycle. |
+| [agent-integration-guide.md](agent-integration-guide.md) | QuakeRaySDK Integration Guide for Agents: SDK/adapter boundaries, runtime embedding, `EditorFormatAdapter` guide, and pitfalls. |
 | [gpu-context.md](gpu-context.md) | SDK-owned shared NVRHI/Vulkan device, create-time requirements, resource ownership and frame hooks. |
 | [api.md](api.md) | Public function catalogue, state lifetime, synchronization and error rules. |
 | [spatial-contract.md](spatial-contract.md) | Meter-valued inputs, axes, handedness and conversion rules. |
