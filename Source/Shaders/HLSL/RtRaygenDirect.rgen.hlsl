@@ -31,6 +31,7 @@
 #include "Q2Asvgf.hlsli"
 #include "Q2LightLists.hlsli"
 #include "GlobalLightSampling.hlsli"
+#include "SubsurfaceTranslucency.hlsli"
 
 #define Q2_RNG_CELL_SELECT 200
 #define Q2_RNG_LIGHT_POINT 208
@@ -71,6 +72,7 @@ void main()
     float3 directSpecular = (float3)0.0;
     float directSpecHitDistSum = 0.0;
     float directSpecHitLumSum = 0.0;
+    const float4 sssData = framebufQ2Subsurface_Sampled.Load(int3(pix, 0));
 
     const int numNeeSamples = clamp((int)globalUniform.neeLightSamples, 1, 2);
 
@@ -107,10 +109,37 @@ void main()
             float memberPdf = 1.0;
             LightSample light = sampleLightNee(lightSources[lightIndex], surf.position, pointRnd, memberRnd, memberPdf);
 
-            if (lightSources[lightIndex].lightType == LIGHT_TYPE_SPHERE ||
-                lightSources[lightIndex].lightType == LIGHT_TYPE_SPOT)
+            const uint lightType = lightSources[lightIndex].lightType;
+            if (lightType == LIGHT_TYPE_SPHERE ||
+                lightType == LIGHT_TYPE_SPOT)
             {
                 light.dw = min(light.dw, Q2_DIRECT_MAX_SPHERE_SOLID_ANGLE);
+            }
+            else if (lightType == LIGHT_TYPE_TRIANGLE ||
+                     lightType == LIGHT_TYPE_TEXTURED_AREA ||
+                     lightType == LIGHT_TYPE_DTAL_GROUP)
+            {
+                float lightArea = 1.0;
+                if (lightType == LIGHT_TYPE_TEXTURED_AREA)
+                {
+                    lightArea = lightSources[lightIndex].data_7.w;
+                }
+                else if (lightType == LIGHT_TYPE_DTAL_GROUP)
+                {
+                    lightArea = lightSources[lightIndex].data_1.y;
+                }
+                else
+                {
+                    lightArea = length(float3(lightSources[lightIndex].data_0.w,
+                                              lightSources[lightIndex].data_1.w,
+                                              lightSources[lightIndex].data_2.w)) * 0.5;
+                }
+                const float dwCap = 0.5 * lerp(1.0, M_PI, saturate(lightArea * 2.0));
+                if (light.dw > dwCap)
+                {
+                    const float excess = light.dw - dwCap;
+                    light.dw = dwCap + excess / (1.0 + excess / dwCap);
+                }
             }
 
             if (getLuminance(light.color) > 0.0)
@@ -132,13 +161,18 @@ void main()
                 }
 
                 float3 d, s;
-                shade(surf, light, 1.0 / max(lightPdf * memberPdf, 1e-9), d, s);
+                const float oneOverPdf = 1.0 / max(lightPdf * memberPdf, 1e-9);
+                shade(surf, light, oneOverPdf, d, s);
                 const float3 specContrib = s * vis;
                 directDiffuse += d * vis;
                 directSpecular += specContrib;
                 const float specLum = getLuminance(specContrib);
                 directSpecHitDistSum += min(length(light.position - surf.position), Q2_MAX_VIEW_DIR_HIT_DIST) * specLum;
                 directSpecHitLumSum += specLum;
+                if (!lightTraced)
+                {
+                    directDiffuse += shadeSubsurfaceBackLit(surf, light, oneOverPdf, sssData, lightIndex, false);
+                }
             }
         }
     }
@@ -169,6 +203,10 @@ void main()
         const float sunSpecLum = getLuminance(sunSpec);
         directSpecHitDistSum += Q2_MAX_VIEW_DIR_HIT_DIST * sunSpecLum;
         directSpecHitLumSum += sunSpecLum;
+        if (!sunTraced && getLuminance(sunLight.color) > 0.0)
+        {
+            directDiffuse += shadeSubsurfaceBackLit(surf, sunLight, 1.0, sssData, LIGHT_INDEX_NONE, true);
+        }
     }
 
     imageStoreUnfilteredDirect(pix, directDiffuse);

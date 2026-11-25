@@ -85,6 +85,7 @@ public:
         Emissive,
         Overlay,
         Gloss,
+        Subsurface,
     };
 
     enum class GizmoPart
@@ -323,6 +324,8 @@ private:
     bool m_lumaClipboardValid = false;
     EditorGlossBlock m_glossClipboard;
     bool m_glossClipboardValid = false;
+    EditorSssBlock m_sssClipboard;
+    bool m_sssClipboardValid = false;
 
     // The light the panel edits: the map light or the custom one, whichever was picked last.
     // Null when the selection is a surface or nothing at all.
@@ -366,6 +369,9 @@ private:
     void Frame();
     void RenderSceneFrameContents(float deltaSeconds);
     void SubmitSceneFrame();
+    void TryRequestScreenshot();
+    void TryCompleteScreenshot();
+    void AdvanceRenderedFrameCount();
     void Shutdown();
     QrMaterial GetCutoutBackingMaterial();
     QrMaterial GetOverlayStageMaterial(const std::string &imageName, bool clampMap,
@@ -460,6 +466,8 @@ private:
                                      int32_t materialIndex);
     void DrawMaterialEditorGlossBlocks(const std::string &name, EditorMaterialParams &params,
                                       int32_t materialIndex);
+    void DrawMaterialEditorSssBlocks(const std::string &name, EditorMaterialParams &params,
+                                     int32_t materialIndex);
     void DrawMaterialEditorEntitiesTab();
     void DrawMaterialEditorSystemTab();
     void ResetActiveMaterialTab();
@@ -609,6 +617,15 @@ private:
     bool m_showPanel = true;
     uint32_t m_maxFrames = 0;
     uint32_t m_renderedFrames = 0;
+    std::string m_screenshotPath;
+    bool m_noPanel = false;
+    bool m_screenshotRequested = false;
+    bool m_screenshotWritten = false;
+    uint64_t m_screenshotRequestId = 0;
+    uint32_t m_screenshotWidth = 0;
+    uint32_t m_screenshotHeight = 0;
+    uint32_t m_screenshotRowPitch = 0;
+    std::vector<uint8_t> m_screenshotPixels;
 
     // Left edge of the right-docked panel and bottom edge of menu bar so overlays stay inside the 3D view.
     bool m_panelVisible = false;
@@ -645,6 +662,7 @@ private:
     int32_t m_selectedMaterial = -1;
     int32_t m_selectedLumaBlock = 0;
     int32_t m_selectedGlossBlock = 0;
+    int32_t m_selectedSssBlock = 0;
     int32_t m_lastInspectedMaterial = -1;
 
     std::vector<EditorAssetCatalogEntry> m_modelCatalog;

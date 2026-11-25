@@ -165,6 +165,18 @@
 # material that asks for both is glass. Wins over `mirror` like glass does.
 #     e.g.  - name: textures/pool01
 #             material_water: true
+#
+# Subsurface scattering (non-glass, non-water, non-mirror opaque / cutout
+# surfaces) runs a separable screen-space Burley diffusion blur and back-lit
+# thickness translucency pass:
+#   - `sss_strength`: global strength in [0, 1] (defaults to 1 when `sss:` or
+#     `texture_sss` is authored without an explicit strength)
+#   - `sss_color`: 6-hex RGB scatter tint (default `ff5933`)
+#   - `sss_radius`: scatter radius in meters, clamped to [0, 1] (default `0.02`)
+#   - `texture_sss`: optional greyscale/luminance mask texture
+#   - `sss:` list of colour-key or polygon UV blocks (`color`, `threshold`,
+#     `feather`, `factor`, or `polygon: u0,v0 u1,v1 ...`) baked into Normal.a
+#   - `sss_threshold`, `sss_feather`: material-level defaults inherited by blocks
 qray_materials:
   - name: textures/#lava1
     texture_emissive: textures/_lava1_luma.png

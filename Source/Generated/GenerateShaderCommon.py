@@ -308,7 +308,7 @@ CONST = {
     "MATERIAL_BLENDING_MASK_THIRD_LAYER"    : RESOLVE_LATER,
     "GEOM_INST_FLAG_TURB_WARP"              : "1 << 13",
     "GEOM_INST_FLAG_ALPHA_TRANSMISSION"     : "1 << 14",
-    "GEOM_INST_FLAG_RESERVED_2"             : "1 << 15",
+    "GEOM_INST_FLAG_SUBSURFACE"             : "1 << 15",
     "GEOM_INST_FLAG_EMISSION_RAY_ONLY"      : "1 << 16",
     "GEOM_INST_FLAG_GLASS_CUTOUT"           : "1 << 17",
     "GEOM_INST_FLAG_MEDIA_TYPE_ACID"        : "1 << 18",
@@ -680,7 +680,7 @@ GEOM_INSTANCE_MEMBERS = [
     (FLOAT32, 1, "defaultRoughness",     1),
     (FLOAT32, 1, "defaultMetallicity",   1),
     (FLOAT32, 1, "defaultEmission",      1),
-    (UINT32, 1, "_unused1",   1),
+    (UINT32, 1, "subsurfacePacked",      1),
 ]
 
 DTAL_MEMBER_MEMBERS = [
@@ -980,6 +980,9 @@ if Q2_CORE_ENABLED:
         # so the contribution never passes the pane's half-field reconstruction, which mixes a
         # one-field signal at half weight and made a moving particle flicker.
         "Q2ParticleLayer"               : (FLOAT16,   CHANNELS_RGBA, 0),
+        "Q2Subsurface"                  : (FLOAT16,   CHANNELS_RGBA, 0),
+        "Q2SssDiffuse"                  : (PACKED_11, CHANNELS_RGB,  0),
+        "Q2SssTemp"                     : (PACKED_11, CHANNELS_RGB,  0),
     })
 
 

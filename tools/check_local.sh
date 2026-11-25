@@ -161,6 +161,7 @@ if [[ "$no_build" -eq 0 ]]; then
         qray_swapchain_policy \
         qray_sampler_filter_tests \
         qray_spatial_contract_tests \
+        qray_subsurface_tests \
         qray_worldlights_tests \
         qray_light_shaft_tests
 

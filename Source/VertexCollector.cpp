@@ -23,6 +23,7 @@
 
 #include "Generated/ShaderCommonC.h"
 #include "Matrix.h"
+#include "SubsurfacePacking.h"
 
 using namespace qray;
 
@@ -34,6 +35,30 @@ namespace
     uint32_t AlignUpBy3( uint32_t x )
     {
         return ( ( x + 2 ) / 3 ) * 3;
+    }
+
+    void ApplySubsurfaceInstanceParams( const QrGeometryUploadInfo &info,
+                                        ShGeometryInstance         &geomInfo )
+    {
+        const bool enabled =
+            ( info.flags & QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT ) != 0 &&
+            IsSubsurfaceAllowedPassThrough( info.passThroughType ) &&
+            std::isfinite( info.subsurfaceRadius ) && info.subsurfaceRadius > 0.0f &&
+            std::isfinite( info.subsurfaceStrength ) && info.subsurfaceStrength > 0.0f;
+
+        if( !enabled )
+        {
+            geomInfo.subsurfacePacked = 0u;
+            return;
+        }
+
+        const uint32_t packed = PackSubsurfaceParams(
+            info.subsurfaceColor, info.subsurfaceRadius, info.subsurfaceStrength );
+        geomInfo.subsurfacePacked = packed;
+        if( packed != 0u )
+        {
+            geomInfo.flags |= GEOM_INST_FLAG_SUBSURFACE;
+        }
     }
 
     uint32_t GetMaterialsBlendFlags( const QrGeometryMaterialBlendType blendingTypes[],
@@ -407,6 +432,7 @@ uint32_t VertexCollector::AddGeometry( uint32_t                         frameInd
 
     geomInfo.flags = GetMaterialsBlendFlags( info.layerBlendingTypes, MATERIALS_MAX_LAYER_COUNT ) |
                      GetGeometryInstanceUploadFlags( info, geomFlags );
+    ApplySubsurfaceInstanceParams( info, geomInfo );
 
     static_assert( sizeof( QrLayeredMaterial ) / sizeof( QrMaterial ) == MATERIALS_MAX_LAYER_COUNT,
                    "Layer count mismatch with ShGeometryInstance" );

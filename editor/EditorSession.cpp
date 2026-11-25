@@ -443,6 +443,41 @@ std::string FormatColor(const float color[3])
     return buffer;
 }
 
+void AppendSssOwnedValues(const EditorMaterialParams &params,
+                          std::vector<std::pair<const char *, std::string>> &values)
+{
+    if (!params.textureSss.empty())
+    {
+        values.emplace_back("texture_sss", params.textureSss);
+    }
+    if (params.sssStrength != 0.0f)
+    {
+        values.emplace_back("sss_strength", FormatFloat(params.sssStrength));
+    }
+    const bool defaultSssColor = params.sssColor[0] == 1.0f && params.sssColor[1] == 0.35f &&
+                                 params.sssColor[2] == 0.2f;
+    if (!defaultSssColor)
+    {
+        values.emplace_back("sss_color", FormatColor(params.sssColor));
+    }
+    if (params.sssRadius != 0.02f)
+    {
+        values.emplace_back("sss_radius", FormatFloat(params.sssRadius));
+    }
+    if (!params.sssBlocks.empty())
+    {
+        values.emplace_back("sss", std::string());
+    }
+    if (params.sssThreshold != 0.02f)
+    {
+        values.emplace_back("sss_threshold", FormatFloat(params.sssThreshold));
+    }
+    if (params.sssFeather != 0.0f)
+    {
+        values.emplace_back("sss_feather", FormatFloat(params.sssFeather));
+    }
+}
+
 void AppendOwnedTailValues(const EditorMaterialParams &params,
                            std::vector<std::pair<const char *, std::string>> &values)
 {
@@ -490,6 +525,7 @@ void AppendOwnedTailValues(const EditorMaterialParams &params,
     {
         values.emplace_back("gloss_feather", FormatFloat(params.glossFeather));
     }
+    AppendSssOwnedValues(params, values);
 }
 
 // The owned keys of `params`, in canonical order, as `key`/`value` pairs. A key at its file
@@ -771,8 +807,21 @@ void AppendGlossBlocksYaml(std::string &out, const std::string &indent,
     }
 }
 
-// One owned key as YAML. Every key but `luma` and `gloss` is a scalar on its own line; `luma` and
-// `gloss` are lists of colour / polygon blocks.
+void AppendSssBlocksYaml(std::string &out, const std::string &indent,
+                         const EditorMaterialParams &params)
+{
+    out += indent + "sss:\n";
+
+    for (const EditorSssBlock &block : params.sssBlocks)
+    {
+        AppendPolygonOrBrushYaml(out, indent, block);
+        out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
+        out += indent + "    factor: " + FormatFloat(block.factor) + "\n";
+    }
+}
+
+// One owned key as YAML. Every key but `luma`, `gloss` and `sss` is a scalar on its own line;
+// `luma`, `gloss` and `sss` are lists of colour / polygon blocks.
 void AppendOwnedValue(std::string &out, const std::string &indent, const char *key,
                       const std::string &value, const EditorMaterialParams &params)
 {
@@ -787,6 +836,12 @@ void AppendOwnedValue(std::string &out, const std::string &indent, const char *k
     if (keyView == "gloss")
     {
         AppendGlossBlocksYaml(out, indent, params);
+        return;
+    }
+
+    if (keyView == "sss")
+    {
+        AppendSssBlocksYaml(out, indent, params);
         return;
     }
 
@@ -939,11 +994,6 @@ void ReadUvPolygon(std::string_view value, std::vector<float> &outPolyUv)
     {
         outPolyUv.clear();
     }
-}
-
-void ReadEmissivePolygon(std::string_view value, EditorEmissiveBlock &block)
-{
-    ReadUvPolygon(value, block.polyUv);
 }
 
 bool ParseBrushUint(std::string_view text, size_t &pos, uint64_t &out)
@@ -1137,33 +1187,49 @@ void ReadBrushMask(std::string_view value, uint32_t &outWidth, uint32_t &outHeig
     outMask = std::move(decoded);
 }
 
-void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorEmissiveBlock &block,
-                           uint32_t &has)
+template <typename Block>
+bool ApplyCommonMaskBlockKey(std::string_view key, std::string_view value, Block &block,
+                             uint32_t &has)
 {
     if (key == "color")
     {
         ParseColor(value, block.color);
+        return true;
     }
-    else if (key == "polygon")
+    if (key == "polygon")
     {
-        ReadEmissivePolygon(value, block);
+        ReadUvPolygon(value, block.polyUv);
+        return true;
     }
-    else if (key == "brush")
+    if (key == "brush")
     {
         ReadBrushMask(value, block.brushWidth, block.brushHeight, block.brushMask);
+        return true;
     }
-    else if (key == "threshold")
+    if (key == "threshold")
     {
         block.threshold = FloatOf(value, block.threshold);
         has |= kOwnedThreshold;
+        return true;
     }
-    else if (key == "feather")
+    if (key == "feather")
     {
         // The loader rounds to whole pixels and clamps to the 16 the blur can reach.
         block.feather = ParseBlockFeather(value, block.feather);
         has |= kOwnedFeather;
+        return true;
     }
-    else if (key == "emissive_factor" || key == "factor")
+    return false;
+}
+
+void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorEmissiveBlock &block,
+                           uint32_t &has)
+{
+    if (ApplyCommonMaskBlockKey(key, value, block, has))
+    {
+        return;
+    }
+    if (key == "emissive_factor" || key == "factor")
     {
         block.factor = FloatOf(value, block.factor);
         has |= kOwnedFactor;
@@ -1180,6 +1246,121 @@ void ApplyEmissiveBlockKey(std::string_view key, std::string_view value, EditorE
     }
 }
 
+template <typename Block, size_t MaxBlocks>
+void ParseScalarColorBlockList(std::string_view scalar, std::vector<Block> &blocks,
+                               std::vector<uint32_t> &has)
+{
+    size_t start = 0;
+
+    while (start < scalar.size() && blocks.size() < MaxBlocks)
+    {
+        size_t stop = scalar.find_first_of(", \t", start);
+
+        if (stop == std::string_view::npos)
+        {
+            stop = scalar.size();
+        }
+
+        if (stop > start)
+        {
+            Block block;
+            ParseColor(scalar.substr(start, stop - start), block.color);
+            blocks.push_back(block);
+            has.push_back(0);
+        }
+
+        start = stop + 1;
+    }
+}
+
+template <typename Block, size_t MaxBlocks, typename ApplyFn>
+void ParseNestedMaskBlockLine(std::string_view item, std::vector<Block> &blocks,
+                              std::vector<uint32_t> &has, size_t &current, ApplyFn applyKey)
+{
+    if (item.size() >= 2 && item.front() == '-' && IsSpace(item[1]))
+    {
+        // Past the loader's cap the items are skipped rather than written into a block the
+        // game would not read anyway.
+        if (blocks.size() >= MaxBlocks)
+        {
+            current = size_t(-1);
+            return;
+        }
+
+        blocks.emplace_back();
+        has.push_back(0);
+        current = blocks.size() - 1;
+        item = Trimmed(item.substr(1));
+    }
+
+    if (current == size_t(-1))
+    {
+        return;
+    }
+
+    const size_t colon = item.find(':');
+
+    if (colon != std::string_view::npos)
+    {
+        applyKey(Trimmed(item.substr(0, colon)), Trimmed(item.substr(colon + 1)),
+                 blocks[current], has[current]);
+    }
+}
+
+struct YamlEntrySlice
+{
+    const std::string &text;
+    const std::vector<TextLine> &lines;
+    size_t begin;
+    size_t end;
+    size_t keyIndent;
+};
+
+template <typename Block, size_t MaxBlocks, typename HeaderFn, typename ApplyFn>
+void ReadMaskBlockList(const YamlEntrySlice &slice, std::vector<Block> &blocks,
+                       std::vector<uint32_t> &has, HeaderFn isHeader, ApplyFn applyKey)
+{
+    for (size_t i = slice.begin; i < slice.end; i++)
+    {
+        const std::string_view line = slice.lines[i].View(slice.text);
+
+        if (LeadingWhitespace(line) != slice.keyIndent || !isHeader(KeyOf(line)))
+        {
+            continue;
+        }
+
+        const std::string_view scalar = Trimmed(ValueOf(line));
+
+        if (!scalar.empty())
+        {
+            ParseScalarColorBlockList<Block, MaxBlocks>(scalar, blocks, has);
+            continue;
+        }
+
+        size_t current = size_t(-1);
+
+        for (size_t k = i + 1; k < slice.end; k++)
+        {
+            const std::string_view nested = slice.lines[k].View(slice.text);
+
+            if (IsBlankLine(nested))
+            {
+                continue;
+            }
+
+            const size_t indent = LeadingWhitespace(nested);
+
+            if (indent <= slice.keyIndent)
+            {
+                break;
+            }
+
+            ParseNestedMaskBlockLine<Block, MaxBlocks>(nested.substr(indent), blocks, has,
+                                                       current, applyKey);
+        }
+    }
+}
+
 bool IsLumaBlockHeaderKey(std::string_view key)
 {
     return key == "luma" || key == "color_emissive";
@@ -1191,96 +1372,9 @@ void ReadEmissiveBlocks(const std::string &text, const std::vector<TextLine> &li
                         size_t end, size_t keyIndent, EditorMaterialParams &params)
 {
     std::vector<uint32_t> has;
-
-    for (size_t i = begin; i < end; i++)
-    {
-        const std::string_view line = lines[i].View(text);
-
-        if (LeadingWhitespace(line) != keyIndent || !IsLumaBlockHeaderKey(KeyOf(line)))
-        {
-            continue;
-        }
-
-        const std::string_view scalar = Trimmed(ValueOf(line));
-
-        if (!scalar.empty())
-        {
-            size_t start = 0;
-
-            while (start < scalar.size() && params.emissiveBlocks.size() < kEditorEmissiveBlockMax)
-            {
-                size_t stop = scalar.find_first_of(", \t", start);
-
-                if (stop == std::string_view::npos)
-                {
-                    stop = scalar.size();
-                }
-
-                if (stop > start)
-                {
-                    EditorEmissiveBlock block;
-                    ParseColor(scalar.substr(start, stop - start), block.color);
-                    params.emissiveBlocks.push_back(block);
-                    has.push_back(0);
-                }
-
-                start = stop + 1;
-            }
-
-            continue;
-        }
-
-        size_t current = size_t(-1);
-
-        for (size_t k = i + 1; k < end; k++)
-        {
-            const std::string_view nested = lines[k].View(text);
-
-            if (IsBlankLine(nested))
-            {
-                continue;
-            }
-
-            const size_t indent = LeadingWhitespace(nested);
-
-            if (indent <= keyIndent)
-            {
-                break;
-            }
-
-            std::string_view item = nested.substr(indent);
-
-            if (item.size() >= 2 && item.front() == '-' && IsSpace(item[1]))
-            {
-                // Past the loader's cap the items are skipped rather than written into a block the
-                // game would not read anyway.
-                if (params.emissiveBlocks.size() >= kEditorEmissiveBlockMax)
-                {
-                    current = size_t(-1);
-                    continue;
-                }
-
-                params.emissiveBlocks.emplace_back();
-                has.push_back(0);
-                current = params.emissiveBlocks.size() - 1;
-                item = Trimmed(item.substr(1));
-            }
-
-            if (current == size_t(-1))
-            {
-                continue;
-            }
-
-            const size_t colon = item.find(':');
-
-            if (colon != std::string_view::npos)
-            {
-                ApplyEmissiveBlockKey(Trimmed(item.substr(0, colon)),
-                                     Trimmed(item.substr(colon + 1)),
-                                     params.emissiveBlocks[current], has[current]);
-            }
-        }
-    }
+    const YamlEntrySlice slice{ text, lines, begin, end, keyIndent };
+    ReadMaskBlockList<EditorEmissiveBlock, kEditorEmissiveBlockMax>(
+        slice, params.emissiveBlocks, has, IsLumaBlockHeaderKey, ApplyEmissiveBlockKey);
 
     // A block that carries no tone control of its own takes the material-level one, which is what
     // the loader does once it has read every key of the entry.
@@ -1318,92 +1412,17 @@ bool IsGlossBlockHeaderKey(std::string_view key)
 void ApplyGlossBlockKey(std::string_view key, std::string_view value, EditorGlossBlock &block,
                         uint32_t &has)
 {
-    if (key == "color")
+    if (ApplyCommonMaskBlockKey(key, value, block, has))
     {
-        ParseColor(value, block.color);
+        return;
     }
-    else if (key == "polygon")
-    {
-        ReadUvPolygon(value, block.polyUv);
-    }
-    else if (key == "brush")
-    {
-        ReadBrushMask(value, block.brushWidth, block.brushHeight, block.brushMask);
-    }
-    else if (key == "threshold")
-    {
-        block.threshold = FloatOf(value, block.threshold);
-        has |= kOwnedThreshold;
-    }
-    else if (key == "feather")
-    {
-        block.feather = ParseBlockFeather(value, block.feather);
-        has |= kOwnedFeather;
-    }
-    else if (key == "roughness")
+    if (key == "roughness")
     {
         block.roughness = std::clamp(FloatOf(value, block.roughness), 0.0f, 1.0f);
     }
     else if (key == "metalness")
     {
         block.metalness = std::clamp(FloatOf(value, block.metalness), 0.0f, 1.0f);
-    }
-}
-
-void ParseScalarColorGlossList(std::string_view scalar, EditorMaterialParams &params,
-                               std::vector<uint32_t> &has)
-{
-    size_t start = 0;
-
-    while (start < scalar.size() && params.glossBlocks.size() < kEditorGlossBlockMax)
-    {
-        size_t stop = scalar.find_first_of(", \t", start);
-
-        if (stop == std::string_view::npos)
-        {
-            stop = scalar.size();
-        }
-
-        if (stop > start)
-        {
-            EditorGlossBlock block;
-            ParseColor(scalar.substr(start, stop - start), block.color);
-            params.glossBlocks.push_back(block);
-            has.push_back(0);
-        }
-
-        start = stop + 1;
-    }
-}
-
-void ParseNestedGlossLine(std::string_view item, EditorMaterialParams &params,
-                          std::vector<uint32_t> &has, size_t &current)
-{
-    if (item.size() >= 2 && item.front() == '-' && IsSpace(item[1]))
-    {
-        if (params.glossBlocks.size() >= kEditorGlossBlockMax)
-        {
-            current = size_t(-1);
-            return;
-        }
-
-        params.glossBlocks.emplace_back();
-        has.push_back(0);
-        current = params.glossBlocks.size() - 1;
-        item = Trimmed(item.substr(1));
-    }
-
-    if (current == size_t(-1))
-    {
-        return;
-    }
-
-    const size_t colon = item.find(':');
-
-    if (colon != std::string_view::npos)
-    {
-        ApplyGlossBlockKey(Trimmed(item.substr(0, colon)), Trimmed(item.substr(colon + 1)),
-                           params.glossBlocks[current], has[current]);
     }
 }
 
@@ -1429,47 +1448,62 @@ void ReadGlossBlocks(const std::string &text, const std::vector<TextLine> &lines
                      size_t end, size_t keyIndent, EditorMaterialParams &params)
 {
     std::vector<uint32_t> has;
+    const YamlEntrySlice slice{ text, lines, begin, end, keyIndent };
+    ReadMaskBlockList<EditorGlossBlock, kEditorGlossBlockMax>(
+        slice, params.glossBlocks, has, IsGlossBlockHeaderKey, ApplyGlossBlockKey);
+    ApplyGlossBlockDefaults(params, has);
+}
 
-    for (size_t i = begin; i < end; i++)
+bool IsSssBlockHeaderKey(std::string_view key)
+{
+    return key == "sss";
+}
+
+void ApplySssBlockKey(std::string_view key, std::string_view value, EditorSssBlock &block,
+                      uint32_t &has)
+{
+    if (ApplyCommonMaskBlockKey(key, value, block, has))
     {
-        const std::string_view line = lines[i].View(text);
+        return;
+    }
+    if (key == "factor")
+    {
+        block.factor = std::clamp(FloatOf(value, block.factor), 0.0f, 1.0f);
+        has |= kOwnedFactor;
+    }
+}
 
-        if (LeadingWhitespace(line) != keyIndent || !IsGlossBlockHeaderKey(KeyOf(line)))
+void ApplySssBlockDefaults(EditorMaterialParams &params, const std::vector<uint32_t> &has)
+{
+    for (size_t b = 0; b < params.sssBlocks.size() && b < has.size(); b++)
+    {
+        EditorSssBlock &block = params.sssBlocks[b];
+
+        if ((has[b] & kOwnedThreshold) == 0)
         {
-            continue;
+            block.threshold = params.sssThreshold;
         }
 
-        const std::string_view scalar = Trimmed(ValueOf(line));
-
-        if (!scalar.empty())
+        if ((has[b] & kOwnedFeather) == 0)
         {
-            ParseScalarColorGlossList(scalar, params, has);
-            continue;
+            block.feather = params.sssFeather;
         }
 
-        size_t current = size_t(-1);
-
-        for (size_t k = i + 1; k < end; k++)
+        if ((has[b] & kOwnedFactor) == 0)
         {
-            const std::string_view nested = lines[k].View(text);
-
-            if (IsBlankLine(nested))
-            {
-                continue;
-            }
-
-            const size_t indent = LeadingWhitespace(nested);
-
-            if (indent <= keyIndent)
-            {
-                break;
-            }
-
-            ParseNestedGlossLine(nested.substr(indent), params, has, current);
+            block.factor = 1.0f;
         }
     }
+}
 
-    ApplyGlossBlockDefaults(params, has);
+void ReadSssBlocks(const std::string &text, const std::vector<TextLine> &lines, size_t begin,
+                   size_t end, size_t keyIndent, EditorMaterialParams &params)
+{
+    std::vector<uint32_t> has;
+    const YamlEntrySlice slice{ text, lines, begin, end, keyIndent };
+    ReadMaskBlockList<EditorSssBlock, kEditorSssBlockMax>(
+        slice, params.sssBlocks, has, IsSssBlockHeaderKey, ApplySssBlockKey);
+    ApplySssBlockDefaults(params, has);
 }
 
 void ApplyGlossScalarKey(std::string_view key, std::string_view value, EditorMaterialParams &params)
@@ -1488,16 +1522,47 @@ void ApplyGlossScalarKey(std::string_view key, std::string_view value, EditorMat
     }
 }
 
+void ApplySssScalarKey(std::string_view key, std::string_view value, EditorMaterialParams &params,
+                       bool &hasSssStrength)
+{
+    if (key == "texture_sss")
+    {
+        params.textureSss = TextOf(value);
+    }
+    else if (key == "sss_strength")
+    {
+        params.sssStrength = std::clamp(FloatOf(value, params.sssStrength), 0.0f, 1.0f);
+        hasSssStrength = true;
+    }
+    else if (key == "sss_color")
+    {
+        ParseColor(value, params.sssColor);
+    }
+    else if (key == "sss_radius")
+    {
+        params.sssRadius = std::clamp(FloatOf(value, params.sssRadius), 0.0f, 1.0f);
+    }
+    else if (key == "sss_threshold")
+    {
+        params.sssThreshold = FloatOf(value, params.sssThreshold);
+    }
+    else if (key == "sss_feather")
+    {
+        params.sssFeather = FloatOf(value, params.sssFeather);
+    }
+}
+
 void ResetMaterialBlockState(EditorMaterialParams &params)
 {
     params.emissiveBlocks.clear();
     params.hasColorEmissive = false;
     params.glossBlocks.clear();
     params.hasColorGloss = false;
+    params.sssBlocks.clear();
 }
 
 void ApplyExtraMaterialScalarKey(std::string_view key, std::string_view value,
-                                 EditorMaterialParams &params)
+                                 EditorMaterialParams &params, bool &hasSssStrength)
 {
     if (key == "enabled")
     {
@@ -1540,13 +1605,18 @@ void ApplyExtraMaterialScalarKey(std::string_view key, std::string_view value,
     else
     {
         ApplyGlossScalarKey(key, value, params);
+        ApplySssScalarKey(key, value, params, hasSssStrength);
     }
 }
 
-void FinalizeExtraMaterialRead(EditorMaterialParams &params)
+void FinalizeExtraMaterialRead(EditorMaterialParams &params, bool hasSssStrength)
 {
     params.hasColorEmissive = params.hasColorEmissive || !params.emissiveBlocks.empty();
     params.hasColorGloss = params.hasColorGloss || !params.glossBlocks.empty();
+    if (!hasSssStrength && (!params.textureSss.empty() || !params.sssBlocks.empty()))
+    {
+        params.sssStrength = 1.0f;
+    }
 }
 
 std::string FormatVector(const float value[3])
@@ -2457,6 +2527,8 @@ bool IsEmittedMaterialKey(std::string_view key,
     static constexpr const char *kAlwaysReplacedKeys[] = {
         "enabled",         "luma",        "color_emissive", "gloss",
         "color_gloss",     "gloss_threshold", "gloss_feather",
+        "texture_sss",     "sss_strength", "sss_color",     "sss_radius",
+        "sss",             "sss_threshold", "sss_feather",
     };
 
     for (const char *replaced : kAlwaysReplacedKeys)
@@ -2689,6 +2761,7 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
     const std::vector<TextLine> lines = SplitLines(m_text);
     bool glass = false;
     bool water = false;
+    bool hasSssStrength = false;
 
     ResetMaterialBlockState(params);
 
@@ -2853,14 +2926,15 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         }
         else
         {
-            ApplyExtraMaterialScalarKey(key, value, params);
+            ApplyExtraMaterialScalarKey(key, value, params, hasSssStrength);
         }
     }
 
     // The blocks inherit the material-level tone controls, so they are read once those are known.
     ReadEmissiveBlocks(m_text, lines, head + 1, end, keyIndent, params);
     ReadGlossBlocks(m_text, lines, head + 1, end, keyIndent, params);
-    FinalizeExtraMaterialRead(params);
+    ReadSssBlocks(m_text, lines, head + 1, end, keyIndent, params);
+    FinalizeExtraMaterialRead(params, hasSssStrength);
 
     // a material that asks for both is glass, as the loader decides
     params.type = glass ? EditorMaterialType::Glass

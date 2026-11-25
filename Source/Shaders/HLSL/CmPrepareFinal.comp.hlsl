@@ -40,8 +40,8 @@ struct PostEffectsControl_BT
 
 [[vk::push_constant]] ConstantBuffer<PostEffectsControl_BT> postEffectsControl;
 
-[[vk::binding(400, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> bloomResultTexture;
-[[vk::binding(402, DESC_SET_FRAMEBUFFERS)]] SamplerState opticalResultSampler;
+[[vk::binding(500, DESC_SET_FRAMEBUFFERS)]] Texture2D<float4> bloomResultTexture;
+[[vk::binding(502, DESC_SET_FRAMEBUFFERS)]] SamplerState opticalResultSampler;
 
 
 #define DEBUG_LPM 0

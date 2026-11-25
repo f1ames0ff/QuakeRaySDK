@@ -44,4 +44,26 @@ float traceClearance(float3 origin, float3 direction, float maxDistance, uint cu
         : maxDistance;
 }
 
+/* True if any surface matching cullMask lies in [tMin, maxDistance] along the ray.
+   Used at liquid/wall junctions so a refracted or reflected ray pulled back along the
+   incoming segment hits an adjacent wall instead of jumping behind it into the void. */
+bool hasClearanceBlocker(float3 origin, float3 direction, float tMin, float maxDistance, uint cullMask)
+{
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+
+    RayDesc rayDesc;
+    rayDesc.Origin = origin;
+    rayDesc.Direction = direction;
+    rayDesc.TMin = tMin;
+    rayDesc.TMax = maxDistance;
+
+    query.TraceRayInline(topLevelAS, getAdditionalRayFlags(), cullMask, rayDesc);
+
+    while (query.Proceed())
+    {
+    }
+
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
 #endif
