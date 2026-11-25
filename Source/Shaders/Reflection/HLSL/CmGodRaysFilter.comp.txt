@@ -1,5 +1,34 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
+=== block set 1 binding 0
+
+[0] offset 0 v4(float32)
+[1] offset 16 v4(float32)
+[2] offset 32 v4(float32)
+[3] offset 48 v4(float32)
+[4] offset 64 m4(v4(float32)) matrixstride 16
+[5] offset 128 float32
+[6] offset 132 float32
+[7] offset 136 float32
+[8] offset 140 uint32
+[9] offset 144 float32
+[10] offset 148 uint32
+[11] offset 152 float32
+[12] offset 156 uint32
+[13] offset 160 array[64](struct) stride 144
+  [0] offset 0 v4(float32)
+  [1] offset 16 v4(float32)
+  [2] offset 32 v4(float32)
+  [3] offset 48 v4(float32)
+  [4] offset 64 v4(float32)
+  [5] offset 80 v4(float32)
+  [6] offset 96 v4(float32)
+  [7] offset 112 v4(float32)
+  [8] offset 128 v4(float32)
+[14] offset 9376 uint32
+[15] offset 9380 uint32
+[16] offset 9384 uint32
+[17] offset 9388 uint32
 === block set 3 binding 0
 
 [0] offset 0 m4(v4(float32)) matrixstride 16
@@ -134,22 +163,30 @@ v3(int32)
 declared
 === capability StorageImageExtendedFormats
 declared
-=== descriptor set 2 binding 195
+=== descriptor set 1 binding 0
+struct nonwritable
+=== descriptor set 1 binding 0: storage class
+StorageBuffer
+=== descriptor set 2 binding 198
 image:2D:0:0:0:1:Unknown
-=== descriptor set 2 binding 195: storage class
+=== descriptor set 2 binding 198: storage class
 UniformConstant
-=== descriptor set 2 binding 213
+=== descriptor set 2 binding 216
 image:2D:0:0:0:1:Unknown
-=== descriptor set 2 binding 213: storage class
+=== descriptor set 2 binding 216: storage class
 UniformConstant
 === descriptor set 2 binding 64
-image:2D:0:0:0:2:R11fG11fB10f
+image:2D:0:0:0:2:Rgba16f
 === descriptor set 2 binding 64: storage class
 UniformConstant
 === descriptor set 3 binding 0
 struct
 === descriptor set 3 binding 0: storage class
 Uniform
+=== descriptor set 4 binding 0
+image:2D:0:0:0:1:Unknown
+=== descriptor set 4 binding 0: storage class
+UniformConstant
 === entry point
 GLCompute main
 === workgroup size

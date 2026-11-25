@@ -29,19 +29,28 @@ qray::VertexPreprocessing::VertexPreprocessing(
     const std::shared_ptr<const ShaderManager> &_shaderManager)
     : device(_device)
 {
-    std::vector<VkDescriptorSetLayout> setLayouts =
+    const VkDescriptorSetLayout uniformLayout = _uniform->GetDescSetLayout();
+    const VkDescriptorSetLayout buffersLayout = _asManager->GetBuffersDescSetLayout();
+    if (uniformLayout != VK_NULL_HANDLE && buffersLayout != VK_NULL_HANDLE)
     {
-        _uniform->GetDescSetLayout(),
-        _asManager->GetBuffersDescSetLayout()
-    };
+        std::vector<VkDescriptorSetLayout> setLayouts =
+        {
+            uniformLayout,
+            buffersLayout
+        };
 
-    CreatePipelineLayout(setLayouts.data(), setLayouts.size());
-    CreatePipelines(_shaderManager.get());
+        CreatePipelineLayout(setLayouts.data(), setLayouts.size());
+        CreatePipelines(_shaderManager.get());
+    }
 }
 
 qray::VertexPreprocessing::~VertexPreprocessing()
 {
-    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    if (pipelineLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        pipelineLayout = VK_NULL_HANDLE;
+    }
     DestroyPipelines();
 }
 
@@ -51,6 +60,10 @@ void qray::VertexPreprocessing::Preprocess(
     const std::shared_ptr<ASManager> &asManager,
     const ShVertPreprocessing &push)
 {
+    if (pipelineLayout == VK_NULL_HANDLE)
+    {
+        return;
+    }
     CmdLabel label(cmd, "Vertex preprocessing");
 
     const bool onlyDynamic = preprocMode == VERT_PREPROC_MODE_ONLY_DYNAMIC;
@@ -88,6 +101,11 @@ void qray::VertexPreprocessing::Preprocess(
 
 void qray::VertexPreprocessing::OnShaderReload(const ShaderManager *shaderManager)
 {
+    if (pipelineLayout == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
     DestroyPipelines();
     CreatePipelines(shaderManager);
 }
@@ -159,11 +177,18 @@ void qray::VertexPreprocessing::CreatePipelines(const ShaderManager *shaderManag
 
 void qray::VertexPreprocessing::DestroyPipelines()
 {
-    vkDestroyPipeline(device, pipelineOnlyDynamic, nullptr);
-    vkDestroyPipeline(device, pipelineDynamicAndMovable, nullptr);
-    vkDestroyPipeline(device, pipelineAll, nullptr);
+    VkPipeline *pipelines[] = {
+        &pipelineOnlyDynamic,
+        &pipelineDynamicAndMovable,
+        &pipelineAll,
+    };
 
-    pipelineOnlyDynamic = VK_NULL_HANDLE;
-    pipelineDynamicAndMovable = VK_NULL_HANDLE;
-    pipelineAll = VK_NULL_HANDLE;
+    for (VkPipeline *pipeline : pipelines)
+    {
+        if (*pipeline != VK_NULL_HANDLE)
+        {
+            vkDestroyPipeline(device, *pipeline, nullptr);
+            *pipeline = VK_NULL_HANDLE;
+        }
+    }
 }

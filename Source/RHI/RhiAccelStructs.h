@@ -31,6 +31,8 @@
 namespace qray
 {
 class ASManager;
+class GeomInfoManager;
+class VertexCollector;
 }
 
 namespace qray::rhi
@@ -275,7 +277,8 @@ public:
     // uniform is not a static constant-buffer wrap, or one of the vertex-data buffers is missing.
     void RecordVertexPreprocessing(nvrhi::ICommandList *pCommandList,
                                    uint32_t frameIndex,
-                                   nvrhi::IBuffer *pUniformBuffer);
+                                   nvrhi::IBuffer *pUniformBuffer,
+                                   bool includeStatic = false);
 
     // The slot's TLAS, or null while the slot has never been built. The caller does not own the
     // handle; a re-created TLAS replaces it, and the debug-trace pass has to re-read it.
@@ -399,6 +402,7 @@ private:
         // presence. The handle is reused while every build fits these maxima and is recreated,
         // adopting the current shape as the new envelope, when it does not.
         std::vector<uint32_t> shape;
+        std::vector<uint32_t> sortedEnvelopeCounts;
         std::vector<uint32_t> shapeScratch;
 
         // The topology identity of the last build and the current frame's scratch copy: equal,
@@ -437,6 +441,12 @@ private:
 
         nvrhi::BufferHandle matchPrev;
         uint64_t matchPrevCapacity = 0;
+
+        uint32_t uploadedStaticGeneration = UINT32_MAX;
+        uint64_t uploadedStaticContentRevision = UINT64_MAX;
+        uint64_t uploadedStaticFilterMask = 0;
+        uint64_t uploadedMatchPrevStaticRevision = UINT64_MAX;
+        bool     matchPrevInitialized = false;
     };
 
     // The buffers of the shader's set 1 (Generated/ShaderCommonC.h:19-26) that the RHI
@@ -462,9 +472,26 @@ private:
     // number of geometries in its BLAS, exactly what WriteInstanceGeomInfo writes.
     struct InstanceGeomInfo
     {
-        int32_t offset = 0;
-        int32_t count = 0;
-        bool    movable = false;
+        int32_t  offset = 0;
+        int32_t  count = 0;
+        uint32_t filterId = 0;
+        bool     movable = false;
+        bool     isStatic = false;
+    };
+
+    struct StaticCollectorMemory
+    {
+        VkDeviceAddress vertexBufferAddress = 0;
+        VkDeviceAddress indexBufferAddress = 0;
+        VkDeviceAddress transformsBufferAddress = 0;
+        const VkTransformMatrixKHR *transforms = nullptr;
+    };
+
+    struct StaticBlasCounts
+    {
+        uint32_t geometryCount = 0;
+        uint64_t vertexCount = 0;
+        uint64_t primitiveCount = 0;
     };
 
     // Retires and clears the whole static set (a level change, or teardown before the handles are
@@ -473,6 +500,21 @@ private:
 
     // The static structure that mirrors 'filter', or null.
     const StaticBlas *FindStaticBlas(uint32_t filter) const;
+    StaticBlas *FindMutableStaticBlas(uint32_t filter);
+    bool CanRefitStaticMovableInPlace(const VertexCollector &collector,
+                                      const StaticCollectorMemory &mem) const;
+    void RefitStaticMovableInPlace(nvrhi::ICommandList *pCommandList,
+                                   const VertexCollector &collector,
+                                   const StaticCollectorMemory &mem);
+    void GatherStaticBlasCandidates(const VertexCollector &collector,
+                                    const StaticCollectorMemory &mem,
+                                    bool rebuildMovable,
+                                    std::vector<StaticBlas> &candidates,
+                                    StaticBlasCounts &counts) const;
+    bool CopyDynamicPrefixBuffers(nvrhi::ICommandList *pCommandList,
+                                  uint32_t frameIndex,
+                                  const VertexCollector &collector,
+                                  DynamicCopies &copies);
 
     // Appends the static instances, in GetStaticBlasComponents() order.
     void AppendStaticInstances(uint32_t rayCullMaskWorld,
@@ -535,6 +577,17 @@ private:
     // source that still holds the previous frame's bytes under `rhiframe`). Does nothing when the
     // frame produced no instance.
     void RecordVertexDataCopies(nvrhi::ICommandList *pCommandList, uint32_t frameIndex);
+    void RecordStaticTexCoordUpdates(nvrhi::ICommandList *pCommandList);
+    void RecordGeometryInstanceCopies(nvrhi::ICommandList *pCommandList,
+                                      uint32_t frameIndex,
+                                      GeomInfoManager &geomInfoMgr,
+                                      VertexDataCopies &copies,
+                                      uint64_t geometryInstancesNeeded);
+    void RecordMatchPrevUpdates(nvrhi::ICommandList *pCommandList,
+                                uint32_t frameIndex,
+                                const GeomInfoManager &geomInfoMgr,
+                                VertexDataCopies &copies);
+    bool EnsureVertexPreprocessUniformSet(nvrhi::IBuffer *pUniformBuffer);
 
     // The one-shot warning for a non-empty filter that has no RHI BLAS ('filter' is its grid filter).
     void WarnUnresolvedFilter(uint32_t filter);
@@ -589,10 +642,12 @@ private:
     // that call succeeds.
     nvrhi::ShaderHandle vertexPreprocessShader;
     nvrhi::ShaderHandle vertexPreprocessSpecializedShader;
+    nvrhi::ShaderHandle vertexPreprocessAllSpecializedShader;
     nvrhi::BindingLayoutHandle vertexPreprocessUniformLayout;
     nvrhi::BindingLayoutHandle vertexPreprocessVertexDataLayout;
     nvrhi::BindingLayoutHandle vertexPreprocessPushLayout;
     nvrhi::ComputePipelineHandle vertexPreprocessPipeline;
+    nvrhi::ComputePipelineHandle vertexPreprocessAllPipeline;
 
     // Set 0 of the pass: the host's global-uniform wrap. The wrap is created once by the frame
     // skeleton and never replaced, so one set serves every slot and the pointer is only the key.
@@ -623,6 +678,16 @@ private:
     // Set after a failure that makes the vertex-data set unavailable (a failed wrap or copy buffer):
     // the module stops its vertex-data work instead of logging the same failure every frame.
     bool vertexDataCreationFailed = false;
+
+    struct ParticleAabb
+    {
+        float min[3];
+        float max[3];
+    };
+
+    // Per-frame scratch vectors reused across AppendDynamicSlot / BuildParticleProxies.
+    std::vector<uint32_t> sortedShapeScratch;
+    std::vector<ParticleAabb> particleAabbScratch;
 
     // The static structures, one per non-empty static component of the current generation.
     std::vector<StaticBlas> staticBlas;

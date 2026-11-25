@@ -61,6 +61,7 @@ MemoryAllocator::MemoryAllocator(
 MemoryAllocator::~MemoryAllocator()
 {
     assert(bufAllocs.size() == 0);
+    assert(imgAllocs.size() == 0);
 
     if (texturesStagingPool != VK_NULL_HANDLE)
     {
@@ -148,6 +149,32 @@ VkImage MemoryAllocator::CreateDstTextureImage(const VkImageCreateInfo *info, co
     }
 
     return image;
+}
+
+VkImage MemoryAllocator::CreateFramebufferImage(const VkImageCreateInfo *info, const char *pDebugName)
+{
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+    allocInfo.pUserData = const_cast<char *>(pDebugName);
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    const VkResult r = vmaCreateImage(allocator, info, &allocInfo, &image, &allocation, nullptr);
+    VK_CHECKERROR(r);
+
+    if (r != VK_SUCCESS || image == VK_NULL_HANDLE)
+    {
+        return VK_NULL_HANDLE;
+    }
+
+    imgAllocs[image] = allocation;
+    return image;
+}
+
+void MemoryAllocator::DestroyFramebufferImage(VkImage image)
+{
+    DestroyTextureImage(image);
 }
 
 void MemoryAllocator::DestroyStagingSrcTextureBuffer(VkBuffer buffer)

@@ -92,16 +92,6 @@ ASManager::ASManager(
         collectorDynamic[i] = std::make_shared<VertexCollector>(collectorDynamic[0], allocator);
     }
 
-    previousDynamicPositions.Init(
-        allocator, MAX_DYNAMIC_VERTEX_COUNT * sizeof(ShVertex),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "Previous frame's vertex data");
-
-    previousDynamicIndices.Init(
-        allocator, MAX_DYNAMIC_VERTEX_COUNT * sizeof(uint32_t),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "Previous frame's index data");
-
     instanceBuffer = std::make_unique<AutoBuffer>(device, allocator);
 
     const VkDeviceSize instanceBufferSize = MAX_TOP_LEVEL_INSTANCE_COUNT * sizeof(VkAccelerationStructureInstanceKHR);
@@ -111,13 +101,6 @@ ASManager::ASManager(
         "TLAS instance buffer");
 
     static_assert(std::size(TLASPrepareResult{}.instances) == MAX_TOP_LEVEL_INSTANCE_COUNT);
-
-    CreateDescriptors();
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-    {
-        UpdateBufferDescriptors(i);
-    }
 
     VkFenceCreateInfo fenceInfo = {};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -310,9 +293,18 @@ ASManager::~ASManager()
         tlas[i]->Destroy();
     }
 
-    vkDestroyDescriptorPool(device, descPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, buffersDescSetLayout, nullptr);
-    vkDestroyDescriptorSetLayout(device, asDescSetLayout, nullptr);
+    if (descPool != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorPool(device, descPool, nullptr);
+    }
+    if (buffersDescSetLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, buffersDescSetLayout, nullptr);
+    }
+    if (asDescSetLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, asDescSetLayout, nullptr);
+    }
     vkDestroyFence(device, staticCopyFence, nullptr);
 }
 
@@ -451,12 +443,8 @@ void ASManager::SubmitStaticGeometry()
 
 void ASManager::BeginDynamicGeometry(VkCommandBuffer cmd, uint32_t frameIndex)
 {
+    (void)cmd;
     scratchBuffer->Reset();
-
-    static_assert(MAX_FRAMES_IN_FLIGHT == 2, "");
-    const uint32_t prevFrameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
-
-    CopyDynamicDataToPrevBuffers(cmd, prevFrameIndex);
 
     collectorDynamic[frameIndex]->Reset();
     collectorDynamic[frameIndex]->BeginCollecting(false);

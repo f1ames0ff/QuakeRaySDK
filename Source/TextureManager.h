@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <functional>
 #include <list>
 #include <string>
 
@@ -72,7 +73,7 @@ public:
     bool CanUpdateMaterialContents(uint32_t materialIndex, QrExtent2D size) const;
     void DestroyMaterial(uint32_t currentFrameIndex, uint32_t materialIndex);
 
-    void CheckForHotReload(VkCommandBuffer cmd, uint32_t frameIndex);
+    void CheckForHotReload(const std::function<VkCommandBuffer()> &getCmd, uint32_t frameIndex);
 
     MaterialTextures GetMaterialTextures(uint32_t materialIndex) const;
 
@@ -102,9 +103,16 @@ private:
                              bool                                            isUpdateable,
                              std::optional< QrTextureSwizzling >             swizzling );
 
+    struct TextureImageSpec
+    {
+        VkFormat   format = VK_FORMAT_UNDEFINED;
+        VkExtent2D baseSize = {};
+        uint32_t   mipLevels = 1;
+    };
+
     uint32_t InsertTexture(uint32_t frameIndex, VkImage image, VkImageView view,
-                           SamplerManager::Handle samplerHandle, VkFormat format,
-                           VkExtent2D baseSize, uint32_t mipLevels);
+                           SamplerManager::Handle samplerHandle, const TextureImageSpec &spec,
+                           std::optional<QrTextureSwizzling> swizzling = std::nullopt);
     void DestroyTexture(const Texture &texture);
     void AddToBeDestroyed(uint32_t frameIndex, const Texture &texture);
 
@@ -144,8 +152,10 @@ private:
 
     std::shared_ptr<AutoBuffer> talCdfBuffer;
     std::vector<TalCdfSource> talCdfSources;
+    std::vector<uint32_t> talCdfScratch;
 
     std::vector<Texture> textures;
+    uint32_t freeTextureSearchCursor = 0;
     rhi::RhiTextureTable *rhiTextureTable = nullptr;
     std::vector<Texture> texturesToDestroy[MAX_FRAMES_IN_FLIGHT];
 

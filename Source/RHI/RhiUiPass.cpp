@@ -432,58 +432,10 @@ void RhiUiPass::Render(nvrhi::ICommandList *pCommandList,
     // The wrap's own extent is what the backend asserts the framebuffer against
     // (vulkan-graphics.cpp:67-68), so a mismatch is a host error and the frame is skipped instead
     // of building an invalid framebuffer.
-    const nvrhi::TextureDesc &targetDesc = pTarget->getDesc();
-    if (targetDesc.width != targetWidth || targetDesc.height != targetHeight)
-    {
-        if (!warnedMissingTarget)
-        {
-            warnedMissingTarget = true;
-            LogMessage(print, "Warning: RHI: the UI pass got a target of a different extent, the overlay is skipped");
-        }
-        return;
-    }
-
     Target &target = targets[frameIndex];
-
-    // Nothing to do while the slot still wraps the same target at the same size: replacing the
-    // framebuffer every frame would create one per frame for nothing.
-    if (target.framebuffer == nullptr || target.target != pTarget ||
-        target.width != targetWidth || target.height != targetHeight)
+    if (!EnsureTarget(target, pTarget, targetWidth, targetHeight))
     {
-        ReleaseTarget(target);
-
-        target.target = pTarget;
-        target.width = targetWidth;
-        target.height = targetHeight;
-
-        // The one-attachment framebuffer of the legacy swapchain render pass (SwapchainPass.cpp:
-        // 135-183): the colour target only, no depth. NVRHI's loadOp is always LOAD
-        // (vulkan-graphics.cpp:80), which is the legacy loadOp too.
-        nvrhi::FramebufferDesc framebufferDesc;
-        framebufferDesc.addColorAttachment(pTarget);
-
-        target.framebuffer = device->createFramebuffer(framebufferDesc);
-        if (target.framebuffer == nullptr)
-        {
-            if (!warnedMissingTarget)
-            {
-                warnedMissingTarget = true;
-                LogMessage(print, "Warning: RHI: failed to create the UI framebuffer");
-            }
-            return;
-        }
-
-        // The pipeline is built against the framebuffer's colour format, so a change means every
-        // cached pipeline belongs to the wrong framebuffer and has to be replaced. The upscaled
-        // image is VK_FORMAT_B10G11R11_UFLOAT_PACK32 (ShaderCommonCFramebuf.cpp:9-10), which the
-        // wrapped texture reports as nvrhi::Format::R11G11B10_FLOAT; the wrap's own format is
-        // authoritative because it is the one NVRHI mapped the engine format to.
-        const nvrhi::Format colorFormat = targetDesc.format;
-        if (pipelineColorFormat != colorFormat)
-        {
-            ReleasePipelineCache();
-            pipelineColorFormat = colorFormat;
-        }
+        return;
     }
 
     // The fallback view-projection, built the way Rasterizer::DrawToSwapchain builds it
@@ -511,6 +463,10 @@ void RhiUiPass::Render(nvrhi::ICommandList *pCommandList,
     // per-draw viewports, so the backend emits the same positive-height VkViewport.
     const VkViewport legacyDefaultViewport = { 0.0f, 0.0f, float(targetWidth), float(targetHeight), 0.0f, 1.0f };
     const nvrhi::Viewport defaultViewport = ToLegacyViewport(legacyDefaultViewport);
+
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
+    nvrhi::Viewport lastViewport;
+    nvrhi::Rect lastScissor;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
@@ -562,21 +518,27 @@ void RhiUiPass::Render(nvrhi::ICommandList *pCommandList,
 
         const nvrhi::Rect scissor = info.scissor ? ToLegacyScissor(*info.scissor) : fullTarget;
 
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.framebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(scissor);
-        // Set 0 is the bindless texture table, the pipeline's first layout; the second layout only
-        // carries the push constants and has no descriptors to bind.
-        state.addBindingSet(textureTable->GetTable());
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(indexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
+        if (lastPipeline != pipeline || lastViewport != viewport || lastScissor != scissor)
+        {
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.framebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(scissor);
+            // Set 0 is the bindless texture table, the pipeline's first layout; the second layout only
+            // carries the push constants and has no descriptors to bind.
+            state.addBindingSet(textureTable->GetTable());
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
 
-        pCommandList->setGraphicsState(state);
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+            lastViewport = viewport;
+            lastScissor = scissor;
+        }
 
         // After the state: changing the state invalidates push constants (nvrhi.h:3430-3432), and
         // the block is rebuilt per draw exactly as Rasterizer::Draw does (Rasterizer.cpp:399-409).
@@ -608,6 +570,71 @@ void RhiUiPass::Render(nvrhi::ICommandList *pCommandList,
     // pattern RhiSkyPass::RenderWorld applies to SCREEN_EMISSION.
     pCommandList->setTextureState(pTarget, nvrhi::AllSubresources,
                                   nvrhi::ResourceStates::UnorderedAccess);
+}
+
+bool RhiUiPass::EnsureTarget(Target &target,
+                             nvrhi::ITexture *pTarget,
+                             uint32_t targetWidth,
+                             uint32_t targetHeight)
+{
+    // The wrap's own extent is what the backend asserts the framebuffer against
+    // (vulkan-graphics.cpp:67-68), so a mismatch is a host error and the frame is skipped instead
+    // of building an invalid framebuffer.
+    const nvrhi::TextureDesc &targetDesc = pTarget->getDesc();
+    if (targetDesc.width != targetWidth || targetDesc.height != targetHeight)
+    {
+        if (!warnedMissingTarget)
+        {
+            warnedMissingTarget = true;
+            LogMessage(print, "Warning: RHI: the UI pass got a target of a different extent, the overlay is skipped");
+        }
+        return false;
+    }
+
+    // Nothing to do while the slot still wraps the same target at the same size: replacing the
+    // framebuffer every frame would create one per frame for nothing.
+    if (target.framebuffer != nullptr && target.target == pTarget &&
+        target.width == targetWidth && target.height == targetHeight)
+    {
+        return true;
+    }
+
+    ReleaseTarget(target);
+
+    target.target = pTarget;
+    target.width = targetWidth;
+    target.height = targetHeight;
+
+    // The one-attachment framebuffer of the legacy swapchain render pass (SwapchainPass.cpp:
+    // 135-183): the colour target only, no depth. NVRHI's loadOp is always LOAD
+    // (vulkan-graphics.cpp:80), which is the legacy loadOp too.
+    nvrhi::FramebufferDesc framebufferDesc;
+    framebufferDesc.addColorAttachment(pTarget);
+
+    target.framebuffer = device->createFramebuffer(framebufferDesc);
+    if (target.framebuffer == nullptr)
+    {
+        if (!warnedMissingTarget)
+        {
+            warnedMissingTarget = true;
+            LogMessage(print, "Warning: RHI: failed to create the UI framebuffer");
+        }
+        return false;
+    }
+
+    // The pipeline is built against the framebuffer's colour format, so a change means every
+    // cached pipeline belongs to the wrong framebuffer and has to be replaced. The upscaled
+    // image is VK_FORMAT_B10G11R11_UFLOAT_PACK32 (ShaderCommonCFramebuf.cpp:9-10), which the
+    // wrapped texture reports as nvrhi::Format::R11G11B10_FLOAT; the wrap's own format is
+    // authoritative because it is the one NVRHI mapped the engine format to.
+    const nvrhi::Format colorFormat = targetDesc.format;
+    if (pipelineColorFormat != colorFormat)
+    {
+        ReleasePipelineCache();
+        pipelineColorFormat = colorFormat;
+    }
+
+    return true;
 }
 
 void RhiUiPass::ReleaseTargets()

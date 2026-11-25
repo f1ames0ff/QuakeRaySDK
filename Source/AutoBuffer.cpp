@@ -18,6 +18,7 @@
 #include "AutoBuffer.h"
 
 #include <utility>
+#include <vector>
 
 using namespace qray;
 
@@ -63,6 +64,7 @@ AutoBuffer::~AutoBuffer()
 void AutoBuffer::Create(VkDeviceSize size, VkBufferUsageFlags usage, const std::string &debugName, uint32_t frameCount)
 {
     assert(frameCount > 0 && frameCount <= MAX_FRAMES_IN_FLIGHT);
+    activeFrameCount = frameCount;
 
     const VkBufferUsageFlags stagingUsage =
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -106,6 +108,7 @@ void AutoBuffer::Destroy()
     }
 
     deviceLocal.Destroy();
+    activeFrameCount = 0;
 }
 
 void AutoBuffer::CopyFromStaging(VkCommandBuffer cmd, uint32_t frameIndex, VkDeviceSize size, VkDeviceSize offset)
@@ -158,10 +161,35 @@ void AutoBuffer::CopyFromStaging(
         staging[frameIndex].GetBuffer(), deviceLocal.GetBuffer(),
         copyInfosCount, copyInfos);
 
+    constexpr uint32_t kStackBarrierCap = 64;
+    VkBufferMemoryBarrier stackBarriers[kStackBarrierCap];
+    std::vector<VkBufferMemoryBarrier> heapBarriers;
+    VkBufferMemoryBarrier *pBarriers = stackBarriers;
+    if (copyInfosCount > kStackBarrierCap)
+    {
+        heapBarriers.resize(copyInfosCount);
+        pBarriers = heapBarriers.data();
+    }
+
+    const VkBuffer deviceBuf = deviceLocal.GetBuffer();
     for (uint32_t i = 0; i < copyInfosCount; i++)
     {
-        BarrierAfterCopy(cmd, deviceLocal.GetBuffer(), copyInfos[i].dstOffset, copyInfos[i].size);
+        VkBufferMemoryBarrier &b = pBarriers[i];
+        b = {};
+        b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.buffer = deviceBuf;
+        b.offset = copyInfos[i].dstOffset;
+        b.size = copyInfos[i].size;
     }
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 0, nullptr, copyInfosCount, pBarriers, 0, nullptr);
 }
 
 void *AutoBuffer::GetMapped(uint32_t frameIndex)
@@ -191,7 +219,7 @@ VkDeviceAddress AutoBuffer::GetDeviceAddress()
 
 VkDeviceSize AutoBuffer::GetSize() const
 {
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    for (uint32_t i = 0; i < activeFrameCount; i++)
     {
         assert(deviceLocal.GetSize() == staging[i].GetSize());
     }

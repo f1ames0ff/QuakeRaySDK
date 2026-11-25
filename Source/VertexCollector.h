@@ -86,6 +86,16 @@ public:
     VkBuffer GetStagingVertexBuffer() const;
     VkBuffer GetStagingIndexBuffer() const;
 
+    struct TexCoordUpdateRange
+    {
+        uint32_t firstVertex = 0;
+        uint32_t vertexCount = 0;
+        bool     preserveGpuNormals = false;
+    };
+
+    const ShVertex *GetStagingVertexData() const;
+    void ConsumePendingTexCoordUpdates(std::vector<TexCoordUpdateRange> &outRanges);
+
     struct GeometryDrawInfo
     {
         VkBuffer vertexBuffer;
@@ -93,6 +103,7 @@ public:
         uint32_t baseVertex;
         uint32_t firstIndex;
         uint32_t indexCount;
+        uint32_t vertexCount;
         float model[16];
     };
     std::vector<GeometryDrawInfo> GetGeometryDrawInfos() const;
@@ -168,6 +179,7 @@ private:
     rgl::unordered_map<VertexCollectorFilterTypeFlags, std::shared_ptr<VertexCollectorFilter>> filters;
 
     rgl::unordered_map<uint32_t, uint32_t> simpleIndexToTransformIndex;
+    std::vector<TexCoordUpdateRange> pendingTexCoordUpdates;
 };
 
 }

@@ -608,10 +608,6 @@ qray::LightManager::LightManager(
                              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                          "Lights buffer");
 
-    lightsBuffer_Prev.Init(_allocator, sizeof(ShLightEncoded) * kLightArrayMaxSize,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "Lights buffer - prev");
-
     lightListOffsets = std::make_shared<AutoBuffer>(device, _allocator);
     lightListOffsets->Create(sizeof(uint32_t) * (Q2_MAX_CLUSTERS + 1),
                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -658,22 +654,18 @@ qray::LightManager::LightManager(
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                               "DTAL group members");
-
-    prevToCurIndex = std::make_shared<AutoBuffer>(device, _allocator);
-    prevToCurIndex->Create(sizeof(uint32_t) * kLightArrayMaxSize,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "Lights buffer - prev to cur");
-
-    curToPrevIndex = std::make_shared<AutoBuffer>(device, _allocator);
-    curToPrevIndex->Create(sizeof(uint32_t) * kLightArrayMaxSize,
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "Lights buffer - cur to prev");
-
-    CreateDescriptors();
 }
 
 qray::LightManager::~LightManager()
 {
-    vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
-    vkDestroyDescriptorPool(device, descPool, nullptr);
+    if (descSetLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
+    }
+    if (descPool != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorPool(device, descPool, nullptr);
+    }
 }
 
 void qray::LightManager::AddLightShaft(const LightShaft &shaft)
@@ -744,6 +736,7 @@ uint32_t qray::LightManager::CollectLightShafts(LightShaft *out, uint32_t max,
 
 void qray::LightManager::PrepareForFrame(VkCommandBuffer cmd, uint32_t frameIndex)
 {
+    (void)cmd;
     std::lock_guard<std::mutex> registryLock(registryMutex);
     regLightCount_Prev = regLightCount;
     dirLightCount_Prev = dirLightCount;
@@ -758,20 +751,6 @@ void qray::LightManager::PrepareForFrame(VkCommandBuffer cmd, uint32_t frameInde
     }
 
     g_arrayOverflowed = false;
-
-    const uint32_t prevArrayEnd = GetLightArrayEnd(regLightCount_Prev, dirLightCount_Prev);
-
-    if (prevArrayEnd > 0)
-    {
-        VkBufferCopy copyInfo = {};
-        copyInfo.srcOffset = 0;
-        copyInfo.dstOffset = 0;
-        copyInfo.size = prevArrayEnd * sizeof(ShLightEncoded);
-
-        vkCmdCopyBuffer(cmd, lightsBuffer->GetDeviceLocal(), lightsBuffer_Prev.GetBuffer(), 1, &copyInfo);
-    }
-
-    memset(prevToCurIndex->GetMapped(frameIndex), 0xFF, sizeof(uint32_t) * prevArrayEnd);
 
     if (++registryGeneration[frameIndex] == 0)
     {
@@ -789,12 +768,6 @@ void qray::LightManager::Reset()
     lightShafts.clear();
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
-        const uint32_t arrayEnd = std::max(GetLightArrayEnd(regLightCount, dirLightCount),
-                                           GetLightArrayEnd(regLightCount_Prev, dirLightCount_Prev));
-
-        memset(prevToCurIndex->GetMapped(i), 0xFF, sizeof(uint32_t) * arrayEnd);
-        memset(curToPrevIndex->GetMapped(i), 0xFF, sizeof(uint32_t) * arrayEnd);
-
         registeredLightOrder[i].clear();
         registeredLightIndex[i].clear();
 
@@ -964,10 +937,6 @@ void qray::LightManager::AddLight(uint32_t frameIndex, uint64_t uniqueId,
 
     auto *pDst = static_cast<ShLightEncoded *>(lightsBuffer->GetMapped(frameIndex));
     memcpy(&pDst[index.GetArrayIndex()], &encodedLight, sizeof(ShLightEncoded));
-
-    const uint32_t ordinal = uint32_t(registeredLightOrder[frameIndex].size());
-
-    FillMatchPrev(frameIndex, index, uniqueId, ordinal);
 
     RegistryEntry &entry = registry[frameIndex][registrySlot];
     entry.generation = registryGeneration[frameIndex];
@@ -1547,10 +1516,28 @@ bool qray::LightManager::PrepareClusterListPublication(uint32_t frameIndex, uint
     return true;
 }
 
-uint32_t qray::LightManager::ResolveLightUid(uint32_t frameIndex, uint64_t uid, ResolveCacheEntry *pCache)
+uint32_t qray::LightManager::BeginResolveCache(std::vector<ResolveCacheEntry> &cache, uint32_t &generation)
 {
-    constexpr uint32_t kNotCached = ~0u;
+    if (cache.size() != kResolveCacheSize)
+    {
+        cache.assign(kResolveCacheSize, ResolveCacheEntry{});
+        generation = 1;
+        return generation;
+    }
 
+    generation++;
+    if (generation == 0)
+    {
+        std::fill(cache.begin(), cache.end(), ResolveCacheEntry{});
+        generation = 1;
+    }
+
+    return generation;
+}
+
+uint32_t qray::LightManager::ResolveLightUid(uint32_t frameIndex, uint64_t uid, ResolveCacheEntry *pCache,
+                                             uint32_t generation)
+{
     if (uid == kLightUidHole)
     {
         return uint32_t(LIGHT_INDEX_NONE);
@@ -1563,7 +1550,7 @@ uint32_t qray::LightManager::ResolveLightUid(uint32_t frameIndex, uint64_t uid, 
     {
         const ResolveCacheEntry &entry = pCache[slot];
 
-        if (entry.index == kNotCached)
+        if (entry.generation != generation)
         {
             break;
         }
@@ -1579,10 +1566,11 @@ uint32_t qray::LightManager::ResolveLightUid(uint32_t frameIndex, uint64_t uid, 
     uint32_t       resolved = 0;
     const uint32_t index = FindRegisteredLight(frameIndex, uid, resolved) ? resolved : uint32_t(LIGHT_INDEX_NONE);
 
-    if (pCache[slot].index == kNotCached)
+    if (pCache[slot].generation != generation)
     {
         pCache[slot].uid = uid;
         pCache[slot].index = index;
+        pCache[slot].generation = generation;
     }
 
     return index;
@@ -1600,12 +1588,15 @@ void qray::LightManager::RunClusterListPublishSlice(uint32_t slice, uint32_t sli
 
     uint32_t *pDstLights = static_cast<uint32_t *>(lightListLights->GetMapped(publishFrameIndex));
 
-    ResolveCacheEntry cache[kResolveCacheSize];
-    memset(cache, 0xFF, sizeof(cache));
+    std::vector<ResolveCacheEntry> fallbackCache;
+    std::vector<ResolveCacheEntry> &cache = (slice < kMaxSliceCaches) ? sliceResolveCaches[slice] : fallbackCache;
+    uint32_t localGeneration = 0;
+    uint32_t &generation = (slice < kMaxSliceCaches) ? sliceResolveGenerations[slice] : localGeneration;
+    const uint32_t gen = BeginResolveCache(cache, generation);
 
     for (uint32_t i = wordBegin; i < wordEnd; i++)
     {
-        pDstLights[i] = ResolveLightUid(publishFrameIndex, publishLightUniqueIds[i], cache);
+        pDstLights[i] = ResolveLightUid(publishFrameIndex, publishLightUniqueIds[i], cache.data(), gen);
     }
 
     if (wordBegin < wordEnd)
@@ -1648,14 +1639,13 @@ void qray::LightManager::CommitClusterListPublication()
 
     if (tailWordCount > 0)
     {
-        ResolveCacheEntry cache[kResolveCacheSize];
-        memset(cache, 0xFF, sizeof(cache));
+        const uint32_t gen = BeginResolveCache(resolveCache, resolveCacheGeneration);
 
         uint32_t unresolved = 0;
 
         for (uint32_t i = 0; i < tailWordCount; i++)
         {
-            const uint32_t index = ResolveLightUid(frameIndex, publishTails.pUniqueIds[i], cache);
+            const uint32_t index = ResolveLightUid(frameIndex, publishTails.pUniqueIds[i], resolveCache.data(), gen);
             const bool     resolved = index != uint32_t(LIGHT_INDEX_NONE);
 
             pTailEntries[i].lightIndex = index;

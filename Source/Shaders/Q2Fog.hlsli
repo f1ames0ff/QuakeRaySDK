@@ -129,7 +129,11 @@ void q2FindFogVolumes(float3 origin, float3 dir, float tMin, float tMax,
     fog1 = (uint4)0;
     fog2 = (uint4)0;
 
-    const float3 inv_dir = (float3)1.0 / dir;
+    const float3 safe_dir = float3(
+        abs(dir.x) < 1e-8 ? (dir.x < 0.0 ? -1e-8 : 1e-8) : dir.x,
+        abs(dir.y) < 1e-8 ? (dir.y < 0.0 ? -1e-8 : 1e-8) : dir.y,
+        abs(dir.z) < 1e-8 ? (dir.z < 0.0 ? -1e-8 : 1e-8) : dir.z);
+    const float3 inv_dir = (float3)1.0 / safe_dir;
     for (int i = 0; i < MAX_FOG_VOLUMES; i++)
     {
         if (globalUniform.fogIsActive[i] == 0u)

@@ -18,10 +18,12 @@
 #pragma once
 
 #include "RhiFrameContext.h"
+#include "qray/qray.h"
 
 #include <nvrhi/vulkan.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace qray::rhi
@@ -63,11 +65,10 @@ namespace qray::rhi
 // and the engine's initial all-dirty fill is up to TEXTURE_COUNT_MAX of them - accepted as a one-time
 // start-up cost.
 //
-// Wrap fidelity (TODO(refactor), not solved here): a slot is filled through
-// RhiTextureSource::wrapEngineTexture, which cannot reproduce everything the legacy table can -
-// formats missing from NVRHI's map and the engine's PBR view swizzles have no counterpart. Such slots
-// fall back to the 1x1 white texture and are counted by GetFallbackSlotCount(); the caller is meant to
-// log that count once, so a fidelity gap cannot pass silently.
+// Wrap fidelity: a slot is filled through RhiTextureSource::wrapEngineTexture with the engine's
+// optional PBR channel swizzle mapped to TextureDesc::defaultComponentMapping; only formats
+// missing from NVRHI's map fall back to the 1x1 white texture and are counted by
+// GetFallbackSlotCount(), which the caller logs once so a gap cannot pass silently.
 class RhiTextureTable
 {
 public:
@@ -92,12 +93,23 @@ public:
     nvrhi::IBindingLayout *GetLayout() const { return bindingLayout; }
     nvrhi::IDescriptorTable *GetTable() const { return table; }
 
+    struct SlotDesc
+    {
+        uint32_t slot = 0;
+        VkImage image = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t mipLevels = 1;
+        uint32_t samplerIndex = 0;
+        std::optional<QrTextureSwizzling> swizzling = std::nullopt;
+    };
+
     // Mirrors one legacy table write: element 'slot' of the texture array and of the sampler array.
     // 'samplerIndex' is the engine sampler index of the slot (SamplerManager), which is what makes the
     // sampler side follow dynamic filter changes. A repeated call with the same 'image' reuses the
     // wrapped texture instead of creating another view of it.
-    void SetSlot(uint32_t slot, VkImage image, VkFormat format, uint32_t width, uint32_t height,
-                 uint32_t mipLevels, uint32_t samplerIndex);
+    void SetSlot(const SlotDesc &desc);
 
     // Overwrites the slot with the fallback texture and its sampler. Must precede vkDestroyImage for
     // the slot's image.
@@ -139,8 +151,10 @@ private:
         uint32_t height = 0;
         uint32_t mipLevels = 1;
         uint32_t samplerIndex = 0;
+        std::optional<QrTextureSwizzling> swizzling = std::nullopt;
         nvrhi::TextureHandle texture;
         bool fallback = false;
+        bool descriptorWritten = false;
     };
 
     std::vector<Slot> slots;

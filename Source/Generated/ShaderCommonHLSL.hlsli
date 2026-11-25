@@ -78,6 +78,9 @@
 #define SBT_INDEX_MISS_SHADOW (1)
 #define SBT_INDEX_HITGROUP_FULLY_OPAQUE (0)
 #define SBT_INDEX_HITGROUP_ALPHA_TESTED (1)
+#define SBT_INDEX_HITGROUP_SHADOW_OFFSET (2)
+#define SBT_INDEX_HITGROUP_SHADOW_FULLY_OPAQUE (2)
+#define SBT_INDEX_HITGROUP_SHADOW_ALPHA_TESTED (3)
 #define MATERIAL_ALBEDO_ALPHA_INDEX (0)
 #define MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX (1)
 #define MATERIAL_NORMAL_INDEX (2)
@@ -356,7 +359,7 @@ struct ShGeometryInstance
     uint portalIndex;
     uint materials2A;
     uint materials2B;
-    uint _unused0;
+    uint clusterOverride;
     uint flags;
     uint baseVertexIndex;
     uint baseIndexIndex;

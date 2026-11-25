@@ -58,9 +58,12 @@ public:
     VkImage CreateDstTextureImage(
         const VkImageCreateInfo *info, const char *pDebugName,
         VkDeviceMemory *outMemory = nullptr);
+    VkImage CreateFramebufferImage(
+        const VkImageCreateInfo *info, const char *pDebugName);
 
     void DestroyStagingSrcTextureBuffer(VkBuffer buffer);
     void DestroyTextureImage(VkImage image);
+    void DestroyFramebufferImage(VkImage image);
 
 private:
     void CreateTexturesStagingPool();

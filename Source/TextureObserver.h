@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <functional>
 #include <qray/qray.h>
 
 #include "Containers.h"
@@ -38,7 +39,10 @@ namespace qray
         TextureObserver& operator=(const TextureObserver& other) = delete;
         TextureObserver& operator=(TextureObserver&& other) noexcept = delete;
 
-        void CheckPathsAndReupload(VkCommandBuffer cmd, uint32_t frameIndex, TextureManager &manager, ImageLoaderDev *loader);
+        void CheckPathsAndReupload(const std::function<VkCommandBuffer()> &getCmd,
+                                   uint32_t frameIndex,
+                                   TextureManager &manager,
+                                   ImageLoaderDev *loader);
 
         void RegisterPath(QrMaterial index, std::optional<std::filesystem::path> path, const std::optional<ImageLoader::ResultInfo> &imageInfo, uint32_t textureType);
         void Remove(QrMaterial index);
@@ -54,9 +58,17 @@ namespace qray
         };
 
         static bool HaveChanged(std::vector<DependentFile> &files);
+        static void ReuploadChangedFiles(const std::function<VkCommandBuffer()> &getCmd,
+                                         uint32_t frameIndex,
+                                         TextureManager &manager,
+                                         ImageLoaderDev *loader,
+                                         QrMaterial materialIndex,
+                                         const std::vector<DependentFile> &files);
 
     private:
+        static constexpr size_t kMaxMaterialsPerTick = 32;
         rgl::unordered_map<QrMaterial, std::vector<DependentFile>> materials;
-        std::chrono::time_point<std::chrono::system_clock> lastCheck;
+        std::chrono::time_point<std::chrono::steady_clock> lastCheck;
+        size_t nextMaterialOffset = 0;
     };
 }

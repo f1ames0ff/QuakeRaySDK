@@ -253,6 +253,7 @@ private:
         uint32_t baseVertex;
         uint32_t firstIndex;
         uint32_t indexCount;
+        uint32_t vertexCount;
     };
 
     bool LoadShader(const char *pFileName, nvrhi::ShaderHandle &result);
@@ -287,6 +288,9 @@ private:
     // GetDepthScale(). The single image means a single slot of these values is coherent.
     float lastViewProjection[16] = {};
     float lastDepthScale = 0.0f;
+
+    std::vector<DrawItem> staticDraws;
+    std::vector<DrawItem> dynamicDraws;
 
     bool warnedMissingGeometryBuffers = false;
     bool warnedBufferFlags = false;

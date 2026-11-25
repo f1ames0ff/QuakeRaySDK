@@ -149,22 +149,41 @@ const VkPhysicalDeviceDriverProperties &PhysicalDevice::GetDriverProperties() co
 uint32_t PhysicalDevice::GetMemoryTypeIndex(uint32_t memoryTypeBits, VkFlags requirementsMask) const
 {
     const bool wantsDeviceLocal = (requirementsMask & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
-    const VkMemoryPropertyFlags conflictingFlags =
-        wantsDeviceLocal ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const bool wantsHostVisible = (requirementsMask & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
 
-    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++)
+    VkMemoryPropertyFlags avoidedFlags = 0;
+    if (wantsDeviceLocal && !wantsHostVisible)
     {
-        if ((memoryTypeBits & 1u) != 0)
-        {
-            const VkMemoryPropertyFlags flags = memoryProperties.memoryTypes[i].propertyFlags;
+        avoidedFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    }
+    else if (wantsHostVisible && !wantsDeviceLocal)
+    {
+        avoidedFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    }
 
-            if ((flags & requirementsMask) == requirementsMask && (flags & conflictingFlags) != conflictingFlags)
+    for (uint32_t pass = 0; pass < 2; pass++)
+    {
+        uint32_t bits = memoryTypeBits;
+        const VkMemoryPropertyFlags disallowed = (pass == 0) ? avoidedFlags : 0;
+
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++)
+        {
+            if ((bits & 1u) != 0)
             {
-                return i;
+                const VkMemoryPropertyFlags flags = memoryProperties.memoryTypes[i].propertyFlags;
+                if ((flags & requirementsMask) == requirementsMask && (flags & disallowed) == 0)
+                {
+                    return i;
+                }
             }
+
+            bits >>= 1u;
         }
 
-        memoryTypeBits >>= 1u;
+        if (disallowed == 0)
+        {
+            break;
+        }
     }
 
     throw QrException(QR_GRAPHICS_API_ERROR, "Can't find memory type for given memory property flags (" + std::to_string(requirementsMask) + ")");

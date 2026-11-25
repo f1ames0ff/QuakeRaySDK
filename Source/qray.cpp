@@ -32,7 +32,23 @@ static std::atomic<uint32_t> G_EntryPointCalls{ 0 };
 
 static QrInstance GetNextID()
 {
-    return reinterpret_cast<QrInstance>(G_DEVICES.size() + 1024);
+    static std::atomic<uintptr_t> nextId{ 1024 };
+
+    while (true)
+    {
+        uintptr_t raw = nextId.fetch_add(1, std::memory_order_relaxed);
+        if (raw < 1024)
+        {
+            raw = 1024;
+            nextId.store(1025, std::memory_order_relaxed);
+        }
+
+        const QrInstance candidate = reinterpret_cast<QrInstance>(raw);
+        if (G_DEVICES.find(candidate) == G_DEVICES.end())
+        {
+            return candidate;
+        }
+    }
 }
 
 static VulkanDevice &GetDevice(QrInstance qrInstance)
@@ -452,12 +468,22 @@ QrResult qrUploadWorldLights(QrInstance qrInstance, const QrWorldLightsUploadInf
 
 QrResult qrCreateMaterial(QrInstance qrInstance, const QrMaterialCreateInfo *pCreateInfo, QrMaterial *pResult)
 {
+    if (pResult == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
     *pResult = QR_NO_MATERIAL;
     return Call(qrInstance, &VulkanDevice::CreateMaterial, pCreateInfo, pResult);
 }
 
 QrResult qrCreateAnimatedMaterial(QrInstance qrInstance, const QrAnimatedMaterialCreateInfo *pCreateInfo, QrMaterial *pResult)
 {
+    if (pResult == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
     *pResult = QR_NO_MATERIAL;
     return Call(qrInstance, &VulkanDevice::CreateAnimatedMaterial, pCreateInfo, pResult);
 }
@@ -479,8 +505,23 @@ QrResult qrCanUpdateMaterialContents(QrInstance qrInstance, QrMaterial material,
         return QR_WRONG_ARGUMENT;
     }
 
-    return Call(qrInstance, &VulkanDevice::CanUpdateMaterialContents, material, size) ? QR_SUCCESS
-                                                                                     : QR_CANT_UPDATE_MATERIAL;
+    try
+    {
+        VulkanDevice &dev = GetDevice(qrInstance);
+        G_EntryPointCalls.fetch_add(1, std::memory_order_relaxed);
+
+        if (dev.IsSuspended())
+        {
+            return QR_CANT_UPDATE_MATERIAL;
+        }
+
+        return dev.CanUpdateMaterialContents(material, size) ? QR_SUCCESS : QR_CANT_UPDATE_MATERIAL;
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
 }
 
 QrResult qrDestroyMaterial(QrInstance qrInstance, QrMaterial material)
@@ -490,6 +531,11 @@ QrResult qrDestroyMaterial(QrInstance qrInstance, QrMaterial material)
 
 QrResult qrCreateCubemap(QrInstance qrInstance, const QrCubemapCreateInfo *pCreateInfo, QrCubemap *pResult)
 {
+    if (pResult == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
     *pResult = QR_EMPTY_CUBEMAP;
     return Call(qrInstance, &VulkanDevice::CreateSkyboxCubemap, pCreateInfo, pResult);
 }

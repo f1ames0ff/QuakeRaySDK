@@ -51,6 +51,7 @@ public:
         upscaledHeight = windowHeight;
 
         dlssSharpness = 0;
+        dlssActive = false;
 
         if (pParams == nullptr)
         {
@@ -97,7 +98,9 @@ public:
 
     bool IsAmdFsr3Enabled()     const { return upscaleTechnique == QR_RENDER_UPSCALE_TECHNIQUE_AMD_FSR3; }
     bool IsNvDlssEnabled()      const { return upscaleTechnique == QR_RENDER_UPSCALE_TECHNIQUE_NVIDIA_DLSS; }
+    bool IsNvDlssActive()       const { return IsNvDlssEnabled() && dlssActive; }
     bool IsUpscaleEnabled()     const { return IsAmdFsr3Enabled() || IsNvDlssEnabled(); }
+    bool IsActiveUpscaleEnabled() const { return IsAmdFsr3Enabled() || IsNvDlssActive(); }
 
     QrRenderUpscaleTechnique GetUpscaleTechnique() const { return upscaleTechnique; }
 
@@ -212,6 +215,24 @@ private:
                       uint32_t                                 windowHeight,
                       const std::shared_ptr< DLSS >&           dlss )
     {
+        if (dlss == nullptr || !dlss->IsDlssAvailable())
+        {
+            if (resolutionMode == QR_RENDER_RESOLUTION_MODE_CUSTOM && pParams != nullptr)
+            {
+                renderWidth  = pParams->customRenderSize.width;
+                renderHeight = pParams->customRenderSize.height;
+            }
+            else
+            {
+                renderWidth  = windowWidth;
+                renderHeight = windowHeight;
+            }
+            dlssActive = false;
+            return;
+        }
+
+        dlssActive = true;
+
         if (resolutionMode == QR_RENDER_RESOLUTION_MODE_CUSTOM)
         {
             renderWidth  = pParams->customRenderSize.width;
@@ -244,6 +265,7 @@ private:
     QrRenderResolutionMode      resolutionMode   = QR_RENDER_RESOLUTION_MODE_CUSTOM;
 
     float dlssSharpness = 0.0f;
+    bool dlssActive = false;
 };
 
 }

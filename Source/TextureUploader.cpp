@@ -82,7 +82,13 @@ TextureUploader::~TextureUploader()
 
     for (const auto &entry : updateableImageInfos)
     {
-        memAllocator->DestroyStagingSrcTextureBuffer(entry.second.stagingBuffer);
+        for (VkBuffer stagingBuffer : entry.second.stagingBuffers)
+        {
+            if (stagingBuffer != VK_NULL_HANDLE)
+            {
+                memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffer);
+            }
+        }
     }
 }
 
@@ -118,6 +124,11 @@ uint32_t TextureUploader::GetMipmapCount(const QrExtent2D &size, const UploadInf
     if (AreMipmapsPregenerated(info))
     {
         return std::min(info.pregeneratedLevelCount, MAX_PREGENERATED_MIPMAP_LEVELS);
+    }
+
+    if (!DoesFormatSupportBlit(info.format))
+    {
+        return 1;
     }
 
     const auto widthLevelCount = static_cast<uint32_t>(log2(size.width));
@@ -185,10 +196,11 @@ void TextureUploader::PrepareMipmaps(VkCommandBuffer cmd, VkImage image, uint32_
     }
 }
 
-void TextureUploader::CopyStagingToImage(VkCommandBuffer cmd, VkBuffer staging, VkImage image, const QrExtent2D &size, uint32_t baseLayer, uint32_t layerCount)
+void TextureUploader::CopyStagingToImage(VkCommandBuffer cmd, VkBuffer staging, VkImage image, const QrExtent2D &size, uint32_t baseLayer, uint32_t layerCount,
+                                           VkDeviceSize bufferOffset)
 {
     VkBufferImageCopy copyRegion{};
-    copyRegion.bufferOffset = 0;
+    copyRegion.bufferOffset = bufferOffset;
     copyRegion.bufferRowLength = 0;
     copyRegion.bufferImageHeight = 0;
     copyRegion.imageExtent = { size.width, size.height, 1 };
@@ -260,7 +272,8 @@ bool TextureUploader::CreateImage(const UploadInfo &info, VkImage *result)
     return true;
 }
 
-void TextureUploader::PrepareImage(VkImage image, VkBuffer staging[], const UploadInfo &info, ImagePrepareType prepareType)
+void TextureUploader::PrepareImage(VkImage image, VkBuffer staging[], const UploadInfo &info, ImagePrepareType prepareType,
+                                   const VkDeviceSize *stagingOffsets)
 {
     VkCommandBuffer cmd = info.cmd;
     const QrExtent2D &size = info.baseSize;
@@ -302,20 +315,21 @@ void TextureUploader::PrepareImage(VkImage image, VkBuffer staging[], const Uplo
         }
         else
         {
+            Utils::BarrierImage(
+                cmd, image,
+                curAccessMask, VK_ACCESS_TRANSFER_WRITE_BIT,
+                curLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                curStageMask, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                firstMipmap);
+
+            curAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            curLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            curStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
             for (uint32_t layer = 0; layer < layerCount; layer++)
             {
-                Utils::BarrierImage(
-                    cmd, image,
-                    curAccessMask, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    curLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    curStageMask, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    firstMipmap);
-
-                curAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                curLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                curStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-
-                CopyStagingToImage(cmd, staging[layer], image, size, layer, 1);
+                const VkDeviceSize offset = stagingOffsets != nullptr ? stagingOffsets[layer] : 0;
+                CopyStagingToImage(cmd, staging[layer], image, size, layer, 1, offset);
             }
         }
     }
@@ -397,6 +411,7 @@ VkImageView TextureUploader::CreateImageView( VkImage                           
 TextureUploader::UploadResult TextureUploader::UploadImage(const UploadInfo &info)
 {
     assert(!info.isCubemap);
+    assert(info.frameIndex < MAX_FRAMES_IN_FLIGHT);
 
     const void *data = info.pData;
     const VkDeviceSize dataSize = info.dataSize;
@@ -412,32 +427,52 @@ TextureUploader::UploadResult TextureUploader::UploadImage(const UploadInfo &inf
     stagingInfo.size = dataSize;
     stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
-    void *mappedData = nullptr;
-    VkBuffer stagingBuffer = memAllocator->CreateStagingSrcTextureBuffer(&stagingInfo, info.pDebugName, &mappedData);
+    VkBuffer stagingBuffers[MAX_FRAMES_IN_FLIGHT] = {};
+    void *mappedDatas[MAX_FRAMES_IN_FLIGHT] = {};
+    const uint32_t stagingCount = info.isUpdateable ? MAX_FRAMES_IN_FLIGHT : 1u;
 
-    if (stagingBuffer == VK_NULL_HANDLE)
+    for (uint32_t i = 0; i < stagingCount; i++)
     {
-        return {};
-    }
+        stagingBuffers[i] = memAllocator->CreateStagingSrcTextureBuffer(&stagingInfo, info.pDebugName, &mappedDatas[i]);
+        if (stagingBuffers[i] == VK_NULL_HANDLE)
+        {
+            for (uint32_t j = 0; j < i; j++)
+            {
+                memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffers[j]);
+            }
+            return {};
+        }
 
-    SET_DEBUG_NAME(device, stagingBuffer, VK_OBJECT_TYPE_BUFFER, info.pDebugName);
+        SET_DEBUG_NAME(device, stagingBuffers[i], VK_OBJECT_TYPE_BUFFER, info.pDebugName);
+    }
 
     VkImage image = VK_NULL_HANDLE;
 
     if (!CreateImage(info, &image))
     {
-        memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffer);
+        for (uint32_t i = 0; i < stagingCount; i++)
+        {
+            memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffers[i]);
+        }
         return {};
     }
 
-    if (info.isUpdateable && data == nullptr)
+    if (info.isUpdateable)
     {
-        PrepareImage(image, VK_NULL_HANDLE, info, ImagePrepareType::INIT_WITHOUT_COPYING);
+        if (data == nullptr)
+        {
+            PrepareImage(image, nullptr, info, ImagePrepareType::INIT_WITHOUT_COPYING);
+        }
+        else
+        {
+            memcpy(mappedDatas[info.frameIndex], data, dataSize);
+            PrepareImage(image, &stagingBuffers[info.frameIndex], info, ImagePrepareType::INIT);
+        }
     }
     else
     {
-        memcpy(mappedData, data, dataSize);
-        PrepareImage(image, &stagingBuffer, info, ImagePrepareType::INIT);
+        memcpy(mappedDatas[0], data, dataSize);
+        PrepareImage(image, &stagingBuffers[0], info, ImagePrepareType::INIT);
     }
 
     const VkImageView imageView = CreateImageView(
@@ -446,20 +481,23 @@ TextureUploader::UploadResult TextureUploader::UploadImage(const UploadInfo &inf
 
     if (info.isUpdateable)
     {
-        updateableImageInfos[image] = UpdateableImageInfo
+        UpdateableImageInfo updateable = {};
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            .stagingBuffer = stagingBuffer,
-            .mappedData = mappedData,
-            .dataSize = static_cast<uint32_t>(dataSize),
-            .imageSize = size,
-            .generateMipmaps = info.useMipmaps,
-            .format = info.format,
-            .pregenerated = AreMipmapsPregenerated(info),
-        };
+            updateable.stagingBuffers[i] = stagingBuffers[i];
+            updateable.mappedData[i] = mappedDatas[i];
+        }
+        updateable.dataSize = static_cast<uint32_t>(dataSize);
+        updateable.imageSize = size;
+        updateable.generateMipmaps = info.useMipmaps;
+        updateable.format = info.format;
+        updateable.pregenerated = AreMipmapsPregenerated(info);
+
+        updateableImageInfos[image] = updateable;
     }
     else
     {
-        stagingToFree[info.frameIndex].push_back(stagingBuffer);
+        stagingToFree[info.frameIndex].push_back(stagingBuffers[0]);
     }
 
     return UploadResult
@@ -470,10 +508,11 @@ TextureUploader::UploadResult TextureUploader::UploadImage(const UploadInfo &inf
     };
 }
 
-void TextureUploader::UpdateImage(VkCommandBuffer cmd, VkImage targetImage, const void *data)
+void TextureUploader::UpdateImage(VkCommandBuffer cmd, uint32_t frameIndex, VkImage targetImage, const void *data)
 {
     assert(targetImage != VK_NULL_HANDLE);
     assert(data != nullptr);
+    assert(frameIndex < MAX_FRAMES_IN_FLIGHT);
 
     const auto it = updateableImageInfos.find(targetImage);
 
@@ -484,16 +523,17 @@ void TextureUploader::UpdateImage(VkCommandBuffer cmd, VkImage targetImage, cons
 
     UpdateableImageInfo &updateInfo = it->second;
 
-    assert(updateInfo.mappedData != nullptr);
-    memcpy(updateInfo.mappedData, data, updateInfo.dataSize);
+    assert(updateInfo.mappedData[frameIndex] != nullptr);
+    memcpy(updateInfo.mappedData[frameIndex], data, updateInfo.dataSize);
 
     UploadInfo info{};
     info.cmd = cmd;
+    info.frameIndex = frameIndex;
     info.baseSize = updateInfo.imageSize;
     info.useMipmaps = updateInfo.generateMipmaps;
     info.format = updateInfo.format;
 
-    PrepareImage(targetImage, &updateInfo.stagingBuffer, info, ImagePrepareType::UPDATE);
+    PrepareImage(targetImage, &updateInfo.stagingBuffers[frameIndex], info, ImagePrepareType::UPDATE);
 }
 
 bool TextureUploader::CanUpdateImageFromHostData(VkImage image) const
@@ -509,7 +549,13 @@ void TextureUploader::DestroyImage(VkImage image, VkImageView view)
 
     if (it != updateableImageInfos.end())
     {
-        memAllocator->DestroyStagingSrcTextureBuffer(it->second.stagingBuffer);
+        for (VkBuffer stagingBuffer : it->second.stagingBuffers)
+        {
+            if (stagingBuffer != VK_NULL_HANDLE)
+            {
+                memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffer);
+            }
+        }
         updateableImageInfos.erase(it);
     }
 

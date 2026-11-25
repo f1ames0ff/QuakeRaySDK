@@ -174,7 +174,8 @@ void storeSky(
 #else
     bool wasSplit,
 #endif
-    const float4 fogAccum )
+    const float4 fogAccum,
+    const bool writeQ2GBuffer = true )
 {
     framebufIsSky[pix] = (uint4)1;
 
@@ -192,7 +193,10 @@ void storeSky(
 
         framebufAlbedo[getRegularPixFromCheckerboardPix(pix)] = float4(albedo, 0.0);
 
-        storeQ2GBuffer(pix, albedo, 1.0, (float2)0.0, (float3)1.0, (float4)0.0, 0.0, 1.0, globalUniform.rayLength * 2.0, 0.0, globalUniform.rayLength * 2.0, albedo, 1.0, fogAccum, ~0u);
+        if (writeQ2GBuffer)
+        {
+            storeQ2GBuffer(pix, albedo, 1.0, (float2)0.0, (float3)1.0, (float4)0.0, 0.0, 1.0, globalUniform.rayLength * 2.0, 0.0, globalUniform.rayLength * 2.0, albedo, 1.0, fogAccum, ~0u);
+        }
     }
 
     float2 m = getMotionForInfinitePoint(rayDir);
@@ -1149,7 +1153,7 @@ void main()
                 framebufDepthNdc[pairPix] = (float4)1.0;
             }
 
-            storeSky(pix, rayDir, true, throughput, wasSplit, q2FogAccum);
+            storeSky(pix, rayDir, true, throughput, wasSplit, q2FogAccum, false);
             storeQ2GBuffer(pix, (float3)0.0, 1.0, (float2)0.0, (float3)1.0, (float4)0.0, 0.0, 1.0, -globalUniform.rayLength * 2.0, q2HalfConeAngle, globalUniform.rayLength * 2.0,
                            q2Transparent.rgb, q2Transparent.a, q2FogAccum, ~0u);
 

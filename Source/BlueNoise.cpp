@@ -165,14 +165,18 @@ BlueNoise::BlueNoise(
     VK_CHECKERROR(vkCreateImageView(device, &viewInfo, nullptr, &blueNoiseImagesView));
 
     SET_DEBUG_NAME(device, blueNoiseImagesView, VK_OBJECT_TYPE_IMAGE_VIEW, "Blue noise View");
-
-    CreateDescriptors();
 }
 
 BlueNoise::~BlueNoise()
 {
-    vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
-    vkDestroyDescriptorPool(device, descPool, nullptr);
+    if (descSetLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
+    }
+    if (descPool != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorPool(device, descPool, nullptr);
+    }
 
     vkDestroyImageView(device, blueNoiseImagesView, nullptr);
     allocator->DestroyTextureImage(blueNoiseImages);

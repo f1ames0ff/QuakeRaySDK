@@ -179,7 +179,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                     float marchTau = -1.0;
                     if (blend < 1.0)
                     {
-                        marchTau = cloudOpticalDepth(layer, cloudSunDepth(layer, p, sunDir, CLOUD_SHADOW_STEPS, sunSlices));
+                        marchTau = cloudOpticalDepth(layer, cloudSunDepth(layer, p, sunDir, min(CLOUD_SHADOW_STEPS, 8), sunSlices));
                     }
                     sunTau = (marchTau >= 0.0) ? lerp(marchTau, max(mapTau, 0.0), blend) : mapTau;
                     sunVisibility = exp(-sunTau);

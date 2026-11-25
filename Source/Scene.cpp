@@ -36,7 +36,6 @@ qray::Scene::Scene(
     const std::shared_ptr<const GlobalUniform> &_uniform,
     const std::shared_ptr<const ShaderManager> &_shaderManager)
 :
-    toResubmitMovable(false),
     isRecordingStatic(false),
     submittedStaticInCurrentFrame(false),
     aabbInitialized(false)
@@ -79,30 +78,54 @@ void qray::Scene::PreprocessVertices(VkCommandBuffer cmd, uint32_t frameIndex,
 
 uint32_t qray::Scene::GetVertexPreprocessingMode() const
 {
-    if (submittedStaticInCurrentFrame)
-    {
-        return VERT_PREPROC_MODE_ALL;
-    }
+    return submittedStaticInCurrentFrame
+        ? VERT_PREPROC_MODE_ALL
+        : VERT_PREPROC_MODE_ONLY_DYNAMIC;
+}
 
-    if (toResubmitMovable)
-    {
-        return VERT_PREPROC_MODE_DYNAMIC_AND_MOVABLE;
-    }
-
-    return VERT_PREPROC_MODE_ONLY_DYNAMIC;
+void qray::Scene::RecordBoundsScan(uint64_t durationNs, uint32_t vertexCount)
+{
+    boundsScanSumNs.fetch_add(durationNs, std::memory_order_relaxed);
+    boundsScanCalls.fetch_add(1, std::memory_order_relaxed);
+    boundsScanVerts.fetch_add(vertexCount, std::memory_order_relaxed);
 }
 
 bool qray::Scene::Upload(uint32_t frameIndex, const QrGeometryUploadInfo &uploadInfo)
 {
     const std::chrono::steady_clock::time_point boundsStart = std::chrono::steady_clock::now();
 
-    AccumulateGeometryBounds(uploadInfo, aabbInitialized, aabbMin, aabbMax);
+    bool  localInit = false;
+    float localMin[3] = {};
+    float localMax[3] = {};
+    AccumulateGeometryBounds(uploadInfo, localInit, localMin, localMax);
 
-    boundsScanSumNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+    RecordBoundsScan(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - boundsStart).count()),
-        std::memory_order_relaxed);
-    boundsScanCalls.fetch_add(1, std::memory_order_relaxed);
-    boundsScanVerts.fetch_add(uploadInfo.vertexCount, std::memory_order_relaxed);
+        uploadInfo.vertexCount);
+
+    return UploadWithBounds(frameIndex, uploadInfo, localInit, localMin, localMax);
+}
+
+bool qray::Scene::UploadWithBounds(uint32_t frameIndex, const QrGeometryUploadInfo &uploadInfo,
+                                   bool localInit, const float localMin[3], const float localMax[3])
+{
+    if (localInit)
+    {
+        if (!aabbInitialized)
+        {
+            aabbInitialized = true;
+            std::copy(localMin, localMin + 3, aabbMin);
+            std::copy(localMax, localMax + 3, aabbMax);
+        }
+        else
+        {
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                aabbMin[axis] = std::min(aabbMin[axis], localMin[axis]);
+                aabbMax[axis] = std::max(aabbMax[axis], localMax[axis]);
+            }
+        }
+    }
 
     if (uploadInfo.geomType == QR_GEOMETRY_TYPE_DYNAMIC)
     {
@@ -138,7 +161,11 @@ bool qray::Scene::Upload(uint32_t frameIndex, const QrGeometryUploadInfo &upload
 
             if (uploadInfo.geomType == QR_GEOMETRY_TYPE_STATIC_MOVABLE)
             {
-                movableGeomIndices.push_back(simpleIndex);
+                if (simpleIndex >= isMovableSimpleIndex.size())
+                {
+                    isMovableSimpleIndex.resize(size_t(simpleIndex) + 1u, 0u);
+                }
+                isMovableSimpleIndex[simpleIndex] = 1u;
             }
 
             return true;
@@ -194,17 +221,12 @@ bool qray::Scene::UpdateTransform(const QrUpdateTransformInfo &updateInfo)
         throw QrException(QR_CANT_UPDATE_TRANSFORM, "Can't find static geometry with unique ID=" + std::to_string(updateInfo.movableStaticUniqueID));
     }
 
-    if (std::find(movableGeomIndices.begin(), movableGeomIndices.end(), simpleIndex) == movableGeomIndices.end())
+    if (simpleIndex >= isMovableSimpleIndex.size() || isMovableSimpleIndex[simpleIndex] == 0u)
     {
         throw QrException(QR_CANT_UPDATE_TRANSFORM, "Static geometry with unique ID=" + std::to_string(updateInfo.movableStaticUniqueID) + " isn't movable");
     }
 
     asManager->UpdateStaticMovableTransform(simpleIndex, updateInfo);
-
-    if (!isRecordingStatic)
-    {
-        toResubmitMovable = true;
-    }
 
     return true;
 }
@@ -247,7 +269,7 @@ void qray::Scene::StartNewStatic()
     lightManager->Reset();
 
     staticUniqueIDToSimpleIndex.clear();
-    movableGeomIndices.clear();
+    isMovableSimpleIndex.clear();
 }
 
 const std::shared_ptr<ASManager> &qray::Scene::GetASManager()

@@ -70,12 +70,20 @@ public:
     VkBuffer GetBuffer() const;
     VkBuffer GetMatchPrevBuffer() const;
     uint32_t GetStaticGeomBaseVertexIndex(uint32_t simpleIndex);
+    void GetStaticGeomVertexInfo(uint32_t simpleIndex,
+                                 uint32_t *outBaseVertex,
+                                 uint32_t *outVertexCount,
+                                 uint32_t *outFlags);
 
     VkBuffer GetStagingBuffer(uint32_t frameIndex);
     const ShGeometryInstance *GetStagingData(uint32_t frameIndex);
     VkDeviceSize GetBufferSize() const;
     VkDeviceSize GetMatchPrevSize() const;
     const int32_t *GetMatchPrevData() const;
+
+    uint64_t GetStaticContentRevision() const { return staticContentRevision; }
+    uint64_t GetStaticMatchPrevRevision() const { return staticMatchPrevRevision; }
+    void GetMatchPrevCopyBounds(uint32_t &outMaxStatic, uint32_t &outMaxDynamic) const;
 
 private:
     struct GeomFrameInfo
@@ -126,6 +134,8 @@ private:
     std::shared_ptr<AutoBuffer> matchPrev;
     std::unique_ptr<int32_t[]> matchPrevShadow;
     MatchPrevCopyInfo matchPrevCopyInfo;
+    uint64_t staticContentRevision = 0;
+    uint64_t staticMatchPrevRevision = 0;
 
     std::vector<uint32_t> copyRegionLowerBounds[MAX_FRAMES_IN_FLIGHT];
     std::vector<uint32_t> copyRegionUpperBounds[MAX_FRAMES_IN_FLIGHT];

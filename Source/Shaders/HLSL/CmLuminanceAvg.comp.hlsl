@@ -25,6 +25,7 @@
 
 
 groupshared float s_Shared[HISTOGRAM_BINS];
+groupshared float s_Weights[14];
 
 
 float computeSharedSum(float val, const uint linear_idx)
@@ -166,27 +167,35 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint localInvocationInde
     sum_recip = computeSharedSum(rcp_hist * thresh_passed, linear_idx);
     float my_slope = (1.0 + rcp_hist * (r_over_delta - len_omega) / max(sum_recip, 1e-6)) * thresh_passed;
 
-    float gaussian_sum = 0.0;
-    float weights[14];
-    for (int i = 0; i < 14; i++)
+    if (linear_idx < 14)
     {
-        const float kernel_value = exp(-(float)(i * i) / (2.0 * tonemapping[0].tmSlopeBlurSigma * tonemapping[0].tmSlopeBlurSigma));
-        gaussian_sum += kernel_value * (i == 0 ? 1.0 : 2.0);
-        weights[i] = kernel_value;
+        const float sigma = max(tonemapping[0].tmSlopeBlurSigma, 1e-6);
+        s_Weights[linear_idx] = exp(-(float)(linear_idx * linear_idx) / (2.0 * sigma * sigma));
     }
-    for (int i = 0; i < 14; i++)
-    {
-        weights[i] /= gaussian_sum;
-    }
-
     s_Shared[linear_idx] = my_slope;
     GroupMemoryBarrierWithGroupSync();
-    my_slope *= weights[0];
+
+    if (linear_idx == 0)
+    {
+        float gaussian_sum = 0.0;
+        for (int i = 0; i < 14; i++)
+        {
+            gaussian_sum += s_Weights[i] * (i == 0 ? 1.0 : 2.0);
+        }
+        const float invSum = 1.0 / gaussian_sum;
+        for (int i = 0; i < 14; i++)
+        {
+            s_Weights[i] *= invSum;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    my_slope *= s_Weights[0];
     for (int dx = -13; dx <= 13; dx++)
     {
         if (dx != 0)
         {
-            my_slope += weights[abs(dx)] * s_Shared[clamp(linear_idx + dx, 0, HISTOGRAM_BINS - 1)];
+            my_slope += s_Weights[abs(dx)] * s_Shared[clamp(linear_idx + dx, 0, HISTOGRAM_BINS - 1)];
         }
     }
 

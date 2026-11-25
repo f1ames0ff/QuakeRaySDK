@@ -357,8 +357,6 @@ float3 sampleSceneUV( const float2 uv )
 
 float3 applyChromaticAberration( const int2 pix )
 {
-    const float3 scene = sampleScene( pix );
-
     const float damage     = postEffectsControl.gameplayFeedback.x;
     const float liquid     = postEffectsControl.gameplayFeedback.y;
     const float aberration = postEffectsControl.gameplayFeedback.z;
@@ -366,7 +364,7 @@ float3 applyChromaticAberration( const int2 pix )
 
     if( damage <= 0.0 && liquid <= 0.0 && suit <= 0.0 )
     {
-        return scene;
+        return sampleScene( pix );
     }
 
     const float2 uv = ( float2( pix ) + 0.5 ) /
@@ -378,10 +376,6 @@ float3 applyChromaticAberration( const int2 pix )
     const float damageDistance = length( ( uv - 0.5 ) * 2.0 );
     const float damageMask = smoothstep( 0.8, 1.0, damageDistance );
 
-    const float aspect = globalUniform.renderWidth / globalUniform.renderHeight;
-    const float2 centered = float2( ( uv.x - 0.5 ) * aspect, uv.y - 0.5 );
-    const float2 direction = normalize( centered + float2( 1e-5, 1e-5 ) );
-
     float displayHeight = globalUniform.upscaledRenderHeight;
     if( displayHeight <= 0.0 )
     {
@@ -392,24 +386,36 @@ float3 applyChromaticAberration( const int2 pix )
     const float damageAmount = 270.0 * damage * damageMask;
     const float liquidAmount = ( 180.0 * liquid + 4.0 * suit ) * edgeMask;
     const float splitPixels = min( ( damageAmount + liquidAmount ) * ( aberration / 0.3 ), 200.0 ) * heightScale;
-    const float2 offset = direction * ( splitPixels / displayHeight );
 
-    const int tapCount = 7;
-
-    float3 color  = (float3)0.0;
-    float3 weight = (float3)0.0;
-
-    for( int i = 0; i < tapCount; i++ )
+    float3 color;
+    if( splitPixels <= 1e-3 )
     {
-        const float t = ( i + 0.5 ) / (float)tapCount;
-        const float3 w = float3( t, 1.0 - abs( 2.0 * t - 1.0 ), 1.0 - t );
-        const float2 sampleUV = clamp( uv + offset * ( t - 0.5 ), (float2)0.0, (float2)1.0 );
-
-        color  += sampleSceneUV( sampleUV ) * w;
-        weight += w;
+        color = sampleScene( pix );
     }
+    else
+    {
+        const float aspect = globalUniform.renderWidth / globalUniform.renderHeight;
+        const float2 centered = float2( ( uv.x - 0.5 ) * aspect, uv.y - 0.5 );
+        const float2 direction = normalize( centered + float2( 1e-5, 1e-5 ) );
+        const float2 offset = direction * ( splitPixels / displayHeight );
 
-    color /= weight;
+        const int tapCount = 7;
+
+        color = (float3)0.0;
+        float3 weight = (float3)0.0;
+
+        for( int i = 0; i < tapCount; i++ )
+        {
+            const float t = ( i + 0.5 ) / (float)tapCount;
+            const float3 w = float3( t, 1.0 - abs( 2.0 * t - 1.0 ), 1.0 - t );
+            const float2 sampleUV = clamp( uv + offset * ( t - 0.5 ), (float2)0.0, (float2)1.0 );
+
+            color  += sampleSceneUV( sampleUV ) * w;
+            weight += w;
+        }
+
+        color /= weight;
+    }
 
     const float redness = saturate( damage * 2.0 ) * damageMask * 0.5;
     color = colorApplyTint( color, float3( 1.0, 0.15, 0.10 ), redness );

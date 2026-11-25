@@ -35,14 +35,18 @@ qray::PortalList::PortalList(VkDevice _device, std::shared_ptr<MemoryAllocator> 
         PORTAL_MAX_COUNT * sizeof(ShPortalInstance),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         "Portals buffer");
-
-    CreateDescriptors();
 }
 
 qray::PortalList::~PortalList()
 {
-    vkDestroyDescriptorPool(device, descPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
+    if (descPool != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorPool(device, descPool, nullptr);
+    }
+    if (descSetLayout != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
+    }
 }
 
 void qray::PortalList::Upload(uint32_t frameIndex, const QrPortalUploadInfo &info)

@@ -132,6 +132,10 @@ float3 intersectRayTriangle(const float3x3 positions, const float3 orig, const f
     const float3 pvec = cross(dir, edge2);
 
     const float det = dot(edge1, pvec);
+    if (abs(det) < 1e-12)
+    {
+        return float3(1.0, 0.0, 0.0);
+    }
     const float invDet = 1.0 / det;
 
     const float3 tvec = orig - getColumn(positions, 0);

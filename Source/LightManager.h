@@ -237,13 +237,21 @@ private:
 
     struct ResolveCacheEntry
     {
-        uint64_t uid;
-        uint32_t index;
+        uint64_t uid = 0;
+        uint32_t index = 0;
+        uint32_t generation = 0;
     };
 
     static constexpr uint32_t kResolveCacheSize = 2048;
+    static constexpr uint32_t kMaxSliceCaches = 32;
 
-    uint32_t ResolveLightUid(uint32_t frameIndex, uint64_t uid, ResolveCacheEntry *pCache);
+    uint32_t BeginResolveCache(std::vector<ResolveCacheEntry> &cache, uint32_t &generation);
+    uint32_t ResolveLightUid(uint32_t frameIndex, uint64_t uid, ResolveCacheEntry *pCache, uint32_t generation);
+
+    std::vector<ResolveCacheEntry> resolveCache;
+    uint32_t resolveCacheGeneration = 0;
+    std::vector<ResolveCacheEntry> sliceResolveCaches[kMaxSliceCaches];
+    uint32_t sliceResolveGenerations[kMaxSliceCaches] = {};
 
     bool            publishPending = false;
     uint32_t        publishFrameIndex = 0;

@@ -357,7 +357,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float rnd = rndBlueNoise8(seed, 0).x;
     offset += getStep(offset, density) * (rnd - 1.0);
 
-    while (true)
+    for (uint stepIdx = 0u; stepIdx < 1024u; stepIdx++)
     {
         density = getDensity(currentPos);
         float stepLength = getStep(offset, density);

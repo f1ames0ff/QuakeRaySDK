@@ -70,7 +70,7 @@ public:
         return cluster < clusterFlags.size() && (clusterFlags[cluster] & QR_WORLD_CLUSTER_SOLID_BIT) != 0;
     }
 
-    const uint8_t *GetClusterVis(uint32_t cluster) const;
+    const uint8_t *GetClusterVis(uint32_t cluster, size_t *pOutRemainingBytes = nullptr) const;
 
     // Bit c of byte c/8 is 1 when a sun ray from cluster c can still reach the sky;
     // nullptr when the host sent no table, which the light manager reads as all-visible.

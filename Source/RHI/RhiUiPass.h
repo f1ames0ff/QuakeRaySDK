@@ -232,6 +232,7 @@ private:
 
     bool LoadShader(const char *pFileName, nvrhi::ShaderType type, nvrhi::ShaderHandle &result);
 
+    bool EnsureTarget(Target &target, nvrhi::ITexture *pTarget, uint32_t targetWidth, uint32_t targetHeight);
     void ReleaseTarget(Target &target);
     void ReleasePipelineCache();
 

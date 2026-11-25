@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block set 1 binding 0
 
 [0] offset 0 m4(v4(float32)) matrixstride 16
@@ -153,6 +153,19 @@
 === block set 6 binding 8
 
 [0] offset 0 array[](uint32) stride 4
+=== block set 6 binding 9
+
+[0] offset 0 v3(float32)
+[1] offset 12 float32
+[2] offset 16 v3(float32)
+[3] offset 28 float32
+[4] offset 32 v3(float32)
+[5] offset 44 float32
+[6] offset 48 v3(float32)
+[7] offset 60 float32
+[8] offset 64 array[8](v2(float32)) stride 8
+[9] offset 128 uint32
+[10] offset 132 array[3](uint32) stride 4
 === block set 7 binding 0
 
 [0] offset 0 array[6](uint32) stride 4
@@ -202,6 +215,10 @@ StorageBuffer
 === descriptor set 6 binding 8
 struct nonwritable
 === descriptor set 6 binding 8: storage class
+StorageBuffer
+=== descriptor set 6 binding 9
+struct nonwritable
+=== descriptor set 6 binding 9: storage class
 StorageBuffer
 === descriptor set 7 binding 0
 struct

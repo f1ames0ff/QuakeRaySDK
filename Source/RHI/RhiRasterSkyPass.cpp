@@ -417,7 +417,7 @@ bool RhiRasterSkyPass::Create(nvrhi::IDevice *pDevice,
         depthDesc.height = CUBEMAP_SIZE;
         depthDesc.format = DEPTH_FORMAT;
         depthDesc.dimension = nvrhi::TextureDimension::Texture2DArray;
-        depthDesc.mipLevels = CUBEMAP_MIP_LEVELS;
+        depthDesc.mipLevels = 1;
         depthDesc.arraySize = CUBEMAP_FACE_COUNT;
         depthDesc.sampleCount = 1;
         depthDesc.isShaderResource = false;
@@ -434,30 +434,23 @@ bool RhiRasterSkyPass::Create(nvrhi::IDevice *pDevice,
         }
     }
 
-    // One framebuffer per (mip, face), the same subresource pair as its colour and depth attachment.
-    // The colour attachment is one cube slice; the Vulkan backend turns that into a 2D view over
-    // (mip, layer) (vulkan-graphics.cpp:28-54, :56-84; vulkan-texture.cpp:287-349), so the cube
-    // needs no second view and no re-wrap. Nothing here depends on the frame index or the frame
-    // resolution: the cube is fixed and never re-created, so Render allocates nothing.
-    for (uint32_t mip = 0; mip < CUBEMAP_MIP_LEVELS; mip++)
+    // One framebuffer per face at mip 0; mips 1..10 are generated via rhi::generateCubemapMips.
+    for (uint32_t face = 0; face < CUBEMAP_FACE_COUNT; face++)
     {
-        for (uint32_t face = 0; face < CUBEMAP_FACE_COUNT; face++)
+        const nvrhi::TextureSubresourceSet subresources(0, 1, face, 1);
+
+        nvrhi::FramebufferDesc framebufferDesc;
+        framebufferDesc.addColorAttachment(visibleCube, subresources);
+        framebufferDesc.setDepthAttachment(depthTexture, subresources);
+
+        nvrhi::FramebufferHandle &framebuffer = framebuffers[face];
+        framebuffer = device->createFramebuffer(framebufferDesc);
+
+        if (framebuffer == nullptr)
         {
-            const nvrhi::TextureSubresourceSet subresources(mip, 1, face, 1);
-
-            nvrhi::FramebufferDesc framebufferDesc;
-            framebufferDesc.addColorAttachment(visibleCube, subresources);
-            framebufferDesc.setDepthAttachment(depthTexture, subresources);
-
-            nvrhi::FramebufferHandle &framebuffer = framebuffers[mip * CUBEMAP_FACE_COUNT + face];
-            framebuffer = device->createFramebuffer(framebufferDesc);
-
-            if (framebuffer == nullptr)
-            {
-                LogMessage(print, "Warning: RHI: failed to create the raster sky framebuffers");
-                ReleaseResources();
-                return false;
-            }
+            LogMessage(print, "Warning: RHI: failed to create the raster sky framebuffers");
+            ReleaseResources();
+            return false;
         }
     }
 
@@ -505,115 +498,79 @@ void RhiRasterSkyPass::Render(nvrhi::ICommandList *pCommandList,
     // declared in the first list that binds the table (RhiTextureSource.h); this may be that list.
     textureTable->TrackPendingTextures(pCommandList);
 
-    for (uint32_t mip = 0; mip < CUBEMAP_MIP_LEVELS; mip++)
+    // Rasterize mip 0 (6 faces), then generate mips 1..10 via vkCmdBlitImage linear blit chain.
+    VkViewport legacyViewport = {};
+    legacyViewport.x = 0.0f;
+    legacyViewport.y = 0.0f;
+    legacyViewport.width = float(CUBEMAP_SIZE);
+    legacyViewport.height = float(CUBEMAP_SIZE);
+    legacyViewport.minDepth = 0.0f;
+    legacyViewport.maxDepth = 1.0f;
+
+    const nvrhi::Viewport viewport = ToLegacyViewport(legacyViewport);
+    const nvrhi::Rect scissor(0, int(CUBEMAP_SIZE), 0, int(CUBEMAP_SIZE));
+
+    for (uint32_t face = 0; face < CUBEMAP_FACE_COUNT; face++)
     {
-        // The mip's face size. The legacy rasters mip 0 at 1024 and blits the chain
-        // (RenderCubemap.cpp:230, :233-330); this module rasters every mip at its own size instead,
-        // because NVRHI has no blit. The per-face view-projections do not change with the mip: they
-        // map to NDC and the viewport scales them to this level.
-        const uint32_t size = std::max(CUBEMAP_SIZE >> mip, 1u);
+        nvrhi::IFramebuffer *framebuffer = framebuffers[face];
 
-        // The legacy cube pass's static viewport and scissor (RenderCubemap.cpp:460-468, :479): the
-        // face's whole area, depth [0, 1], and the same area for the scissor of every draw. The
-        // rectangle goes through the legacy-viewport helper, so the emitted VkViewport is the
-        // legacy's own positive-height one.
-        VkViewport legacyViewport = {};
-        legacyViewport.x = 0.0f;
-        legacyViewport.y = 0.0f;
-        legacyViewport.width = float(size);
-        legacyViewport.height = float(size);
-        legacyViewport.minDepth = 0.0f;
-        legacyViewport.maxDepth = 1.0f;
+        const nvrhi::TextureSubresourceSet depthSubresource(0, 1, face, 1);
+        pCommandList->clearDepthStencilTexture(depthTexture, depthSubresource, true, 1.0f, false, 0);
 
-        const nvrhi::Viewport viewport = ToLegacyViewport(legacyViewport);
-        const nvrhi::Rect scissor(0, int(size), 0, int(size));
-
-        for (uint32_t face = 0; face < CUBEMAP_FACE_COUNT; face++)
+        for (uint32_t i = 0; i < drawCount; i++)
         {
-            nvrhi::IFramebuffer *framebuffer = framebuffers[mip * CUBEMAP_FACE_COUNT + face];
+            const RasterizedDataCollector::DrawInfo &info = pDraws[i];
 
-            // NVRHI's attachment loadOp is always LOAD (vulkan-graphics.cpp:80), so the clear the
-            // legacy cube render pass does on its depth attachment (loadOp CLEAR,
-            // RenderCubemap.cpp:395) is an explicit command. It runs once per (mip, face)
-            // framebuffer, before the face's first draw and outside any render pass; the colour is
-            // never cleared, exactly like the legacy's DONT_CARE colour load (RenderCubemap.cpp:385):
-            // the game's skybox path draws a full-face opaque quad per face (Sky_DrawSkyBox,
-            // Quake/gl_sky.c:1036-1091).
-            const nvrhi::TextureSubresourceSet depthSubresource(mip, 1, face, 1);
-            pCommandList->clearDepthStencilTexture(depthTexture, depthSubresource, true, 1.0f, false, 0);
+            const uint32_t stateFlags =
+                ConvertToStateFlags(info.pipelineState, info.blendFuncSrc, info.blendFuncDst);
 
-            for (uint32_t i = 0; i < drawCount; i++)
+            nvrhi::IGraphicsPipeline *pipeline = GetPipeline(stateFlags, applyVertexColorGamma);
+            if (pipeline == nullptr)
             {
-                const RasterizedDataCollector::DrawInfo &info = pDraws[i];
-
-                const uint32_t stateFlags =
-                    ConvertToStateFlags(info.pipelineState, info.blendFuncSrc, info.blendFuncDst);
-
-                nvrhi::IGraphicsPipeline *pipeline = GetPipeline(stateFlags, applyVertexColorGamma);
-                if (pipeline == nullptr)
+                if (!warnedFailedPipeline)
                 {
-                    if (!warnedFailedPipeline)
-                    {
-                        warnedFailedPipeline = true;
-                        LogMessage(print, "Warning: RHI: failed to create a raster sky pipeline, the raster sky is incomplete");
-                    }
-                    return;
+                    warnedFailedPipeline = true;
+                    LogMessage(print, "Warning: RHI: failed to create a raster sky pipeline, the raster sky is incomplete");
                 }
+                return;
+            }
 
-                nvrhi::GraphicsState state;
-                state.pipeline = pipeline;
-                state.framebuffer = framebuffer;
-                state.viewport.addViewport(viewport);
-                state.viewport.addScissorRect(scissor);
-                // Set 0 is the bindless texture table, the pipeline's first layout; the second
-                // layout only carries the push constants and has no descriptors to bind.
-                state.addBindingSet(textureTable->GetTable());
-                state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-                state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                         .setBuffer(indexBuffer)
-                                         .setFormat(nvrhi::Format::R32_UINT)
-                                         .setOffset(0));
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = framebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(scissor);
+            state.addBindingSet(textureTable->GetTable());
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
 
-                pCommandList->setGraphicsState(state);
+            pCommandList->setGraphicsState(state);
 
-                // The framebuffer use above emits the RenderTarget / DepthWrite barriers for this
-                // (mip, face); the next framebuffer's use emits its own, because NVRHI re-applies
-                // the attachment states when the framebuffer changes.
+            const RasterSkyPushConstants push(info, faceViewProj[face]);
+            pCommandList->setPushConstants(&push, sizeof(push));
 
-                // After the state: changing the state invalidates push constants (nvrhi.h:3430-3432),
-                // and the block is rebuilt per draw exactly as Rasterizer::Draw does
-                // (Rasterizer.cpp:399-409).
-                const RasterSkyPushConstants push(info, faceViewProj[face]);
-                pCommandList->setPushConstants(&push, sizeof(push));
-
-                nvrhi::DrawArguments args;
-                if (info.indexCount > 0)
-                {
-                    // NVRHI carries the index count in 'vertexCount' for an indexed draw:
-                    // drawIndexed maps it to vkCmdDrawIndexed's indexCount
-                    // (vulkan-graphics.cpp:689-700).
-                    args.vertexCount = info.indexCount;
-                    args.startIndexLocation = info.firstIndex;
-                    args.startVertexLocation = info.firstVertex;
-                    pCommandList->drawIndexed(args);
-                }
-                else
-                {
-                    args.vertexCount = info.vertexCount;
-                    args.startVertexLocation = info.firstVertex;
-                    pCommandList->draw(args);
-                }
+            nvrhi::DrawArguments args;
+            if (info.indexCount > 0)
+            {
+                args.vertexCount = info.indexCount;
+                args.startIndexLocation = info.firstIndex;
+                args.startVertexLocation = info.firstVertex;
+                pCommandList->drawIndexed(args);
+            }
+            else
+            {
+                args.vertexCount = info.vertexCount;
+                args.startVertexLocation = info.firstVertex;
+                pCommandList->draw(args);
             }
         }
     }
 
-    // The whole cube is left in the state the set-8 SRV consumers require and the state the A5.4
-    // pass created it with (`initialState`/`keepInitialState`, RhiProceduralSkyPass.cpp:93-94), so
-    // the next list's first SRV or UAV use finds the state it expects and the close-time
-    // `keepInitialState` requirement is a no-op. The render-target use moved only the subresources
-    // this Render touched; the requirement below covers all of them, which is correct because this
-    // Render wrote all of them (every mip of every face).
-    pCommandList->setTextureState(visibleCube, nvrhi::AllSubresources, nvrhi::ResourceStates::NonPixelShaderResource);
+    rhi::generateCubemapMips(pCommandList, visibleCube, CUBEMAP_SIZE, CUBEMAP_MIP_LEVELS,
+                             nvrhi::ResourceStates::NonPixelShaderResource);
 }
 
 void RhiRasterSkyPass::ReleaseResources()

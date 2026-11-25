@@ -44,6 +44,56 @@ inline bool DynamicShapeFits(const std::vector<uint32_t> &envelope, const std::v
     return true;
 }
 
+inline void BuildSortedShapeCounts(const std::vector<uint32_t> &shape, std::vector<uint32_t> &outSortedCounts)
+{
+    const size_t count = shape.size() / 5;
+    outSortedCounts.resize(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        outSortedCounts[i] = shape[i * 5];
+    }
+    std::sort(outSortedCounts.begin(), outSortedCounts.end(), [](uint32_t a, uint32_t b) { return a > b; });
+}
+
+inline bool DynamicShapeSortedFitsCached(const std::vector<uint32_t> &sortedEnvelopeCounts,
+                                         const std::vector<uint32_t> &current,
+                                         std::vector<uint32_t> &currentScratch)
+{
+    if (current.size() % 5 != 0)
+    {
+        return false;
+    }
+
+    const size_t geometryCount = current.size() / 5;
+    if (geometryCount > sortedEnvelopeCounts.size())
+    {
+        return false;
+    }
+
+    if (geometryCount == 0)
+    {
+        return true;
+    }
+
+    currentScratch.resize(geometryCount);
+    for (size_t i = 0; i < geometryCount; i++)
+    {
+        currentScratch[i] = current[i * 5];
+    }
+
+    std::sort(currentScratch.begin(), currentScratch.end(), [](uint32_t a, uint32_t b) { return a > b; });
+
+    for (size_t i = 0; i < geometryCount; i++)
+    {
+        if (currentScratch[i] > sortedEnvelopeCounts[i])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 // The rank-wise dominance test behind `rt_dyn_blas_sorted`: the envelope's geometry count and its
 // primitive counts sorted in descending order must dominate the current list's, so any reordering
 // of the list fits. A BLAS allocation is a function of its geometry count and its per-geometry

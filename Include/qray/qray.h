@@ -418,6 +418,8 @@ typedef struct QrGeometryUploadInfo
     QrFloat3D                       subsurfaceColor;
     float                           subsurfaceRadius;
     float                           subsurfaceStrength;
+    /* Optional per-instance cluster override (0 preserves per-vertex cluster). */
+    uint32_t                        clusterOverride;
 } QrGeometryUploadInfo;
 
 typedef struct QrUpdateTransformInfo

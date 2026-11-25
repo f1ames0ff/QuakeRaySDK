@@ -328,9 +328,18 @@ NvrhiFrameSkeleton::~NvrhiFrameSkeleton()
     vertexShader = nullptr;
     pixelShader = nullptr;
 
+    rasterVertexDeviceWrap = nullptr;
+    rasterIndexDeviceWrap = nullptr;
+    rasterParticlePointDeviceWrap = nullptr;
+    rasterVertexDeviceHandle = 0;
+    rasterIndexDeviceHandle = 0;
+    rasterParticlePointDeviceHandle = 0;
+
     bindingLayout = nullptr;
     presentParamsBuffer = nullptr;
     presentSampler = nullptr;
+    presentDirectDummyTexture = nullptr;
+    presentDirectDummyCleared = false;
 }
 
 void NvrhiFrameSkeleton::OnSwapchainCreate(const Swapchain *pSwapchain)
@@ -368,11 +377,6 @@ void NvrhiFrameSkeleton::OnSwapchainCreate(const Swapchain *pSwapchain)
 
 void NvrhiFrameSkeleton::OnSwapchainDestroy()
 {
-    if (device != nullptr)
-    {
-        device->waitForIdle();
-    }
-
     DestroySwapchainResources();
 }
 
@@ -838,11 +842,11 @@ void NvrhiFrameSkeleton::ReadGpuTimings(uint32_t frameIndex)
     {
         device->resetTimerQuery(frameQuery);
     }
-    for (const auto &query : gpuPassQueries[frameIndex])
+    for (uint32_t pass = 0; pass < GPU_PASS_COUNT; pass++)
     {
-        if (query != nullptr)
+        if ((recordedPasses & (1u << pass)) != 0 && gpuPassQueries[frameIndex][pass] != nullptr)
         {
-            device->resetTimerQuery(query.Get());
+            device->resetTimerQuery(gpuPassQueries[frameIndex][pass].Get());
         }
     }
     gpuPassMasks[frameIndex] = 0;
@@ -984,10 +988,53 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     bool filterEnabledNow = false;
     const bool resetHistory = ShouldResetHistory(sky, filterEnabledNow);
     frameContext->BeginSlot(frameIndex, cpuProfiler);
-    CompleteFrameReadback(frameIndex);
 
     nvrhi::ICommandList *commandList = frameContext->GetCommandList(frameIndex);
     assert(commandList != nullptr);
+
+    bool gpuFrameTimerStarted = false;
+    bool slotCommitted = false;
+    struct SlotAbortGuard
+    {
+        rhi::RhiFrameContext *context;
+        nvrhi::ICommandList *cmd;
+        nvrhi::ITimerQuery *frameQuery;
+        uint32_t slot;
+        bool *timerStarted;
+        bool *committed;
+
+        ~SlotAbortGuard()
+        {
+            if (*committed || context == nullptr)
+            {
+                return;
+            }
+            try
+            {
+                if (*timerStarted && cmd != nullptr && frameQuery != nullptr)
+                {
+                    cmd->endTimerQuery(frameQuery);
+                    *timerStarted = false;
+                }
+                context->AbortSlot(slot);
+            }
+            catch (...)
+            {
+                // Destructor cleanup must stay noexcept; swallow teardown failures after disarming timer state.
+                *timerStarted = false;
+            }
+        }
+    } slotAbortGuard{
+        frameContext,
+        commandList,
+        nullptr,
+        frameIndex,
+        &gpuFrameTimerStarted,
+        &slotCommitted
+    };
+
+    CompleteFrameReadback(frameIndex);
+
     if (sky.gpuFrameCallback)
     {
         assert(swapchainReady);
@@ -1002,7 +1049,9 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
 
     if (gpuTimersReady)
     {
-        commandList->beginTimerQuery(gpuFrameQueries[frameIndex].Get());
+        slotAbortGuard.frameQuery = gpuFrameQueries[frameIndex].Get();
+        commandList->beginTimerQuery(slotAbortGuard.frameQuery);
+        gpuFrameTimerStarted = true;
     }
     BeginGpuPass(commandList, frameIndex, GPU_PASS_SETUP);
 
@@ -1010,6 +1059,22 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
     // the first command list that samples them (RhiTextureSource.h); the shared table hands over
     // what was wrapped since the last frame.
     textureTable->TrackPendingTextures(commandList);
+
+    // Copy per-frame raster/UI/particle staging buffers to device-local buffers on the RHI
+    // command list (replacing the legacy VulkanDevice::DrawFrame CopyFromStaging path).
+    if (PrepareAndCopyRasterGeometry(commandList, frameIndex, sky))
+    {
+        if (skyPass != nullptr)
+        {
+            skyPass->SetGeometryBuffers(rasterVertexDeviceWrap.Get(),
+                                        rasterIndexDeviceWrap.Get());
+        }
+        if (rasterSkyPass != nullptr)
+        {
+            rasterSkyPass->SetGeometryBuffers(rasterVertexDeviceWrap.Get(),
+                                              rasterIndexDeviceWrap.Get());
+        }
+    }
 
     // The sky pass's Prepare runs in both modes: it selects the slot's ALBEDO target, wraps it and
     // announces the state the engine leaves it in (UnorderedAccess, i.e. GENERAL) - the wrap the
@@ -1120,7 +1185,9 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         if (tracedFrame && accelStructs != nullptr)
         {
             BeginGpuPass(commandList, frameIndex, GPU_PASS_SETUP_PREPROC);
-            accelStructs->RecordVertexPreprocessing(commandList, frameIndex, worldUniformBuffer.Get());
+            accelStructs->RecordVertexPreprocessing(commandList, frameIndex,
+                                                    worldUniformBuffer.Get(),
+                                                    sky.preprocessStatic);
             EndGpuPass(commandList, frameIndex, GPU_PASS_SETUP_PREPROC);
         }
     }
@@ -1243,62 +1310,6 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
             EndGpuPass(commandList, frameIndex, GPU_PASS_SKY);
         }
 
-        auto ensureRasterStagingWraps = [&]() -> bool
-        {
-            if (sky.swapchainVertexStaging == 0 || sky.swapchainIndexStaging == 0)
-            {
-                return false;
-            }
-
-            if (uiVertexStagingWraps[frameIndex] == nullptr ||
-                uiVertexStagingHandles[frameIndex] != sky.swapchainVertexStaging)
-            {
-                if (uiVertexStagingWraps[frameIndex] != nullptr && frameContext != nullptr)
-                {
-                    frameContext->Retire(uiVertexStagingWraps[frameIndex]);
-                }
-
-                nvrhi::BufferDesc desc;
-                desc.byteSize = sky.swapchainVertexStagingSize;
-                desc.isVertexBuffer = true;
-                desc.initialState = nvrhi::ResourceStates::VertexBuffer;
-                desc.keepInitialState = true;
-                desc.debugName = "RHI sky vertex staging";
-
-                uiVertexStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-                    nvrhi::ObjectTypes::VK_Buffer,
-                    nvrhi::Object(static_cast<uint64_t>(sky.swapchainVertexStaging)),
-                    desc);
-                uiVertexStagingHandles[frameIndex] =
-                    uiVertexStagingWraps[frameIndex] != nullptr ? sky.swapchainVertexStaging : 0;
-            }
-
-            if (uiIndexStagingWraps[frameIndex] == nullptr ||
-                uiIndexStagingHandles[frameIndex] != sky.swapchainIndexStaging)
-            {
-                if (uiIndexStagingWraps[frameIndex] != nullptr && frameContext != nullptr)
-                {
-                    frameContext->Retire(uiIndexStagingWraps[frameIndex]);
-                }
-
-                nvrhi::BufferDesc desc;
-                desc.byteSize = sky.swapchainIndexStagingSize;
-                desc.isIndexBuffer = true;
-                desc.initialState = nvrhi::ResourceStates::IndexBuffer;
-                desc.keepInitialState = true;
-                desc.debugName = "RHI sky index staging";
-
-                uiIndexStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-                    nvrhi::ObjectTypes::VK_Buffer,
-                    nvrhi::Object(static_cast<uint64_t>(sky.swapchainIndexStaging)),
-                    desc);
-                uiIndexStagingHandles[frameIndex] =
-                    uiIndexStagingWraps[frameIndex] != nullptr ? sky.swapchainIndexStaging : 0;
-            }
-
-            return uiVertexStagingWraps[frameIndex] != nullptr && uiIndexStagingWraps[frameIndex] != nullptr;
-        };
-
         // The raster sky (RHI/RhiRasterSkyPass.h): the legacy frame's `DrawSkyToCubemap` ->
         // `DrawSkyToAlbedo` pair (VulkanDevice.cpp:748-753), recorded on this list before the
         // primary because under this sky type the primary takes its sky color from the raster
@@ -1312,15 +1323,15 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         if (skyPass != nullptr && sky.framebuffers != nullptr && !sky.disableRasterization &&
             uniform != nullptr && uniform->skyType == SKY_TYPE_RASTERIZED_GEOMETRY)
         {
-            if (ensureRasterStagingWraps())
+            if (rasterVertexDeviceWrap != nullptr && rasterIndexDeviceWrap != nullptr)
             {
-                skyPass->SetGeometryBuffers(uiVertexStagingWraps[frameIndex].Get(),
-                                            uiIndexStagingWraps[frameIndex].Get());
+                skyPass->SetGeometryBuffers(rasterVertexDeviceWrap.Get(),
+                                            rasterIndexDeviceWrap.Get());
 
                 if (rasterSkyPass != nullptr)
                 {
-                    rasterSkyPass->SetGeometryBuffers(uiVertexStagingWraps[frameIndex].Get(),
-                                                      uiIndexStagingWraps[frameIndex].Get());
+                    rasterSkyPass->SetGeometryBuffers(rasterVertexDeviceWrap.Get(),
+                                                      rasterIndexDeviceWrap.Get());
                 }
             }
 
@@ -1704,100 +1715,15 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
             }
             rasterOverlayPass->SetTonemappingBuffers(tonemappingBuffers);
 
-            if (uiVertexStagingWraps[frameIndex] == nullptr ||
-                uiVertexStagingHandles[frameIndex] != sky.swapchainVertexStaging)
+            if (rasterVertexDeviceWrap != nullptr && rasterIndexDeviceWrap != nullptr)
             {
-                if (uiVertexStagingWraps[frameIndex] != nullptr && frameContext != nullptr)
-                {
-                    frameContext->Retire(uiVertexStagingWraps[frameIndex]);
-                }
-
-                nvrhi::BufferDesc desc;
-                desc.byteSize = sky.swapchainVertexStagingSize;
-                desc.isVertexBuffer = true;
-                desc.initialState = nvrhi::ResourceStates::VertexBuffer;
-                desc.keepInitialState = true;
-                desc.debugName = "RHI UI vertex staging";
-
-                uiVertexStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-                    nvrhi::ObjectTypes::VK_Buffer,
-                    nvrhi::Object(static_cast<uint64_t>(sky.swapchainVertexStaging)),
-                    desc);
-                uiVertexStagingHandles[frameIndex] =
-                    uiVertexStagingWraps[frameIndex] != nullptr ? sky.swapchainVertexStaging : 0;
+                rasterOverlayPass->SetGeometryBuffers(rasterVertexDeviceWrap,
+                                                      rasterIndexDeviceWrap);
             }
 
-            if (uiIndexStagingWraps[frameIndex] == nullptr ||
-                uiIndexStagingHandles[frameIndex] != sky.swapchainIndexStaging)
+            if (rasterParticlePointDeviceWrap != nullptr)
             {
-                if (uiIndexStagingWraps[frameIndex] != nullptr && frameContext != nullptr)
-                {
-                    frameContext->Retire(uiIndexStagingWraps[frameIndex]);
-                }
-
-                nvrhi::BufferDesc desc;
-                desc.byteSize = sky.swapchainIndexStagingSize;
-                desc.isIndexBuffer = true;
-                desc.initialState = nvrhi::ResourceStates::IndexBuffer;
-                desc.keepInitialState = true;
-                desc.debugName = "RHI UI index staging";
-
-                uiIndexStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-                    nvrhi::ObjectTypes::VK_Buffer,
-                    nvrhi::Object(static_cast<uint64_t>(sky.swapchainIndexStaging)),
-                    desc);
-                uiIndexStagingHandles[frameIndex] =
-                    uiIndexStagingWraps[frameIndex] != nullptr ? sky.swapchainIndexStaging : 0;
-            }
-
-            if (uiVertexStagingWraps[frameIndex] != nullptr && uiIndexStagingWraps[frameIndex] != nullptr)
-            {
-                rasterOverlayPass->SetGeometryBuffers(uiVertexStagingWraps[frameIndex],
-                                                      uiIndexStagingWraps[frameIndex]);
-            }
-
-            uint64_t particlePointBytes = 0;
-            if (sky.particlePointDraws != nullptr)
-            {
-                for (uint32_t i = 0; i < sky.particlePointDrawCount; i++)
-                {
-                    const RasterizedDataCollector::ParticlePointDrawInfo &pointDraw = sky.particlePointDraws[i];
-                    particlePointBytes = std::max(
-                        particlePointBytes,
-                        (static_cast<uint64_t>(pointDraw.firstPoint) + pointDraw.count) * sizeof(QrParticlePoint));
-                }
-            }
-
-            if (sky.particlePointDraws != nullptr && sky.particlePointDrawCount > 0 &&
-                sky.particlePointGeometry != 0 &&
-                (particlePointStagingWraps[frameIndex] == nullptr ||
-                 particlePointStagingHandles[frameIndex] != sky.particlePointGeometry ||
-                 particlePointStagingBytes[frameIndex] < particlePointBytes))
-            {
-                if (particlePointStagingWraps[frameIndex] != nullptr && frameContext != nullptr)
-                {
-                    frameContext->Retire(particlePointStagingWraps[frameIndex]);
-                }
-
-                nvrhi::BufferDesc desc;
-                desc.byteSize = particlePointBytes;
-                desc.isVertexBuffer = true;
-                desc.initialState = nvrhi::ResourceStates::VertexBuffer;
-                desc.keepInitialState = true;
-                desc.debugName = "RHI particle point staging";
-
-                particlePointStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-                    nvrhi::ObjectTypes::VK_Buffer,
-                    nvrhi::Object(static_cast<uint64_t>(sky.particlePointGeometry)),
-                    desc);
-                particlePointStagingHandles[frameIndex] =
-                    particlePointStagingWraps[frameIndex] != nullptr ? sky.particlePointGeometry : 0;
-                particlePointStagingBytes[frameIndex] = particlePointBytes;
-            }
-
-            if (particlePointStagingWraps[frameIndex] != nullptr)
-            {
-                rasterOverlayPass->SetParticlePointBuffer(particlePointStagingWraps[frameIndex]);
+                rasterOverlayPass->SetParticlePointBuffer(rasterParticlePointDeviceWrap);
             }
         }
 
@@ -1810,11 +1736,44 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         // samples (RhiRtComposePass.h documents both entry points and the sizes they take).
         if (rtComposePass != nullptr)
         {
+            const bool hasOverlayDraws =
+                (sky.worldDraws != nullptr && sky.worldDrawCount > 0) ||
+                (sky.smokeDraws != nullptr && sky.smokeDrawCount > 0) ||
+                (sky.particleDraws != nullptr && sky.particleDrawCount > 0) ||
+                (sky.particlePointDraws != nullptr && sky.particlePointDrawCount > 0);
             const bool overlayRuns =
-                rasterOverlayPass != nullptr && rasterOverlayPass->IsCreated() && uniform != nullptr;
+                hasOverlayDraws && rasterOverlayPass != nullptr && rasterOverlayPass->IsCreated() && uniform != nullptr;
 
             sceneRecording.Finish();
             BeginGpuPass(commandList, frameIndex, GPU_PASS_COMPOSE);
+
+            std::function<void(nvrhi::ICommandList *)> overlayCallback;
+            if (overlayRuns)
+            {
+                overlayCallback = [&](nvrhi::ICommandList *pOverlayList)
+                {
+                    rasterOverlayPass->SetParticleTimer(
+                        gpuTimersReady ? gpuPassQueries[frameIndex][GPU_PASS_PARTICLES].Get() : nullptr);
+
+                    rasterOverlayPass->Render(
+                        pOverlayList, frameIndex, sky.framebuffers,
+                        sky.width, sky.height, sky.jitter,
+                        worldUniformBuffer.Get(),
+                        sky.worldDraws, sky.worldDrawCount,
+                        sky.view, sky.projection, sky.applyVertexColorGamma,
+                        sky.smokeDraws, sky.smokeDrawCount,
+                        sky.particleDraws, sky.particleDrawCount,
+                        sky.particlePointDraws, sky.particlePointDrawCount,
+                        accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
+                        rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex).Get() : nullptr,
+                        rtPrimaryPass != nullptr ? rtPrimaryPass->GetRayStatsSet(frameIndex).Get() : nullptr);
+
+                    if (gpuTimersReady)
+                    {
+                        gpuPassMasks[frameIndex] |= 1u << GPU_PASS_PARTICLES;
+                    }
+                };
+            }
 
             // The raster overlay's window: the compose calls the callback between its checkerboard
             // and prepare-final dispatches - the legacy order (VulkanDevice.cpp:1066 -> :1071 ->
@@ -1827,32 +1786,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                       accelStructs != nullptr && accelStructs->HasGlassInstances(),
                                   worldUniformBuffer.Get(),
                                   sky.postEffectParams,
-                                  [&](nvrhi::ICommandList *pOverlayList)
-                                  {
-                                      if (overlayRuns)
-                                      {
-                                          rasterOverlayPass->SetParticleTimer(
-                                              gpuTimersReady ? gpuPassQueries[frameIndex][GPU_PASS_PARTICLES].Get() : nullptr);
-
-                                          rasterOverlayPass->Render(
-                                              pOverlayList, frameIndex, sky.framebuffers,
-                                              sky.width, sky.height, sky.jitter,
-                                              worldUniformBuffer.Get(),
-                                              sky.worldDraws, sky.worldDrawCount,
-                                              sky.view, sky.projection, sky.applyVertexColorGamma,
-                                              sky.smokeDraws, sky.smokeDrawCount,
-                                              sky.particleDraws, sky.particleDrawCount,
-                                              sky.particlePointDraws, sky.particlePointDrawCount,
-                                              accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
-                                              rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex).Get() : nullptr,
-                                              rtPrimaryPass != nullptr ? rtPrimaryPass->GetRayStatsSet(frameIndex).Get() : nullptr);
-
-                                          if (gpuTimersReady)
-                                          {
-                                              gpuPassMasks[frameIndex] |= 1u << GPU_PASS_PARTICLES;
-                                          }
-                                      }
-                                  });
+                                  overlayCallback);
             EndGpuPass(commandList, frameIndex, GPU_PASS_COMPOSE);
             // The frame's upscaler (A5.7): the engine's own FSR 3.1 (the default configuration)
             // writes image 30 through the module's interop contract; on success the skeleton copies
@@ -1900,17 +1834,10 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
 
                 if (upscaledByFsr)
                 {
-                    nvrhi::ITexture *upscaledTarget = rtComposePass->GetUpscaledTexture(frameIndex);
-                    nvrhi::ITexture *fsrOutput = fsrPass->GetOutputTexture(frameIndex);
-
-                    if (upscaledTarget != nullptr && fsrOutput != nullptr)
+                    if (nvrhi::ITexture *upscaledTarget = rtComposePass->GetUpscaledTexture(frameIndex))
                     {
-                        commandList->copyTexture(upscaledTarget, nvrhi::TextureSlice(),
-                                                 fsrOutput, nvrhi::TextureSlice());
-                        commandList->setTextureState(upscaledTarget, nvrhi::AllSubresources,
-                                                     nvrhi::ResourceStates::UnorderedAccess);
-                        commandList->setTextureState(fsrOutput, nvrhi::AllSubresources,
-                                                     nvrhi::ResourceStates::UnorderedAccess);
+                        commandList->beginTrackingTextureState(upscaledTarget, nvrhi::AllSubresources,
+                                                               nvrhi::ResourceStates::UnorderedAccess);
                     }
                 }
             }
@@ -2006,7 +1933,16 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         albedo = skyPass->GetAlbedoTexture(frameIndex);
     }
 
-    nvrhi::ITexture *directTexture = albedo != nullptr ? ResolvePresentDirectTexture(frameIndex, sky) : nullptr;
+    const bool traced = frameMode == FrameMode::Traced;
+    const bool compose = sky.renderUiOnly || rtComposePass != nullptr;
+    const bool needsDirectTexture = traced && !compose;
+
+    nvrhi::ITexture *directTexture = nullptr;
+    if (albedo != nullptr)
+    {
+        directTexture = needsDirectTexture ? ResolvePresentDirectTexture(frameIndex, sky)
+                                           : presentDirectDummyTexture.Get();
+    }
     if (sky.gpuFrameCallback)
         sky.gpuFrameCallback(QrayGpuFramePhase::BeforePresent, commandList, albedo, backBuffer, frameIndex);
 
@@ -2019,6 +1955,13 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         {
             warnedMissingAlbedo = true;
             print("Warning: RHI: the present has no ALBEDO target, the swapchain image is left untouched");
+        }
+
+        ReadbackSlot &readback = readbackSlots[frameIndex];
+        if (readback.queued)
+        {
+            readback.failed = true;
+            readback.queued = false;
         }
     }
     else if (directTexture != nullptr && PreparePresentBindingSet(frameIndex, albedo, directTexture))
@@ -2033,26 +1976,26 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         // RhiDebugTrace.rgen.hlsl:107-114). exposure.z enables the direct-lighting term of the
         // diagnostic present - the compose pass feeds display-referred FINAL, which already carries
         // the light and the tone curve, so the term and the curve stay off (exposure.w).
-        const bool traced = frameMode == FrameMode::Traced;
-        const bool compose = sky.renderUiOnly || rtComposePass != nullptr;
         RhiPresentParams presentParams = PRESENT_PARAMS;
         presentParams.exposure[1] = traced ? 1.0f : 0.0f;
-        presentParams.exposure[2] = (traced && !compose) ? 1.0f : 0.0f;
+        presentParams.exposure[2] = needsDirectTexture ? 1.0f : 0.0f;
         // exposure.w tells the present that the source is display-referred: the composed FINAL has
         // already been through the tone curve, so the present must skip its own x / (1 + x) curve
         // (RhiPresent.frag.hlsl documents the flag).
         presentParams.exposure[3] = compose ? 1.0f : 0.0f;
         rhi::writeBuffer(commandList, presentParamsBuffer, &presentParams, sizeof(presentParams));
 
-        // The swapchain hands the image over in the present layout and expects it
-        // back in the same layout, so the pass is wrapped into two transitions.
-        // The direct term is read through its storage image; a Texture_UAV binding requires the
-        // image's true state - UnorderedAccess, i.e. the GENERAL layout the engine leaves its
-        // framebuffer images in and the direct pass writes them in (RhiTextureSource.h:123-134). The
-        // announcement makes the first use of every list transition-free; nothing restores the
-        // state afterwards, because UnorderedAccess is exactly what the engine and the next frame's
-        // trace expect.
-        commandList->beginTrackingTextureState(directTexture, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        if (needsDirectTexture)
+        {
+            commandList->beginTrackingTextureState(directTexture, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        }
+        else if (!presentDirectDummyCleared)
+        {
+            commandList->clearTextureUInt(presentDirectDummyTexture, nvrhi::AllSubresources, 0u);
+            commandList->setTextureState(presentDirectDummyTexture, nvrhi::AllSubresources,
+                                          nvrhi::ResourceStates::UnorderedAccess);
+            presentDirectDummyCleared = true;
+        }
 
         commandList->beginTrackingTextureState(backBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
         commandList->setTextureState(backBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::RenderTarget);
@@ -2131,20 +2074,30 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
             }
         }
 
-        // Sampling moved the ALBEDO wrap to the shader-resource state, and the engine's framebuffer
-        // images rest in GENERAL - the layout its own framebuffer descriptors declare
-        // (Framebuffers.cpp:786, :794) and the state the sky pass announces at the start of every
-        // list. The barrier is committed when the list closes (vulkan-commandlist.cpp:74-80).
+        if (needsDirectTexture)
+        {
+            commandList->setTextureState(directTexture, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+        }
         commandList->setTextureState(albedo, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
 
         commandList->setTextureState(backBuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
 
         EndGpuPass(commandList, frameIndex, GPU_PASS_PRESENT);
     }
+    else
+    {
+        ReadbackSlot &readback = readbackSlots[frameIndex];
+        if (readback.queued)
+        {
+            readback.failed = true;
+            readback.queued = false;
+        }
+    }
 
     if (gpuTimersReady)
     {
         commandList->endTimerQuery(gpuFrameQueries[frameIndex].Get());
+        gpuFrameTimerStarted = false;
     }
 
     // The context closes the slot's list and submits it: the image is not available until the
@@ -2155,6 +2108,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         CpuProfileScope submit(cpuProfiler, QR_CPU_PASS_RHI_SUBMIT);
         assert(submission.semaphoreToWait != VK_NULL_HANDLE);
         assert(submission.semaphoreToSignal != VK_NULL_HANDLE);
+        slotCommitted = true;
         frameContext->EndSlot(frameIndex, submission.semaphoreToWait, submission.semaphoreToSignal);
     }
     UpdateHistoryTracking(sky.renderUiOnly, filterEnabledNow);
@@ -2243,49 +2197,140 @@ nvrhi::ITexture *NvrhiFrameSkeleton::PrepareUiTarget(uint32_t frameIndex, const 
     return texture.Get();
 }
 
-bool NvrhiFrameSkeleton::PrepareUiGeometry(uint32_t frameIndex, const SkyFrameInputs &sky)
+namespace
 {
-    if (frameIndex >= MAX_FRAMES_IN_FLIGHT ||
-        sky.swapchainVertexStaging == 0 || sky.swapchainIndexStaging == 0)
+struct NativeBufferWrapSpec
+{
+    uint64_t handle = 0;
+    uint64_t byteSize = 0;
+    bool isVertexBuffer = false;
+    bool isIndexBuffer = false;
+    nvrhi::ResourceStates initialState = nvrhi::ResourceStates::Common;
+    const char *debugName = nullptr;
+};
+
+void EnsureNativeBufferWrap(nvrhi::IDevice *device,
+                            rhi::RhiFrameContext *frameContext,
+                            nvrhi::BufferHandle &wrap,
+                            uint64_t &cachedHandle,
+                            const NativeBufferWrapSpec &spec)
+{
+    if (spec.handle == 0 || spec.byteSize == 0)
+    {
+        return;
+    }
+    if (wrap != nullptr && cachedHandle == spec.handle && wrap->getDesc().byteSize == spec.byteSize)
+    {
+        return;
+    }
+    if (wrap != nullptr && frameContext != nullptr)
+    {
+        frameContext->Retire(wrap);
+    }
+
+    nvrhi::BufferDesc desc;
+    desc.byteSize = spec.byteSize;
+    desc.isVertexBuffer = spec.isVertexBuffer;
+    desc.isIndexBuffer = spec.isIndexBuffer;
+    desc.initialState = spec.initialState;
+    desc.keepInitialState = true;
+    desc.debugName = spec.debugName;
+
+    wrap = device->createHandleForNativeBuffer(
+        nvrhi::ObjectTypes::VK_Buffer, nvrhi::Object(spec.handle), desc);
+    cachedHandle = wrap != nullptr ? spec.handle : 0;
+}
+} // namespace
+
+bool NvrhiFrameSkeleton::PrepareAndCopyRasterGeometry(
+    nvrhi::ICommandList *commandList, uint32_t frameIndex, const SkyFrameInputs &sky)
+{
+    if (device == nullptr || commandList == nullptr || frameIndex >= MAX_FRAMES_IN_FLIGHT)
     {
         return false;
     }
 
-    if (uiVertexStagingWraps[frameIndex] == nullptr || uiVertexStagingHandles[frameIndex] != sky.swapchainVertexStaging)
+    EnsureNativeBufferWrap(device, frameContext, rasterVertexDeviceWrap, rasterVertexDeviceHandle,
+                           { sky.rasterVertexDevice, sky.swapchainVertexStagingSize,
+                             true, false, nvrhi::ResourceStates::VertexBuffer,
+                             "RHI raster vertex device" });
+    EnsureNativeBufferWrap(device, frameContext, rasterIndexDeviceWrap, rasterIndexDeviceHandle,
+                           { sky.rasterIndexDevice, sky.swapchainIndexStagingSize,
+                             false, true, nvrhi::ResourceStates::IndexBuffer,
+                             "RHI raster index device" });
+    EnsureNativeBufferWrap(device, frameContext, rasterParticlePointDeviceWrap, rasterParticlePointDeviceHandle,
+                           { sky.rasterParticlePointDevice, sky.particlePointStagingSize,
+                             true, false, nvrhi::ResourceStates::VertexBuffer,
+                             "RHI raster particle point device" });
+
+    EnsureNativeBufferWrap(device, frameContext, uiVertexStagingWraps[frameIndex], uiVertexStagingHandles[frameIndex],
+                           { sky.swapchainVertexStaging, sky.swapchainVertexStagingSize,
+                             false, false, nvrhi::ResourceStates::CopySource,
+                             "RHI raster vertex staging" });
+    EnsureNativeBufferWrap(device, frameContext, uiIndexStagingWraps[frameIndex], uiIndexStagingHandles[frameIndex],
+                           { sky.swapchainIndexStaging, sky.swapchainIndexStagingSize,
+                             false, false, nvrhi::ResourceStates::CopySource,
+                             "RHI raster index staging" });
+    EnsureNativeBufferWrap(device, frameContext, particlePointStagingWraps[frameIndex], particlePointStagingHandles[frameIndex],
+                           { sky.particlePointGeometry, sky.particlePointStagingSize,
+                             false, false, nvrhi::ResourceStates::CopySource,
+                             "RHI particle point staging" });
+
+    struct CopyEntry
     {
-        if (uiVertexStagingWraps[frameIndex] != nullptr)
+        nvrhi::IBuffer *dst;
+        nvrhi::IBuffer *src;
+        uint64_t copyBytes;
+        uint64_t bufferSize;
+        nvrhi::ResourceStates targetState;
+    };
+
+    const CopyEntry entries[3] = {
+        { rasterVertexDeviceWrap.Get(), uiVertexStagingWraps[frameIndex].Get(),
+          sky.rasterVertexCopyBytes, sky.swapchainVertexStagingSize,
+          nvrhi::ResourceStates::VertexBuffer },
+        { rasterIndexDeviceWrap.Get(), uiIndexStagingWraps[frameIndex].Get(),
+          sky.rasterIndexCopyBytes, sky.swapchainIndexStagingSize,
+          nvrhi::ResourceStates::IndexBuffer },
+        { rasterParticlePointDeviceWrap.Get(), particlePointStagingWraps[frameIndex].Get(),
+          sky.rasterParticlePointCopyBytes, sky.particlePointStagingSize,
+          nvrhi::ResourceStates::VertexBuffer },
+    };
+
+    bool copied[3] = {};
+    bool anyCopied = false;
+    for (int i = 0; i < 3; i++)
+    {
+        const CopyEntry &e = entries[i];
+        if (e.dst != nullptr && e.src != nullptr && e.copyBytes > 0 && e.bufferSize > 0)
         {
-            frameContext->Retire(uiVertexStagingWraps[frameIndex]);
+            const uint64_t bytes = std::min(e.copyBytes, e.bufferSize);
+            commandList->copyBuffer(e.dst, 0, e.src, 0, bytes);
+            copied[i] = true;
+            anyCopied = true;
         }
-        nvrhi::BufferDesc desc;
-        desc.byteSize = sky.swapchainVertexStagingSize;
-        desc.isVertexBuffer = true;
-        desc.initialState = nvrhi::ResourceStates::VertexBuffer;
-        desc.keepInitialState = true;
-        desc.debugName = "RHI UI vertex staging";
-        uiVertexStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-            nvrhi::ObjectTypes::VK_Buffer, nvrhi::Object(sky.swapchainVertexStaging), desc);
-        uiVertexStagingHandles[frameIndex] = uiVertexStagingWraps[frameIndex] != nullptr ? sky.swapchainVertexStaging : 0;
     }
 
-    if (uiIndexStagingWraps[frameIndex] == nullptr || uiIndexStagingHandles[frameIndex] != sky.swapchainIndexStaging)
+    if (anyCopied)
     {
-        if (uiIndexStagingWraps[frameIndex] != nullptr)
+        for (int i = 0; i < 3; i++)
         {
-            frameContext->Retire(uiIndexStagingWraps[frameIndex]);
+            if (copied[i])
+            {
+                commandList->setBufferState(entries[i].dst, entries[i].targetState);
+            }
         }
-        nvrhi::BufferDesc desc;
-        desc.byteSize = sky.swapchainIndexStagingSize;
-        desc.isIndexBuffer = true;
-        desc.initialState = nvrhi::ResourceStates::IndexBuffer;
-        desc.keepInitialState = true;
-        desc.debugName = "RHI UI index staging";
-        uiIndexStagingWraps[frameIndex] = device->createHandleForNativeBuffer(
-            nvrhi::ObjectTypes::VK_Buffer, nvrhi::Object(sky.swapchainIndexStaging), desc);
-        uiIndexStagingHandles[frameIndex] = uiIndexStagingWraps[frameIndex] != nullptr ? sky.swapchainIndexStaging : 0;
+        commandList->commitBarriers();
     }
 
-    return uiVertexStagingWraps[frameIndex] != nullptr && uiIndexStagingWraps[frameIndex] != nullptr;
+    return rasterVertexDeviceWrap != nullptr && rasterIndexDeviceWrap != nullptr;
+}
+
+bool NvrhiFrameSkeleton::PrepareUiGeometry(uint32_t frameIndex, const SkyFrameInputs &sky)
+{
+    (void)sky;
+    return frameIndex < MAX_FRAMES_IN_FLIGHT &&
+           rasterVertexDeviceWrap != nullptr && rasterIndexDeviceWrap != nullptr;
 }
 
 void NvrhiFrameSkeleton::RenderUi(nvrhi::ICommandList *commandList, uint32_t frameIndex,
@@ -2313,7 +2358,7 @@ void NvrhiFrameSkeleton::RenderUi(nvrhi::ICommandList *commandList, uint32_t fra
     if (drawUi && PrepareUiGeometry(frameIndex, sky))
     {
         const ShGlobalUniform *uniform = sky.uniform->GetData();
-        uiPass->SetGeometryBuffers(uiVertexStagingWraps[frameIndex], uiIndexStagingWraps[frameIndex]);
+        uiPass->SetGeometryBuffers(rasterVertexDeviceWrap, rasterIndexDeviceWrap);
         uiPass->Render(commandList, frameIndex, target, sky.upscaledWidth, sky.upscaledHeight,
                        sky.swapchainDraws, sky.swapchainDrawCount,
                        uniform->view, uniform->projection, sky.applyVertexColorGamma);
@@ -2509,6 +2554,26 @@ bool NvrhiFrameSkeleton::CreatePassResources()
         print("Warning: RHI: failed to create the present sampler");
         return false;
     }
+
+    nvrhi::TextureDesc dummyDesc;
+    dummyDesc.dimension = nvrhi::TextureDimension::Texture2D;
+    dummyDesc.format = nvrhi::Format::R32_UINT;
+    dummyDesc.width = 1;
+    dummyDesc.height = 1;
+    dummyDesc.mipLevels = 1;
+    dummyDesc.isShaderResource = false;
+    dummyDesc.isUAV = true;
+    dummyDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    dummyDesc.keepInitialState = true;
+    dummyDesc.debugName = "RhiPresent direct dummy";
+
+    presentDirectDummyTexture = rhi::createTexture(device, dummyDesc, dummyDesc.debugName);
+    if (presentDirectDummyTexture == nullptr)
+    {
+        print("Warning: RHI: failed to create the present direct dummy texture");
+        return false;
+    }
+    presentDirectDummyCleared = false;
 
     return true;
 }

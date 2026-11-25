@@ -29,18 +29,38 @@ bool isLeftOutOfBounds(int checkerboardPix_X)
 bool isRightOutOfBounds(int checkerboardPix_X)
 {
     return
-        checkerboardPix_X == getCheckerboardSeparatorX() ||
-        checkerboardPix_X == (int)globalUniform.renderWidth;
+        checkerboardPix_X == getCheckerboardSeparatorX() - 1 ||
+        checkerboardPix_X == (int)globalUniform.renderWidth - 1;
 }
 
 float3 resolveCheckerboard( Texture2D<float4> src, const int2 regularPix, const int2 checkerboardPix, const float3 center )
 {
-    float3 crossColor =
-        0.25 * src.Load(int3(regularPix + int2( -1,  0 ), 0)).rgb * (float)( !isLeftOutOfBounds( checkerboardPix.x ) ) +
-        0.25 * src.Load(int3(regularPix + int2(  1,  0 ), 0)).rgb * (float)( !isRightOutOfBounds( checkerboardPix.x ) ) +
-        0.25 * src.Load(int3(regularPix + int2(  0,  1 ), 0)).rgb +
-        0.25 * src.Load(int3(regularPix + int2(  0, -1 ), 0)).rgb;
+    const int height = (int)globalUniform.renderHeight;
+    float3 accum = (float3)0.0;
+    float weightSum = 0.0;
 
+    if (!isLeftOutOfBounds(checkerboardPix.x))
+    {
+        accum += src.Load(int3(regularPix + int2(-1, 0), 0)).rgb;
+        weightSum += 1.0;
+    }
+    if (!isRightOutOfBounds(checkerboardPix.x))
+    {
+        accum += src.Load(int3(regularPix + int2(1, 0), 0)).rgb;
+        weightSum += 1.0;
+    }
+    if (regularPix.y + 1 < height)
+    {
+        accum += src.Load(int3(regularPix + int2(0, 1), 0)).rgb;
+        weightSum += 1.0;
+    }
+    if (regularPix.y - 1 >= 0)
+    {
+        accum += src.Load(int3(regularPix + int2(0, -1), 0)).rgb;
+        weightSum += 1.0;
+    }
+
+    const float3 crossColor = weightSum > 0.0 ? (accum / weightSum) : center;
     return lerp( center, crossColor, 0.5 );
 }
 

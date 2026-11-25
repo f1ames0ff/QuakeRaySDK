@@ -116,7 +116,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
          float(geometryInstances[0].materials0B) + float(geometryInstances[0].materials0C) +
          float(geometryInstances[0].materials1A) + float(geometryInstances[0].materials1B) +
          float(geometryInstances[0].portalIndex) + float(geometryInstances[0].materials2A) +
-         float(geometryInstances[0].materials2B) + float(geometryInstances[0]._unused0) +
+         float(geometryInstances[0].materials2B) + float(geometryInstances[0].clusterOverride) +
          float(geometryInstances[0].flags) + float(geometryInstances[0].baseVertexIndex) +
          float(geometryInstances[0].baseIndexIndex) + float(geometryInstances[0].prevBaseVertexIndex) +
          float(geometryInstances[0].prevBaseIndexIndex) + float(geometryInstances[0].vertexCount) +

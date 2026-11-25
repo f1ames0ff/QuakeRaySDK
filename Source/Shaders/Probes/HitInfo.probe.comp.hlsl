@@ -64,7 +64,7 @@
 
 [[vk::binding(0, PROBE_DESC_SET)]] RWStructuredBuffer<float> probeOutput;
 
-[numthreads(1, 1, 1)]
+[numthreads(2, 2, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     float v = 0.0;

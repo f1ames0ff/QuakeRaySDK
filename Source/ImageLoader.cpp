@@ -67,13 +67,27 @@ bool ImageLoader::ReadFile(const std::filesystem::path &path, std::vector<uint8_
         return true;
     }
 
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file)
     {
         return false;
     }
 
-    out.assign(std::istreambuf_iterator<char>(file), {});
+    const std::streampos endPos = file.tellg();
+    if (endPos <= 0)
+    {
+        out.clear();
+        return false;
+    }
+
+    out.resize(static_cast<size_t>(endPos));
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char *>(out.data()), endPos))
+    {
+        out.clear();
+        return false;
+    }
+
     return !out.empty();
 }
 
@@ -113,12 +127,19 @@ std::optional<ImageLoader::ResultInfo> ImageLoader::Load(const std::filesystem::
         return std::nullopt;
     }
 
+    const std::string pathKey = path.string();
+    if (missingPaths.find(pathKey) != missingPaths.end())
+    {
+        return std::nullopt;
+    }
+
     if (IsPng(path))
     {
         std::vector<uint8_t> fileData;
 
         if (!ReadFile(path, fileData))
         {
+            missingPaths.insert(pathKey);
             return std::nullopt;
         }
 
@@ -152,6 +173,7 @@ std::optional<ImageLoader::ResultInfo> ImageLoader::Load(const std::filesystem::
 
     if (!LoadTextureFile(path, &pTexture))
     {
+        missingPaths.insert(pathKey);
         return std::nullopt;
     }
 

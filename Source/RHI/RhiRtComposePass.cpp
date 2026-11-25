@@ -76,7 +76,8 @@ const char *const TAAU_SHADER_FILE_NAME = "CmQ2TAAU.comp.spv";
 // (`1 + ceil(size / group)`, Utils.cpp:319-328); Q2Denoiser.cpp:400-408, :472, :519, :593, :606-607,
 // :652-653, ImageComposition.cpp:198-199, Tonemapping.cpp:176-179.
 constexpr uint32_t COMPOSE_GROUP_SIZE = 16;
-constexpr uint32_t TEMPORAL_GROUP_SIZE = 15;
+constexpr uint32_t TEMPORAL_GROUP_SIZE_X = 24;
+constexpr uint32_t TEMPORAL_GROUP_SIZE_Y = 12;
 
 // The gradient and LF-a-trous passes dispatch at 1/3 resolution: the legacy divides the render size
 // by `COMPUTE_ASVGF_STRATA_SIZE` first and then asks for the full workgroup count
@@ -638,8 +639,8 @@ VkExtent2D GetComposeImageExtent(const ComposeImage &entry,
             return {std::max(1u, (width + 1) / 2), std::max(1u, (height + 1) / 2)};
 
         case ComposeImageSize::Third:
-            return {std::max(1u, (width + 1) / COMPOSE_STRATA_SIZE),
-                    std::max(1u, (height + 1) / COMPOSE_STRATA_SIZE)};
+            return {std::max(1u, (width + COMPOSE_STRATA_SIZE - 1u) / COMPOSE_STRATA_SIZE),
+                    std::max(1u, (height + COMPOSE_STRATA_SIZE - 1u) / COMPOSE_STRATA_SIZE)};
 
         case ComposeImageSize::Upscaled:
             return {upscaledWidth, upscaledHeight};
@@ -1633,15 +1634,14 @@ bool RhiRtComposePass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
-    // The module's nearest-filter sampler for the TAAU history: the engine binds its own nearest
-    // sampler for image 120, whose flags carry no BILINEAR_SAMPLER bit (Framebuffers.cpp:813-815),
-    // and the shader's bicubic Catmull-Rom taps are at texel centers - a linear sampler would blend
-    // across texels (CmQ2TAAU.comp.hlsl:106-124, :221). Min/mag nearest, mip linear and clamp on
-    // all axes mirror the engine's nearestSampler (Framebuffers.cpp:198-217).
+    // The module's bilinear-filter sampler for the TAAU history: `CmQ2TAAU.comp.hlsl` uses
+    // the 9-tap bilinear-optimized Catmull-Rom filter (`Sample[1] = tc + w2 / Weight[1]`),
+    // which relies on linear filtering between adjacent texels. Clamp on all axes matches
+    // edge behavior (Framebuffers.cpp:198-217).
     {
         nvrhi::SamplerDesc samplerDesc;
-        samplerDesc.setMinFilter(false);
-        samplerDesc.setMagFilter(false);
+        samplerDesc.setMinFilter(true);
+        samplerDesc.setMagFilter(true);
         samplerDesc.setMipFilter(true);
         samplerDesc.setAllAddressModes(nvrhi::SamplerAddressMode::Clamp);
 
@@ -2115,19 +2115,20 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
     }
 
     // `Utils::GetWorkGroupCount` computes `ceil(size / groupSize)` (minimum 1); the shaders'
-    // bounds checks discard trailing lanes. Gradient passes operate on complete 3x3 strata
-    // (`width / 3`), whereas `atrousLf` operates on `(width + 1) / 3` LF anchors
-    // (`ipos * 3 + 1 < renderWidth`), which includes index `width / 3` when `dim % 3 == 2`.
+    // bounds checks discard trailing lanes. Gradient and LF-a-trous dispatches run over the
+    // ceil(1/3) strata grid `(width + 2) / 3`, matching `ComposeImageSize::Third`.
     const uint32_t groupsX = Utils::GetWorkGroupCount(width, COMPOSE_GROUP_SIZE);
     const uint32_t groupsY = Utils::GetWorkGroupCount(height, COMPOSE_GROUP_SIZE);
-    const uint32_t temporalGroupsX = Utils::GetWorkGroupCount(width, TEMPORAL_GROUP_SIZE);
-    const uint32_t temporalGroupsY = Utils::GetWorkGroupCount(height, TEMPORAL_GROUP_SIZE);
-    const uint32_t gradientGroupsX = Utils::GetWorkGroupCount(width / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
-    const uint32_t gradientGroupsY = Utils::GetWorkGroupCount(height / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
-    const uint32_t atrousLfGroupsX =
-        Utils::GetWorkGroupCount((width + 1) / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
-    const uint32_t atrousLfGroupsY =
-        Utils::GetWorkGroupCount((height + 1) / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
+    const uint32_t temporalGroupsX = Utils::GetWorkGroupCount(width, TEMPORAL_GROUP_SIZE_X);
+    const uint32_t temporalGroupsY = Utils::GetWorkGroupCount(height, TEMPORAL_GROUP_SIZE_Y);
+    const uint32_t gradWidth = (width + COMPOSE_STRATA_SIZE - 1u) / COMPOSE_STRATA_SIZE;
+    const uint32_t gradHeight = (height + COMPOSE_STRATA_SIZE - 1u) / COMPOSE_STRATA_SIZE;
+    const uint32_t gradientGroupsX = Utils::GetWorkGroupCount(gradWidth, COMPOSE_GROUP_SIZE);
+    const uint32_t gradientGroupsY = Utils::GetWorkGroupCount(gradHeight, COMPOSE_GROUP_SIZE);
+
+    const ComposeDispatchDims dims = {
+        groupsX, groupsY, temporalGroupsX, temporalGroupsY, gradientGroupsX, gradientGroupsY
+    };
 
     // The adapter always runs; it dispatches by the switch itself (CmQ2Adapter.comp.hlsl:193-213),
     // so it either composites the raw ReSTIR signal into Q2_COLOR or anti-fireflies it into the
@@ -2137,73 +2138,7 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
 
     if (filterEnabled)
     {
-        // The ASVGF chain of the legacy `Denoise` (Q2Denoiser.cpp:438-597), between the adapter and
-        // the interleave. Its first consumer of the temporal result is the LF a-trous, and the HF
-        // a-trous composite writes Q2_COLOR, which the interleave then resolves.
-        RecordDispatch(pCommandList, gradientImgPipeline,
-                       { target.gradientImgSet, target.uniformSet },
-                       gradientGroupsX, gradientGroupsY, 1);
-
-        // Seven gradient a-trous iterations at 1/3 resolution, the iteration in the 4-byte push
-        // constant. The writes of each dispatch are required in UnorderedAccess, which is the
-        // same-state UAV barrier of the next iteration's read (see the class comment); the last
-        // iteration's write is ordered by the temporal set's own transition.
-        for (uint32_t i = 0; i < GRADIENT_ATROUS_ITERATION_COUNT; i++)
-        {
-            RecordDispatch(pCommandList, gradientAtrousPipeline,
-                           { target.gradientAtrousSet, target.uniformSet },
-                           gradientGroupsX, gradientGroupsY, 1, &i);
-
-            if (i + 1 < GRADIENT_ATROUS_ITERATION_COUNT)
-            {
-                const FramebufferImageIndex *const writes = GRADIENT_ATROUS_WRITES[i % 2];
-
-                for (uint32_t j = 0; j < GRADIENT_ATROUS_WRITE_COUNT; j++)
-                {
-                    RequireImageUnorderedAccess(pCommandList, target, writes[j]);
-                }
-            }
-        }
-
-        // The temporal accumulation over the frame's render size, `[numthreads(15, 15, 1)]`.
-        RecordDispatch(pCommandList, temporalPipeline, { target.temporalSet, target.uniformSet },
-                       temporalGroupsX, temporalGroupsY, 1);
-
-        // Four LF a-trous iterations at 1/3 resolution (push-constant iteration).
-        for (uint32_t i = 0; i < COMPUTE_SVGF_ATROUS_ITERATION_COUNT; i++)
-        {
-            RecordDispatch(pCommandList, atrousLfPipeline,
-                           { target.atrousLfSet, target.uniformSet },
-                           atrousLfGroupsX, atrousLfGroupsY, 1, &i);
-
-            if (i + 1 < COMPUTE_SVGF_ATROUS_ITERATION_COUNT)
-            {
-                const FramebufferImageIndex *const writes = ATROUS_LF_WRITES[i % 2];
-
-                for (uint32_t j = 0; j < ATROUS_LF_WRITE_COUNT; j++)
-                {
-                    RequireImageUnorderedAccess(pCommandList, target, writes[j]);
-                }
-            }
-        }
-
-        // Four HF/SPEC a-trous iterations over the render size, the iteration baked into each
-        // pipeline's specialization; the fourth composites Q2_COLOR.
-        for (uint32_t i = 0; i < COMPUTE_SVGF_ATROUS_ITERATION_COUNT; i++)
-        {
-            RecordDispatch(pCommandList, atrousPipelines[i],
-                           { target.atrousSet, target.uniformSet }, groupsX, groupsY, 1);
-
-            if (i < COMPUTE_SVGF_ATROUS_ITERATION_COUNT - 1)
-            {
-                const FramebufferImageIndex *const writes = ATROUS_WRITES[i];
-
-                for (uint32_t j = 0; j < ATROUS_WRITE_COUNT; j++)
-                {
-                    RequireImageUnorderedAccess(pCommandList, target, writes[j]);
-                }
-            }
-        }
+        RecordAsvgfDenoiser(pCommandList, target, dims);
     }
 
     // The interleave resolves the checkerboard-packed Q2_COLOR into PRE_FINAL, which the exposure
@@ -2261,13 +2196,13 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
     // wraps before the callback's announces claim it. The glass mask is not in the list: the
     // callback announces it read-only and only samples it, so it stays in the state the
     // checkerboard left it in.
-    for (uint32_t i = 0; i < RASTER_OVERLAY_HANDOFF_COUNT; i++)
-    {
-        RequireImageUnorderedAccess(pCommandList, target, RASTER_OVERLAY_HANDOFF_IMAGES[i]);
-    }
-
     if (pfnRasterOverlay)
     {
+        for (uint32_t i = 0; i < RASTER_OVERLAY_HANDOFF_COUNT; i++)
+        {
+            RequireImageUnorderedAccess(pCommandList, target, RASTER_OVERLAY_HANDOFF_IMAGES[i]);
+        }
+
         pfnRasterOverlay(pCommandList);
     }
 
@@ -2293,7 +2228,7 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
 
     if (bloomPass != nullptr && bloomPass->IsCreated() &&
         postEffectParams.pBloom != nullptr && postEffectParams.pBloom->isActive &&
-        postEffectParams.pBloom->intensity > 0.0f)
+        std::isfinite(postEffectParams.pBloom->intensity) && postEffectParams.pBloom->intensity > 0.0f)
     {
         RhiBloomPass::Settings settings;
         settings.intensity = postEffectParams.pBloom->intensity;
@@ -2333,7 +2268,9 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
     }
 
     const float bloomThreshold =
-        postEffectParams.pBloom != nullptr ? postEffectParams.pBloom->threshold : 0.0f;
+        (postEffectParams.pBloom != nullptr && std::isfinite(postEffectParams.pBloom->threshold))
+            ? std::max(postEffectParams.pBloom->threshold, 0.0f)
+            : 0.0f;
 
     const auto *dof = postEffectParams.pNearDof;
     const float dofStrength = dof != nullptr && std::isfinite(dof->strength) ? std::clamp(dof->strength, 0.0f, 1.0f) : 0.0f;
@@ -2398,6 +2335,79 @@ void RhiRtComposePass::Render(nvrhi::ICommandList *pCommandList,
     }
 }
 
+void RhiRtComposePass::RecordAsvgfDenoiser(nvrhi::ICommandList *pCommandList,
+                                           Target &target,
+                                           const ComposeDispatchDims &dims)
+{
+    // The ASVGF chain of the legacy `Denoise` (Q2Denoiser.cpp:438-597), between the adapter and
+    // the interleave. Its first consumer of the temporal result is the LF a-trous, and the HF
+    // a-trous composite writes Q2_COLOR, which the interleave then resolves.
+    RecordDispatch(pCommandList, gradientImgPipeline,
+                   { target.gradientImgSet, target.uniformSet },
+                   dims.gradientGroupsX, dims.gradientGroupsY, 1);
+
+    // Seven gradient a-trous iterations at 1/3 resolution, the iteration in the 4-byte push
+    // constant. The writes of each dispatch are required in UnorderedAccess, which is the
+    // same-state UAV barrier of the next iteration's read (see the class comment); the last
+    // iteration's write is ordered by the temporal set's own transition.
+    for (uint32_t i = 0; i < GRADIENT_ATROUS_ITERATION_COUNT; i++)
+    {
+        RecordDispatch(pCommandList, gradientAtrousPipeline,
+                       { target.gradientAtrousSet, target.uniformSet },
+                       dims.gradientGroupsX, dims.gradientGroupsY, 1, &i);
+
+        if (i + 1 < GRADIENT_ATROUS_ITERATION_COUNT)
+        {
+            const FramebufferImageIndex *const writes = GRADIENT_ATROUS_WRITES[i % 2];
+
+            for (uint32_t j = 0; j < GRADIENT_ATROUS_WRITE_COUNT; j++)
+            {
+                RequireImageUnorderedAccess(pCommandList, target, writes[j]);
+            }
+        }
+    }
+
+    // The temporal accumulation over the frame's render size, `[numthreads(24, 12, 1)]`.
+    RecordDispatch(pCommandList, temporalPipeline, { target.temporalSet, target.uniformSet },
+                   dims.temporalGroupsX, dims.temporalGroupsY, 1);
+
+    // Four LF a-trous iterations at 1/3 resolution (push-constant iteration).
+    for (uint32_t i = 0; i < COMPUTE_SVGF_ATROUS_ITERATION_COUNT; i++)
+    {
+        RecordDispatch(pCommandList, atrousLfPipeline,
+                       { target.atrousLfSet, target.uniformSet },
+                       dims.gradientGroupsX, dims.gradientGroupsY, 1, &i);
+
+        if (i + 1 < COMPUTE_SVGF_ATROUS_ITERATION_COUNT)
+        {
+            const FramebufferImageIndex *const writes = ATROUS_LF_WRITES[i % 2];
+
+            for (uint32_t j = 0; j < ATROUS_LF_WRITE_COUNT; j++)
+            {
+                RequireImageUnorderedAccess(pCommandList, target, writes[j]);
+            }
+        }
+    }
+
+    // Four HF/SPEC a-trous iterations over the render size, the iteration baked into each
+    // pipeline's specialization; the fourth composites Q2_COLOR.
+    for (uint32_t i = 0; i < COMPUTE_SVGF_ATROUS_ITERATION_COUNT; i++)
+    {
+        RecordDispatch(pCommandList, atrousPipelines[i],
+                       { target.atrousSet, target.uniformSet }, dims.groupsX, dims.groupsY, 1);
+
+        if (i < COMPUTE_SVGF_ATROUS_ITERATION_COUNT - 1)
+        {
+            const FramebufferImageIndex *const writes = ATROUS_WRITES[i];
+
+            for (uint32_t j = 0; j < ATROUS_WRITE_COUNT; j++)
+            {
+                RequireImageUnorderedAccess(pCommandList, target, writes[j]);
+            }
+        }
+    }
+}
+
 void RhiRtComposePass::RenderGradientReproject(nvrhi::ICommandList *pCommandList,
                                                uint32_t frameIndex,
                                                const Framebuffers *pFramebuffers,
@@ -2418,10 +2428,12 @@ void RhiRtComposePass::RenderGradientReproject(nvrhi::ICommandList *pCommandList
 
     AnnounceFrameImages(pCommandList, target);
 
-    // The legacy dispatch over the third of the render size (Q2Denoiser.cpp:344-345): the shader
-    // bounds itself with `renderWidth / Q2_GRAD_DWN` (CmQ2GradientReproject.comp.hlsl:64-70).
-    const uint32_t groupsX = Utils::GetWorkGroupCount(width / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
-    const uint32_t groupsY = Utils::GetWorkGroupCount(height / COMPOSE_STRATA_SIZE, COMPOSE_GROUP_SIZE);
+    // The gradient reprojection dispatches over the ceil(1/3) strata grid; the shader
+    // bounds itself with `(renderWidth + Q2_GRAD_DWN - 1) / Q2_GRAD_DWN`.
+    const uint32_t gradWidth = (width + COMPOSE_STRATA_SIZE - 1u) / COMPOSE_STRATA_SIZE;
+    const uint32_t gradHeight = (height + COMPOSE_STRATA_SIZE - 1u) / COMPOSE_STRATA_SIZE;
+    const uint32_t groupsX = Utils::GetWorkGroupCount(gradWidth, COMPOSE_GROUP_SIZE);
+    const uint32_t groupsY = Utils::GetWorkGroupCount(gradHeight, COMPOSE_GROUP_SIZE);
 
     RecordDispatch(pCommandList, gradientReprojectPipeline,
                    { target.gradientReprojectSet, target.uniformSet }, groupsX, groupsY, 1);

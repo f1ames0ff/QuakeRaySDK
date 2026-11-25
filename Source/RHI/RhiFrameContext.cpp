@@ -18,7 +18,6 @@
 #include "RhiFrameContext.h"
 #include "../CpuFrameProfiler.h"
 
-#include <thread>
 #include <utility>
 
 namespace qray::rhi
@@ -33,6 +32,7 @@ RhiFrameContext::~RhiFrameContext()
     for (Slot &s : slots)
     {
         s.retireQueue.clear();
+        s.frameDoneQuery = nullptr;
         s.commandList = nullptr;
     }
 
@@ -78,7 +78,8 @@ bool RhiFrameContext::Create(nvrhi::IDevice *pDevice, uint32_t frameCount)
     for (uint32_t i = 0; i < frameCount; i++)
     {
         slots[i].commandList = device->createCommandList();
-        if (slots[i].commandList == nullptr)
+        slots[i].frameDoneQuery = device->createEventQuery();
+        if (slots[i].commandList == nullptr || slots[i].frameDoneQuery == nullptr)
         {
             empty();
             return false;
@@ -86,6 +87,38 @@ bool RhiFrameContext::Create(nvrhi::IDevice *pDevice, uint32_t frameCount)
     }
 
     return true;
+}
+
+void RhiFrameContext::WaitForSlot(uint32_t slot, CpuFrameProfiler *cpuProfiler)
+{
+    if (!IsCreated() || slot >= slots.size())
+    {
+        return;
+    }
+
+    Slot &s = slots[slot];
+
+    if (s.commandList == nullptr)
+    {
+        return;
+    }
+
+    if (s.hasSubmission)
+    {
+        if (s.frameDoneQuery != nullptr)
+        {
+            CpuProfileScope wait(cpuProfiler, QR_CPU_PASS_SLOT_WAIT);
+            device->waitEventQuery(s.frameDoneQuery);
+            device->resetEventQuery(s.frameDoneQuery);
+        }
+        s.hasSubmission = false;
+
+        CpuProfileScope collect(cpuProfiler, QR_CPU_PASS_SLOT_GC);
+        s.retireQueue.clear();
+        device->runGarbageCollection();
+    }
+
+    currentSlot = slot;
 }
 
 void RhiFrameContext::BeginSlot(uint32_t slot, CpuFrameProfiler *cpuProfiler)
@@ -104,34 +137,17 @@ void RhiFrameContext::BeginSlot(uint32_t slot, CpuFrameProfiler *cpuProfiler)
         return;
     }
 
-    // The engine's frame fence cannot order RHI work (the header), and NVRHI has no blocking per-queue
-    // wait, so poll the Graphics queue's completed instance. The slot's submission is two frames old,
-    // so the first read normally satisfies the condition and the loop only spins when the GPU is
-    // behind the engine's pacing.
-    CpuProfileScope wait(cpuProfiler, QR_CPU_PASS_SLOT_WAIT);
-    if (s.hasSubmission)
+    WaitForSlot(slot, cpuProfiler);
+
+    if (s.isOpen)
     {
-        while (device->queueGetCompletedInstance(nvrhi::CommandQueue::Graphics) < s.lastSubmissionInstance)
-        {
-            std::this_thread::yield();
-        }
+        currentSlot = slot;
+        return;
     }
-
-    wait.Finish();
-    CpuProfileScope collect(cpuProfiler, QR_CPU_PASS_SLOT_GC);
-
-    // The engine's drain moment: retired in frame N, released at the start of frame N+2, right after
-    // the fence wait (TextureManager::texturesToDestroy and the two sibling queues). Releasing here,
-    // after the wait above, means the queue has finished the submission that the resources could
-    // still be referenced by.
-    s.retireQueue.clear();
-
-    // The command buffers of the closed lists (this slot's and every other slot's) return to the
-    // queue's shared pool only here (the header); without it the pool grows by one buffer per frame.
-    device->runGarbageCollection();
 
     currentSlot = slot;
     s.commandList->open();
+    s.isOpen = true;
 }
 
 nvrhi::ICommandList *RhiFrameContext::GetCommandList(uint32_t slot) const
@@ -157,7 +173,7 @@ void RhiFrameContext::EndSlot(uint32_t slot,
     Slot &s = slots[slot];
 
     // Nothing was opened for this slot, so there is nothing to close and submit.
-    if (s.commandList == nullptr)
+    if (s.commandList == nullptr || !s.isOpen)
     {
         return;
     }
@@ -177,11 +193,26 @@ void RhiFrameContext::EndSlot(uint32_t slot,
     }
 
     s.commandList->close();
+    s.isOpen = false;
 
-    // The returned instance is the slot's new sync point: the next BeginSlot of this slot waits for it
-    // before it releases the slot's retire queue.
-    s.lastSubmissionInstance = device->executeCommandList(s.commandList, queue);
+    device->executeCommandList(s.commandList, queue);
+    if (s.frameDoneQuery != nullptr)
+    {
+        // NVRHI's vulkan-queries.cpp asserts commandListID == 0 before re-arming an EventQuery.
+        device->resetEventQuery(s.frameDoneQuery);
+        device->setEventQuery(s.frameDoneQuery, queue);
+    }
     s.hasSubmission = true;
+}
+
+void RhiFrameContext::AbortSlot(uint32_t slot, nvrhi::CommandQueue queue)
+{
+    if (!IsCreated() || slot >= slots.size() || !slots[slot].isOpen)
+    {
+        return;
+    }
+
+    EndSlot(slot, VK_NULL_HANDLE, VK_NULL_HANDLE, queue);
 }
 
 void RhiFrameContext::RetireRelease(std::function<void()> release)
@@ -211,6 +242,12 @@ void RhiFrameContext::WaitForIdle()
     {
         s.retireQueue.clear();
         s.hasSubmission = false;
+        s.isOpen = false;
+        if (device != nullptr && s.frameDoneQuery != nullptr)
+        {
+            device->resetEventQuery(s.frameDoneQuery);
+        }
+        s.frameDoneQuery = nullptr;
         s.commandList = nullptr;
     }
 }

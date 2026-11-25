@@ -91,6 +91,14 @@ RsWorldFragOutput main( [[vk::location(0)]] float4 vertColor    : TEXCOORD0,
     float4 albedoAlpha = getTextureSample( rasterizerFragInfo.textureIndex, vertTexCoord );
     o.outColor         = rasterizerFragInfo.color * vertColor * albedoAlpha;
 
+    if( alphaTest != 0 )
+    {
+        if( o.outColor.a < ALPHA_THRESHOLD )
+        {
+            discard;
+        }
+    }
+
 #if ILLUMINATION_VOLUME
     float4 ndc = float4( fragCoord.xyz, 1.0 );
     ndc.xy   /= float2( globalUniform.renderWidth, globalUniform.renderHeight );
@@ -137,14 +145,6 @@ RsWorldFragOutput main( [[vk::location(0)]] float4 vertColor    : TEXCOORD0,
         emisBlendCode = uint( emisSample.a * 255.0 + 0.5 );
     }
     o.outScreenEmission = rmeEmissionToScreenEmission( emis ) * albedoAlpha.rgb;
-
-    if( alphaTest != 0 )
-    {
-        if( o.outColor.a < ALPHA_THRESHOLD )
-        {
-            discard;
-        }
-    }
 
     if( emisBlendCode != 0u )
     {

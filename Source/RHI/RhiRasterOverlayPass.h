@@ -470,6 +470,12 @@ private:
     bool UpdateBufferSets(Target &target, uint32_t frameIndex, nvrhi::IBuffer *pUniformBuffer);
     bool PrepareSmokeTlasSet(Target &target, nvrhi::rt::IAccelStruct *pSmokeTopLevel);
 
+    bool ValidateRenderInputs(uint32_t frameIndex, const float *pView, const float *pProj,
+                              const float jitter[2], nvrhi::IBuffer *pUniformBuffer);
+    bool HasCommonLitOverlayInputs(const Target &target, nvrhi::rt::IAccelStruct *pSmokeTopLevel,
+                                   nvrhi::IBindingSet *pSmokeLightSet,
+                                   nvrhi::IBindingSet *pRayStatsSet) const;
+
     void RecordDepthCopy(nvrhi::ICommandList *pCommandList, const Target &target,
                          uint32_t width, uint32_t height);
     void RecordWorldDraws(nvrhi::ICommandList *pCommandList, const Target &target,

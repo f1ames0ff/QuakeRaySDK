@@ -93,8 +93,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const int width = (int)globalUniform.renderWidth;
     const int height = (int)globalUniform.renderHeight;
-    const int grad_width = width / Q2_GRAD_DWN;
-    const int grad_height = height / Q2_GRAD_DWN;
+    const int grad_width = (width + Q2_GRAD_DWN - 1) / Q2_GRAD_DWN;
+    const int grad_height = (height + Q2_GRAD_DWN - 1) / Q2_GRAD_DWN;
 
     if (ipos.x >= grad_width || ipos.y >= grad_height)
     {
@@ -118,33 +118,35 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             (u >> (Q2_STRATUM_OFFSET_SHIFT * 1)) & Q2_STRATUM_OFFSET_MASK);
 
         int2 grad_sample_pos_curr = ipos * Q2_GRAD_DWN + grad_strata_pos;
+        if (grad_sample_pos_curr.x < width && grad_sample_pos_curr.y < height)
+        {
+            // Read the previous HF/SPEC luminance through the storage image, not the sampled
+            // view: this shader also writes framebufQ2GradHFSpecPing, and binding both views of
+            // one image in one set makes the SRV and the UAV disagree about the image layout
+            // (A4.5). The invocation that reads this texel is the one that writes it at the end
+            // of main, so the read-then-write is a same-thread access to the same texel; the
+            // image is rg16f, so .xy are the same raw halfs the sampled view returned.
+            float2 prev_hf_spec_lum = framebufQ2GradHFSpecPing.Load(ipos).xy;
 
-        // Read the previous HF/SPEC luminance through the storage image, not the sampled
-        // view: this shader also writes framebufQ2GradHFSpecPing, and binding both views of
-        // one image in one set makes the SRV and the UAV disagree about the image layout
-        // (A4.5). The invocation that reads this texel is the one that writes it at the end
-        // of main, so the read-then-write is a same-thread access to the same texel; the
-        // image is rg16f, so .xy are the same raw halfs the sampled view returned.
-        float2 prev_hf_spec_lum = framebufQ2GradHFSpecPing.Load(ipos).xy;
+            float3 curr_hf = q2UnpackRGBE(framebufQ2ColorHF_Sampled.Load(int3(grad_sample_pos_curr, 0)).r);
+            float3 curr_spec = q2UnpackRGBE(framebufQ2ColorSpec_Sampled.Load(int3(grad_sample_pos_curr, 0)).r);
 
-        float3 curr_hf = q2UnpackRGBE(framebufQ2ColorHF_Sampled.Load(int3(grad_sample_pos_curr, 0)).r);
-        float3 curr_spec = q2UnpackRGBE(framebufQ2ColorSpec_Sampled.Load(int3(grad_sample_pos_curr, 0)).r);
+            grad_hf = q2GetGradient(getLuminance(curr_hf), prev_hf_spec_lum.x);
+            grad_spec = q2GetGradient(getLuminance(curr_spec), prev_hf_spec_lum.y);
 
-        grad_hf = q2GetGradient(getLuminance(curr_hf), prev_hf_spec_lum.x);
-        grad_spec = q2GetGradient(getLuminance(curr_spec), prev_hf_spec_lum.y);
-
-        const float4 saved_normal = framebufQ2BaseColor_Sampled.Load(int3(grad_sample_pos_curr, 0));
-        const uint restored_normal_enc =
-              ((uint)(saved_normal.x + 0.5) & 0xFFu)
-            | (((uint)(saved_normal.y + 0.5) & 0xFFu) << 8)
-            | (((uint)(saved_normal.z + 0.5) & 0xFFu) << 16)
-            | (((uint)(saved_normal.w + 0.5) & 0xFFu) << 24);
-        framebufNormal[grad_sample_pos_curr] = (uint4)restored_normal_enc;
-        framebufMetallicRoughness[grad_sample_pos_curr] =
-            float4(framebufQ2Metallic_Sampled.Load(int3(grad_sample_pos_curr, 0)).xy, 0.0, 0.0);
-        framebufSurfacePosition[grad_sample_pos_curr] = framebufQ2GradSavedSurfPos_Sampled.Load(int3(ipos, 0));
-        const float4 savedViewDir = framebufQ2GradSavedViewDir_Sampled.Load(int3(ipos, 0));
-        framebufViewDirection[grad_sample_pos_curr] = float4(savedViewDir.xyz, -1.0);
+            const float4 saved_normal = framebufQ2BaseColor_Sampled.Load(int3(grad_sample_pos_curr, 0));
+            const uint restored_normal_enc =
+                  ((uint)(saved_normal.x + 0.5) & 0xFFu)
+                | (((uint)(saved_normal.y + 0.5) & 0xFFu) << 8)
+                | (((uint)(saved_normal.z + 0.5) & 0xFFu) << 16)
+                | (((uint)(saved_normal.w + 0.5) & 0xFFu) << 24);
+            framebufNormal[grad_sample_pos_curr] = (uint4)restored_normal_enc;
+            framebufMetallicRoughness[grad_sample_pos_curr] =
+                float4(framebufQ2Metallic_Sampled.Load(int3(grad_sample_pos_curr, 0)).xy, 0.0, 0.0);
+            framebufSurfacePosition[grad_sample_pos_curr] = framebufQ2GradSavedSurfPos_Sampled.Load(int3(ipos, 0));
+            const float4 savedViewDir = framebufQ2GradSavedViewDir_Sampled.Load(int3(ipos, 0));
+            framebufViewDirection[grad_sample_pos_curr] = float4(savedViewDir.xyz, -1.0);
+        }
     }
 
     // Accumulate the LF luminances over the whole 3x3 square
@@ -152,7 +154,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     {
         for (int xx = 0; xx < Q2_GRAD_DWN; xx++)
         {
-            grad_lf += q2GetLFGradient(ipos * Q2_GRAD_DWN + int2(xx, yy), width, height, inv_width, inv_height);
+            const int2 p = ipos * Q2_GRAD_DWN + int2(xx, yy);
+            if (p.x < width && p.y < height)
+            {
+                grad_lf += q2GetLFGradient(p, width, height, inv_width, inv_height);
+            }
         }
     }
 

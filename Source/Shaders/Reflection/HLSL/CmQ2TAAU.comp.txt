@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block set 1 binding 0
 
 [0] offset 0 m4(v4(float32)) matrixstride 16
@@ -140,25 +140,25 @@ declared
 image:2D:0:0:0:2:Rgba16f
 === descriptor set 0 binding 119: storage class
 UniformConstant
-=== descriptor set 0 binding 160
-image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 160: storage class
-UniformConstant
 === descriptor set 0 binding 163
 image:2D:0:0:0:1:Unknown
 === descriptor set 0 binding 163: storage class
 UniformConstant
-=== descriptor set 0 binding 252
+=== descriptor set 0 binding 166
 image:2D:0:0:0:1:Unknown
-=== descriptor set 0 binding 252: storage class
+=== descriptor set 0 binding 166: storage class
+UniformConstant
+=== descriptor set 0 binding 255
+image:2D:0:0:0:1:Unknown
+=== descriptor set 0 binding 255: storage class
 UniformConstant
 === descriptor set 0 binding 29
 image:2D:0:0:0:2:R11fG11fB10f
 === descriptor set 0 binding 29: storage class
 UniformConstant
-=== descriptor set 0 binding 384
+=== descriptor set 0 binding 390
 sampler
-=== descriptor set 0 binding 384: storage class
+=== descriptor set 0 binding 390: storage class
 UniformConstant
 === descriptor set 1 binding 0
 struct
