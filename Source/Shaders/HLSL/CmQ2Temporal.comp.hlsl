@@ -381,6 +381,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     }
 
     const float motion_z = (depth_curr < 0.0) ? -motion.z : motion.z;
+    const float3 surf_view_dir = safeNormalize(viewDirAndDist.xyz);
+    const float ndotv_geo = validPrimarySurface ? abs(dot(geo_normal_curr, surf_view_dir)) : 1.0;
+    const float grazing_factor = validPrimarySurface ? smoothstep(0.45, 0.10, ndotv_geo) : 0.0;
+    // Cap grazing depth tolerance strictly below 0.50 so genuine coplanar depth discontinuities (e.g. 2.4x step) stay rejected.
+    const float grazing_depth_tol = lerp(0.10, 0.35, grazing_factor);
 
     if (globalUniform.restirParams.z == 0u)
     {
@@ -422,11 +427,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             float depth_prev = framebufQ2ViewDepth_Prev_Sampled.Load(int3(p, 0)).r;
             float3  normal_prev = texelFetchNormal_Prev(p);
             float3  geo_normal_prev = texelFetchNormalGeometry_Prev(p);
+            float3  surf_pos_prev = framebufSurfacePosition_Prev_Sampled.Load(int3(p, 0)).xyz;
 
             // Q2ViewDepth is negative for reflection/refraction surfaces, and the
             // stored motion depth delta (motion.z) is in the positive primary
             // space - flip its sign so the motion-compensated match stays exact.
-            float dist_depth = abs(depth_curr - depth_prev + motion_z) / abs(depth_curr);
+            float dist_depth = abs(depth_curr - depth_prev + motion_z) / max(abs(depth_curr), 1e-4);
             float dot_normals = dot(normal_curr, normal_prev);
             float dot_geo_normals = dot(geo_normal_curr, geo_normal_prev);
 
@@ -437,7 +443,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
                 dist_depth *= 0.25;
             }
 
-            if(dist_depth < 0.1 && dot_geo_normals > 0.5)
+            const float diff_plane_dist = validPrimarySurface
+                ? (abs(dot(surfPos - surf_pos_prev, geo_normal_curr)) / max(abs(depth_curr), 0.25))
+                : 1.0;
+            const bool depth_ok_diff = (dist_depth < 0.1) ||
+                (validPrimarySurface && grazing_factor > 0.0 && diff_plane_dist < 0.025 && dist_depth < grazing_depth_tol);
+
+            if(depth_ok_diff && dot_geo_normals > 0.5)
             {
                 float w_diff = w[i] * max(dot_normals, 0);
 
@@ -484,10 +496,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             const float geomDist = lerp(planeDist, surfDepthDist, surface_blend);
             const float parallaxUv = length(motion_spec_xy - motion.xy);
             const float planeTol = lerp(0.015, 0.08, surface_blend);
+            const float spec_grazing_dist = abs(dot(surfPosPrev - surfPos, geo_normal_curr)) / max(abs(depth_curr), 0.25);
+            const bool spec_grazing_ok = (validPrimarySurface && grazing_factor > 0.0 && spec_grazing_dist < 0.025);
+            const float spec_depth_limit = max(0.08 + 4.0 * parallaxUv, spec_grazing_ok ? grazing_depth_tol : 0.0);
 
             if(dot(geo_normal_curr, geo_normal_prev_s) > 0.75
-                && geomDist < planeTol
-                && surfDepthDist < (0.08 + 4.0 * parallaxUv)
+                && (geomDist < planeTol || (spec_grazing_ok && surfDepthDist < grazing_depth_tol))
+                && surfDepthDist < spec_depth_limit
                 && abs(rough_prev - metal_rough.y) <= 0.25)
             {
                 const float3 normal_prev_s = texelFetchNormal_Prev(p_s);
@@ -547,7 +562,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
                 get_shared_data(groupThreadID, int2(xx, yy), depth, normal, lum_p_hf);
 
                 float dist_z = abs(depth_curr - depth) * gradDepth;
-                if(dist_z < 2.0)
+                const float spatial_depth_tol = lerp(2.0, 3.5, grazing_factor);
+                if(dist_z < spatial_depth_tol)
                 {
                     float w_hf = pow(max(0.0, dot(normal, normal_curr)), 128.0);
 
@@ -707,13 +723,46 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         ? lerp(spatial_moments_spec, out_moments_spec, saturate((out_color_histlen_spec.a - 1.0) / 3.0))
         : out_moments_spec;
 
+    float2 atrous_moments_hf = out_moments_histlen_hf.xy;
+    if (out_moments_histlen_hf.b < 4.0)
+    {
+        float2 sum_mom5 = float2(lum_curr_hf, lum_curr_hf * lum_curr_hf);
+        float sum_w5 = 1.0;
+        const float sp5_depth_tol = lerp(2.0, 3.5, grazing_factor);
+        for (int yy5 = -2; yy5 <= 2; yy5++)
+        {
+            for (int xx5 = -2; xx5 <= 2; xx5++)
+            {
+                if (xx5 == 0 && yy5 == 0)
+                    continue;
+                const int2 mp5 = ipos + int2(xx5, yy5);
+                if (mp5.x < cb_left || mp5.x >= cb_right || mp5.y < 0 || mp5.y >= height)
+                    continue;
+                const float d5 = framebufQ2ViewDepth_Sampled.Load(int3(mp5, 0)).r;
+                const float3 n5 = texelFetchNormal(mp5);
+                const float dz5 = abs(depth_curr - d5) * gradDepth;
+                const float nd5 = max(0.0, dot(normal_curr, n5));
+                if (dz5 < sp5_depth_tol && nd5 > 0.7)
+                {
+                    const float w5 = pow(nd5, 32.0);
+                    const float l5 = getLuminance(q2UnpackRGBE(framebufQ2ColorHF_Sampled.Load(int3(mp5, 0)).r));
+                    sum_mom5 += float2(l5, l5 * l5) * w5;
+                    sum_w5 += w5;
+                }
+            }
+        }
+        const float2 spatial5x5_hf = sum_mom5 / max(sum_w5, 1e-6);
+        const float fast_t_hf = saturate((out_moments_histlen_hf.b - 1.0) / 3.0);
+        atrous_moments_hf = lerp(spatial5x5_hf, out_moments_histlen_hf.xy, fast_t_hf);
+    }
+
     // Store the outputs for further processing by the a-trous filter
     framebufQ2HistMomentsHF[ipos] = out_moments_histlen_hf;
     framebufQ2HistMomentsSpec[ipos] = float4(out_moments_spec, 0.0, 0.0);
     Q2_STORE_SH(framebufQ2HistColorLF_SH, framebufQ2HistColorLF_COCG, ipos, out_color_lf);
     framebufQ2AtrousPingHF[ipos] = (uint4)q2PackRGBE(out_color_hf);
     framebufQ2AtrousPingSpec[ipos] = (uint4)q2PackRGBE(out_color_histlen_spec.rgb);
-    framebufQ2AtrousPingMoments[ipos] = float4(out_moments_histlen_hf.xy, atrous_moments_spec);
+    framebufQ2AtrousPingMoments[ipos] = float4(atrous_moments_hf, atrous_moments_spec);
     framebufQ2FilteredSpec[ipos] = out_color_histlen_spec;
 
     GroupMemoryBarrierWithGroupSync();
@@ -760,6 +809,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     float sum_w = 1;
     Q2SH sum_lf = center_lf;
 
+    const float3 lf_view_dir = safeNormalize(framebufViewDirection_Sampled.Load(int3(center_ipos, 0)).xyz);
+    const float lf_grazing = (center_depth > 1e-4 && dot(center_normal, center_normal) > 0.5)
+        ? smoothstep(0.45, 0.10, abs(dot(center_normal, lf_view_dir)))
+        : 0.0;
+    const float lf_depth_tol = lerp(2.0, 3.5, lf_grazing);
+
     // Average the anchor pixel color with the relevant neighborhood
     for(int yy = -1; yy <= 1; yy++)
     {
@@ -777,7 +832,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             float p_depth = s_depth[center_shared_pos.y + FILTER_RADIUS + yy][center_shared_pos.x + FILTER_RADIUS + xx];
 
             float dist_depth = abs(p_depth - center_depth) * depth_width;
-            if(dist_depth < 2)
+            if(dist_depth < lf_depth_tol)
             {
                 float w = pow(max(dot(p_normal, center_normal), 0), 8);
 

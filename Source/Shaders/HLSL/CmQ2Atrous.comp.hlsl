@@ -119,12 +119,83 @@ filter_image(
     float hist_len_spec = max(framebufQ2FilteredSpec_Sampled.Load(int3( ipos, 0 )).a, 1.0);
     float spec_hit_dist = framebufViewDirection_Sampled.Load(int3( ipos, 0 )).w;
 
+    // Boundaries for the checkerboard field, either left or right half of the screen
+    const int width = (int)globalUniform.renderWidth;
+    const int height = (int)globalUniform.renderHeight;
+    int field_left = 0;
+    int field_right = width / 2;
+    if(ipos.x >= field_right)
+    {
+        field_left = field_right;
+        field_right = width;
+    }
+
     if(Q2_FLT_ATROUS_LUM_HF != 0 && hist_len_hf > 1)
     {
-        // Compute luminance variance from the statistical moments: Var(X) = E[X^2] - E[X]^2
+        // Pre-filter per-pixel temporal HF variance over a bilateral 3x3 checkerboard neighbourhood
+        // so an isolated noisy emissive pixel cannot stall filtering, while keeping lum_mean_hf at
+        // moments_center.x so sharp static contact shadow edges do not blur.
+        static const float kGauss3x3[3] = { 0.25, 0.5, 0.25 };
+        const float center_w = kGauss3x3[1] * kGauss3x3[1];
+        const float center_var_hf = max(1e-8, moments_center.y - moments_center.x * moments_center.x);
+        float sum_var_hf = center_var_hf * center_w;
+        float sum_var_w = center_w;
+        const float center_l_hf = getLuminance(color_center_hf);
+        float spatial_s1 = center_l_hf * center_w;
+        float spatial_s2 = center_l_hf * center_l_hf * center_w;
+        float spatial_w = center_w;
+
+        [unroll]
+        for(int dy = -1; dy <= 1; dy++)
+        {
+            [unroll]
+            for(int dx = -1; dx <= 1; dx++)
+            {
+                if(dx == 0 && dy == 0)
+                    continue;
+                const int2 np = ipos + int2(dx, dy);
+                if(any(np < int2(field_left, 0)) || any(np >= int2(field_right, height)))
+                    continue;
+
+                const float nDepth = framebufQ2ViewDepth_Sampled.Load(int3(np, 0)).r;
+                const float3 nNormal = texelFetchNormal(np);
+                const float dist_z_n = abs(depth_center - nDepth) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
+                const float n_dot = max(0.0, dot(normal_center, nNormal));
+                if(dist_z_n > 2.5 || n_dot < 0.85)
+                    continue;
+
+                const float gw = kGauss3x3[dx + 1] * kGauss3x3[dy + 1] * exp(-dist_z_n);
+                const float2 nMom = img_moments.Load(np).xy;
+                const float nVar = max(1e-8, nMom.y - nMom.x * nMom.x);
+                sum_var_hf += nVar * gw;
+                sum_var_w += gw;
+
+                const float nLum = getLuminance(q2UnpackRGBE(img_hf.Load(np).r));
+                spatial_s1 += nLum * gw;
+                spatial_s2 += nLum * nLum * gw;
+                spatial_w += gw;
+            }
+        }
+
         lum_mean_hf = moments_center.x;
-        float lum_variance_hf = max(1e-8, moments_center.y - moments_center.x * moments_center.x);
-        sigma_l_hf = min(hist_len_hf, Q2_FLT_ATROUS_LUM_HF) / (2.0 * lum_variance_hf);
+        float lum_variance_hf = max(1e-8, sum_var_hf / max(sum_var_w, 1e-6));
+
+        // Short-history spatial variance floor prevents newly disoccluded noisy emissive regions
+        // from locking out filtering when temporal moments have not yet converged.
+        if(hist_len_hf < 8.0)
+        {
+            const float sp_mean = spatial_s1 / max(spatial_w, 1e-6);
+            const float sp_var = max(0.0, spatial_s2 / max(spatial_w, 1e-6) - sp_mean * sp_mean);
+            const float short_hist_weight = lerp(1.0, 0.15, saturate((hist_len_hf - 1.0) / 7.0));
+            lum_variance_hf = max(lum_variance_hf, sp_var * short_hist_weight);
+        }
+
+        // Adapt luminance edge-stopping by history length and relative variance so noisy
+        // emissive penumbras blend smoothly while converged shadow edges stay crisp.
+        const float rel_var_hf = lum_variance_hf / max(lum_mean_hf * lum_mean_hf, 1e-4);
+        const float var_relax = 1.0 + 3.0 * smoothstep(0.015, 0.25, rel_var_hf);
+        const float eff_hist_hf = min(hist_len_hf, Q2_FLT_ATROUS_LUM_HF) / var_relax;
+        sigma_l_hf = eff_hist_hf / (2.0 * lum_variance_hf);
     }
     else
     {
@@ -145,7 +216,9 @@ filter_image(
     float normal_weight_scale_hf = clamp(hist_len_hf / 8.0, 0.0, 1.0);
     float normal_weight_scale_spec = clamp(hist_len_spec / 8.0, 0.0, 1.0);
 
-    float normal_weight_hf = Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf;
+    float normal_weight_hf = (Q2_FLT_ATROUS_NORMAL_HF > 0.0)
+        ? max(4.0, Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf)
+        : 0.0;
     float normal_weight_spec = roughnessSquaredToSpecPower(square(roughness_center)) * Q2_FLT_ATROUS_NORMAL_SPEC;
     normal_weight_spec = clamp(normal_weight_spec, 8.0, 1024.0) * normal_weight_scale_spec;
 
@@ -157,17 +230,6 @@ filter_image(
 
     float sum_w_hf = 1.0;
     float sum_w_spec = 1.0;
-
-    // Boundaries for the checkerboard field, either left or right half of the screen
-    const int width = (int)globalUniform.renderWidth;
-    const int height = (int)globalUniform.renderHeight;
-    int field_left = 0;
-    int field_right = width / 2;
-    if(ipos.x >= field_right)
-    {
-        field_left = field_right;
-        field_right = width;
-    }
 
     if (spec_hit_dist < 0.0 && depth_center > 1e-4 && !isSkyPix(ipos) && dot(normal_center, normal_center) > 0.5)
     {
@@ -215,71 +277,98 @@ filter_image(
         : clamp(roughness_center * 30.0 - (float)q2AtrousIteration, 0.0, 1.0);
     const float rough_sharpness = lerp(4.0, 12.0, saturate(hist_len_spec / 16.0));
 
+    // Zero-mean centrosymmetric 2x2 Bayer tap rotation for HF on coarser iterations
+    // breaks dyadic square grid ringing without adding temporal jitter; SPEC stays exact
+    // to preserve specular impulse monotonicity across atrous iterations.
+    const int hf_rot_hi = (q2AtrousIteration >= 1u) ? max(1, step_size / 2) : 0;
+    const int hf_rot_lo = (q2AtrousIteration >= 2u) ? max(1, step_size / 4) : 0;
+    const uint hf_tile_hash = (((uint(ipos.x) & 1u) | ((uint(ipos.y) & 1u) << 1u)) + q2AtrousIteration) & 3u;
+    int hf_rot = 0;
+    if (hf_rot_hi > 0)
+    {
+        if (hf_tile_hash == 0u)      hf_rot =  hf_rot_hi;
+        else if (hf_tile_hash == 1u) hf_rot = -hf_rot_hi;
+        else if (hf_tile_hash == 2u) hf_rot =  hf_rot_lo;
+        else                         hf_rot = -hf_rot_lo;
+    }
+    const float hf_eff_step = sqrt((float)(step_size * step_size + hf_rot * hf_rot));
+
     // Compute the weighted average of color and moments from a sparse 3x3 pattern around the target pixel
     const int r = 1;
     for(int yy = -r; yy <= r; yy++)
     {
         for(int xx = -r; xx <= r; xx++)
         {
-            int2 p = ipos + int2(xx, yy) * step_size;
-
             if(xx == 0 && yy == 0)
                 continue;
 
-            float w = (float)(all(p >= int2(field_left, 0))
-                    && all(p < int2(field_right, height)));
+            const float kernel_w = Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
+            const int2 p_spec = ipos + int2(xx, yy) * step_size;
+            const bool spec_in_bounds = all(p_spec >= int2(field_left, 0))
+                && all(p_spec < int2(field_right, height));
 
-            float3 normal = texelFetchNormal(p);
-
-            float depth = framebufQ2ViewDepth_Sampled.Load(int3( p, 0 )).r;
-            float roughness = framebufMetallicRoughness_Sampled.Load(int3( p, 0 )).y;
-
-            float dist_z = abs(depth_center - depth) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
-            w *= exp(-dist_z / (float)step_size);
-            w *= Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
-
-            float3 c_hf = q2UnpackRGBE(img_hf.Load( p ).r);
-            float3 c_spec = q2UnpackRGBE(img_spec.Load( p ).r);
-            float4 c_mom = img_moments.Load( p );
-            float l_hf = getLuminance(c_hf.rgb);
-            float dist_l_hf = abs(lum_mean_hf - l_hf);
-
-            float w_hf = w * exp(- dist_l_hf * dist_l_hf * sigma_l_hf);
-
-            float l_spec = getLuminance(c_spec.rgb);
-            float dist_l_spec = abs(lum_mean_spec - l_spec);
-            float w_spec = w;
-            if(inv_lum_scale_spec > 0.0)
+            float3 normal_spec = normal_center;
+            float depth_spec = depth_center;
+            if (spec_in_bounds && Q2_ATROUS_ITERATIONS_SPEC > q2AtrousIteration)
             {
-                w_spec *= exp(-dist_l_spec * inv_lum_scale_spec);
-            }
-            w_spec *= exp(-abs(roughness - roughness_center) * rough_sharpness);
-            w_spec *= spec_filter_width_scale;
+                normal_spec = texelFetchNormal(p_spec);
+                depth_spec = framebufQ2ViewDepth_Sampled.Load(int3(p_spec, 0)).r;
+                const float roughness = framebufMetallicRoughness_Sampled.Load(int3(p_spec, 0)).y;
+                const float dist_z = abs(depth_center - depth_spec) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
+                float w_spec = exp(-dist_z / (float)step_size) * kernel_w;
 
-            float NdotN = max(0.0, dot(normal_center, normal));
+                const float3 c_spec = q2UnpackRGBE(img_spec.Load(p_spec).r);
+                const float4 c_mom_s = img_moments.Load(p_spec);
+                const float l_spec = getLuminance(c_spec.rgb);
+                const float dist_l_spec = abs(lum_mean_spec - l_spec);
+                if(inv_lum_scale_spec > 0.0)
+                {
+                    w_spec *= exp(-dist_l_spec * inv_lum_scale_spec);
+                }
+                w_spec *= exp(-abs(roughness - roughness_center) * rough_sharpness);
+                w_spec *= spec_filter_width_scale;
 
-            if(normal_weight_hf > 0)
-            {
-                w_hf *= q2SafePow(NdotN, normal_weight_hf);
-            }
+                const float NdotN_s = max(0.0, dot(normal_center, normal_spec));
+                if(normal_weight_spec > 0)
+                {
+                    w_spec *= q2SafePow(NdotN_s, normal_weight_spec);
+                }
 
-            if(normal_weight_spec > 0)
-            {
-                w_spec *= q2SafePow(NdotN, normal_weight_spec);
+                sum_color_spec += c_spec.rgb * w_spec;
+                sum_moments.zw += c_mom_s.zw * w_spec;
+                sum_w_spec     += w_spec;
             }
 
-            if(Q2_ATROUS_ITERATIONS_HF <= q2AtrousIteration)
-                w_hf = 0;
+            if (Q2_ATROUS_ITERATIONS_HF > q2AtrousIteration)
+            {
+                const int2 p_hf = ipos + int2(xx * step_size + yy * hf_rot, yy * step_size - xx * hf_rot);
+                const bool hf_in_bounds = all(p_hf >= int2(field_left, 0))
+                    && all(p_hf < int2(field_right, height));
+                if (hf_in_bounds)
+                {
+                    const bool reuse_spec = (hf_rot == 0) && (Q2_ATROUS_ITERATIONS_SPEC > q2AtrousIteration);
+                    const float3 normal_hf = reuse_spec ? normal_spec : texelFetchNormal(p_hf);
+                    const float depth_hf = reuse_spec ? depth_spec : framebufQ2ViewDepth_Sampled.Load(int3(p_hf, 0)).r;
+                    const float dist_z_hf = abs(depth_center - depth_hf) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
+                    float w_hf = exp(-dist_z_hf / hf_eff_step) * kernel_w;
 
-            if(Q2_ATROUS_ITERATIONS_SPEC <= q2AtrousIteration)
-                w_spec = 0;
+                    const float3 c_hf = q2UnpackRGBE(img_hf.Load(p_hf).r);
+                    const float4 c_mom_hf = img_moments.Load(p_hf);
+                    const float l_hf = getLuminance(c_hf.rgb);
+                    const float dist_l_hf = abs(lum_mean_hf - l_hf);
+                    w_hf *= exp(-dist_l_hf * dist_l_hf * sigma_l_hf);
 
-            sum_color_hf += c_hf.rgb * w_hf;
-            sum_color_spec += c_spec.rgb * w_spec;
-            sum_moments.xy += c_mom.xy * w_hf;
-            sum_moments.zw += c_mom.zw * w_spec;
-            sum_w_hf     += w_hf;
-            sum_w_spec   += w_spec;
+                    const float NdotN_hf = max(0.0, dot(normal_center, normal_hf));
+                    if(normal_weight_hf > 0)
+                    {
+                        w_hf *= q2SafePow(NdotN_hf, normal_weight_hf);
+                    }
+
+                    sum_color_hf   += c_hf.rgb * w_hf;
+                    sum_moments.xy += c_mom_hf.xy * w_hf;
+                    sum_w_hf       += w_hf;
+                }
+            }
         }
     }
 

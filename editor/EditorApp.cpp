@@ -3362,6 +3362,8 @@ void EditorApp::SubmitSceneFrame()
         UploadPreviewModel();
     }
 
+    TryRequestScreenshot();
+
     const QrResult drawResult = EditorDrawFrame(m_instance, &draw);
 
     if (drawResult != QR_SUCCESS)
@@ -3375,12 +3377,7 @@ void EditorApp::SubmitSceneFrame()
         }
     }
 
-    m_renderedFrames++;
-
-    if (m_maxFrames > 0 && m_renderedFrames >= m_maxFrames)
-    {
-        m_running = false;
-    }
+    AdvanceRenderedFrameCount();
 
     if (m_sceneLoaded && !m_lightStatsLogged && ++m_framesSinceSceneLoad == 120)
     {
@@ -11156,6 +11153,135 @@ void EditorApp::Notify(const std::string &text)
 namespace
 {
 
+void AppendBe32(std::vector<uint8_t> &out, uint32_t value)
+{
+    out.push_back(uint8_t((value >> 24u) & 0xFFu));
+    out.push_back(uint8_t((value >> 16u) & 0xFFu));
+    out.push_back(uint8_t((value >> 8u) & 0xFFu));
+    out.push_back(uint8_t(value & 0xFFu));
+}
+
+uint32_t UpdateCrc32(uint32_t crc, const uint8_t *data, size_t size)
+{
+    uint32_t state = crc ^ 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; i++)
+    {
+        state ^= data[i];
+        for (int bit = 0; bit < 8; bit++)
+        {
+            state = (state & 1u) != 0u ? ((state >> 1u) ^ 0xEDB88320u) : (state >> 1u);
+        }
+    }
+    return state ^ 0xFFFFFFFFu;
+}
+
+uint32_t ComputeAdler32(const uint8_t *data, size_t size)
+{
+    constexpr uint32_t kModAdler = 65521u;
+    uint32_t s1 = 1u;
+    uint32_t s2 = 0u;
+    for (size_t i = 0; i < size; i++)
+    {
+        s1 = (s1 + data[i]) % kModAdler;
+        s2 = (s2 + s1) % kModAdler;
+    }
+    return (s2 << 16u) | s1;
+}
+
+void WritePngChunk(std::vector<uint8_t> &out, const char type[4], const uint8_t *data, size_t size)
+{
+    AppendBe32(out, uint32_t(size));
+    const size_t typeOffset = out.size();
+    out.insert(out.end(), type, type + 4);
+    if (size > 0 && data != nullptr)
+    {
+        out.insert(out.end(), data, data + size);
+    }
+    const uint32_t crc = UpdateCrc32(0u, out.data() + typeOffset, 4u + size);
+    AppendBe32(out, crc);
+}
+
+std::vector<uint8_t> BuildStoredZlibStream(const uint8_t *raw, size_t rawSize)
+{
+    std::vector<uint8_t> z;
+    z.reserve(rawSize + 64u);
+    z.push_back(0x78u);
+    z.push_back(0x01u);
+
+    size_t offset = 0;
+    while (offset < rawSize || rawSize == 0)
+    {
+        const size_t blockLen = std::min<size_t>(65535u, rawSize - offset);
+        const bool isFinal = (offset + blockLen) >= rawSize;
+        const uint16_t len16 = uint16_t(blockLen);
+        const uint16_t nlen16 = uint16_t(~len16);
+        z.push_back(isFinal ? 0x01u : 0x00u);
+        z.push_back(uint8_t(len16 & 0xFFu));
+        z.push_back(uint8_t(len16 >> 8u));
+        z.push_back(uint8_t(nlen16 & 0xFFu));
+        z.push_back(uint8_t(nlen16 >> 8u));
+        if (blockLen > 0)
+        {
+            z.insert(z.end(), raw + offset, raw + offset + blockLen);
+        }
+        offset += blockLen;
+        if (isFinal)
+        {
+            break;
+        }
+    }
+
+    AppendBe32(z, ComputeAdler32(raw, rawSize));
+    return z;
+}
+
+bool WriteRgbaPng(const std::filesystem::path &path, uint32_t width, uint32_t height,
+                  uint32_t rowPitch, const uint8_t *rgba)
+{
+    if (width == 0 || height == 0 || rgba == nullptr || rowPitch < width * 4u)
+    {
+        return false;
+    }
+
+    std::error_code ec;
+    if (path.has_parent_path())
+    {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+
+    std::vector<uint8_t> raw(size_t(height) * (1u + size_t(width) * 4u), 0u);
+    const size_t stride = 1u + size_t(width) * 4u;
+    for (uint32_t y = 0; y < height; y++)
+    {
+        uint8_t *dst = raw.data() + size_t(y) * stride;
+        dst[0] = 0u;
+        std::copy_n(rgba + size_t(y) * rowPitch, size_t(width) * 4u, dst + 1u);
+    }
+
+    std::vector<uint8_t> png = { 137u, 80u, 78u, 71u, 13u, 10u, 26u, 10u };
+    std::vector<uint8_t> ihdr;
+    AppendBe32(ihdr, width);
+    AppendBe32(ihdr, height);
+    ihdr.push_back(8u);
+    ihdr.push_back(6u);
+    ihdr.push_back(0u);
+    ihdr.push_back(0u);
+    ihdr.push_back(0u);
+    WritePngChunk(png, "IHDR", ihdr.data(), ihdr.size());
+
+    const std::vector<uint8_t> idat = BuildStoredZlibStream(raw.data(), raw.size());
+    WritePngChunk(png, "IDAT", idat.data(), idat.size());
+    WritePngChunk(png, "IEND", nullptr, 0u);
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+        return false;
+    }
+    out.write(reinterpret_cast<const char *>(png.data()), std::streamsize(png.size()));
+    return out.good();
+}
+
 struct EditorLaunchConfig
 {
     std::string scenePath = "editor_scene.obj";
@@ -11165,10 +11291,12 @@ struct EditorLaunchConfig
     std::string initialTab;
     std::string materialsOverride;
     std::string lightsOverride;
+    std::string screenshotPath;
     uint32_t maxFrames = 0;
     bool hasScene = false;
     bool hasShaders = false;
     bool hasBlueNoise = false;
+    bool noPanel = false;
 };
 
 struct StringFlagBinding
@@ -11188,11 +11316,23 @@ void ParseEditorCliArgs(const std::vector<std::string> &args, EditorLaunchConfig
         { "--tab", &config.initialTab, nullptr },
         { "--materials", &config.materialsOverride, nullptr },
         { "--lights", &config.lightsOverride, nullptr },
+        { "--screenshot", &config.screenshotPath, nullptr },
     };
 
-    for (size_t i = 1; i + 1 < args.size(); i++)
+    for (size_t i = 1; i < args.size(); i++)
     {
         const std::string &argument = args[i];
+
+        if (argument == "--no-panel")
+        {
+            config.noPanel = true;
+            continue;
+        }
+
+        if (i + 1 >= args.size())
+        {
+            break;
+        }
 
         if (argument == "--max-frames")
         {
@@ -11226,6 +11366,95 @@ void ParseEditorCliArgs(const std::vector<std::string> &args, EditorLaunchConfig
 
 } // namespace
 
+void EditorApp::TryRequestScreenshot()
+{
+    if (m_screenshotPath.empty() || m_screenshotRequested || m_instance == nullptr)
+    {
+        return;
+    }
+
+    const uint32_t targetFrame = (m_maxFrames > 0u) ? m_maxFrames : 1u;
+    if (m_renderedFrames + 1u < targetFrame)
+    {
+        return;
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t rowPitch = 0;
+    uint64_t bufferSize = 0;
+    if (qrGetFrameReadbackRequirements(m_instance, QR_FRAME_READBACK_FORMAT_RGBA8_UNORM, QR_TRUE,
+                                       &width, &height, &rowPitch, &bufferSize) != QR_SUCCESS ||
+        bufferSize == 0u)
+    {
+        return;
+    }
+
+    m_screenshotWidth = width;
+    m_screenshotHeight = height;
+    m_screenshotRowPitch = rowPitch;
+    m_screenshotPixels.assign(size_t(bufferSize), 0u);
+
+    QrFrameReadbackInfo info = {};
+    info.width = width;
+    info.height = height;
+    info.rowPitch = rowPitch;
+    info.bufferSize = bufferSize;
+    info.format = QR_FRAME_READBACK_FORMAT_RGBA8_UNORM;
+    info.includeUi = QR_TRUE;
+    info.pDst = m_screenshotPixels.data();
+    info.frameId = QR_FRAME_ID_LATEST;
+
+    if (qrRequestFrameReadback(m_instance, &info, &m_screenshotRequestId) == QR_SUCCESS)
+    {
+        m_screenshotRequested = true;
+    }
+}
+
+void EditorApp::TryCompleteScreenshot()
+{
+    if (!m_screenshotRequested || m_screenshotWritten || m_instance == nullptr)
+    {
+        return;
+    }
+
+    QrBool32 done = QR_FALSE;
+    if (qrGetFrameReadbackStatus(m_instance, m_screenshotRequestId, &done) != QR_SUCCESS ||
+        done != QR_TRUE)
+    {
+        return;
+    }
+
+    if (WriteRgbaPng(m_screenshotPath, m_screenshotWidth, m_screenshotHeight,
+                     m_screenshotRowPitch, m_screenshotPixels.data()))
+    {
+        PrintMessage(("screenshot: saved " + m_screenshotPath).c_str(), this);
+    }
+    else
+    {
+        PrintMessage(("screenshot: failed writing " + m_screenshotPath).c_str(), this);
+    }
+    m_screenshotWritten = true;
+}
+
+void EditorApp::AdvanceRenderedFrameCount()
+{
+    m_renderedFrames++;
+    TryCompleteScreenshot();
+
+    if (m_maxFrames == 0u || m_renderedFrames < m_maxFrames)
+    {
+        return;
+    }
+
+    const bool waitingScreenshot =
+        !m_screenshotPath.empty() && !m_screenshotWritten && m_renderedFrames < m_maxFrames + 6u;
+    if (!waitingScreenshot)
+    {
+        m_running = false;
+    }
+}
+
 int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
 {
     m_startTime = std::chrono::steady_clock::now();
@@ -11244,7 +11473,9 @@ int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
     m_initialTab = config.initialTab;
     m_materialsOverride = config.materialsOverride;
     m_lightsOverride = config.lightsOverride;
+    m_screenshotPath = config.screenshotPath;
     m_maxFrames = config.maxFrames;
+    m_noPanel = config.noPanel;
 
     NormalizeFolder(m_shaderFolder);
     m_sessionPaths =
@@ -11273,6 +11504,10 @@ int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
     CreateUi();
     m_window.GetClientSize(m_clientWidth, m_clientHeight);
     InitEditorSessionMode();
+    if (m_noPanel)
+    {
+        SetCursorMode(false);
+    }
 
     m_lastFrameTime = std::chrono::steady_clock::now();
 

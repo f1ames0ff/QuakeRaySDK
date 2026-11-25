@@ -339,6 +339,9 @@ private:
     void Frame();
     void RenderSceneFrameContents(float deltaSeconds);
     void SubmitSceneFrame();
+    void TryRequestScreenshot();
+    void TryCompleteScreenshot();
+    void AdvanceRenderedFrameCount();
     void Shutdown();
 
     void HandleEvent(const EditorEvent &event);
@@ -534,6 +537,15 @@ private:
     bool m_showPanel = true;
     uint32_t m_maxFrames = 0;
     uint32_t m_renderedFrames = 0;
+    std::string m_screenshotPath;
+    bool m_noPanel = false;
+    bool m_screenshotRequested = false;
+    bool m_screenshotWritten = false;
+    uint64_t m_screenshotRequestId = 0;
+    uint32_t m_screenshotWidth = 0;
+    uint32_t m_screenshotHeight = 0;
+    uint32_t m_screenshotRowPitch = 0;
+    std::vector<uint8_t> m_screenshotPixels;
 
     // Left edge of the right-docked panel so viewport drag hints stay clear of it.
     bool m_panelVisible = false;

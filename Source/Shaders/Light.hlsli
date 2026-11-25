@@ -231,19 +231,22 @@ float calcSolidAngleForSphere(float sphereRadius, float distanceToSphereCenter)
     return safeSolidAngle(2 * M_PI * (1.0 - cosTheta));
 }
 
+#define DTAL_MIN_DISTANCE 0.025
+
 float calcSolidAngleForArea(float area, const float3 areaPosition, const float3 areaNormal, const float3 surfPosition)
 {
     const DirectionAndLength areaLightToSurf = calcDirectionAndLength(areaPosition, surfPosition);
-    return safeSolidAngle(area * getGeometryFactor(areaNormal, areaLightToSurf.dir, areaLightToSurf.len));
+    const float areaReg = max(area * (0.5 / M_PI), square(DTAL_MIN_DISTANCE));
+    const float cosNL = abs(dot(areaNormal, areaLightToSurf.dir));
+    return safeSolidAngle(area * cosNL * safePositiveRcp(square(areaLightToSurf.len) + areaReg));
 }
-
-#define DTAL_MIN_DISTANCE 0.025
 
 float getTexturedAreaLightDw(float area, const float3 lightNormal, const float3 lightToSurf, float distance)
 {
     const float cosNL = max(dot(lightNormal, lightToSurf), 0.0);
     const float dist = max(distance, DTAL_MIN_DISTANCE);
-    const float dw = area * cosNL * safePositiveRcp(square(dist));
+    const float areaReg = max(area * (0.5 / M_PI), square(DTAL_MIN_DISTANCE));
+    const float dw = area * cosNL * safePositiveRcp(square(dist) + areaReg);
 
     return (isnan(dw) || isinf(dw) || dw < 0.0) ? 0.0 : dw;
 }
@@ -579,10 +582,12 @@ LightSample sampleProjectedAreaLight(const TexturedAreaLight l, const float3 sur
     }
 
     const DirectionAndLength lightToSurf = calcDirectionAndLength(pos, surfPosition);
+    const float areaReg = max(l.area * (0.5 / M_PI), square(DTAL_MIN_DISTANCE));
+    const float cosNL_surf = max(0.0, dot(l.normal, lightToSurf.dir));
 
     r.position = pos;
     r.color = l.color * mask * spotlight;
-    r.dw = safeSolidAngle(emiss * l.area * getGeometryFactorClamped(l.normal, lightToSurf.dir, lightToSurf.len));
+    r.dw = safeSolidAngle(emiss * l.area * cosNL_surf * safePositiveRcp(square(lightToSurf.len) + areaReg));
 
     return r;
 }
