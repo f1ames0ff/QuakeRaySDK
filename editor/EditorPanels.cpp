@@ -232,8 +232,21 @@ void DrawSpotCone(ImDrawList *drawList, const std::function<bool(const float[3],
     }
 }
 
+bool DrawMaterialEnabledRow(EditorMaterialParams &params, const EditorMaterialParams &base)
+{
+    bool enabledReset = false;
+    bool edited = EditorGuiCheckbox(
+        "enabled", &params.enabled,
+        { params.enabled != base.enabled, true,
+          "Render and trace this material in the scene (uncheck to hide completely).", nullptr,
+          &enabledReset });
+    edited |= ResetIfClicked(params.enabled, base.enabled, &enabledReset);
+    return edited;
+}
+
 bool DrawMaterialTexturesSection(
     const std::function<void(EditorApp::EditorTextureSlot)> &onBrowse,
+    const std::function<bool(EditorApp::EditorTextureSlot)> &onGenerateAi,
     EditorMaterialParams &params, const EditorMaterialParams &base,
     const EditorMaterialParams *baseModParams, bool inheritedFromBaseMod)
 {
@@ -242,16 +255,20 @@ bool DrawMaterialTexturesSection(
     {
         const char *label;
         EditorApp::EditorTextureSlot slot;
+        bool supportsAi;
         const char *tip;
     };
     static constexpr SlotRow kSlots[] = {
-        { "texture_base", EditorApp::EditorTextureSlot::Base, "Override base albedo texture." },
-        { "texture_normals", EditorApp::EditorTextureSlot::Normals, "Override normal map texture." },
-        { "texture_emissive", EditorApp::EditorTextureSlot::Emissive,
+        { "texture_base", EditorApp::EditorTextureSlot::Base, false,
+          "Override base albedo texture." },
+        { "texture_normals", EditorApp::EditorTextureSlot::Normals, true,
+          "Override normal / bump map texture." },
+        { "texture_emissive", EditorApp::EditorTextureSlot::Emissive, true,
           "Override explicit emissive mask texture (disables color_emissive blocks)." },
-        { "texture_overlay", EditorApp::EditorTextureSlot::Overlay, "Alpha-stamped overlay decal." },
-        { "texture_gloss", EditorApp::EditorTextureSlot::Gloss, "Gloss / smoothness map." },
-        { "texture_sss", EditorApp::EditorTextureSlot::Subsurface,
+        { "texture_overlay", EditorApp::EditorTextureSlot::Overlay, false,
+          "Alpha-stamped overlay decal." },
+        { "texture_gloss", EditorApp::EditorTextureSlot::Gloss, true, "Gloss / smoothness map." },
+        { "texture_sss", EditorApp::EditorTextureSlot::Subsurface, false,
           "Greyscale/luminance subsurface scattering mask texture." },
     };
 
@@ -266,10 +283,12 @@ bool DrawMaterialTexturesSection(
             !baseModSlot.empty() ? (baseModSlot + " (base mod)") : std::string{};
         bool reset = false;
         bool browse = false;
+        bool generateAi = false;
         EditorGuiRowOpts opts{ dst != ref, true, row.tip,
                                baseHint.empty() ? nullptr : baseHint.c_str(), &reset };
         opts.dimValue = inheritedFromBaseMod && !baseModSlot.empty() && dst == baseModSlot;
-        if (EditorGuiTexturePath(row.label, dst, &browse, opts))
+        if (EditorGuiTexturePath(row.label, dst, &browse, opts,
+                                 row.supportsAi ? &generateAi : nullptr))
         {
             edited = true;
         }
@@ -280,6 +299,10 @@ bool DrawMaterialTexturesSection(
         if (browse)
         {
             onBrowse(row.slot);
+        }
+        if (generateAi && onGenerateAi)
+        {
+            edited |= onGenerateAi(row.slot);
         }
     }
 
@@ -417,17 +440,74 @@ bool DrawMaterialLightShaftSliders(EditorMaterialParams &params, const EditorMat
     return edited;
 }
 
-bool DrawMaterialLightSection(EditorMaterialParams &params, const EditorMaterialParams &base)
+bool DrawMaterialLightMinAreaRow(EditorMaterialParams &params, const EditorMaterialParams &base,
+                                 float globalMinArea)
+{
+    const float minFloor = std::max(0.0f, globalMinArea);
+    float minAreaUi = std::max(params.lightMinArea, minFloor);
+    bool lmaReset = false;
+    bool edited = false;
+    if (EditorGuiSliderFloat(
+            "light_min_area", &minAreaUi, minFloor, 1024.0f,
+            { !AlmostEq(params.lightMinArea, base.lightMinArea), true,
+              "Merge nearby detail light polygons of this material below this area "
+              "(cannot be less than System rt_dtal_minarea).",
+              "%.1f", &lmaReset }))
+    {
+        params.lightMinArea = std::max(minAreaUi, minFloor);
+        edited = true;
+    }
+    if (ResetIfClicked(params.lightMinArea, base.lightMinArea, &lmaReset))
+    {
+        edited = true;
+    }
+    return edited;
+}
+
+bool DrawMaterialLightFocusAndConeRows(EditorMaterialParams &params, const EditorMaterialParams &base)
+{
+    bool edited = false;
+
+    bool lfReset = false;
+    float focusUi = params.lightFocus < 0.0f ? (params.lightProjector ? 45.0f : 0.0f) : params.lightFocus;
+    const char *focusFmt = params.lightFocus < 0.0f ? "auto (%.0f)" : "%.1f";
+    if (EditorGuiSliderFloat("light_focus", &focusUi, 0.0f, 180.0f,
+                             { !AlmostEq(params.lightFocus, base.lightFocus), true,
+                               "Focus cone angle (defaults to 45 for projector).", focusFmt, &lfReset }))
+    {
+        params.lightFocus = focusUi;
+        edited = true;
+    }
+    edited |= ResetIfClicked(params.lightFocus, base.lightFocus, &lfReset);
+
+    bool lfsReset = false;
+    float softUi =
+        params.lightFocusSoft < 0.0f ? (params.lightProjector ? 45.0f : 0.1f * focusUi) : params.lightFocusSoft;
+    const char *softFmt = params.lightFocusSoft < 0.0f ? "auto (%.1f)" : "%.1f";
+    if (EditorGuiSliderFloat("light_focus_soft", &softUi, 0.0f, 180.0f,
+                             { !AlmostEq(params.lightFocusSoft, base.lightFocusSoft), true,
+                               "Soft falloff margin in degrees.", softFmt, &lfsReset }))
+    {
+        params.lightFocusSoft = softUi;
+        edited = true;
+    }
+    edited |= ResetIfClicked(params.lightFocusSoft, base.lightFocusSoft, &lfsReset);
+
+    bool gpReset = false;
+    edited |= EditorGuiCheckbox(
+        "light_projector", &params.lightProjector,
+        { params.lightProjector != base.lightProjector, true,
+          "Gobo light projector mode using the surface texture.", nullptr, &gpReset });
+    edited |= ResetIfClicked(params.lightProjector, base.lightProjector, &gpReset);
+
+    return edited;
+}
+
+bool DrawMaterialLightSection(EditorMaterialParams &params, const EditorMaterialParams &base,
+                              float globalMinArea)
 {
     EditorGuiSectionHeader("Light", "Area light emission parameters when surface casts light.");
     bool edited = false;
-
-    bool enabledReset = false;
-    edited |= EditorGuiCheckbox(
-        "enabled", &params.enabled,
-        { params.enabled != base.enabled, true,
-          "Enable DTAL lighting and surface emission for this material.", nullptr, &enabledReset });
-    edited |= ResetIfClicked(params.enabled, base.enabled, &enabledReset);
 
     bool isLightReset = false;
     edited |= EditorGuiCheckbox(
@@ -469,37 +549,8 @@ bool DrawMaterialLightSection(EditorMaterialParams &params, const EditorMaterial
         { !AlmostEq(params.lightBrightness, base.lightBrightness), true, nullptr, "%.2f", &lbReset });
     edited |= ResetIfClicked(params.lightBrightness, base.lightBrightness, &lbReset);
 
-    bool lfReset = false;
-    float focusUi = params.lightFocus < 0.0f ? (params.lightProjector ? 45.0f : 0.0f) : params.lightFocus;
-    const char *focusFmt = params.lightFocus < 0.0f ? "auto (%.0f)" : "%.1f";
-    if (EditorGuiSliderFloat("light_focus", &focusUi, 0.0f, 180.0f,
-                             { !AlmostEq(params.lightFocus, base.lightFocus), true,
-                               "Focus cone angle (defaults to 45 for projector).", focusFmt, &lfReset }))
-    {
-        params.lightFocus = focusUi;
-        edited = true;
-    }
-    edited |= ResetIfClicked(params.lightFocus, base.lightFocus, &lfReset);
-
-    bool lfsReset = false;
-    float softUi =
-        params.lightFocusSoft < 0.0f ? (params.lightProjector ? 45.0f : 0.1f * focusUi) : params.lightFocusSoft;
-    const char *softFmt = params.lightFocusSoft < 0.0f ? "auto (%.1f)" : "%.1f";
-    if (EditorGuiSliderFloat("light_focus_soft", &softUi, 0.0f, 180.0f,
-                             { !AlmostEq(params.lightFocusSoft, base.lightFocusSoft), true,
-                               "Soft falloff margin in degrees.", softFmt, &lfsReset }))
-    {
-        params.lightFocusSoft = softUi;
-        edited = true;
-    }
-    edited |= ResetIfClicked(params.lightFocusSoft, base.lightFocusSoft, &lfsReset);
-
-    bool gpReset = false;
-    edited |= EditorGuiCheckbox(
-        "light_projector", &params.lightProjector,
-        { params.lightProjector != base.lightProjector, true,
-          "Gobo light projector mode using the surface texture.", nullptr, &gpReset });
-    edited |= ResetIfClicked(params.lightProjector, base.lightProjector, &gpReset);
+    edited |= DrawMaterialLightMinAreaRow(params, base, globalMinArea);
+    edited |= DrawMaterialLightFocusAndConeRows(params, base);
 
     bool lsReset = false;
     edited |= EditorGuiCheckbox(
@@ -969,13 +1020,20 @@ bool DrawGlossBlockShadingControls(EditorGlossBlock &block, const EditorGlossBlo
     return edited;
 }
 
+template <typename Block>
+bool DrawFactorBlockControls(const char *featherLabel, const char *factorTip, Block &block,
+                             const Block *baseBlock)
+{
+    bool edited = DrawMaskBlockFeatherSlider(featherLabel, block, baseBlock);
+    edited |= DrawBlockUnitFloatSlider(
+        "factor", factorTip, block.factor, baseBlock != nullptr ? &baseBlock->factor : nullptr);
+    return edited;
+}
+
 bool DrawSssBlockControls(EditorSssBlock &block, const EditorSssBlock *baseBlock)
 {
-    bool edited = DrawMaskBlockFeatherSlider("sss_feather", block, baseBlock);
-    edited |= DrawBlockUnitFloatSlider(
-        "factor", "Subsurface mask multiplier for this block.",
-        block.factor, baseBlock != nullptr ? &baseBlock->factor : nullptr);
-    return edited;
+    return DrawFactorBlockControls("sss_feather", "Subsurface mask multiplier for this block.",
+                                   block, baseBlock);
 }
 
 bool DrawLumaBlockToneControls(EditorEmissiveBlock &block, const EditorEmissiveBlock *baseBlock)
@@ -1330,8 +1388,124 @@ void DrawSystemDtalSection(EditorRenderSettings &s, const EditorRenderSettings &
     }
 }
 
+int32_t GiLevelComboIndex(float level)
+{
+    if (level <= 0.25f)
+    {
+        return 0;
+    }
+    if (level < 0.75f)
+    {
+        return 1;
+    }
+    return level < 1.5f ? 2 : 3;
+}
+
+void DrawSystemGiNoiseControls(EditorRenderSettings &s, const EditorRenderSettings &b)
+{
+    bool af = s.antifirefly > 0.0f;
+    bool afReset = false;
+    if (EditorGuiCheckbox("rt_antifirefly", &af,
+                          { (s.antifirefly > 0.0f) != (b.antifirefly > 0.0f), true,
+                            "Clamp isolated high-energy indirect GI fireflies.", nullptr,
+                            &afReset }))
+    {
+        s.antifirefly = af ? 1.0f : 0.0f;
+    }
+    ResetIfClicked(s.antifirefly, b.antifirefly, &afReset);
+
+    bool enReset = false;
+    EditorGuiCheckbox(
+        "rt_emissive_nee", &s.emissiveNee,
+        { s.emissiveNee != b.emissiveNee, true,
+          "Automatically sample emissive materials and animated emissive shaders via NEE / ReSTIR direct & 1-bounce area lights.",
+          nullptr, &enReset });
+    ResetIfClicked(s.emissiveNee, b.emissiveNee, &enReset);
+
+    bool siReset = false;
+    EditorGuiSliderFloat("rt_sensit_indir", &s.sensitivityIndirect, 0.005f, 0.25f,
+                         { !AlmostEq(s.sensitivityIndirect, b.sensitivityIndirect), true,
+                           "ASVGF temporal gradient sensitivity for indirect GI (lower = smoother emissive GI in dark areas).",
+                           "%.3f", &siReset });
+    ResetIfClicked(s.sensitivityIndirect, b.sensitivityIndirect, &siReset);
+}
+
+void DrawSystemIndirectGiSection(EditorRenderSettings &s, const EditorRenderSettings &b)
+{
+    EditorGuiSectionHeader("Indirect Light & GI",
+                           "Global illumination bounces, sun bounce reach and ReSTIR GI.");
+
+    static constexpr const char *kGiLabels[] = {
+        "off",
+        "low (half-res 1 bounce)",
+        "medium (1 bounce)",
+        "high (2 bounces)",
+    };
+    static constexpr float kGiValues[] = { 0.0f, 0.5f, 1.0f, 2.0f };
+    int32_t giIdx = GiLevelComboIndex(s.giLevel);
+    bool giReset = false;
+    if (EditorGuiCombo("rt_gi_level", &giIdx, kGiLabels, 4,
+                       { !AlmostEq(s.giLevel, b.giLevel), true, nullptr, nullptr, &giReset }))
+    {
+        s.giLevel = kGiValues[std::clamp(giIdx, 0, 3)];
+    }
+    ResetIfClicked(s.giLevel, b.giLevel, &giReset);
+
+    bool sunRangeReset = false;
+    EditorGuiSliderFloat(
+        "rt_sky_sun_bounce_range", &s.sunBounceRange, 0.0f, 4000.0f,
+        { !AlmostEq(s.sunBounceRange, b.sunBounceRange), true, nullptr, "%.0f", &sunRangeReset });
+    ResetIfClicked(s.sunBounceRange, b.sunBounceRange, &sunRangeReset);
+
+    bool sunScaleReset = false;
+    EditorGuiSliderFloat(
+        "rt_sky_sun_bounce_scale", &s.sunBounceScale, 0.0f, 8.0f,
+        { !AlmostEq(s.sunBounceScale, b.sunBounceScale), true, nullptr, "%.2f", &sunScaleReset });
+    ResetIfClicked(s.sunBounceScale, b.sunBounceScale, &sunScaleReset);
+
+    bool restir = s.restir > 0.0f;
+    bool restirReset = false;
+    if (EditorGuiCheckbox("rt_restir", &restir,
+                          { (s.restir > 0.0f) != (b.restir > 0.0f), true, nullptr, nullptr,
+                            &restirReset }))
+    {
+        s.restir = restir ? 1.0f : 0.0f;
+    }
+    ResetIfClicked(s.restir, b.restir, &restirReset);
+
+    int32_t cand = std::clamp(int32_t(s.restirCandidates + 0.5f), 1, 64);
+    bool candReset = false;
+    if (EditorGuiSliderInt("rt_restir_candidates", &cand, 1, 64,
+                           { !AlmostEq(s.restirCandidates, b.restirCandidates), s.restir > 0.0f,
+                             nullptr, "%d", &candReset }))
+    {
+        s.restirCandidates = float(cand);
+    }
+    ResetIfClicked(s.restirCandidates, b.restirCandidates, &candReset);
+
+    DrawSystemGiNoiseControls(s, b);
+}
+
+void DrawSystemSurfaceAndPostControls(EditorRenderSettings &s, const EditorRenderSettings &b)
+{
+    bool nmReset = false;
+    EditorGuiSliderFloat("rt_normalmap_stren", &s.normalMapStrength, 0.0f, 4.0f,
+                         { !AlmostEq(s.normalMapStrength, b.normalMapStrength), true,
+                           "Global normal-map / bump strength multiplier.", "%.2f", &nmReset });
+    ResetIfClicked(s.normalMapStrength, b.normalMapStrength, &nmReset);
+
+    bool fgReset = false;
+    EditorGuiSliderFloat("rt_filmgrain", &s.filmGrainIntensity, 0.0f, 1.0f,
+                         { !AlmostEq(s.filmGrainIntensity, b.filmGrainIntensity), true,
+                           "Post-process film grain intensity (set to 0 to remove grain in dark areas).",
+                           "%.2f", &fgReset });
+    ResetIfClicked(s.filmGrainIntensity, b.filmGrainIntensity, &fgReset);
+}
+
 void DrawSystemRenderSection(EditorRenderSettings &s, const EditorRenderSettings &b)
 {
+    DrawSystemIndirectGiSection(s, b);
+
     EditorGuiSectionHeader("Light Shafts & Rendering");
 
     bool lsReset = false;
@@ -1394,6 +1568,8 @@ void DrawSystemRenderSection(EditorRenderSettings &s, const EditorRenderSettings
     EditorGuiSliderFloat("sensitivity", &s.mouseSensitivity, 0.5f, 15.0f,
                          { !AlmostEq(s.mouseSensitivity, b.mouseSensitivity), true, nullptr, "%.2f", &sensReset });
     ResetIfClicked(s.mouseSensitivity, b.mouseSensitivity, &sensReset);
+
+    DrawSystemSurfaceAndPostControls(s, b);
 }
 
 struct FloatSettingRow
@@ -1743,6 +1919,7 @@ bool EditorApp::HasUnsavedEditorChanges() const
 {
     return m_sceneLoaded &&
            (m_sessionDirty || !m_touchedMaterials.empty() || m_levelTouched ||
+            HasUnsavedSystemSettings() ||
             (!m_levelFingerprint.empty() && LevelFingerprint() != m_levelFingerprint));
 }
 
@@ -2434,6 +2611,17 @@ void EditorApp::DrawSwitchModSubmenu()
     ImGui::EndMenu();
 }
 
+void EditorApp::DrawFilePlayMenuItem()
+{
+    const bool running = m_playProcess.handle != 0;
+    const bool canPlay = CanPlayCurrentLevel() && !running;
+    const char *label = running ? "Play Level (Running...)" : "Play Level";
+    if (ImGui::MenuItem(label, "Ctrl+P", false, canPlay))
+    {
+        RequestPlayLevel();
+    }
+}
+
 void EditorApp::DrawFileMenu()
 {
     if (!ImGui::BeginMenu("File"))
@@ -2451,6 +2639,9 @@ void EditorApp::DrawFileMenu()
     }
     DrawLevelsInModSubmenu();
     DrawSwitchModSubmenu();
+    ImGui::Separator();
+
+    DrawFilePlayMenuItem();
     ImGui::Separator();
 
     if (ImGui::MenuItem("Reload Level", "Ctrl+R", false, m_sceneLoaded))
@@ -3455,13 +3646,14 @@ void AppendGlossBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t 
     selectedBlock = int32_t(params.glossBlocks.size()) - 1;
 }
 
-void AppendSssBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &selectedBlock,
-                    const EditorTexture *previewTex = nullptr)
+template <typename Block>
+Block MakeFactorMaskBlock(MaskBlockKind kind, float defaultThreshold, float defaultFeather,
+                          const EditorTexture *previewTex)
 {
-    EditorSssBlock blk;
+    Block blk;
     SeedGlossBlockColor(previewTex, blk.color);
-    blk.threshold = params.sssThreshold > 0.0f ? params.sssThreshold : 0.02f;
-    blk.feather = params.sssFeather;
+    blk.threshold = defaultThreshold > 0.0f ? defaultThreshold : 0.02f;
+    blk.feather = defaultFeather;
     blk.factor = 1.0f;
 
     if (kind == MaskBlockKind::Polygon)
@@ -3473,6 +3665,14 @@ void AppendSssBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &s
         InitBrushBlockStorage(blk, previewTex);
     }
 
+    return blk;
+}
+
+void AppendSssBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &selectedBlock,
+                    const EditorTexture *previewTex = nullptr)
+{
+    EditorSssBlock blk =
+        MakeFactorMaskBlock<EditorSssBlock>(kind, params.sssThreshold, params.sssFeather, previewTex);
     params.sssBlocks.push_back(std::move(blk));
     selectedBlock = int32_t(params.sssBlocks.size()) - 1;
     if (params.sssStrength <= 0.0f)
@@ -3554,8 +3754,8 @@ bool IsSssLockedByMaterial(const EditorMaterialParams &params)
            params.type == EditorMaterialType::Water || params.mirror;
 }
 
-bool DrawSssScalarRow(const char *label, float &value, float baseValue, bool enabled,
-                      const char *fmt, const char *tip)
+bool DrawUnitScalarRow(const char *label, float &value, float baseValue, bool enabled,
+                       const char *fmt, const char *tip)
 {
     bool reset = false;
     bool edited = EditorGuiSliderFloat(
@@ -3576,10 +3776,10 @@ bool DrawMaterialSssSection(EditorMaterialParams &params, const EditorMaterialPa
     }
 
     bool edited = false;
-    edited |= DrawSssScalarRow("sss_strength", params.sssStrength, base.sssStrength, enabled, "%.2f",
-                               "Global subsurface scattering intensity (0 disables).");
-    edited |= DrawSssScalarRow("sss_radius", params.sssRadius, base.sssRadius, enabled, "%.3f",
-                               "Subsurface scatter blur radius in meters.");
+    edited |= DrawUnitScalarRow("sss_strength", params.sssStrength, base.sssStrength, enabled, "%.2f",
+                                "Global subsurface scattering intensity (0 disables).");
+    edited |= DrawUnitScalarRow("sss_radius", params.sssRadius, base.sssRadius, enabled, "%.3f",
+                                "Subsurface scatter blur radius in meters.");
 
     bool colorReset = false;
     edited |= EditorGuiColorHex("sss_color", params.sssColor,
@@ -3587,10 +3787,10 @@ bool DrawMaterialSssSection(EditorMaterialParams &params, const EditorMaterialPa
                                   "Subsurface scattering tint color.", nullptr, &colorReset });
     edited |= ResetVec3IfClicked(params.sssColor, base.sssColor, &colorReset);
 
-    edited |= DrawSssScalarRow("sss_threshold", params.sssThreshold, base.sssThreshold, enabled,
-                               "%.3f", "Default color distance threshold for new subsurface blocks.");
-    edited |= DrawSssScalarRow("sss_feather", params.sssFeather, base.sssFeather, enabled, "%.3f",
-                               "Default edge feathering for new subsurface blocks.");
+    edited |= DrawUnitScalarRow("sss_threshold", params.sssThreshold, base.sssThreshold, enabled,
+                                "%.3f", "Default color distance threshold for new subsurface blocks.");
+    edited |= DrawUnitScalarRow("sss_feather", params.sssFeather, base.sssFeather, enabled, "%.3f",
+                                "Default edge feathering for new subsurface blocks.");
     return edited;
 }
 
@@ -3639,33 +3839,23 @@ bool DrawMaskBlockSelector(const char *kindTooltip, std::vector<Block> &blocks,
 
 bool DrawAddColorOrMaskButtons(bool canAdd, MaskBlockKind &outKind)
 {
-    bool clicked = false;
-    ImGui::BeginDisabled(!canAdd);
-
-    if (ImGui::Button("Add color"))
+    const int32_t clicked = EditorGuiMaskAddButtons("##mask_add", canAdd);
+    if (clicked == 0)
     {
         outKind = MaskBlockKind::Color;
-        clicked = true;
+        return true;
     }
-
-    ImGui::SameLine();
-
-    if (ImGui::Button("Add mask"))
+    if (clicked == 1)
     {
         outKind = MaskBlockKind::Polygon;
-        clicked = true;
+        return true;
     }
-
-    ImGui::SameLine();
-
-    if (ImGui::Button("Add brush"))
+    if (clicked == 2)
     {
         outKind = MaskBlockKind::Brush;
-        clicked = true;
+        return true;
     }
-
-    ImGui::EndDisabled();
-    return clicked;
+    return false;
 }
 
 template <typename DrawColorFn, typename DrawControlsFn>
@@ -4000,6 +4190,333 @@ static bool UsesProceduralGloss(const EditorMaterialParams &params)
     return params.glossTexture.empty() && params.hasColorGloss;
 }
 
+namespace
+{
+
+const char *ShaderStageBlendLabel(const EditorOverlayStage &stage)
+{
+    if (stage.isLightmap)
+    {
+        return "lightmap";
+    }
+    if (stage.isEnvironment)
+    {
+        return "env";
+    }
+    if (stage.additive)
+    {
+        return "add";
+    }
+    if (stage.filter)
+    {
+        return "filter";
+    }
+    if (stage.alphaBlend)
+    {
+        return "blend";
+    }
+    return "opaque";
+}
+
+const char *TcModTypeName(EditorTcModType type)
+{
+    switch (type)
+    {
+    case EditorTcModType::Scale:
+        return "scale";
+    case EditorTcModType::Scroll:
+        return "scroll";
+    case EditorTcModType::Rotate:
+        return "rotate";
+    case EditorTcModType::Stretch:
+        return "stretch";
+    case EditorTcModType::Turb:
+        return "turb";
+    }
+    return "mod";
+}
+
+std::string StageDisplayName(const EditorOverlayStage &stage)
+{
+    if (stage.isLightmap)
+    {
+        return "$lightmap";
+    }
+    if (stage.isWhite)
+    {
+        return "$whiteimage";
+    }
+    if (stage.animationMaps.size() > 1u)
+    {
+        return "animMap (" + std::to_string(stage.animationMaps.size()) + "f)";
+    }
+    return StripEditorImageExtension(stage.map);
+}
+
+std::string FormatShaderStageSummary(size_t index, const EditorOverlayStage &stage, bool isBaseStage)
+{
+    std::string text = "[" + std::to_string(index) + "] ";
+    if (isBaseStage)
+    {
+        text += "BASE ";
+    }
+    text += ShaderStageBlendLabel(stage);
+    text += "  ";
+    text += StageDisplayName(stage);
+    if (stage.rgbWave != EditorWaveType::None)
+    {
+        text += "  [wave]";
+    }
+    if (!stage.tcMods.empty())
+    {
+        text += "  [tcMod x" + std::to_string(stage.tcMods.size()) + "]";
+    }
+    return text;
+}
+
+void DrawShaderHeaderBadges(const EditorTexture &tex)
+{
+    std::string flags;
+    flags += tex.isNonTracedOverlay ? "overlay-only" : "traced";
+    if (tex.twoSided)
+    {
+        flags += " | two-sided";
+    }
+    if (tex.autoSprite)
+    {
+        flags += " | autoSprite";
+    }
+    else if (tex.autoSprite2)
+    {
+        flags += " | autoSprite2";
+    }
+    if (tex.deformWave != EditorWaveType::None)
+    {
+        flags += " | deformWave";
+    }
+    if (tex.isEmissiveShader)
+    {
+        flags += " | surfacelight " + std::to_string(int(tex.surfaceLightValue));
+    }
+    ImGui::TextDisabled("%s", flags.c_str());
+}
+
+std::string StagePreviewTextureRef(const EditorTexture &tex, int32_t selectedStage,
+                                   int32_t &selectedAnimFrame)
+{
+    if (selectedStage < 0 || size_t(selectedStage) >= tex.shaderStages.size())
+    {
+        return tex.name;
+    }
+    const EditorOverlayStage &st = tex.shaderStages[size_t(selectedStage)];
+    if (!st.animationMaps.empty())
+    {
+        selectedAnimFrame =
+            std::clamp(selectedAnimFrame, 0, int32_t(st.animationMaps.size()) - 1);
+        return st.animationMaps[size_t(selectedAnimFrame)];
+    }
+    return st.map;
+}
+
+bool BindSelectedStageToEmissive(const EditorTexture &tex, int32_t selectedStage,
+                                 int32_t &selectedAnimFrame, EditorMaterialParams &params,
+                                 bool allowBaseStage)
+{
+    if (selectedStage < 0 || size_t(selectedStage) >= tex.shaderStages.size())
+    {
+        return false;
+    }
+    const size_t idx = size_t(selectedStage);
+    const EditorOverlayStage &st = tex.shaderStages[idx];
+    if (st.isLightmap || st.isWhite || (!allowBaseStage && idx == tex.baseStageIndex))
+    {
+        return false;
+    }
+    const std::string ref =
+        StripEditorImageExtension(StagePreviewTextureRef(tex, selectedStage, selectedAnimFrame));
+    if (ref.empty() || params.emissiveTexture == ref)
+    {
+        return false;
+    }
+    params.emissiveTexture = ref;
+    return true;
+}
+
+bool DrawShaderStageRows(const EditorTexture &tex, EditorMaterialParams &params,
+                         int32_t &selectedStage, int32_t &selectedAnimFrame)
+{
+    bool edited = false;
+    if (ImGui::Selectable("Composite (all stages)", selectedStage < 0))
+    {
+        selectedStage = -1;
+        selectedAnimFrame = 0;
+    }
+
+    for (size_t i = 0; i < tex.shaderStages.size(); i++)
+    {
+        const EditorOverlayStage &stage = tex.shaderStages[i];
+        ImGui::PushID(int(i));
+        if (!stage.isLightmap && i < 32u)
+        {
+            bool enabled = ((params.disabledStagesMask >> i) & 1u) == 0u;
+            if (ImGui::Checkbox("##st_en", &enabled))
+            {
+                if (enabled)
+                {
+                    params.disabledStagesMask &= ~(1u << i);
+                }
+                else
+                {
+                    params.disabledStagesMask |= (1u << i);
+                }
+                edited = true;
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Enable or disable this shader stage in 3D.");
+            }
+            ImGui::SameLine();
+        }
+        const std::string label =
+            FormatShaderStageSummary(i, stage, i == tex.baseStageIndex);
+        if (ImGui::Selectable(label.c_str(), selectedStage == int32_t(i)))
+        {
+            selectedStage = int32_t(i);
+            selectedAnimFrame = 0;
+            if (params.luma)
+            {
+                edited |= BindSelectedStageToEmissive(tex, selectedStage, selectedAnimFrame,
+                                                      params, false);
+            }
+        }
+        ImGui::PopID();
+    }
+    return edited;
+}
+
+void DrawStageDetailsText(const EditorOverlayStage &st, int32_t &selectedAnimFrame)
+{
+    if (st.animationMaps.size() > 1u)
+    {
+        EditorGuiSliderInt("stage_frame", &selectedAnimFrame, 0,
+                           int32_t(st.animationMaps.size()) - 1,
+                           { false, true, "Inspect individual animMap frames." });
+    }
+
+    std::string mods;
+    for (size_t i = 0; i < st.tcMods.size(); i++)
+    {
+        if (i > 0u)
+        {
+            mods += ", ";
+        }
+        mods += TcModTypeName(st.tcMods[i].type);
+    }
+
+    ImGui::TextDisabled("blend: %s%s%s", ShaderStageBlendLabel(st),
+                        mods.empty() ? "" : " | tcMod: ", mods.c_str());
+}
+
+bool DrawStageQuickWireButtons(const std::string &stageTexRef, EditorMaterialParams &params)
+{
+    const std::string cleanRef = StripEditorImageExtension(stageTexRef);
+    if (cleanRef.empty())
+    {
+        return false;
+    }
+
+    bool edited = false;
+    if (ImGui::SmallButton("-> base"))
+    {
+        params.baseTexture = cleanRef;
+        edited = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("-> emissive"))
+    {
+        params.emissiveTexture = cleanRef;
+        edited = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("-> overlay"))
+    {
+        params.overlayTexture = cleanRef;
+        edited = true;
+    }
+    return edited;
+}
+
+void DrawSelectedShaderPreviewImage(uint64_t handle, const EditorTexture *previewTex)
+{
+    if (handle == 0 || previewTex == nullptr || previewTex->width == 0 ||
+        previewTex->height == 0)
+    {
+        ImGui::TextDisabled("Stage preview unavailable.");
+        return;
+    }
+
+    const float aspect = float(previewTex->width) / float(previewTex->height);
+    constexpr float kMaxSide = 160.0f;
+    const float w = aspect >= 1.0f ? kMaxSide : kMaxSide * aspect;
+    const float h = aspect >= 1.0f ? (kMaxSide / aspect) : kMaxSide;
+    ImGui::Image(ImTextureRef(ImTextureID(uintptr_t(handle))), ImVec2(w, h));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%u x %u px\n%s", previewTex->width, previewTex->height,
+                        previewTex->name.c_str());
+}
+
+bool MaybeBindSelectedStageOnLightEnable(bool wasLight, const EditorTexture *tex,
+                                         int32_t selectedStage, int32_t &selectedAnimFrame,
+                                         EditorMaterialParams &params)
+{
+    if (wasLight || !params.luma || selectedStage < 0 || tex == nullptr)
+    {
+        return false;
+    }
+    return BindSelectedStageToEmissive(*tex, selectedStage, selectedAnimFrame, params, true);
+}
+
+} // namespace
+
+bool EditorApp::DrawMaterialEditorShaderStages(const std::string &matName,
+                                               EditorMaterialParams &params)
+{
+    const int32_t texIdx = TextureIndexByName(matName);
+    const EditorTexture *tex = GetSceneTexturePtr(m_scene, texIdx);
+    if (tex == nullptr || tex->shaderStages.empty())
+    {
+        return false;
+    }
+
+    EditorGuiSectionHeader("Shader Stages",
+                           "Inspect engine shader stages, preview frames and toggle layers.");
+    DrawShaderHeaderBadges(*tex);
+    bool edited =
+        DrawShaderStageRows(*tex, params, m_selectedShaderStage, m_selectedStageAnimFrame);
+
+    const std::string previewRef =
+        StagePreviewTextureRef(*tex, m_selectedShaderStage, m_selectedStageAnimFrame);
+    if (m_selectedShaderStage >= 0 && size_t(m_selectedShaderStage) < tex->shaderStages.size())
+    {
+        const EditorOverlayStage &st = tex->shaderStages[size_t(m_selectedShaderStage)];
+        DrawStageDetailsText(st, m_selectedStageAnimFrame);
+        if (!st.isLightmap && !st.isWhite)
+        {
+            edited |= DrawStageQuickWireButtons(previewRef, params);
+        }
+    }
+
+    int32_t previewIdx = ResolveOrLoadTexture(StripEditorImageExtension(previewRef));
+    if (previewIdx < 0)
+    {
+        previewIdx = ResolveOrLoadTexture(previewRef);
+    }
+    const BlockPreviewTarget preview =
+        MakeBlockPreviewTarget(m_scene, m_textureMaterials, previewIdx);
+    DrawSelectedShaderPreviewImage(preview.handle, preview.tex);
+    return edited;
+}
+
 void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeader)
 {
     if (materialIndex < 0 || size_t(materialIndex) >= m_materials.Count())
@@ -4012,6 +4529,8 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
         m_lastInspectedMaterial = materialIndex;
         m_selectedLumaBlock = 0;
         m_selectedGlossBlock = 0;
+        m_selectedShaderStage = -1;
+        m_selectedStageAnimFrame = 0;
         m_selectedSssBlock = 0;
     }
 
@@ -4036,11 +4555,20 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
     bool edited = false;
     edited |= DrawMaterialClipboardActions(matName, params, base, m_materialClipboard,
                                            m_hasMaterialClipboard);
+    edited |= DrawMaterialEnabledRow(params, base);
     edited |= DrawMaterialTexturesSection(
         [this, &matName](EditorTextureSlot slot) { OpenTextureBrowserForSlot(matName, slot); },
+        [this, materialIndex](EditorTextureSlot slot) {
+            return GenerateMaterialTextureWithAi(materialIndex, slot);
+        },
         params, base, hasBaseModEntry ? &baseModParams : nullptr, inheritedFromBaseMod);
+    edited |= DrawMaterialEditorShaderStages(matName, params);
     edited |= DrawMaterialSurfaceSection(params, base);
-    edited |= DrawMaterialLightSection(params, base);
+    const bool wasLight = params.luma;
+    edited |= DrawMaterialLightSection(params, base, m_settings.dtalMinArea);
+    edited |= MaybeBindSelectedStageOnLightEnable(
+        wasLight, GetSceneTexturePtr(m_scene, TextureIndexByName(matName)), m_selectedShaderStage,
+        m_selectedStageAnimFrame, params);
     edited |= DrawMaterialLumaToggleSection(params, base, m_selectedLumaBlock);
 
     if (edited)
@@ -4340,10 +4868,21 @@ void EditorApp::DrawMaterialEditorEntitiesTab()
     }
 }
 
-void EditorApp::DrawMaterialEditorSystemTab()
+void EditorApp::DrawSystemTab()
 {
     DrawSystemDtalSection(m_settings, m_baselineSettings);
     DrawSystemRenderSection(m_settings, m_baselineSettings);
+}
+
+void EditorApp::ResetSystemTab()
+{
+    m_settings = m_baselineSettings;
+    ClearDirtyFlagIfClean();
+}
+
+void EditorApp::DrawMaterialEditorSystemTab()
+{
+    DrawSystemTab();
 }
 
 void EditorApp::ResetActiveMaterialTab()
@@ -4366,7 +4905,7 @@ void EditorApp::ResetActiveMaterialTab()
     }
     else if (m_materialTab == 3)
     {
-        m_settings = m_baselineSettings;
+        ResetSystemTab();
     }
 }
 
@@ -5648,9 +6187,9 @@ void EditorApp::DrawLightEditorPanel()
     m_panelLeft = ImGui::GetWindowPos().x;
 
     DrawPanelActionBar(true);
-    static constexpr const char *kTabs[] = { "Entity", "Custom", "Global" };
+    static constexpr const char *kTabs[] = { "Entity", "Custom", "Global", "System" };
     bool resetClicked = false;
-    EditorGuiTabs(kTabs, 3, &m_lightTab, true, &resetClicked,
+    EditorGuiTabs(kTabs, 4, &m_lightTab, true, &resetClicked,
                   "Reset current light / global parameters to baseline");
     if (resetClicked)
     {
@@ -5677,6 +6216,10 @@ void EditorApp::DrawLightEditorPanel()
             m_sun = m_baselineSun;
             ClearDirtyFlagIfClean();
         }
+        else if (m_lightTab == 3)
+        {
+            ResetSystemTab();
+        }
     }
 
     EditorGuiBeginScroll("##LightScroll");
@@ -5688,9 +6231,13 @@ void EditorApp::DrawLightEditorPanel()
     {
         DrawLightEditorCustomTab();
     }
-    else
+    else if (m_lightTab == 2)
     {
         DrawLightEditorGlobalTab();
+    }
+    else
+    {
+        DrawSystemTab();
     }
     EditorGuiEndScroll();
     EditorGuiEndPanel();

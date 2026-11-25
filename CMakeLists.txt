@@ -300,7 +300,8 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_spatial_contract_tests COMMAND qray_spatial_contract_tests)
     set_tests_properties(qray_spatial_contract_tests PROPERTIES TIMEOUT 30)
 
-    add_executable(qray_subsurface_tests Tests/SubsurfaceTests.cpp editor/EditorMaterial.cpp)
+    add_executable(qray_subsurface_tests Tests/SubsurfaceTests.cpp editor/EditorMaterial.cpp
+        editor/Assets.cpp editor/Scene.cpp Source/Stb/stb_image.cpp)
     target_compile_features(qray_subsurface_tests PRIVATE cxx_std_20)
     target_compile_definitions(qray_subsurface_tests PRIVATE QR_STATIC)
     if(WIN32)
@@ -308,7 +309,7 @@ if(QR_BUILD_TESTS)
     else()
         target_compile_definitions(qray_subsurface_tests PRIVATE QR_USE_SURFACE_XLIB)
     endif()
-    target_include_directories(qray_subsurface_tests PRIVATE Include Source editor)
+    target_include_directories(qray_subsurface_tests PRIVATE Include Source Source/Stb editor)
     add_test(NAME qray_subsurface_tests COMMAND qray_subsurface_tests)
     set_tests_properties(qray_subsurface_tests PROPERTIES TIMEOUT 30)
 

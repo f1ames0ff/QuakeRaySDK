@@ -270,6 +270,7 @@ struct EditorMaterialParams
     bool hasLightColor = false;
     float lightColor[3] = { 1.0f, 1.0f, 1.0f };
     float lightBrightness = 1.0f;
+    float lightMinArea = 0.0f;
     // The game's RT_MAT default: -1 is "unset", and only a value above 0 is written.
     float lightFocus = -1.0f;
     float lightFocusSoft = -1.0f;
@@ -279,6 +280,8 @@ struct EditorMaterialParams
     float lightShaftsDistance = 0.0f;
     float lightShaftsFalloff = 1.0f;
     bool enabled = true;
+    // Bitmask of disabled overlay shader stages (bit i = 1 disables stage i).
+    uint32_t disabledStagesMask = 0;
 
     // Subsurface scattering: optional explicit mask texture, global strength in [0, 1], linear
     // scatter tint, scatter radius in meters (clamped to [0, 1]), and colour-key / polygon
@@ -295,9 +298,10 @@ struct EditorMaterialParams
 };
 
 // Default roughness matching the game's rt_brush_rough ("1.0") when a material has no override.
-inline constexpr float kEditorDefaultRoughness = 1.0f;
+inline constexpr float kEditorDefaultRoughness = 0.8f;
 
 bool HasEditorSubsurface(const EditorMaterialParams &material);
+bool EditorMaterialPromotesOverlayToTraced(const EditorMaterialParams &material);
 
 void ApplyEditorSubsurface(const EditorMaterialParams &material,
                            QrGeometryUploadInfo &upload);
@@ -398,6 +402,11 @@ public:
     // that still references them.
     void Destroy(QrInstance instance);
 
+    // Releases only the cached bakes that reference `textureIndex` in any texture slot
+    // (albedo, gloss, normal, emissive, overlay). Returns true if at least one entry was
+    // invalidated so the caller knows whether static scene geometry needs a re-upload.
+    bool InvalidateTexture(QrInstance instance, int32_t textureIndex);
+
     // Call before re-uploading the scene: Get marks what the pass keeps, EndPass releases the
     // bakes no geometry uses any more, which is how a slider drag does not pile up materials.
     void BeginPass() { for (Entry &entry : m_entries) { entry.used = false; } }
@@ -412,7 +421,8 @@ public:
     // maps a texture name to an index in `scene.textures`, or -1.
     QrMaterial Get(QrInstance instance, const std::string &name, const EditorMaterialParams &params,
                    const EditorScene &scene, const std::vector<QrMaterial> &pool,
-                   const std::function<int32_t(const std::string &)> &resolveTexture);
+                   const std::function<int32_t(const std::string &)> &resolveTexture,
+                   bool forceEnvBase = false);
 
     // The emission the bake behind this handle carries, or an invalid record when the handle is
     // no bake of this pass. A textured area light reads the mask off the material it is handed,
@@ -427,6 +437,8 @@ private:
         int32_t normal = -1;
         int32_t emissive = -1;
         int32_t overlay = -1;
+        int32_t emissiveStageIndex = -1;
+        uint32_t disabledStagesMask = 0;
         int32_t sssTex = -1;
         uint32_t width = 0;
         uint32_t height = 0;
@@ -439,7 +451,10 @@ private:
         bool metalnessFromNormalAlpha = false;
         bool hasRoughnessOverride = false;
         bool mirror = false;
+        bool neutralMirrorAlbedo = false;
         bool enabled = true;
+        bool uniformLightGlow = false;
+        float lightColor[3] = { 1.0f, 1.0f, 1.0f };
         bool sssEnabled = false;
         // The colour blocks, serialized: two materials that differ in any block's colour,
         // threshold, feather, factor, blend or polygon are different bakes.
@@ -459,3 +474,21 @@ private:
 
     std::vector<Entry> m_entries;
 };
+
+// Target map type for on-demand AI / intrinsic texture generation from a diffuse texture.
+enum class EditorAiMapKind
+{
+    Normals,
+    Emissive,
+    Gloss,
+};
+
+// Generates a seamless RGBA texture map (`Normals`, `Emissive`, or `Gloss`) from a diffuse RGBA
+// image (`width` x `height` x 4). Optionally incorporates `fullbrightMask` (`width` x `height` bytes)
+// for `Emissive` when available.
+bool GenerateEditorAiTextureFromDiffuse(const uint8_t *diffuseRgba, uint32_t width, uint32_t height,
+                                        const uint8_t *fullbrightMask, EditorAiMapKind kind,
+                                        std::vector<uint8_t> &outRgba);
+
+// Encodes tightly-packed 8-bit RGBA pixels into an uncompressed 32-bit top-left TGA byte buffer.
+std::vector<uint8_t> EncodeEditorTgaRgba(const uint8_t *rgba, uint32_t width, uint32_t height);

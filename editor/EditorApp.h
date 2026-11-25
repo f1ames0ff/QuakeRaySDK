@@ -30,6 +30,7 @@
 #include "EditorLightSelection.h"
 #include "EditorMaterial.h"
 #include "EditorPlatform.h"
+#include "EditorSceneRuntime.h"
 #include "EditorSession.h"
 #include "EditorSettings.h"
 #include "EditorUi.h"
@@ -37,46 +38,6 @@
 #include "Scene.h"
 
 struct ImDrawList;
-
-// One textured area light the level's own light materials cast. The game rebuilds its list every
-// frame (RT_CollectWorldEmissiveLights) and uploads it through the same per-frame light registry,
-// so the editor keeps the upload info it derived once from the geometry and re-uploads it each
-// frame -- the identity and the fitted geometry of a light do not change with time, its colour is
-// refreshed from the material the same way RT_UploadAllWorldModelLights refreshes an animated
-// surface's.
-struct EditorGeneratedLightBase
-{
-    std::string name;
-    uint64_t uniqueID = 0;
-    float position[3] = {};
-    float baseColor[3] = { 1.0f, 1.0f, 1.0f };
-    float baseGain = 1.0f;
-    float defaultRadiusMeters = 0.1f;
-    float modelSizeMeters = 0.0f;
-    bool spot = false;
-    float direction[3] = { 0.0f, 0.0f, 1.0f };
-    float angleInner = 0.0f;
-    float angleOuter = 30.0f;
-    bool lightShafts = false;
-    float lightShaftsPower = 1.0f;
-    float lightShaftsDistance = 0.0f;
-    float lightShaftsFalloff = 1.0f;
-    bool isAliasModel = false;
-};
-
-struct EditorEmissiveLight
-{
-    QrTexturedAreaLightUploadInfo info = {};
-    // The surface the light stands for, so a material edit can refresh its colour without
-    // re-deriving the geometry.
-    size_t surfaceIndex = 0;
-    // RT_RegisterWorldModelLight's cluster power: area * meanEmiss * luminance(color).
-    float power = 0.0f;
-    float center[3] = { 0.0f, 0.0f, 0.0f };
-    // The cluster the surface resolved into, which is what an area light is registered against.
-    uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
-    bool isAliasModel = false;
-};
 
 class EditorApp
 {
@@ -122,6 +83,7 @@ public:
         OpenScene,
         OpenMod,
         UnloadMod,
+        PlayLevel,
     };
 
     struct MapCatalogItem
@@ -175,16 +137,11 @@ private:
     int32_t ResolveOrLoadTexture(const std::string &name);
     EditorMaterialEmission MaterialEmissionOf(QrMaterial material) const;
     void DestroyPoolMaterials();
-    void DestroySkyMaterials();
-    void CreateSkyboxMaterials();
-    void CreateScrollingSkyMaterials();
     void UploadScrollingSky(double timeSeconds, float skyDistance);
     // The surface's own material, replaced by the one texture_base names where it resolves, or by
     // a bake of the parameters that only a packed material texture can carry.
     QrMaterial SurfaceMaterialWithOverride(const EditorSurface &surface,
                                            const EditorMaterialParams &params);
-    bool UploadSurfaceGeometry(size_t surfaceIndex, const EditorSurface &surface,
-                               std::vector<QrVertex> &meterVertices);
     static QrGeometryPassThroughType PassThroughTypeForSurface(EditorSurfaceKind kind);
     void ResetCameraToScene();
     void UpdateCamera(float deltaSeconds);
@@ -331,8 +288,6 @@ private:
     bool BeginLightGrab();
     bool IsCursorNearProjectedLight(const EditorLight &light) const;
     bool ResolveGrabTargetLight(int32_t &outIndex, bool &outCustom) const;
-    bool LoadOverlayMaterialPixels(const std::string &imageName, std::vector<uint8_t> &outRgba,
-                                   uint32_t &outWidth, uint32_t &outHeight) const;
     void UpdateLightGrab();
     void FinishLightGrab(bool kept);
 
@@ -380,6 +335,8 @@ private:
     void AddCustomLight(const EditorLight *source, LightSpawn spawn);
     void DuplicateSelectedLight();
     void CloneSelectedLight();
+    void CopySelectedLights();
+    void PasteCopiedLights();
     void RemoveSelectedLights();
     void RemoveSelectedCustomLight();
     void HandleUnmodifiedEditorKey(EditorKey key);
@@ -397,6 +354,10 @@ private:
     void DestroyOverlayMaterials();
     void UploadOverlayGeometry(float timeSeconds);
 
+    void FlushPendingSceneUpdates();
+    void MaintainFlyLookCapture();
+    bool HandlePlayProcessEvent(const EditorEvent &event);
+    void RestoreFocusFromInputEvent(const EditorEvent &event);
     void HandleEvent(const EditorEvent &event);
     void HandleMouseMoveEvent(const EditorEvent &event);
     void HandleMouseButtonEvent(const EditorEvent &event);
@@ -406,6 +367,7 @@ private:
     void UpdatePreviewOrbitDrag(int32_t x, int32_t y);
     void HandlePreviewOrbitMouseButton(const EditorEvent &event);
     void HandleKeyEvent(const EditorEvent &event);
+    void HandleModeCtrlShortcut(EditorKey key);
     void HandleCtrlShortcut(EditorKey key);
     void HandleFocusLost();
 
@@ -413,26 +375,20 @@ private:
     void *m_nativeInstance = nullptr;
     QrInstance m_instance = nullptr;
     QrMaterial m_material = QR_NO_MATERIAL;
-    std::vector<QrMaterial> m_textureMaterials;
-    std::vector<EditorMaterialEmission> m_textureEmissions;
-    std::unordered_set<std::string> m_missingExternalTextures;
-    QrMaterial m_cutoutBackingMaterial = QR_NO_MATERIAL;
-    std::unordered_map<std::string, QrMaterial> m_overlayMaterials;
-    QrMaterial m_skySolidMaterial = QR_NO_MATERIAL;
-    QrMaterial m_skyAlphaMaterial = QR_NO_MATERIAL;
-    QrMaterial m_skyboxMaterials[6] = {
-        QR_NO_MATERIAL, QR_NO_MATERIAL, QR_NO_MATERIAL,
-        QR_NO_MATERIAL, QR_NO_MATERIAL, QR_NO_MATERIAL,
-    };
-    uint32_t m_skyboxWidths[6] = {};
-    uint32_t m_skyboxHeights[6] = {};
-    bool m_hasSkybox = false;
-    // The materials the authored keys that need a packed texture set produce, kept alive for as
-    // long as a geometry still points at them.
-    EditorMaterialBakes m_materialBakes;
-    // Lowercased scene texture name to its index, the lookup a texture_base override and the
-    // browser both need.
-    std::unordered_map<std::string, int32_t> m_textureIndexByName;
+    EditorSceneRuntime m_runtime;
+    EditorScene &m_scene;
+    EditorMaterialTable &m_materials;
+    EditorMaterialBakes &m_materialBakes;
+    EditorRenderSettings &m_settings;
+    EditorSunState &m_sun;
+    std::vector<EditorLight> &m_customLights;
+    std::vector<EditorEmissiveLight> &m_emissiveLights;
+    std::vector<EditorGeneratedLightBase> &m_generatedLightBases;
+    std::vector<EditorEmitterLightOverride> &m_emitterLightOverrides;
+    std::vector<QrMaterial> &m_textureMaterials;
+    std::vector<EditorMaterialEmission> &m_textureEmissions;
+    std::unordered_map<std::string, int32_t> &m_textureIndexByName;
+    std::unordered_set<std::string> &m_missingExternalTextures;
     std::vector<uint8_t> m_palette;
     EditorAssetSource m_assets;
     EditorUi m_ui;
@@ -484,10 +440,16 @@ private:
                                      int32_t materialIndex);
     void DrawMaterialEditorGlossBlocks(const std::string &name, EditorMaterialParams &params,
                                       int32_t materialIndex);
+    bool DrawMaterialEditorShaderStages(const std::string &matName, EditorMaterialParams &params);
     void DrawMaterialEditorSssBlocks(const std::string &name, EditorMaterialParams &params,
                                      int32_t materialIndex);
     void DrawMaterialEditorEntitiesTab();
     void DrawMaterialEditorSystemTab();
+    void DrawSystemTab();
+    void ResetSystemTab();
+    bool HasUnsavedSystemSettings() const;
+    std::string ResolveSystemConfigPath() const;
+    bool SaveSystemConfigSession();
     void ResetActiveMaterialTab();
     struct MultiLightEditTargets
     {
@@ -537,6 +499,9 @@ private:
     void SetSingleLightSelection(int32_t light, bool lightCustom);
     void HandleLightModePick(const float direction[3], float surfaceDistance, bool hitSurface);
     void OpenTextureBrowserForSlot(const std::string &materialName, EditorTextureSlot slot);
+    bool GenerateMaterialTextureWithAi(int32_t materialIndex, EditorTextureSlot slot);
+    int32_t RegisterOrUpdateGeneratedTexture(const std::string &relPath, uint32_t width,
+                                             uint32_t height, const std::vector<uint8_t> &rgba);
     void MarkMaterialsEdited();
     void MarkMaterialEdited(int32_t materialIndex);
 
@@ -553,11 +518,17 @@ private:
     const char *ActivePreviewSkinName(int32_t index) const;
     void ResetPreviewView();
     void ComputePreviewPose(float outCenter[3], float &outScale, float outRotation[3][3]) const;
-    QrMaterial ResolvePreviewMaterial(const std::string &skinName, const EditorMaterialParams &params);
+    QrMaterial ResolvePreviewMaterial(const std::string &skinName, const EditorMaterialParams &params,
+                                      bool forceEnvBase = false);
     void UploadPreviewModel(float timeSeconds = 0.0f);
     bool SaveSessionToDisk();
     void CancelSessionChanges();
     void RequestEditorExit();
+    void DrawFilePlayMenuItem();
+    bool CanPlayCurrentLevel() const;
+    void RequestPlayLevel();
+    bool PlayLevelNow();
+    bool PollPlayProcess();
     void ApplyBaselineCapture();
     bool HasUnsavedEditorChanges() const;
 
@@ -601,19 +572,18 @@ private:
     EditorSunState m_baselineSun;
     std::vector<EditorLight> m_baselineCustomLights;
     std::vector<EditorLight> m_baselineMapLights;
-    std::vector<EditorEmitterLightOverride> m_emitterLightOverrides;
     std::vector<EditorEmitterLightOverride> m_baselineEmitterOverrides;
-    std::vector<EditorGeneratedLightBase> m_generatedLightBases;
     EditorRenderSettings m_lastLightBuildSettings;
     bool m_hasLightBuildSettings = false;
-    EditorScene m_scene;
     std::string m_scenePath;
     std::string m_gamePath;
     std::string m_initialGamePath;
+    std::string m_gameExecutableOverride;
     std::string m_shaderFolder;
     std::string m_blueNoisePath;
     std::string m_waterNormalPath;
     std::string m_fontPath;
+    EditorChildProcess m_playProcess;
     // --tab opens one panel tab on the first frame. A script cannot click a tab without knowing
     // where ImGui laid it out, so it names the tab it wants instead.
     std::string m_initialTab;
@@ -650,9 +620,8 @@ private:
     float m_panelLeft = 0.0f;
     float m_menuBarBottom = 0.0f;
 
-    // The sun of the level: rt_physical_sun, rt_sky_sun, rt_sky_sun_size and the two angles. Off
-    // uploads no directional light, which is what the game does while rt_physical_sun is 0.
-    EditorSunState m_sun;
+    // The vertical field of view is rebuilt from m_settings each frame.
+    // The sun of the level sits in m_runtime.sun (referenced via m_sun).
 
     // The two scopes of the sky block. `m_skyGlobals` is the text of the file-wide sky a level
     // without a block inherits, kept only as the baseline the level scope compares against, and
@@ -669,17 +638,15 @@ private:
     // key whose text still matches it was not edited and writes back the file's own spelling.
     EditorLevelSky m_skyRendered;
 
-    // The Global tab of the game editor. The frame params derived from it are
-    // rebuilt every frame and only live for the duration of the qrDrawFrame call.
-    EditorRenderSettings m_settings;
+    // The Global tab's frame params live in m_frameParams (populated by m_runtime).
     EditorFrameParams m_frameParams;
 
-    // One material per texture name; edited from the Materials tab and written into every
-    // surface upload that uses it, the way the game's rt_material_t is keyed.
-    EditorMaterialTable m_materials;
+    // One material per texture name (in m_runtime.materials); selection indices stay on EditorApp.
     int32_t m_selectedMaterial = -1;
     int32_t m_selectedLumaBlock = 0;
     int32_t m_selectedGlossBlock = 0;
+    int32_t m_selectedShaderStage = -1;
+    int32_t m_selectedStageAnimFrame = 0;
     int32_t m_selectedSssBlock = 0;
     int32_t m_lastInspectedMaterial = -1;
 
@@ -756,14 +723,10 @@ private:
     bool m_notifyActive = false;
 
     float m_frameTimeMs = 0.0f;
-    double m_celestialClockSeconds = 0.0;
     uint32_t m_clientWidth = 0;
     uint32_t m_clientHeight = 0;
     uint32_t m_framesSinceSceneLoad = 0;
     bool m_lightStatsLogged = false;
-    // Bumped every time a new world cluster table reaches the renderer, so it can tell a new
-    // map apart from a re-upload of the same one.
-    uint32_t m_clusterGeneration = 0;
 
     // Selection and live hover state, mirroring the game editor's whole-face and light picks.
     int32_t m_selectedSurface = -1;
@@ -774,23 +737,15 @@ private:
     int32_t m_hoverFace = -1;
     int32_t m_hoverLight = -1;
     int32_t m_hoverCustomLight = -1;
-    // Lights the level does not have, uploaded after the map's own and indexed from their own
-    // list: RT_CustomLights keeps them in a file of their own, so a map change cannot lose them
-    // and a map light cannot be removed from the scene by an editor action.
-    std::vector<EditorLight> m_customLights;
     int32_t m_selectedCustomLight = -1;
     std::vector<int32_t> m_selectedCustomLights;
+    EditorLightClipboard m_lightClipboard;
     bool m_marqueePending = false;
     bool m_marqueeDragging = false;
     bool m_marqueeAdditive = false;
     bool m_pendingAdditivePick = false;
     float m_marqueeStart[2] = {};
     float m_marqueeEnd[2] = {};
-    // Surface lights, rebuilt with the geometry: a textured area light stands for one emissive
-    // face of the level, so it is not something the editor owns or edits the way a custom light
-    // is. Rebuilt rather than patched because the material bake decides whether a surface is a
-    // light at all.
-    std::vector<EditorEmissiveLight> m_emissiveLights;
     float m_pickPoint[3] = {};
     bool m_hasPickPoint = false;
     uint32_t m_pickCluster = 0;

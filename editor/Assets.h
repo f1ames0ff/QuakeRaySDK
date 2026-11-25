@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -28,13 +29,23 @@ struct EditorAssetCatalogEntry
     std::string tree;
 };
 
+struct EditorAssetVfsCallbacks
+{
+    std::function<bool(const std::string &path)> exists;
+    std::function<bool(const std::string &path, std::vector<uint8_t> &out)> readFile;
+    std::function<void(const std::string &prefix, const std::string &extension,
+                       std::vector<EditorAssetCatalogEntry> &out)>
+        listFiles;
+};
+
 // Resolves editor assets across loose game directories, Quake PAK archives, and ZIP/PKZ/PK3
-// packs. Lookup is case-insensitive because Quake data mixes "PAK0.PAK", "maps/E1M1.BSP" and
-// "textures/city4_2.wal" spellings in the same installation.
+// packs, plus optional host VFS fallbacks. Lookup is case-insensitive because Quake data mixes
+// "PAK0.PAK", "maps/E1M1.BSP" and "textures/city4_2.wal" spellings in the same installation.
 class EditorAssetSource
 {
 public:
     void Clear();
+    void SetVfsCallbacks(EditorAssetVfsCallbacks callbacks);
     bool AddDirectory(const std::string &path);
     bool AddPak(const std::string &path);
     bool AddZip(const std::string &path);
@@ -90,7 +101,11 @@ private:
     std::vector<std::string> m_archives;
     std::vector<Pak> m_paks;
     std::vector<ZipArchive> m_zips;
+    EditorAssetVfsCallbacks m_vfs;
 };
+
+// Mounts a game/mod directory and its .pkz/.pk3/.pak archives in descending override order.
+void MountEditorGameDirectory(EditorAssetSource &assets, const std::string &dir);
 
 // Decodes PNG/TGA/JPG/etc. bytes in memory into tightly-packed 8-bit RGBA pixels.
 bool DecodeEditorImageRgba(const std::vector<uint8_t> &bytes, uint32_t &outWidth,

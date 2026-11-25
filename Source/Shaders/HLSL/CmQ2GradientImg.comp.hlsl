@@ -69,7 +69,10 @@ float2 q2GetLFGradient(int2 ipos, int width, int height, float inv_width, float 
 {
     float4 motion = framebufMotion_Sampled.Load(int3(ipos, 0));
     int2 ipos_flat = q2CheckerToFlat(ipos, width);
-    float2 pos_prev_flat = (float2(ipos_flat) + (float2)0.5) * float2(inv_width, inv_height) + motion.xy;
+    const float2 jitter_delta = float2(
+        globalUniform.jitterX - globalUniform.jitterPrevX,
+        globalUniform.jitterY - globalUniform.jitterPrevY);
+    float2 pos_prev_flat = (float2(ipos_flat) + (float2)0.5 + jitter_delta) * float2(inv_width, inv_height) + motion.xy;
     int2 pp_flat = int2(floor(pos_prev_flat * float2(width, height)));
 
     if (pp_flat.x < 0 || pp_flat.x >= width || pp_flat.y < 0 || pp_flat.y >= height)

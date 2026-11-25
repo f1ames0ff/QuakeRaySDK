@@ -258,6 +258,12 @@ void EditorAssetSource::Clear()
     m_archives.clear();
     m_paks.clear();
     m_zips.clear();
+    m_vfs = EditorAssetVfsCallbacks{};
+}
+
+void EditorAssetSource::SetVfsCallbacks(EditorAssetVfsCallbacks callbacks)
+{
+    m_vfs = std::move(callbacks);
 }
 
 bool EditorAssetSource::AddDirectory(const std::string &path)
@@ -758,6 +764,11 @@ bool EditorAssetSource::Exists(const std::string &name) const
         }
     }
 
+    if (m_vfs.exists && m_vfs.exists(normalized))
+    {
+        return true;
+    }
+
     return false;
 }
 
@@ -767,6 +778,11 @@ bool EditorAssetSource::ReadFile(const std::string &name, std::vector<uint8_t> &
 
     if (ReadFromDirectories(normalized, out) || ReadFromZips(normalized, out) ||
         ReadFromPaks(normalized, out))
+    {
+        return true;
+    }
+
+    if (m_vfs.readFile && m_vfs.readFile(normalized, out))
     {
         return true;
     }
@@ -1172,6 +1188,37 @@ void ScanDirectoryByPrefixAndExt(const std::string &directory, const std::string
     }
 }
 
+void AppendMatchingCatalogItem(const std::string &name, const std::string &source,
+                               const std::string &prefixLower, const std::string &extLower,
+                               std::unordered_set<std::string> &seen,
+                               std::vector<EditorAssetCatalogEntry> &out)
+{
+    const std::string pathLower = LowerString(NormalizeAssetName(name));
+    if ((prefixLower.empty() || pathLower.compare(0, prefixLower.size(), prefixLower) == 0) &&
+        ExtensionOf(pathLower) == extLower && seen.insert(pathLower).second)
+    {
+        out.push_back(EditorAssetCatalogEntry{ name, source, TreeDirOf(name) });
+    }
+}
+
+void AppendVfsEntriesByPrefixAndExt(const EditorAssetVfsCallbacks &vfs, const std::string &prefix,
+                                    const std::string &extension, const std::string &prefixLower,
+                                    const std::string &extLower,
+                                    std::unordered_set<std::string> &seen,
+                                    std::vector<EditorAssetCatalogEntry> &out)
+{
+    if (!vfs.listFiles)
+    {
+        return;
+    }
+    std::vector<EditorAssetCatalogEntry> vfsEntries;
+    vfs.listFiles(prefix, extension, vfsEntries);
+    for (EditorAssetCatalogEntry &entry : vfsEntries)
+    {
+        AppendMatchingCatalogItem(entry.path, entry.source, prefixLower, extLower, seen, out);
+    }
+}
+
 } // namespace
 
 void EditorAssetSource::ListModelAssets(std::vector<EditorAssetCatalogEntry> &out) const
@@ -1235,12 +1282,7 @@ void EditorAssetSource::ListFilesWithPrefixAndExtension(
         const std::string source = CatalogSourceLabel(zip.path);
         for (const ZipEntry &entry : zip.entries)
         {
-            const std::string pathLower = LowerString(NormalizeAssetName(entry.name));
-            if ((prefixLower.empty() || pathLower.compare(0, prefixLower.size(), prefixLower) == 0) &&
-                ExtensionOf(pathLower) == extLower && seen.insert(pathLower).second)
-            {
-                out.push_back(EditorAssetCatalogEntry{ entry.name, source, TreeDirOf(entry.name) });
-            }
+            AppendMatchingCatalogItem(entry.name, source, prefixLower, extLower, seen, out);
         }
     }
 
@@ -1249,14 +1291,72 @@ void EditorAssetSource::ListFilesWithPrefixAndExtension(
         const std::string source = CatalogSourceLabel(pak.path);
         for (const PakEntry &entry : pak.entries)
         {
-            const std::string pathLower = LowerString(NormalizeAssetName(entry.name));
-            if ((prefixLower.empty() || pathLower.compare(0, prefixLower.size(), prefixLower) == 0) &&
-                ExtensionOf(pathLower) == extLower && seen.insert(pathLower).second)
+            AppendMatchingCatalogItem(entry.name, source, prefixLower, extLower, seen, out);
+        }
+    }
+
+    AppendVfsEntriesByPrefixAndExt(m_vfs, prefix, extension, prefixLower, extLower, seen, out);
+}
+
+namespace
+{
+
+bool IsZipPackExt(const std::filesystem::path &path)
+{
+    const std::string ext = ExtensionOf(path.filename().string());
+    if (ext == ".pkz" || ext == ".pk3")
+    {
+        return true;
+    }
+    if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter())
+    {
+        for (const std::string &extraExt : adapter->extraArchiveExtensions)
+        {
+            if (LowerString(extraExt) == ext)
             {
-                out.push_back(EditorAssetCatalogEntry{ entry.name, source, TreeDirOf(entry.name) });
+                return true;
             }
         }
     }
+    return false;
+}
+
+template <typename Pred, typename AddFn>
+void AddSortedArchivesInDir(const std::string &directory, Pred &&matches, AddFn &&add)
+{
+    std::error_code ec;
+    std::vector<std::string> archives;
+    for (const std::filesystem::directory_entry &entry :
+         std::filesystem::directory_iterator(directory, ec))
+    {
+        if (entry.is_regular_file(ec) && matches(entry.path()))
+        {
+            archives.push_back(entry.path().string());
+        }
+    }
+    std::sort(archives.begin(), archives.end(), [](const std::string &a, const std::string &b) {
+        return LowerString(a) > LowerString(b);
+    });
+    for (const std::string &archive : archives)
+    {
+        add(archive);
+    }
+}
+
+} // namespace
+
+void MountEditorGameDirectory(EditorAssetSource &assets, const std::string &dir)
+{
+    if (dir.empty())
+    {
+        return;
+    }
+    assets.AddDirectory(dir);
+    AddSortedArchivesInDir(dir, IsZipPackExt,
+                           [&assets](const std::string &path) { assets.AddZip(path); });
+    AddSortedArchivesInDir(
+        dir, [](const std::filesystem::path &p) { return ExtensionOf(p.filename().string()) == ".pak"; },
+        [&assets](const std::string &path) { assets.AddPak(path); });
 }
 
 bool DecodeEditorImageRgba(const std::vector<uint8_t> &bytes, uint32_t &outWidth,

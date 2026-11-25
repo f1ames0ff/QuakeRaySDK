@@ -26,6 +26,7 @@
 #include "Medium.hlsli"
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_PARAMS)]] ConstantBuffer<LightShaftVolumeParams_BT> params;
+[[vk::binding(6, DESC_SET_LIGHT_SHAFT_PARAMS)]] Texture2D<float> depthBounds;
 
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME)]] Texture3D<float4> lightShaftInjection;
 [[vk::binding(1, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
@@ -41,10 +42,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
     const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
+    const uint3 volumeSize = uint3(params.volumeSizeX, params.volumeSizeY, params.volumeSizeZ);
+    const int maxActiveSlice = (params.debugMode == 0u && params.depthBoundsEnabled != 0u)
+        ? computeColumnMaxActiveSlice(depthBounds, column, volumeSize, nearPlane, farPlane)
+        : ((int)params.volumeSizeZ - 1);
+
     float3 accumulated = (float3)0;
     float transmittance = 1.0;
 
-    for (int z = 0; z < (int)params.volumeSizeZ; z++)
+    for (int z = 0; z <= maxActiveSlice; z++)
     {
         const int3 cell = int3(column, z);
         const float4 current = lightShaftInjection.Load(int4(cell, 0));

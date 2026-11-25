@@ -383,7 +383,10 @@ filter_image(
 Q2SH interpolate_lf(Texture2D<float4> img_lf_shY, Texture2D<float4> img_lf_CoCg, int2 ipos)
 {
     float depth_center = framebufQ2ViewDepth_Sampled.Load(int3( ipos, 0 )).r;
-    float fwidth_depth = framebufDepthGrad_Sampled.Load(int3( ipos, 0 )).r;
+    if(abs(depth_center) > globalUniform.rayLength)
+        return q2InitSH();
+
+    float3 pos_center = framebufSurfacePosition_Sampled.Load(int3( ipos, 0 )).xyz;
     float3 geo_normal_center = texelFetchNormalGeometry(ipos);
 
     float2 pos_lowres = ((float2)ipos + (float2)0.5) / Q2_GRAD_DWN - (float2)0.5;
@@ -421,12 +424,18 @@ Q2SH interpolate_lf(Texture2D<float4> img_lf_shY, Texture2D<float4> img_lf_CoCg,
             continue;
 
         float p_depth = framebufQ2ViewDepth_Sampled.Load(int3( p_hires, 0 )).r;
+        if(abs(p_depth) > globalUniform.rayLength || (p_depth * depth_center) <= 0.0)
+            continue;
+
         float3 p_geo_normal = texelFetchNormalGeometry(p_hires);
+        float3 p_pos = framebufSurfacePosition_Sampled.Load(int3( p_hires, 0 )).xyz;
 
         float p_w = w[i];
 
-        float dist_depth = abs(p_depth - depth_center) * fwidth_depth;
-        p_w *= exp(-dist_depth);
+        float3 delta_pos = p_pos - pos_center;
+        float plane_dist = max(abs(dot(delta_pos, geo_normal_center)), abs(dot(delta_pos, p_geo_normal)))
+                         / max(min(abs(depth_center), abs(p_depth)), 1e-3);
+        p_w *= exp(-plane_dist * 50.0);
         p_w *= pow(max(0.0, dot(geo_normal_center, p_geo_normal)), 8);
 
         if(p_w > 0)

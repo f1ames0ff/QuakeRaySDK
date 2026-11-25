@@ -270,16 +270,20 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         const int cb_left = (ipos.x < cb_half) ? 0 : cb_half;
         const int cb_right = (ipos.x < cb_half) ? cb_half : width;
 
+        const float2 jitter_delta = float2(
+            globalUniform.jitterX - globalUniform.jitterPrevX,
+            globalUniform.jitterY - globalUniform.jitterPrevY);
+
         float2 pos_prev;
         if (sample_across_fields)
         {
             // Reprojection in flat-screen coordinates
-            pos_prev = ((float2(q2CheckerToFlat(ipos, width)) + (float2)0.5) * float2(inv_width, inv_height) + motion.xy) * float2(width, height);
+            pos_prev = (float2(q2CheckerToFlat(ipos, width)) + (float2)0.5 + jitter_delta) + motion.xy * float2(width, height);
         }
         else
         {
             // Reprojection in checkerboarded coordinates
-            pos_prev = ((float2(ipos) + (float2)0.5) * float2(inv_width * 2.0, inv_height) + motion.xy) * float2(width / 2, height);
+            pos_prev = (float2(ipos) + (float2)0.5 + float2(0.5 * jitter_delta.x, jitter_delta.y)) + motion.xy * float2(width / 2, height);
         }
 
         float motion_length = length(motion.xy * float2(width, height));
@@ -387,11 +391,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
         float2 pos_prev_spec;
         if (sample_across_fields)
         {
-            pos_prev_spec = ((float2(q2CheckerToFlat(ipos, width)) + (float2)0.5) * float2(inv_width, inv_height) + motion_spec_xy) * float2(width, height);
+            pos_prev_spec = (float2(q2CheckerToFlat(ipos, width)) + (float2)0.5 + jitter_delta) + motion_spec_xy * float2(width, height);
         }
         else
         {
-            pos_prev_spec = ((float2(ipos) + (float2)0.5) * float2(inv_width * 2.0, inv_height) + motion_spec_xy) * float2(width / 2, height);
+            pos_prev_spec = (float2(ipos) + (float2)0.5 + float2(0.5 * jitter_delta.x, jitter_delta.y)) + motion_spec_xy * float2(width / 2, height);
         }
 
         const float motion_z = (depth_curr < 0.0) ? -motion.z : motion.z;

@@ -37,11 +37,26 @@
 [[vk::binding(3, DESC_SET_LIGHT_SHAFT_PARAMS)]] RWStructuredBuffer<uint> rayCounter;
 [[vk::binding(4, DESC_SET_LIGHT_SHAFT_PARAMS)]] StructuredBuffer<float> sunVisibility;
 [[vk::binding(5, DESC_SET_LIGHT_SHAFT_PARAMS)]] SamplerState historySampler;
+[[vk::binding(6, DESC_SET_LIGHT_SHAFT_PARAMS)]] Texture2D<float> depthBounds;
+[[vk::binding(7, DESC_SET_LIGHT_SHAFT_PARAMS)]] Texture2D<float> prevDepthBounds;
 [[vk::binding(0, DESC_SET_LIGHT_SHAFT_VOLUME), vk::image_format("rgba16f")]] RWTexture3D<float4> lightShaftVolume;
 
 static const float PI = 3.1415926535;
 static const float QUAKES_PER_METER = 40.0;
 static const float LOCAL_SHAFT_PHASE_G = 0.2;
+
+uint shaftPcgHash(uint v)
+{
+    const uint state = v * 747796405u + 2891336453u;
+    const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float shaftRand01(inout uint rng)
+{
+    rng = shaftPcgHash(rng);
+    return (float)(rng & 0x00FFFFFFu) * (1.0 / 16777216.0);
+}
 
 float shaftPhase(float cosTheta, float asymmetry)
 {
@@ -165,18 +180,17 @@ uint volumeClusterIndex(int3 cell)
     return (zBin * tilesY + tileY) * tilesX + tileX;
 }
 
-bool lightShaftVisible(float3 origin, float3 target)
+float lightShaftVisibility(float3 origin, float3 target)
 {
     const float3 delta = target - origin;
     const float distance = length(delta);
 
     if (distance <= 0.001)
     {
-        return true;
+        return 1.0;
     }
 
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
 
     RayDesc ray;
     ray.Origin = origin;
@@ -191,7 +205,7 @@ bool lightShaftVisible(float3 origin, float3 target)
     {
     }
 
-    return query.CommittedStatus() == COMMITTED_NOTHING;
+    return query.CommittedStatus() == COMMITTED_NOTHING ? 1.0 : 0.0;
 }
 
 bool sampleVolumeHistory(int3 cell, float3 center, out float4 history, out float edgeFade)
@@ -224,6 +238,32 @@ bool sampleVolumeHistory(int3 cell, float3 center, out float4 history, out float
         return false;
     }
 
+    if (params.depthBoundsEnabled != 0u)
+    {
+        const int2 maxVolXY = int2((int)params.volumeSizeX - 1, (int)params.volumeSizeY - 1);
+        const uint3 volumeSize = uint3(params.volumeSizeX, params.volumeSizeY, params.volumeSizeZ);
+        const float2 texelPos = uv * float2((float)params.volumeSizeX, (float)params.volumeSizeY) - 0.5;
+        const int2 b0 = int2(floor(texelPos));
+        int prevMinMaxSlice = (int)params.volumeSizeZ - 1;
+        [unroll]
+        for (int by = 0; by <= 1; by++)
+        {
+            [unroll]
+            for (int bx = 0; bx <= 1; bx++)
+            {
+                const int2 c = clamp(b0 + int2(bx, by), int2(0, 0), maxVolXY);
+                prevMinMaxSlice = min(
+                    prevMinMaxSlice,
+                    computeColumnMaxActiveSlice(prevDepthBounds, c, volumeSize, nearPlane, farPlane));
+            }
+        }
+        const float prevSlicePos = sqrt(normalizedDepth) * (float)params.volumeSizeZ;
+        if (prevMinMaxSlice < (int)params.volumeSizeZ - 1 && prevSlicePos > (float)prevMinMaxSlice - 0.5)
+        {
+            return false;
+        }
+    }
+
     const float3 prevUvw = float3(uv, sqrt(normalizedDepth));
     history = historyVolume.SampleLevel(historySampler, prevUvw, 0.0);
     if (any(!isfinite(history)))
@@ -237,7 +277,7 @@ bool sampleVolumeHistory(int3 cell, float3 center, out float4 history, out float
 }
 
 bool evaluateRectAreaShaft(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
-                           float reach, uint samples,
+                           float reach, uint samples, float2 areaRnd, bool singleSampleArea,
                            out float3 outRadiance, out float3 outVisTarget)
 {
     outRadiance = (float3)0;
@@ -317,14 +357,17 @@ bool evaluateRectAreaShaft(const LightShaft_BT shaft, float3 evalPos, float3 toV
     float3 sampleSum = (float3)0;
     float3 visTargetSum = (float3)0;
     float visWeightSum = 0.0;
-    const float invSamples = 1.0 / (float)samples;
+    const uint sampleCount = singleSampleArea ? 1u : samples;
+    const float invSamples = 1.0 / (float)sampleCount;
 
-    for (uint sy = 0; sy < samples; sy++)
+    for (uint sy = 0; sy < sampleCount; sy++)
     {
-        const float vSample = lerp(vLo, vHi, ((float)sy + 0.5) * invSamples);
-        for (uint sx = 0; sx < samples; sx++)
+        const float vFrac = singleSampleArea ? areaRnd.y : (((float)sy + 0.5) * invSamples);
+        const float vSample = lerp(vLo, vHi, vFrac);
+        for (uint sx = 0; sx < sampleCount; sx++)
         {
-            const float uSample = lerp(uLo, uHi, ((float)sx + 0.5) * invSamples);
+            const float uFrac = singleSampleArea ? areaRnd.x : (((float)sx + 0.5) * invSamples);
+            const float uSample = lerp(uLo, uHi, uFrac);
             const float3 pos = origin + U * uSample + V * vSample;
             const DirectionAndLength lightToCell = calcDirectionAndLength(pos, evalPos);
             if (lightToCell.len < 0.001 || (reach > 0.0 && lightToCell.len >= reach))
@@ -367,13 +410,14 @@ bool evaluateRectAreaShaft(const LightShaft_BT shaft, float3 evalPos, float3 toV
         return false;
     }
 
-    outRadiance = sampleSum / (float)(samples * samples);
+    outRadiance = sampleSum / (float)(sampleCount * sampleCount);
     outVisTarget = (visTargetSum / visWeightSum) + N * 0.002;
     return max(outRadiance.r, max(outRadiance.g, outRadiance.b)) > 1e-7;
 }
 
 bool evaluateProjectedAreaCandidate(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
-                                    float reach, out float3 outRadiance, out float3 outVisTarget)
+                                    float reach, float2 areaRnd, bool singleSampleArea,
+                                    out float3 outRadiance, out float3 outVisTarget)
 {
     outRadiance = (float3)0;
     outVisTarget = shaft.positionRadius.xyz;
@@ -417,7 +461,8 @@ bool evaluateProjectedAreaCandidate(const LightShaft_BT shaft, float3 evalPos, f
         return false;
     }
 
-    const LightSample ls = sampleProjectedAreaLight(tal, evalPos, float2(0.5, 0.5));
+    const float2 rnd = singleSampleArea ? areaRnd : float2(0.5, 0.5);
+    const LightSample ls = sampleProjectedAreaLight(tal, evalPos, rnd);
     if (!(ls.dw > 0.0))
     {
         return false;
@@ -440,7 +485,7 @@ bool evaluateProjectedAreaCandidate(const LightShaft_BT shaft, float3 evalPos, f
 }
 
 bool evaluateSourceLightCandidate(const LightShaft_BT shaft, float3 evalPos, float3 toViewer,
-                                  float reach, uint samples,
+                                  float reach, uint samples, float2 areaRnd, bool singleSampleArea,
                                   out float3 outRadiance, out float3 outVisTarget)
 {
     outRadiance = (float3)0;
@@ -454,13 +499,16 @@ bool evaluateSourceLightCandidate(const LightShaft_BT shaft, float3 evalPos, flo
     float3 sampleSum = (float3)0;
     float3 visTargetSum = (float3)0;
     float visWeightSum = 0.0;
-    const float invSamples = 1.0 / (float)samples;
+    const uint sampleCount = singleSampleArea ? 1u : samples;
+    const float invSamples = 1.0 / (float)sampleCount;
 
-    for (uint sy = 0; sy < samples; sy++)
+    for (uint sy = 0; sy < sampleCount; sy++)
     {
-        for (uint sx = 0; sx < samples; sx++)
+        for (uint sx = 0; sx < sampleCount; sx++)
         {
-            const float2 rnd = float2(((float)sx + 0.5) * invSamples, ((float)sy + 0.5) * invSamples);
+            const float2 rnd = singleSampleArea
+                ? areaRnd
+                : float2(((float)sx + 0.5) * invSamples, ((float)sy + 0.5) * invSamples);
             const LightSample ls = sampleLight(encoded, evalPos, rnd);
             if (!(ls.dw > 0.0))
             {
@@ -500,7 +548,7 @@ bool evaluateSourceLightCandidate(const LightShaft_BT shaft, float3 evalPos, flo
         return false;
     }
 
-    outRadiance = sampleSum / (float)(samples * samples);
+    outRadiance = sampleSum / (float)(sampleCount * sampleCount);
     const float3 dir = shaft.direction.xyz;
     const float3 normalOffset = dot(dir, dir) > 1e-6 ? normalize(dir) * 0.002 : (float3)0;
     outVisTarget = (visTargetSum / visWeightSum) + normalOffset;
@@ -548,9 +596,14 @@ bool evaluateAnalyticShaftCandidate(const LightShaft_BT shaft, float3 evalPos, f
     return true;
 }
 
-float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd,
-                       float evalT, float3 toViewer)
+bool evaluateShaftCandidate(const LightShaft_BT shaft, float3 segStart, float3 segEnd,
+                            float evalT, float3 toViewer, float2 areaRnd, bool singleSampleArea,
+                            out float3 outRadiance, out float3 outEvalPos, out float3 outVisTarget)
 {
+    outRadiance = (float3)0;
+    outEvalPos = lerp(segStart, segEnd, evalT);
+    outVisTarget = shaft.positionRadius.xyz;
+
     float3 pa = segStart;
     float3 pb = segEnd;
     float segWeight = 1.0;
@@ -565,7 +618,7 @@ float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd
         const float h1 = dot(N, segEnd - shaft.positionRadius.xyz);
         if (h0 < minH && h1 < minH)
         {
-            return (float3)0;
+            return false;
         }
 
         float s0 = 0.0;
@@ -586,7 +639,7 @@ float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd
         segWeight = saturate(s1 - s0);
         if (segWeight <= 1e-4)
         {
-            return (float3)0;
+            return false;
         }
 
         pa = lerp(segStart, segEnd, s0);
@@ -599,12 +652,12 @@ float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd
     const float boundsRadius = max(shaft.source.w, shaft.positionRadius.w);
     if (reach > 0.0 && length(evalPos - shaft.positionRadius.xyz) - boundsRadius > reach)
     {
-        return (float3)0;
+        return false;
     }
 
     if (!shaftConeAllows(shaft, evalPos, boundsRadius))
     {
-        return (float3)0;
+        return false;
     }
 
     const uint samples = max(1u, min(params.lightShaftSamples, 2u));
@@ -618,17 +671,17 @@ float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd
         dot(shaft.tangentV.xyz, shaft.tangentV.xyz) > 1e-6)
     {
         hasCandidate = evaluateRectAreaShaft(shaft, evalPos, toViewer, reach, samples,
-                                             radiance, visTarget);
+                                             areaRnd, singleSampleArea, radiance, visTarget);
     }
     else if (shaft.emission.x > 0.5 && (shaft.surface.y > 0.5 || shaft.source.x > 0.5))
     {
         hasCandidate = evaluateProjectedAreaCandidate(shaft, evalPos, toViewer, reach,
-                                                      radiance, visTarget);
+                                                      areaRnd, singleSampleArea, radiance, visTarget);
     }
     else if (shaft.source.x > 0.5)
     {
         hasCandidate = evaluateSourceLightCandidate(shaft, evalPos, toViewer, reach, samples,
-                                                    radiance, visTarget);
+                                                    areaRnd, singleSampleArea, radiance, visTarget);
     }
     else
     {
@@ -636,20 +689,13 @@ float3 accumulateShaft(const LightShaft_BT shaft, float3 segStart, float3 segEnd
                                                       radiance, visTarget);
     }
 
-    if (!hasCandidate || max(radiance.r, max(radiance.g, radiance.b)) <= 1e-7)
-    {
-        return (float3)0;
-    }
-
-    if (!lightShaftVisible(evalPos, visTarget))
-    {
-        return (float3)0;
-    }
-
-    return radiance * segWeight;
+    outRadiance = radiance * segWeight;
+    outEvalPos = evalPos;
+    outVisTarget = visTarget;
+    return hasCandidate && max(outRadiance.r, max(outRadiance.g, outRadiance.b)) > 1e-7;
 }
 
-[numthreads(4, 4, 1)]
+[numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     const int3 cell = int3(dispatchThreadID);
@@ -662,6 +708,20 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (params.debugMode == 99u)
     {
         rayCounter[0] = 0u;
+    }
+
+    if (params.debugMode == 0u && params.depthBoundsEnabled != 0u)
+    {
+        const float nearPlane = max(globalUniform.volumeCameraNear, 0.001);
+        const float farPlane = max(globalUniform.volumeCameraFar, nearPlane + 0.001);
+        const uint3 volumeSize = uint3(params.volumeSizeX, params.volumeSizeY, params.volumeSizeZ);
+        const int maxActiveSlice = computeColumnMaxActiveSlice(
+            depthBounds, cell.xy, volumeSize, nearPlane, farPlane);
+        if (cell.z > maxActiveSlice)
+        {
+            lightShaftVolume[cell] = (float4)0;
+            return;
+        }
     }
 
     const float3 jitter = volumeFroxelJitter(cell);
@@ -682,6 +742,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
+    if (params.debugMode == 0u && scatteringSigma <= 1e-6 && extinctionSigma <= 1e-6)
+    {
+        lightShaftVolume[cell] = (float4)0;
+        return;
+    }
+
     float3 radiance = params.mediumEmissive.rgb;
 
     const uint shaftCount = min(params.lightShaftCount, (uint)MAX_LIGHT_SHAFTS);
@@ -692,13 +758,78 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         ? min(lightList[listBase], params.lightListCapacity)
         : shaftCount;
 
-    for (uint i = 0; i < loopCount; i++)
+    if (params.temporalEnabled != 0u)
     {
-        const uint shaftIndex = clusterCount > 0u ? lightList[listBase + 1u + i] : i;
-        if (shaftIndex < shaftCount)
+        uint rng = shaftPcgHash((uint)cell.x + 1973u * (uint)cell.y + 9277u * (uint)cell.z +
+                                26699u * globalUniform.frameId);
+        float3 selRad = (float3)0;
+        float3 selEvalPos = center;
+        float3 selVisTarget = center;
+        float selWeight = 0.0;
+        float weightSum = 0.0;
+
+        for (uint i = 0; i < loopCount; i++)
         {
-            radiance += accumulateShaft(params.lightShafts[shaftIndex], segStart, segEnd,
-                                        jitter.z, toViewer);
+            const uint shaftIndex = clusterCount > 0u ? lightList[listBase + 1u + i] : i;
+            if (shaftIndex >= shaftCount)
+            {
+                continue;
+            }
+
+            const float2 areaRnd = float2(shaftRand01(rng), shaftRand01(rng));
+            float3 candRad;
+            float3 candEvalPos;
+            float3 candVisTarget;
+            if (!evaluateShaftCandidate(params.lightShafts[shaftIndex], segStart, segEnd,
+                                        jitter.z, toViewer, areaRnd, true,
+                                        candRad, candEvalPos, candVisTarget))
+            {
+                continue;
+            }
+
+            const float w = max(candRad.r, max(candRad.g, candRad.b));
+            weightSum += w;
+            if (shaftRand01(rng) * weightSum < w)
+            {
+                selRad = candRad;
+                selEvalPos = candEvalPos;
+                selVisTarget = candVisTarget;
+                selWeight = w;
+            }
+        }
+
+        if (selWeight > 0.0)
+        {
+            const float vis = lightShaftVisibility(selEvalPos, selVisTarget);
+            if (vis > 0.0)
+            {
+                radiance += selRad * (vis * (weightSum / selWeight));
+            }
+        }
+    }
+    else
+    {
+        for (uint i = 0; i < loopCount; i++)
+        {
+            const uint shaftIndex = clusterCount > 0u ? lightList[listBase + 1u + i] : i;
+            if (shaftIndex >= shaftCount)
+            {
+                continue;
+            }
+
+            float3 candRad;
+            float3 candEvalPos;
+            float3 candVisTarget;
+            if (evaluateShaftCandidate(params.lightShafts[shaftIndex], segStart, segEnd,
+                                       jitter.z, toViewer, float2(0.5, 0.5), false,
+                                       candRad, candEvalPos, candVisTarget))
+            {
+                const float vis = lightShaftVisibility(candEvalPos, candVisTarget);
+                if (vis > 0.0)
+                {
+                    radiance += candRad * vis;
+                }
+            }
         }
     }
 
@@ -712,7 +843,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
         else
         {
-            visibility = lightShaftVisible(center, center + sunDirection * MAX_RAY_LENGTH) ? 1.0 : 0.0;
+            visibility = lightShaftVisibility(center, center + sunDirection * MAX_RAY_LENGTH);
         }
 
         visibility *= getCloudSunTransmittance(center, sunDirection, true);

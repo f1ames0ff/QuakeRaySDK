@@ -21,12 +21,15 @@
 #include "EditorMaterial.h"
 #include "EditorSession.h"
 #include "EditorUi.h"
+#include "EditorViewport.h"
 #include "Scene.h"
 
 #include <imgui.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -38,6 +41,9 @@ namespace
 {
 QrMaterial g_nextTestMaterial = 1;
 std::vector<uint8_t> g_lastBakedRme;
+std::vector<uint8_t> g_lastBakedNormal;
+uint32_t g_lastBakedWidth = 0;
+uint32_t g_lastBakedHeight = 0;
 uint32_t g_testBakeCreateCount = 0;
 } // namespace
 
@@ -46,13 +52,23 @@ QrResult QRCONV qrCreateMaterial(QrInstance qrInstance, const QrMaterialCreateIn
                                  QrMaterial *pResult)
 {
     (void)qrInstance;
-    if (pCreateInfo != nullptr && pCreateInfo->textures.pDataRoughnessMetallicEmission != nullptr)
+    if (pCreateInfo != nullptr)
     {
+        g_lastBakedWidth = pCreateInfo->size.width;
+        g_lastBakedHeight = pCreateInfo->size.height;
         const size_t bytes =
             size_t(pCreateInfo->size.width) * size_t(pCreateInfo->size.height) * 4;
-        const auto *src =
-            static_cast<const uint8_t *>(pCreateInfo->textures.pDataRoughnessMetallicEmission);
-        g_lastBakedRme.assign(src, src + bytes);
+        if (pCreateInfo->textures.pDataRoughnessMetallicEmission != nullptr)
+        {
+            const auto *src = static_cast<const uint8_t *>(
+                pCreateInfo->textures.pDataRoughnessMetallicEmission);
+            g_lastBakedRme.assign(src, src + bytes);
+        }
+        if (pCreateInfo->textures.pDataNormal != nullptr)
+        {
+            const auto *srcN = static_cast<const uint8_t *>(pCreateInfo->textures.pDataNormal);
+            g_lastBakedNormal.assign(srcN, srcN + bytes);
+        }
     }
     g_testBakeCreateCount++;
     if (pResult != nullptr)
@@ -2045,8 +2061,8 @@ bool VerifyImagePickAndOverlayCap(ImGuiIO &io)
 
     uint8_t maxAlpha = 0;
     const int vtx64 = CountPurpleOverlayVertices(ImGui::GetDrawData(), &maxAlpha);
-    if (!Check(Near(panelW, 484.0f, 1.0f) && Near(kEditorGuiPanelWidth, 484.0f) &&
-                   Near(kEditorGuiLabelWidth, 186.0f) && maxAlpha == 128 && vtx64 == 32 * 4,
+    if (!Check(Near(panelW, 536.0f, 1.0f) && Near(kEditorGuiPanelWidth, 536.0f) &&
+                   Near(kEditorGuiLabelWidth, 176.0f) && maxAlpha == 128 && vtx64 == 32 * 4,
                "widened panel or 1:1 run-merged purple overlay mismatch"))
     {
         return false;
@@ -2269,6 +2285,767 @@ bool TestEmissiveBrushBake()
                  "emissive brush bake did not emit expected RME channel and glow bounds");
 }
 
+std::vector<uint8_t> BuildSyntheticAiTestDiffuse(uint32_t size)
+{
+    std::vector<uint8_t> diffuse(size_t(size) * size_t(size) * 4u, 44u);
+    for (uint32_t y = 0; y < size; y++)
+    {
+        for (uint32_t x = 0; x < size; x++)
+        {
+            const size_t idx = (size_t(y) * size + x) * 4u;
+            diffuse[idx + 3u] = 255u;
+            const bool onPlateau = x >= 8u && x < 24u && y >= 8u && y < 24u;
+            const bool onCore = x >= 14u && x < 18u && y >= 14u && y < 18u;
+            if (onCore)
+            {
+                diffuse[idx + 0u] = 255u;
+                diffuse[idx + 1u] = 220u;
+                diffuse[idx + 2u] = 70u;
+            }
+            else if (onPlateau)
+            {
+                diffuse[idx + 0u] = 200u;
+                diffuse[idx + 1u] = 200u;
+                diffuse[idx + 2u] = 200u;
+            }
+        }
+    }
+    return diffuse;
+}
+
+bool VerifyAiNormalsAndGloss(const std::vector<uint8_t> &diffuse, uint32_t size,
+                             std::vector<uint8_t> &outNormals)
+{
+    if (!Check(GenerateEditorAiTextureFromDiffuse(diffuse.data(), size, size, nullptr,
+                                                  EditorAiMapKind::Normals, outNormals) &&
+                   outNormals.size() == diffuse.size(),
+               "AI normal generation failed"))
+    {
+        return false;
+    }
+
+    const bool leftOk = outNormals[(16u * size + 8u) * 4u + 0u] < 120u;
+    const bool topOk = outNormals[(8u * size + 16u) * 4u + 1u] > 136u;
+    const bool flatZOk = outNormals[0u * 4u + 2u] > 240u;
+    if (!Check(leftOk && topOk && flatZOk, "AI normal tangent signs or flat Z mismatch"))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> gloss;
+    if (!Check(GenerateEditorAiTextureFromDiffuse(diffuse.data(), size, size, nullptr,
+                                                  EditorAiMapKind::Gloss, gloss) &&
+                   gloss.size() == diffuse.size(),
+               "AI gloss generation failed"))
+    {
+        return false;
+    }
+    return Check(gloss[(12u * size + 12u) * 4u + 0u] > gloss[(2u * size + 2u) * 4u + 0u],
+                 "AI gloss should rank bright raised surface higher than dark crevice");
+}
+
+bool VerifyAiEmissiveAndTgaRoundTrip(const std::vector<uint8_t> &diffuse, uint32_t size,
+                                     const std::vector<uint8_t> &normals)
+{
+    std::vector<uint8_t> emissive;
+    if (!Check(GenerateEditorAiTextureFromDiffuse(diffuse.data(), size, size, nullptr,
+                                                  EditorAiMapKind::Emissive, emissive) &&
+                   emissive.size() == diffuse.size(),
+               "AI emissive generation failed"))
+    {
+        return false;
+    }
+    const bool coreBright = emissive[(16u * size + 16u) * 4u + 0u] > 180u;
+    const bool bgDark = emissive[(2u * size + 2u) * 4u + 0u] == 0u;
+    if (!Check(coreBright && bgDark,
+               "AI emissive should isolate bright glowing core from dark background"))
+    {
+        return false;
+    }
+
+    const std::vector<uint8_t> tga = EncodeEditorTgaRgba(normals.data(), size, size);
+    uint32_t outW = 0;
+    uint32_t outH = 0;
+    std::vector<uint8_t> decoded;
+    return Check(DecodeEditorImageRgba(tga, outW, outH, decoded) && outW == size &&
+                     outH == size && decoded == normals,
+                 "EncodeEditorTgaRgba round-trip mismatch");
+}
+
+bool VerifyAiGeneratedMapsAndTgaRoundTrip()
+{
+    constexpr uint32_t kSize = 32u;
+    const std::vector<uint8_t> diffuse = BuildSyntheticAiTestDiffuse(kSize);
+    std::vector<uint8_t> normals;
+    return VerifyAiNormalsAndGloss(diffuse, kSize, normals) &&
+           VerifyAiEmissiveAndTgaRoundTrip(diffuse, kSize, normals);
+}
+
+bool TestAiTextureGenerationAndButton()
+{
+    if (!VerifyAiGeneratedMapsAndTgaRoundTrip())
+    {
+        return false;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGuiTestContextGuard ctxGuard(ImGui::CreateContext());
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(1280.0f, 720.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    unsigned char *pixels = nullptr;
+    int texW = 0;
+    int texH = 0;
+    io.Fonts->AddFontDefault();
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &texW, &texH);
+    io.Fonts->SetTexID(ImTextureID(uintptr_t(1)));
+    EditorGuiApplyStyle(1280.0f, 720.0f);
+
+    float panelW = 0.0f;
+    ImVec2 rMin{};
+    ImVec2 rMax{};
+    std::string path = "textures/test_norm.tga";
+    bool browseClicked = false;
+    bool aiClicked = false;
+    RenderPanelUiFrame(panelW, rMin, rMax, [&]() {
+        EditorGuiTexturePath("texture_normals", path, &browseClicked, {}, &aiClicked);
+    });
+    return Check(!browseClicked && !aiClicked && rMax.x > rMin.x,
+                 "EditorGuiTexturePath with Generate with AI button failed to lay out");
+}
+
+void AppendTestQuadSurface(EditorScene &scene, const char *name, float xPos, bool withFaces)
+{
+    EditorSurface surf;
+    surf.textureName = name;
+    const float coords[4][2] = { { -16.0f, -16.0f }, { 16.0f, -16.0f },
+                                 { 16.0f, 16.0f },   { -16.0f, 16.0f } };
+    for (int i = 0; i < 4; i++)
+    {
+        QrVertex v = {};
+        v.position[0] = xPos;
+        v.position[1] = coords[i][0];
+        v.position[2] = coords[i][1];
+        v.normal[0] = -1.0f;
+        v.packedColor = 0xFFFFFFFFu;
+        surf.vertices.push_back(v);
+    }
+    surf.indices = { 0, 1, 2, 0, 2, 3 };
+    if (withFaces)
+    {
+        EditorSurfaceFace face;
+        face.normal[0] = -1.0f;
+        for (int i = 0; i < 4; i++)
+        {
+            face.positions.push_back(QrFloat3D{ { xPos, coords[i][0], coords[i][1] } });
+            face.texCoords.push_back(QrFloat2D{ { 0.0f, 0.0f } });
+        }
+        surf.faces.push_back(std::move(face));
+    }
+    scene.surfaces.push_back(std::move(surf));
+}
+
+bool TestPickSceneFaceSkipsDisabledMaterials()
+{
+    EditorScene scene;
+    AppendTestQuadSurface(scene, "textures/front_mat", 100.0f, true);
+    AppendTestQuadSurface(scene, "textures/back_mat", 200.0f, true);
+    AppendTestQuadSurface(scene, "textures/fallback_mat", 50.0f, false);
+
+    EditorMaterialTable materials;
+    materials.Rebuild(scene);
+    const float origin[3] = { 0.0f, 0.0f, 0.0f };
+    const float dir[3] = { 1.0f, 0.0f, 0.0f };
+
+    if (!Check(PickSceneFace(scene, origin, dir, &materials).surface == 2 &&
+                   PickSceneFace(scene, origin, dir, nullptr).surface == 2,
+               "PickSceneFace should initially hit nearest fallback surface"))
+    {
+        return false;
+    }
+
+    materials.At(size_t(materials.IndexOf("textures/fallback_mat"))).enabled = false;
+    if (!Check(PickSceneFace(scene, origin, dir, &materials).surface == 0,
+               "PickSceneFace should skip disabled fallback surface"))
+    {
+        return false;
+    }
+
+    materials.At(size_t(materials.IndexOf("textures/front_mat"))).enabled = false;
+    if (!Check(PickSceneFace(scene, origin, dir, &materials).surface == 1,
+               "PickSceneFace should skip disabled face surface and pick behind it"))
+    {
+        return false;
+    }
+
+    materials.At(size_t(materials.IndexOf("textures/back_mat"))).enabled = false;
+    return Check(PickSceneFace(scene, origin, dir, &materials).surface == -1 &&
+                     PickSceneFace(scene, origin, dir, nullptr).surface == 2,
+                 "PickSceneFace should return -1 when all hit surfaces are disabled");
+}
+
+bool TestEmitClippedAabbOutlineProjects12Edges()
+{
+    IMGUI_CHECKVERSION();
+    ImGuiTestContextGuard ctxGuard(ImGui::CreateContext());
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    unsigned char *pixels = nullptr;
+    int texW = 0;
+    int texH = 0;
+    io.Fonts->AddFontDefault();
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &texW, &texH);
+    io.Fonts->SetTexID(ImTextureID(uintptr_t(1)));
+
+    const EditorCameraBasis cam = {
+        { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f },
+        1.0f, 1.0f, 800.0f, 600.0f,
+    };
+
+    ImGui::NewFrame();
+    ImDrawList *bg = ImGui::GetBackgroundDrawList();
+    const int baseIdx = bg->IdxBuffer.Size;
+    bg->AddLine(ImVec2(10.0f, 10.0f), ImVec2(50.0f, 50.0f), IM_COL32(255, 255, 255, 255), 2.0f);
+    const int oneLineIdx = bg->IdxBuffer.Size - baseIdx;
+
+    const float boxMin[3] = { 80.0f, -10.0f, -10.0f };
+    const float boxMax[3] = { 120.0f, 10.0f, 10.0f };
+    const int boxStartIdx = bg->IdxBuffer.Size;
+    EmitClippedAabbOutline(bg, cam, boxMin, boxMax, IM_COL32(255, 170, 40, 255), 2.0f);
+    const int boxIdx = bg->IdxBuffer.Size - boxStartIdx;
+
+    const float flatMin[3] = { 80.0f, -10.0f, 5.0f };
+    const float flatMax[3] = { 120.0f, 10.0f, 5.0f };
+    const int flatStartIdx = bg->IdxBuffer.Size;
+    EmitClippedAabbOutline(bg, cam, flatMin, flatMax, IM_COL32(255, 170, 40, 255), 2.0f);
+    const int flatIdx = bg->IdxBuffer.Size - flatStartIdx;
+
+    const float behindMin[3] = { -120.0f, -10.0f, -10.0f };
+    const float behindMax[3] = { -80.0f, 10.0f, 10.0f };
+    const int behindStartIdx = bg->IdxBuffer.Size;
+    EmitClippedAabbOutline(bg, cam, behindMin, behindMax, IM_COL32(255, 170, 40, 255), 2.0f);
+    const int behindIdx = bg->IdxBuffer.Size - behindStartIdx;
+    ImGui::Render();
+
+    return Check(oneLineIdx > 0 && boxIdx == 12 * oneLineIdx && flatIdx == 12 * oneLineIdx &&
+                     behindIdx == 0,
+                 "EmitClippedAabbOutline should emit 12 edges for visible/flat AABBs and 0 behind");
+}
+
+void AppendLe32(std::vector<uint8_t> &buf, uint32_t value)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        buf.push_back(uint8_t((value >> (i * 8)) & 0xFFu));
+    }
+}
+
+void AppendLeF32(std::vector<uint8_t> &buf, float value)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    AppendLe32(buf, bits);
+}
+
+std::vector<uint8_t> BuildMinimalTestIdpoMdl()
+{
+    std::vector<uint8_t> bytes;
+    AppendLe32(bytes, 0x4F504449u); // "IDPO"
+    AppendLe32(bytes, 6u);          // version 6
+    for (int i = 0; i < 3; i++)
+    {
+        AppendLeF32(bytes, 1.0f);
+    }
+    for (int i = 0; i < 7; i++)
+    {
+        AppendLe32(bytes, 0u);
+    }
+    for (uint32_t count : { 1u, 2u, 2u, 3u, 1u, 1u, 0u, 0u, 0u })
+    {
+        AppendLe32(bytes, count);
+    }
+    AppendLe32(bytes, 0u);
+    bytes.insert(bytes.end(), 4, 1u);
+    bytes.insert(bytes.end(), 36, 0u);
+    for (uint32_t v : { 1u, 0u, 1u, 2u })
+    {
+        AppendLe32(bytes, v);
+    }
+    bytes.insert(bytes.end(), 28, 0u);
+    const uint8_t verts[3][4] = {
+        { 0, 0, 0, 0 },
+        { 10, 2, 4, 0 },
+        { 0, 20, 12, 0 },
+    };
+    for (const auto &v : verts)
+    {
+        bytes.insert(bytes.end(), v, v + 4);
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> BuildMinimalTestBsp29WithEntity(const std::string &entities)
+{
+    std::vector<uint8_t> bsp(124, 0);
+    const auto write32 = [&bsp](size_t offset, uint32_t value) {
+        for (int i = 0; i < 4; i++)
+        {
+            bsp[offset + size_t(i)] = uint8_t((value >> (i * 8)) & 0xFFu);
+        }
+    };
+    write32(0, 29u);
+    for (size_t i = 0; i < 15; i++)
+    {
+        write32(4 + i * 8, 124u);
+    }
+
+    const uint32_t entOffset = uint32_t(bsp.size());
+    bsp.insert(bsp.end(), entities.begin(), entities.end());
+    bsp.push_back('\0');
+    write32(4 + 0 * 8, entOffset);
+    write32(8 + 0 * 8, uint32_t(entities.size() + 1));
+
+    const uint32_t leafOffset = uint32_t(bsp.size());
+    bsp.resize(bsp.size() + 56, 0);
+    write32(leafOffset, uint32_t(-2));
+    write32(leafOffset + 4, uint32_t(-1));
+    write32(leafOffset + 28, uint32_t(-1));
+    write32(leafOffset + 32, uint32_t(-1));
+    write32(4 + 10 * 8, leafOffset);
+    write32(8 + 10 * 8, 56u);
+    return bsp;
+}
+
+bool WriteBinaryFile(const std::filesystem::path &path, const std::vector<uint8_t> &bytes)
+{
+    std::FILE *fp = std::fopen(path.string().c_str(), "wb");
+    if (fp == nullptr)
+    {
+        return false;
+    }
+    const size_t written = std::fwrite(bytes.data(), 1, bytes.size(), fp);
+    std::fclose(fp);
+    return written == bytes.size();
+}
+
+struct ScopedTempDir
+{
+    std::filesystem::path path;
+    ~ScopedTempDir()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
+EditorCameraBasis MakeMdlBoundsTestCam()
+{
+    EditorCameraBasis cam{};
+    cam.origin[1] = 55.0f;
+    cam.origin[2] = -14.0f;
+    cam.forward[0] = 1.0f;
+    cam.right[1] = -1.0f;
+    cam.up[2] = 1.0f;
+    cam.tanHalfFovX = 1.0f;
+    cam.tanHalfFovY = 0.75f;
+    cam.viewportWidth = 800.0f;
+    cam.viewportHeight = 600.0f;
+    return cam;
+}
+
+bool BoundsNear(const EditorAliasInstance &inst, const float expectedMin[3],
+                const float expectedMax[3])
+{
+    for (int axis = 0; axis < 3; axis++)
+    {
+        if (!Near(inst.boundsMin[axis], expectedMin[axis]) ||
+            !Near(inst.boundsMax[axis], expectedMax[axis]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VerifyMdlBoundsMatchSurface(const EditorAliasInstance &inst, const EditorSurface &surface)
+{
+    const float expectedMin[3] = { 80.0f, 50.0f, -20.0f };
+    const float expectedMax[3] = { 100.0f, 60.0f, -8.0f };
+    if (!Check(inst.hasBounds && inst.aliasInstanceId != 0 &&
+                   BoundsNear(inst, expectedMin, expectedMax) && !surface.vertices.empty(),
+               "alias model world bounds did not match rotated/translated pose"))
+    {
+        return false;
+    }
+    for (const QrVertex &v : surface.vertices)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            if (v.position[axis] < inst.boundsMin[axis] - 1.0e-3f ||
+                v.position[axis] > inst.boundsMax[axis] + 1.0e-3f)
+            {
+                return Check(false, "alias vertex exceeded aliasInstance world AABB");
+            }
+        }
+    }
+    return true;
+}
+
+int DrawTestAabbAndCountIndices(const float boundsMin[3], const float boundsMax[3])
+{
+    ImGuiContext *ctx = ImGui::CreateContext();
+    ImGuiTestContextGuard guard(ctx);
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+    unsigned char *pixels = nullptr;
+    int fontW = 0;
+    int fontH = 0;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &fontW, &fontH);
+    ImGui::NewFrame();
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();
+    const int startIdx = dl->IdxBuffer.Size;
+    EmitClippedAabbOutline(dl, MakeMdlBoundsTestCam(), boundsMin, boundsMax,
+                           IM_COL32(255, 190, 0, 255), 2.0f);
+    const int drawnIdx = dl->IdxBuffer.Size - startIdx;
+    ImGui::Render();
+    return drawnIdx;
+}
+
+bool TestAliasModelWorldBounds()
+{
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    ScopedTempDir tmp{ std::filesystem::temp_directory_path() /
+                       ("qray_test_mdl_bounds_" + std::to_string(stamp)) };
+    std::error_code ec;
+    std::filesystem::create_directories(tmp.path / "progs", ec);
+    const std::filesystem::path mdlPath = tmp.path / "progs" / "test_box.mdl";
+    if (!Check(!ec && WriteBinaryFile(mdlPath, BuildMinimalTestIdpoMdl()),
+               "failed to write temp test_box.mdl"))
+    {
+        return false;
+    }
+
+    const std::string entities =
+        "{\n\"classname\" \"worldspawn\"\n}\n"
+        "{\n\"classname\" \"misc_model\"\n\"model\" \"progs/test_box.mdl\"\n"
+        "\"origin\" \"100 50 -20\"\n\"angles\" \"0 90 0\"\n}\n";
+    EditorAssetSource assets;
+    EditorScene scene;
+    std::string error;
+    EditorSceneLoadOptions options;
+    options.assets = &assets;
+    if (!Check(assets.AddDirectory(tmp.path.string()), "AddDirectory failed") ||
+        !Check(LoadEditorSceneBspMemory(BuildMinimalTestBsp29WithEntity(entities), "test_mdl.bsp",
+                                        nullptr, scene, error, options),
+               error.c_str()) ||
+        !Check(scene.aliasInstances.size() == 1 && scene.surfaces.size() == 1,
+               "expected 1 aliasInstance and 1 alias surface") ||
+        !VerifyMdlBoundsMatchSurface(scene.aliasInstances[0], scene.surfaces[0]))
+    {
+        return false;
+    }
+
+    const int drawnIdx = DrawTestAabbAndCountIndices(scene.aliasInstances[0].boundsMin,
+                                                     scene.aliasInstances[0].boundsMax);
+    return Check(drawnIdx > 0 && (drawnIdx % 12) == 0,
+                 "EmitClippedAabbOutline should emit 12 edges for transformed Q1 mdl AABB");
+}
+
+bool TestHighResNormalBakePreservesDetail()
+{
+    EditorScene scene;
+    EditorTexture albedo;
+    albedo.name = "low_albedo";
+    albedo.width = 16;
+    albedo.height = 16;
+    albedo.rgba.assign(16u * 16u * 4u, 200u);
+    scene.textures.push_back(std::move(albedo));
+
+    EditorTexture normal;
+    normal.name = "high_normal";
+    normal.width = 64;
+    normal.height = 64;
+    normal.rgba.assign(64u * 64u * 4u, 128u);
+    for (size_t i = 0; i < 64u * 64u; ++i)
+    {
+        normal.rgba[i * 4u + 2u] = 255u;
+        normal.rgba[i * 4u + 3u] = 255u;
+    }
+    normal.rgba[(10u * 64u + 12u) * 4u + 0u] = 160u;
+    scene.textures.push_back(std::move(normal));
+
+    EditorMaterialParams params;
+    params.normalTexture = "high_normal";
+    params.bumpScale = 1.0f;
+
+    EditorMaterialBakes bakes;
+    const std::vector<QrMaterial> pool = { 10, 11 };
+    const auto resolve = [](const std::string &n) -> int32_t {
+        if (n == "low_albedo")
+        {
+            return 0;
+        }
+        if (n == "high_normal")
+        {
+            return 1;
+        }
+        return -1;
+    };
+    const QrInstance dummyInstance = reinterpret_cast<QrInstance>(uintptr_t(1));
+    g_lastBakedNormal.clear();
+    g_lastBakedWidth = 0;
+    g_lastBakedHeight = 0;
+    bakes.BeginPass();
+    const QrMaterial baked = bakes.Get(dummyInstance, "low_albedo", params, scene, pool, resolve);
+    bakes.EndPass(dummyInstance);
+    bakes.Destroy(dummyInstance);
+
+    const uint8_t boostedNx =
+        g_lastBakedNormal.size() > ((10u * 64u + 12u) * 4u)
+            ? g_lastBakedNormal[(10u * 64u + 12u) * 4u + 0u]
+            : 0u;
+    return Check(baked != QR_NO_MATERIAL && g_lastBakedWidth == 64u && g_lastBakedHeight == 64u &&
+                     boostedNx > 160u,
+                 "EditorMaterialBakes should preserve high-res normal dimensions and slope gain");
+}
+
+bool TestBakeInvalidateTexturePreservesUnrelatedMapBakes()
+{
+    auto makeSolidTex = [](const char *name) {
+        EditorTexture tex;
+        tex.name = name;
+        tex.width = 4;
+        tex.height = 4;
+        tex.rgba.assign(4u * 4u * 4u, 180u);
+        return tex;
+    };
+
+    EditorScene scene;
+    scene.textures.push_back(makeSolidTex("map_wall"));
+    scene.textures.push_back(makeSolidTex("map_wall_norm"));
+    scene.textures.push_back(makeSolidTex("preview_skin"));
+    scene.textures.push_back(makeSolidTex("preview_skin_gloss"));
+
+    EditorMaterialParams mapParams;
+    mapParams.normalTexture = "map_wall_norm";
+
+    EditorMaterialParams previewParams;
+    previewParams.glossTexture = "preview_skin_gloss";
+
+    const std::vector<QrMaterial> pool = { 10, 11, 12, 13 };
+    const auto resolve = [](const std::string &n) -> int32_t {
+        if (n == "map_wall")
+            return 0;
+        if (n == "map_wall_norm")
+            return 1;
+        if (n == "preview_skin")
+            return 2;
+        if (n == "preview_skin_gloss")
+            return 3;
+        return -1;
+    };
+
+    EditorMaterialBakes bakes;
+    const QrInstance dummyInstance = reinterpret_cast<QrInstance>(uintptr_t(1));
+    bakes.BeginPass();
+    const QrMaterial mapMat = bakes.Get(dummyInstance, "map_wall", mapParams, scene, pool, resolve);
+    const QrMaterial previewMat =
+        bakes.Get(dummyInstance, "preview_skin", previewParams, scene, pool, resolve);
+    bakes.EndPass(dummyInstance);
+
+    const bool removedPreview = bakes.InvalidateTexture(dummyInstance, 3);
+    const bool unrelatedRemoved = bakes.InvalidateTexture(dummyInstance, 99);
+    const QrMaterial mapMatAfter =
+        bakes.Get(dummyInstance, "map_wall", mapParams, scene, pool, resolve);
+    const bool ok = Check(mapMat != QR_NO_MATERIAL && previewMat != QR_NO_MATERIAL &&
+                              removedPreview && !unrelatedRemoved && bakes.Count() == 1u &&
+                              mapMatAfter == mapMat,
+                          "InvalidateTexture should drop only targeted bakes and keep map bakes intact");
+    bakes.Destroy(dummyInstance);
+    return ok;
+}
+
+bool VerifyClearedYamlDroppedOwnedKeys(const std::string &merged)
+{
+    static constexpr const char *kAbsentKeys[] = {
+        "texture_gloss", "texture_normals", "is_light", "bump_scale",
+        "light_projector", "light_color", "light_brightness",
+    };
+    for (const char *key : kAbsentKeys)
+    {
+        if (!Check(merged.find(key) == std::string::npos,
+                   "WriteMerged must drop cleared owned material keys"))
+        {
+            return false;
+        }
+    }
+    return Check(merged.find("texture_emissive: NONE") != std::string::npos &&
+                     merged.find("mirror: false") != std::string::npos &&
+                     merged.find("light_upoffset: 12") != std::string::npos &&
+                     merged.find("# keep unowned comment") != std::string::npos,
+                 "WriteMerged must override shader defaults and keep unowned lines");
+}
+
+bool VerifyReloadedClearedParams(const EditorMaterialParams &afterReload)
+{
+    const bool clearedOk = afterReload.normalTexture.empty() &&
+                           afterReload.glossTexture.empty() &&
+                           afterReload.emissiveTexture.empty() &&
+                           !afterReload.luma && !afterReload.mirror &&
+                           !afterReload.lightProjector && !afterReload.hasLightColor;
+    const bool floatsOk = std::fabs(afterReload.bumpScale - 1.0f) < 1e-4f &&
+                          std::fabs(afterReload.lightBrightness - 1.0f) < 1e-4f;
+    return Check(clearedOk && floatsOk,
+                 "Reloaded cleared material must stay cleared and disabled");
+}
+
+bool TestMaterialYamlClearAndDefaultResetRoundTrip()
+{
+    const std::filesystem::path tempDir =
+        std::filesystem::temp_directory_path() / "qray_material_clear_roundtrip";
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+    std::filesystem::create_directories(tempDir, ec);
+
+    const std::filesystem::path yamlPath = tempDir / "qray.materials.yaml";
+    const std::string initialYaml =
+        "qray_materials:\n"
+        "  - name: models/mapobjects/bitch/orb\n"
+        "    # keep unowned comment\n"
+        "    light_upoffset: 12\n"
+        "    texture_normals: models/mapobjects/bitch/orb_norm.tga\n"
+        "    texture_gloss: models/mapobjects/bitch/orb_gloss.tga\n"
+        "    texture_emissive: models/mapobjects/bitch/orb\n"
+        "    bump_scale: 2.5\n"
+        "    mirror: true\n"
+        "    is_light: true\n"
+        "    light_projector: true\n"
+        "    light_color: ff4d4d\n"
+        "    light_brightness: 0.5\n";
+
+    std::string err;
+    EditorMaterialsDocument doc;
+    EditorMaterialParams cleared;
+    if (!Check(WriteEditorFile(yamlPath.string(), initialYaml, err) &&
+                   doc.Load(yamlPath.string(), err) &&
+                   doc.ReadMaterial("models/mapobjects/bitch/orb", cleared),
+               "failed to load initial qray.materials.yaml for clear round-trip test"))
+    {
+        std::filesystem::remove_all(tempDir, ec);
+        return false;
+    }
+
+    cleared.normalTexture.clear();
+    cleared.glossTexture.clear();
+    cleared.emissiveTexture.clear();
+    cleared.mirror = false;
+    cleared.luma = false;
+    cleared.bumpScale = 1.0f;
+    cleared.lightProjector = false;
+    cleared.hasLightColor = false;
+    cleared.lightBrightness = 1.0f;
+
+    EditorMaterialEntry entry;
+    entry.name = "models/mapobjects/bitch/orb";
+    entry.params = cleared;
+    entry.clearDefaultEmissive = true;
+    entry.clearDefaultMirror = true;
+
+    const std::string merged = doc.WriteMerged({ entry });
+    EditorMaterialsDocument reloaded;
+    EditorMaterialParams afterReload;
+    afterReload.emissiveTexture = "models/mapobjects/bitch/orb";
+    afterReload.mirror = true;
+    const bool savedOk = WriteEditorFile(yamlPath.string(), merged, err) &&
+                         reloaded.Load(yamlPath.string(), err) &&
+                         reloaded.ReadMaterial("models/mapobjects/bitch/orb", afterReload);
+
+    const bool checksOk = Check(savedOk, "failed to save/reload cleared material") &&
+                          VerifyClearedYamlDroppedOwnedKeys(merged) &&
+                          VerifyReloadedClearedParams(afterReload);
+
+    std::filesystem::remove_all(tempDir, ec);
+    return checksOk;
+}
+
+EditorLightClipboard BuildSampleLightClipboard()
+{
+    EditorLight sceneLight;
+    sceneLight.position[0] = 100.0f;
+    sceneLight.position[1] = 200.0f;
+    sceneLight.position[2] = 50.0f;
+    sceneLight.hasOffset = true;
+    sceneLight.offset[0] = 5.0f;
+    sceneLight.offset[1] = -10.0f;
+    sceneLight.offset[2] = 15.0f;
+    sceneLight.className = "light";
+    sceneLight.emitterUniqueID = 42u;
+    sceneLight.modelSizeMeters = 1.5f;
+    sceneLight.enabled = false;
+    sceneLight.intensity = 600.0f;
+
+    EditorLight customLight;
+    customLight.position[0] = 125.0f;
+    customLight.position[1] = 210.0f;
+    customLight.position[2] = 65.0f;
+    customLight.spot = true;
+    customLight.angleOuter = 40.0f;
+
+    EditorLightClipboard clip;
+    clip.lights = BuildCopiedLights({ sceneLight }, { 0, 0, -1 }, 0, { customLight }, { 0 }, 0);
+    clip.copyCameraForward[0] = 1.0f;
+    return clip;
+}
+
+bool TestLightClipboardCopy()
+{
+    const auto floatEq = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    const EditorLightClipboard clip = BuildSampleLightClipboard();
+    if (!Check(clip.lights.size() == 2u, "BuildCopiedLights count/dedup mismatch"))
+    {
+        return false;
+    }
+
+    const EditorLight &c0 = clip.lights[0];
+    const bool posOk = !c0.hasOffset && floatEq(c0.offset[0], 0.0f) &&
+                       floatEq(c0.offset[1], 0.0f) && floatEq(c0.offset[2], 0.0f) &&
+                       floatEq(c0.position[0], 105.0f) && floatEq(c0.position[1], 190.0f) &&
+                       floatEq(c0.position[2], 65.0f);
+    const bool metaOk = c0.className.empty() && c0.emitterUniqueID == 0u &&
+                        floatEq(c0.modelSizeMeters, 0.0f) && c0.enabled &&
+                        floatEq(c0.intensity, 600.0f);
+    return Check(posOk && metaOk, "BuildCopiedLights sanitization / offset fold failed");
+}
+
+bool TestLightClipboardPaste()
+{
+    const auto floatEq = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    EditorLightClipboard clip = BuildSampleLightClipboard();
+
+    const float samePos[3] = { 4.0f, 0.0f, 0.0f };
+    const float forward[3] = { 1.0f, 0.0f, 0.0f };
+    const std::vector<EditorLight> paste1 = BuildPastedLights(clip, samePos, forward, 16.0f, 96.0f);
+    const std::vector<EditorLight> paste2 = BuildPastedLights(clip, samePos, forward, 16.0f, 96.0f);
+    const bool inPlaceOk = paste1.size() == 2u && paste2.size() == 2u &&
+                           floatEq(paste1[0].position[0], 105.0f) &&
+                           floatEq(paste1[0].position[2], 81.0f) &&
+                           floatEq(paste1[1].position[0], 125.0f) &&
+                           floatEq(paste2[1].position[2], 97.0f);
+
+    const float movedPos[3] = { 500.0f, 100.0f, 50.0f };
+    const std::vector<EditorLight> paste3 =
+        BuildPastedLights(clip, movedPos, forward, 16.0f, 96.0f);
+    const bool movedOk = paste3.size() == 2u &&
+                         floatEq(paste3[0].position[0], 586.0f) &&
+                         floatEq(paste3[0].position[1], 90.0f) &&
+                         floatEq(paste3[1].position[0], 606.0f) &&
+                         floatEq(paste3[1].position[1], 110.0f);
+    return Check(inPlaceOk && movedOk, "BuildPastedLights stepping / group placement failed");
+}
+
 } // namespace
 
 int main()
@@ -2293,6 +3070,15 @@ int main()
         TestComputeMaskEdgeCases,
         TestEmissiveBrushBake,
         TestEditorUiOverlayAndBrushCanvas,
+        TestAiTextureGenerationAndButton,
+        TestPickSceneFaceSkipsDisabledMaterials,
+        TestEmitClippedAabbOutlineProjects12Edges,
+        TestAliasModelWorldBounds,
+        TestHighResNormalBakePreservesDetail,
+        TestBakeInvalidateTexturePreservesUnrelatedMapBakes,
+        TestMaterialYamlClearAndDefaultResetRoundTrip,
+        TestLightClipboardCopy,
+        TestLightClipboardPaste,
     };
 
     for (TestFn test : kTests)

@@ -492,6 +492,17 @@ void EditorWindow::SetMouseCapture(bool capture)
     }
 }
 
+bool EditorWindow::HasFocus() const
+{
+    return IsValid() &&
+           (GetForegroundWindow() == m_impl->hwnd || GetFocus() == m_impl->hwnd);
+}
+
+bool EditorWindow::IsMouseCaptured() const
+{
+    return IsValid() && GetCapture() == m_impl->hwnd;
+}
+
 void EditorWindow::BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const
 {
     storage.win32 = {
@@ -537,5 +548,139 @@ std::string EditorExecutableDirectory()
         }
 
         buffer.resize(buffer.size() * 2, L'\0');
+    }
+}
+
+namespace
+{
+
+std::wstring WideFromUtf8OrEmpty(const std::string &text)
+{
+    if (text.empty())
+    {
+        return {};
+    }
+
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    if (length <= 1)
+    {
+        return {};
+    }
+
+    std::wstring wide(size_t(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), length);
+    if (!wide.empty() && wide.back() == L'\0')
+    {
+        wide.pop_back();
+    }
+    return wide;
+}
+
+std::wstring QuoteWin32Arg(const std::wstring &arg)
+{
+    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos)
+    {
+        return arg;
+    }
+
+    std::wstring out(1, L'"');
+    size_t backslashes = 0;
+    for (wchar_t ch : arg)
+    {
+        if (ch == L'\\')
+        {
+            ++backslashes;
+        }
+        else if (ch == L'"')
+        {
+            out.append(backslashes * 2u + 1u, L'\\');
+            out.push_back(L'"');
+            backslashes = 0;
+        }
+        else
+        {
+            out.append(backslashes, L'\\');
+            backslashes = 0;
+            out.push_back(ch);
+        }
+    }
+    out.append(backslashes * 2u, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
+std::wstring BuildWin32CommandLine(const EditorProcessLaunch &launch)
+{
+    std::wstring cmd = QuoteWin32Arg(WideFromUtf8OrEmpty(launch.executable));
+    for (const std::string &arg : launch.arguments)
+    {
+        cmd.push_back(L' ');
+        cmd += QuoteWin32Arg(WideFromUtf8OrEmpty(arg));
+    }
+    return cmd;
+}
+
+} // namespace
+
+bool EditorSpawnProcess(const EditorProcessLaunch &launch, EditorChildProcess &outProcess,
+                        std::string &outError)
+{
+    outProcess.handle = 0;
+    const std::wstring exeW = WideFromUtf8OrEmpty(launch.executable);
+    if (exeW.empty())
+    {
+        outError = "missing game executable path";
+        return false;
+    }
+
+    std::wstring cmdLine = BuildWin32CommandLine(launch);
+    const std::wstring workDirW = WideFromUtf8OrEmpty(launch.workingDirectory);
+    const wchar_t *workDirPtr = workDirW.empty() ? nullptr : workDirW.c_str();
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(exeW.c_str(), cmdLine.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                        workDirPtr, &si, &pi))
+    {
+        outError = "CreateProcessW failed (" + std::to_string(GetLastError()) + "): " +
+                   launch.executable;
+        return false;
+    }
+
+    CloseHandle(pi.hThread);
+    outProcess.handle = intptr_t(pi.hProcess);
+    return true;
+}
+
+bool EditorIsProcessRunning(EditorChildProcess &process, int *outExitCode)
+{
+    if (process.handle == 0)
+    {
+        return false;
+    }
+
+    HANDLE procHandle = reinterpret_cast<HANDLE>(process.handle);
+    if (WaitForSingleObject(procHandle, 0) == WAIT_TIMEOUT)
+    {
+        return true;
+    }
+
+    DWORD code = 0;
+    if (outExitCode != nullptr)
+    {
+        *outExitCode = GetExitCodeProcess(procHandle, &code) ? int(code) : -1;
+    }
+    CloseHandle(procHandle);
+    process.handle = 0;
+    return false;
+}
+
+void EditorDetachProcess(EditorChildProcess &process)
+{
+    if (process.handle != 0)
+    {
+        CloseHandle(reinterpret_cast<HANDLE>(process.handle));
+        process.handle = 0;
     }
 }

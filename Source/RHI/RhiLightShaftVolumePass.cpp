@@ -19,7 +19,11 @@
 #include "RhiFrameContext.h"
 #include "RhiPipeline.h"
 #include "RhiResources.h"
+#include "RhiTextureSource.h"
 #include "RhiTextureTable.h"
+
+#include "../Framebuffers.h"
+#include "../Generated/ShaderCommonC.h"
 
 #include <algorithm>
 #include <cstring>
@@ -34,6 +38,7 @@ namespace
 constexpr const char *VOLUME_SHADER_FILE_NAME = "CmLightShaftVolume.comp.spv";
 constexpr const char *PREFIX_SHADER_FILE_NAME = "CmLightShaftPrefix.comp.spv";
 constexpr const char *ASSIGN_SHADER_FILE_NAME = "CmLightShaftAssign.comp.spv";
+constexpr const char *DEPTH_BOUNDS_SHADER_FILE_NAME = "CmLightShaftDepthBounds.comp.spv";
 
 void LogMessage(const RhiLightShaftVolumePass::PrintFunction &print, const char *pMessage)
 {
@@ -83,7 +88,10 @@ bool RhiLightShaftVolumePass::LoadShaders()
                                    nvrhi::ShaderType::Compute, "RhiLightShaftVolumePass prefix shader");
     assignShader = rhi::loadShader(device, shaderFolderPath + ASSIGN_SHADER_FILE_NAME,
                                    nvrhi::ShaderType::Compute, "RhiLightShaftVolumePass assign shader");
-    if (volumeShader == nullptr || prefixShader == nullptr || assignShader == nullptr)
+    depthBoundsShader = rhi::loadShader(device, shaderFolderPath + DEPTH_BOUNDS_SHADER_FILE_NAME,
+                                        nvrhi::ShaderType::Compute, "RhiLightShaftVolumePass depth bounds shader");
+    if (volumeShader == nullptr || prefixShader == nullptr || assignShader == nullptr ||
+        depthBoundsShader == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to load the light-shaft volume shader");
         return false;
@@ -115,6 +123,8 @@ bool RhiLightShaftVolumePass::CreateBindingLayouts()
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(3));
         desc.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4));
         desc.addItem(nvrhi::BindingLayoutItem::Sampler(5));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(6));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(7));
         paramsLayout = device->createBindingLayout(desc);
     }
 
@@ -154,6 +164,17 @@ bool RhiLightShaftVolumePass::CreateBindingLayouts()
         assignLayout = device->createBindingLayout(desc);
     }
 
+    {
+        nvrhi::BindingLayoutDesc desc;
+        desc.visibility = nvrhi::ShaderType::Compute;
+        desc.setBindingOffsets(nvrhi::VulkanBindingOffsets()
+                                   .setShaderResourceOffset(0)
+                                   .setUnorderedAccessViewOffset(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        desc.addItem(nvrhi::BindingLayoutItem::Texture_UAV(1));
+        depthBoundsLayout = device->createBindingLayout(desc);
+    }
+
     sampler = rhi::createSampler(device, nvrhi::SamplerDesc()
                                              .setMinFilter(true)
                                              .setMagFilter(true)
@@ -162,7 +183,8 @@ bool RhiLightShaftVolumePass::CreateBindingLayouts()
                                  "RhiLightShaftVolumePass sampler");
 
     if (tlasLayout == nullptr || paramsLayout == nullptr || uniformLayout == nullptr ||
-        volumeLayout == nullptr || prefixLayout == nullptr || assignLayout == nullptr || sampler == nullptr ||
+        volumeLayout == nullptr || prefixLayout == nullptr || assignLayout == nullptr ||
+        depthBoundsLayout == nullptr || sampler == nullptr ||
         !cloudShadowBinding.Create(device, frameContext, nvrhi::ShaderType::Compute))
     {
         LogMessage(print, "Warning: RHI: failed to create a light-shaft volume binding layout");
@@ -174,6 +196,12 @@ bool RhiLightShaftVolumePass::CreateBindingLayouts()
 
 bool RhiLightShaftVolumePass::CreatePipelines()
 {
+    if (textureTable == nullptr || textureTable->GetLayout() == nullptr || lightLayout == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the light-shaft volume pass requires texture and light layouts");
+        return false;
+    }
+
     {
         nvrhi::ComputePipelineDesc desc;
         desc.setComputeShader(volumeShader);
@@ -181,14 +209,8 @@ bool RhiLightShaftVolumePass::CreatePipelines()
         desc.addBindingLayout(paramsLayout);
         desc.addBindingLayout(uniformLayout);
         desc.addBindingLayout(volumeLayout);
-        if (textureTable != nullptr && textureTable->GetLayout() != nullptr)
-        {
-            desc.addBindingLayout(textureTable->GetLayout());
-        }
-        if (lightLayout != nullptr)
-        {
-            desc.addBindingLayout(lightLayout);
-        }
+        desc.addBindingLayout(textureTable->GetLayout());
+        desc.addBindingLayout(lightLayout);
         desc.addBindingLayout(cloudShadowBinding.GetLayout());
         volumePipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass");
     }
@@ -212,7 +234,16 @@ bool RhiLightShaftVolumePass::CreatePipelines()
         assignPipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass assign");
     }
 
-    if (volumePipeline == nullptr || prefixPipeline == nullptr || assignPipeline == nullptr)
+    {
+        nvrhi::ComputePipelineDesc desc;
+        desc.setComputeShader(depthBoundsShader);
+        desc.addBindingLayout(depthBoundsLayout);
+        desc.addBindingLayout(uniformLayout);
+        depthBoundsPipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass depth bounds");
+    }
+
+    if (volumePipeline == nullptr || prefixPipeline == nullptr || assignPipeline == nullptr ||
+        depthBoundsPipeline == nullptr)
     {
         LogMessage(print, "Warning: RHI: failed to create the light-shaft volume pipeline");
         return false;
@@ -270,10 +301,13 @@ void RhiLightShaftVolumePass::RetireTarget(Target &target)
         frameContext->Retire(std::move(target.prefixSet));
         frameContext->Retire(std::move(target.paramsSet));
         frameContext->Retire(std::move(target.assignSet));
+        frameContext->Retire(std::move(target.depthBoundsSet));
         frameContext->Retire(std::move(target.uniformSet));
         frameContext->Retire(std::move(target.tlasSet));
         frameContext->Retire(std::move(target.texture));
         frameContext->Retire(std::move(target.integratedTexture));
+        frameContext->Retire(std::move(target.depthBoundsTexture));
+        frameContext->Retire(std::move(target.depthWorldTexture));
         frameContext->Retire(std::move(target.paramsBuffer));
         frameContext->Retire(std::move(target.lightListBuffer));
         frameContext->Retire(std::move(target.sunVisibilityBuffer));
@@ -301,7 +335,20 @@ bool RhiLightShaftVolumePass::AllocateTargetResources(uint32_t slotIndex, uint32
     const std::string prefix = "RhiLightShaftVolumePass slot " + std::to_string(slotIndex);
     target.texture = rhi::createTexture(device, textureDesc, prefix + " inject");
     target.integratedTexture = rhi::createTexture(device, textureDesc, prefix + " integrated");
-    if (target.texture == nullptr || target.integratedTexture == nullptr)
+
+    nvrhi::TextureDesc depthBoundsDesc;
+    depthBoundsDesc.dimension = nvrhi::TextureDimension::Texture2D;
+    depthBoundsDesc.format = nvrhi::Format::R32_FLOAT;
+    depthBoundsDesc.width = volumeSizeX;
+    depthBoundsDesc.height = volumeSizeY;
+    depthBoundsDesc.mipLevels = 1;
+    depthBoundsDesc.isUAV = true;
+    depthBoundsDesc.initialState = nvrhi::ResourceStates::NonPixelShaderResource;
+    depthBoundsDesc.keepInitialState = true;
+    target.depthBoundsTexture = rhi::createTexture(device, depthBoundsDesc, prefix + " depth bounds");
+
+    if (target.texture == nullptr || target.integratedTexture == nullptr ||
+        target.depthBoundsTexture == nullptr)
     {
         return false;
     }
@@ -347,6 +394,8 @@ bool RhiLightShaftVolumePass::CreateTargetBindingSets(uint32_t slotIndex)
     paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, target.rayCounterBuffer));
     paramsSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(4, target.sunVisibilityBuffer));
     paramsSetDesc.addItem(nvrhi::BindingSetItem::Sampler(5, sampler));
+    paramsSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(6, target.depthBoundsTexture));
+    paramsSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(7, targets[previous].depthBoundsTexture));
     target.paramsSet = device->createBindingSet(paramsSetDesc, paramsLayout);
 
     nvrhi::BindingSetDesc assignSetDesc;
@@ -354,6 +403,11 @@ bool RhiLightShaftVolumePass::CreateTargetBindingSets(uint32_t slotIndex)
     assignSetDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(1, target.sunVisibilityBuffer));
     target.assignSet = device->createBindingSet(assignSetDesc, assignLayout);
 
+    target.depthBoundsSet = nullptr;
+    target.depthWorldTexture = nullptr;
+    target.depthWorldHandle = 0;
+    target.depthWorldWidth = 0;
+    target.depthWorldHeight = 0;
     target.uniformSet = nullptr;
     target.uniformBuffer = nullptr;
     target.tlasSet = nullptr;
@@ -386,6 +440,7 @@ bool RhiLightShaftVolumePass::CreateVolumeTargets()
     }
 
     historyReset = true;
+    depthBoundsCleared = false;
     return true;
 }
 
@@ -451,9 +506,9 @@ bool RhiLightShaftVolumePass::PrepareTlasSet(Target &target, nvrhi::rt::IAccelSt
 
 bool RhiLightShaftVolumePass::EnsureVolumeSize(const Params &params)
 {
-    const uint32_t requestedX = std::clamp(params.volumeSizeX, 32u, 512u);
-    const uint32_t requestedY = std::clamp(params.volumeSizeY, 32u, 512u);
-    const uint32_t requestedZ = std::clamp(params.volumeSizeZ, 16u, 256u);
+    const uint32_t requestedX = std::clamp(params.volumeSizeX, 32u, MAX_VOLUME_SIZE_X);
+    const uint32_t requestedY = std::clamp(params.volumeSizeY, 32u, MAX_VOLUME_SIZE_Y);
+    const uint32_t requestedZ = std::clamp(params.volumeSizeZ, 16u, MAX_VOLUME_SIZE_Z);
 
     if (requestedX == volumeSizeX && requestedY == volumeSizeY && requestedZ == volumeSizeZ)
     {
@@ -469,7 +524,120 @@ bool RhiLightShaftVolumePass::EnsureVolumeSize(const Params &params)
 bool RhiLightShaftVolumePass::IsTargetReady(const Target &target) const
 {
     return target.texture != nullptr && target.integratedTexture != nullptr &&
-           target.uavSet != nullptr && target.paramsSet != nullptr && target.assignSet != nullptr;
+           target.depthBoundsTexture != nullptr && target.uavSet != nullptr &&
+           target.paramsSet != nullptr && target.assignSet != nullptr;
+}
+
+void RhiLightShaftVolumePass::RetireDepthBoundsResources(Target &target)
+{
+    if (frameContext != nullptr)
+    {
+        frameContext->Retire(std::move(target.depthBoundsSet));
+        frameContext->Retire(std::move(target.depthWorldTexture));
+    }
+    target.depthBoundsSet = nullptr;
+    target.depthWorldTexture = nullptr;
+    target.depthWorldHandle = 0;
+    target.depthWorldWidth = 0;
+    target.depthWorldHeight = 0;
+}
+
+bool RhiLightShaftVolumePass::PrepareDepthBoundsSet(Target &target,
+                                                    uint32_t frameIndex,
+                                                    const DepthBoundsInput &depthBounds)
+{
+    if (depthBounds.framebuffers == nullptr || depthBounds.renderWidth == 0 ||
+        depthBounds.renderHeight == 0 || target.depthBoundsTexture == nullptr)
+    {
+        return false;
+    }
+
+    const ResolutionState resolutionState = { depthBounds.renderWidth, depthBounds.renderHeight, 0, 0 };
+    const auto [image, view, format, extent] =
+        depthBounds.framebuffers->GetImageHandles(FB_IMAGE_INDEX_DEPTH_WORLD, frameIndex, resolutionState);
+    const uint64_t imageHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(image));
+    const uint64_t imageView = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(view));
+    if (imageHandle == 0 || extent.width != depthBounds.renderWidth ||
+        extent.height != depthBounds.renderHeight)
+    {
+        return false;
+    }
+
+    const bool ready = target.depthWorldHandle == imageHandle &&
+                       target.depthWorldWidth == extent.width &&
+                       target.depthWorldHeight == extent.height &&
+                       target.depthWorldTexture != nullptr &&
+                       target.depthBoundsSet != nullptr;
+    if (ready)
+    {
+        return true;
+    }
+
+    RetireDepthBoundsResources(target);
+
+    const std::string debugName =
+        "RhiLightShaftVolumePass depthWorld frame " + std::to_string(frameIndex);
+    target.depthWorldTexture = rhi::wrapEngineStorageImage(
+        device, imageHandle, imageView, format, extent.width, extent.height, debugName);
+    if (target.depthWorldTexture == nullptr)
+    {
+        return false;
+    }
+
+    nvrhi::BindingSetDesc setDesc;
+    setDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, target.depthWorldTexture));
+    setDesc.addItem(nvrhi::BindingSetItem::Texture_UAV(
+        1, target.depthBoundsTexture, nvrhi::Format::R32_FLOAT, nvrhi::TextureSubresourceSet(),
+        nvrhi::TextureDimension::Texture2D));
+    target.depthBoundsSet = device->createBindingSet(setDesc, depthBoundsLayout);
+    if (target.depthBoundsSet == nullptr)
+    {
+        RetireDepthBoundsResources(target);
+        return false;
+    }
+
+    target.depthWorldHandle = imageHandle;
+    target.depthWorldWidth = extent.width;
+    target.depthWorldHeight = extent.height;
+    return true;
+}
+
+void RhiLightShaftVolumePass::ClearDepthBoundsIfNeeded(nvrhi::ICommandList *pCommandList)
+{
+    if (depthBoundsCleared)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        pCommandList->clearTextureFloat(targets[i].depthBoundsTexture, nvrhi::AllSubresources,
+                                        nvrhi::Color(1e6f, 0.f, 0.f, 0.f));
+        pCommandList->setTextureState(targets[i].depthBoundsTexture, nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::NonPixelShaderResource);
+    }
+    depthBoundsCleared = true;
+}
+
+void RhiLightShaftVolumePass::DispatchDepthBounds(nvrhi::ICommandList *pCommandList, Target &target)
+{
+    pCommandList->beginTrackingTextureState(target.depthWorldTexture, nvrhi::AllSubresources,
+                                            nvrhi::ResourceStates::UnorderedAccess);
+    pCommandList->setTextureState(target.depthBoundsTexture, nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::UnorderedAccess);
+
+    nvrhi::ComputeState depthBoundsState;
+    depthBoundsState.setPipeline(depthBoundsPipeline);
+    depthBoundsState.addBindingSet(target.depthBoundsSet);
+    depthBoundsState.addBindingSet(target.uniformSet);
+    pCommandList->setComputeState(depthBoundsState);
+    pCommandList->dispatch((volumeSizeX + 7) / 8, (volumeSizeY + 7) / 8, 1);
+
+    pCommandList->setTextureState(target.depthBoundsTexture, nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::NonPixelShaderResource);
+    pCommandList->setTextureState(target.depthWorldTexture, nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::UnorderedAccess);
+    pCommandList->commitBarriers();
 }
 
 bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
@@ -477,38 +645,40 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
                                      nvrhi::IBuffer *pUniformBuffer,
                                      nvrhi::rt::IAccelStruct *pTopLevel,
                                      nvrhi::IBindingSet *pLightSet,
-                                     const Params &params)
+                                     const Params &params,
+                                     const DepthBoundsInput &depthBounds)
 {
-    if (!created || pCommandList == nullptr || frameIndex >= MAX_FRAMES_IN_FLIGHT)
-    {
-        return false;
-    }
-
-    if (!EnsureVolumeSize(params))
-    {
-        return false;
-    }
-
-    if (pLightSet == nullptr || textureTable == nullptr || textureTable->GetTable() == nullptr)
+    if (!created || pCommandList == nullptr || frameIndex >= MAX_FRAMES_IN_FLIGHT ||
+        !EnsureVolumeSize(params) || pLightSet == nullptr ||
+        textureTable == nullptr || textureTable->GetTable() == nullptr)
     {
         return false;
     }
 
     Target &target = targets[frameIndex];
-    if (!IsTargetReady(target))
+    if (!IsTargetReady(target) ||
+        !PrepareUniformSet(target, pUniformBuffer) ||
+        !PrepareTlasSet(target, pTopLevel))
     {
         return false;
     }
 
-    if (!PrepareUniformSet(target, pUniformBuffer) || !PrepareTlasSet(target, pTopLevel))
-    {
-        return false;
-    }
+    ClearDepthBoundsIfNeeded(pCommandList);
 
-    rhi::writeBuffer(pCommandList, target.paramsBuffer, &params, sizeof(params));
+    const bool hasDepthBounds = PrepareDepthBoundsSet(target, frameIndex, depthBounds);
+
+    Params effectiveParams = params;
+    effectiveParams.depthBoundsEnabled = hasDepthBounds ? 1u : 0u;
+
+    rhi::writeBuffer(pCommandList, target.paramsBuffer, &effectiveParams, sizeof(effectiveParams));
     pCommandList->clearBufferUInt(target.rayCounterBuffer, 0);
 
-    if (params.lightListClusterCount > 0)
+    if (hasDepthBounds)
+    {
+        DispatchDepthBounds(pCommandList, target);
+    }
+
+    if (effectiveParams.lightListClusterCount > 0)
     {
         nvrhi::ComputeState assignState;
         assignState.setPipeline(assignPipeline);
@@ -517,7 +687,7 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
         assignState.addBindingSet(target.uniformSet);
         assignState.addBindingSet(target.tlasSet);
         pCommandList->setComputeState(assignState);
-        pCommandList->dispatch((params.lightListClusterCount + 63) / 64, 1, 1);
+        pCommandList->dispatch((effectiveParams.lightListClusterCount + 63) / 64, 1, 1);
         pCommandList->commitBarriers();
     }
 
@@ -537,7 +707,8 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
 
     const uint32_t groupsX = (volumeSizeX + GROUP_SIZE_X - 1) / GROUP_SIZE_X;
     const uint32_t groupsY = (volumeSizeY + GROUP_SIZE_Y - 1) / GROUP_SIZE_Y;
-    pCommandList->dispatch(groupsX, groupsY, volumeSizeZ);
+    const uint32_t groupsZ = (volumeSizeZ + GROUP_SIZE_Z - 1) / GROUP_SIZE_Z;
+    pCommandList->dispatch(groupsX, groupsY, groupsZ);
 
     pCommandList->commitBarriers();
 

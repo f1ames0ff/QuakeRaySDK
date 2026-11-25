@@ -40,7 +40,10 @@ float4 accumulateGlass(int2 pix, float4 mask)
     }
     const int2 extent = int2(globalUniform.renderWidth, globalUniform.renderHeight);
     const float4 guide = framebufQ2GlassReflection_Sampled.Load(int3(pix, 0));
-    const float2 previous = float2(pix) + guide.xy * float2(extent);
+    const float2 jitterDelta = float2(
+        globalUniform.jitterX - globalUniform.jitterPrevX,
+        globalUniform.jitterY - globalUniform.jitterPrevY);
+    const float2 previous = float2(pix) + guide.xy * float2(extent) + jitterDelta;
     const int2 base = int2(floor(previous));
     const float2 fraction = frac(previous);
     const float predictedDepth = max(guide.z + guide.w, 2.5e-5);

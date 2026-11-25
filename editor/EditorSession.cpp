@@ -495,12 +495,16 @@ void AppendSssOwnedValues(const EditorMaterialParams &params,
     }
 }
 
-void AppendOwnedTailValues(const EditorMaterialParams &params,
-                           std::vector<std::pair<const char *, std::string>> &values)
+void AppendOwnedLightAndShaftTailValues(const EditorMaterialParams &params,
+                                        std::vector<std::pair<const char *, std::string>> &values)
 {
-    if (!params.enabled)
+    if (params.lightMinArea > 0.0f)
     {
-        values.emplace_back("enabled", "false");
+        values.emplace_back("light_min_area", FormatFloat(params.lightMinArea));
+    }
+    if (params.disabledStagesMask != 0u)
+    {
+        values.emplace_back("disabled_stages", std::to_string(params.disabledStagesMask));
     }
     if (params.lightShafts)
     {
@@ -518,6 +522,16 @@ void AppendOwnedTailValues(const EditorMaterialParams &params,
     {
         values.emplace_back("light_shafts_falloff", FormatFloat(params.lightShaftsFalloff));
     }
+}
+
+void AppendOwnedTailValues(const EditorMaterialParams &params,
+                           std::vector<std::pair<const char *, std::string>> &values)
+{
+    if (!params.enabled)
+    {
+        values.emplace_back("enabled", "false");
+    }
+    AppendOwnedLightAndShaftTailValues(params, values);
     if (params.hasColorEmissive && !params.emissiveBlocks.empty())
     {
         values.emplace_back("luma", std::string());
@@ -824,12 +838,13 @@ void AppendGlossBlocksYaml(std::string &out, const std::string &indent,
     }
 }
 
-void AppendSssBlocksYaml(std::string &out, const std::string &indent,
-                         const EditorMaterialParams &params)
+template <typename Block>
+void AppendFactorBlocksYaml(std::string &out, const std::string &indent, const char *headerKey,
+                            const std::vector<Block> &blocks)
 {
-    out += indent + "sss:\n";
+    out += indent + headerKey + ":\n";
 
-    for (const EditorSssBlock &block : params.sssBlocks)
+    for (const Block &block : blocks)
     {
         AppendPolygonOrBrushYaml(out, indent, block);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
@@ -837,8 +852,8 @@ void AppendSssBlocksYaml(std::string &out, const std::string &indent,
     }
 }
 
-// One owned key as YAML. Every key but `luma`, `gloss` and `sss` is a scalar on its own line;
-// `luma`, `gloss` and `sss` are lists of colour / polygon blocks.
+// One owned key as YAML. Every key but `luma`, `gloss` and `sss` is a scalar
+// on its own line; `luma`, `gloss` and `sss` are lists of colour / polygon blocks.
 void AppendOwnedValue(std::string &out, const std::string &indent, const char *key,
                       const std::string &value, const EditorMaterialParams &params)
 {
@@ -858,9 +873,10 @@ void AppendOwnedValue(std::string &out, const std::string &indent, const char *k
 
     if (keyView == "sss")
     {
-        AppendSssBlocksYaml(out, indent, params);
+        AppendFactorBlocksYaml(out, indent, "sss", params.sssBlocks);
         return;
     }
+
 
     out += indent;
     out += key;
@@ -1476,8 +1492,8 @@ bool IsSssBlockHeaderKey(std::string_view key)
     return key == "sss";
 }
 
-void ApplySssBlockKey(std::string_view key, std::string_view value, EditorSssBlock &block,
-                      uint32_t &has)
+template <typename Block>
+void ApplyFactorBlockKey(std::string_view key, std::string_view value, Block &block, uint32_t &has)
 {
     if (ApplyCommonMaskBlockKey(key, value, block, has))
     {
@@ -1490,20 +1506,22 @@ void ApplySssBlockKey(std::string_view key, std::string_view value, EditorSssBlo
     }
 }
 
-void ApplySssBlockDefaults(EditorMaterialParams &params, const std::vector<uint32_t> &has)
+template <typename Block>
+void ApplyFactorBlockDefaults(std::vector<Block> &blocks, float defaultThreshold,
+                              float defaultFeather, const std::vector<uint32_t> &has)
 {
-    for (size_t b = 0; b < params.sssBlocks.size() && b < has.size(); b++)
+    for (size_t b = 0; b < blocks.size() && b < has.size(); b++)
     {
-        EditorSssBlock &block = params.sssBlocks[b];
+        Block &block = blocks[b];
 
         if ((has[b] & kOwnedThreshold) == 0)
         {
-            block.threshold = params.sssThreshold;
+            block.threshold = defaultThreshold;
         }
 
         if ((has[b] & kOwnedFeather) == 0)
         {
-            block.feather = params.sssFeather;
+            block.feather = defaultFeather;
         }
 
         if ((has[b] & kOwnedFactor) == 0)
@@ -1519,8 +1537,8 @@ void ReadSssBlocks(const std::string &text, const std::vector<TextLine> &lines, 
     std::vector<uint32_t> has;
     const YamlEntrySlice slice{ text, lines, begin, end, keyIndent };
     ReadMaskBlockList<EditorSssBlock, kEditorSssBlockMax>(
-        slice, params.sssBlocks, has, IsSssBlockHeaderKey, ApplySssBlockKey);
-    ApplySssBlockDefaults(params, has);
+        slice, params.sssBlocks, has, IsSssBlockHeaderKey, ApplyFactorBlockKey<EditorSssBlock>);
+    ApplyFactorBlockDefaults(params.sssBlocks, params.sssThreshold, params.sssFeather, has);
 }
 
 void ApplyGlossScalarKey(std::string_view key, std::string_view value, EditorMaterialParams &params)
@@ -1536,6 +1554,15 @@ void ApplyGlossScalarKey(std::string_view key, std::string_view value, EditorMat
     else if (key == "gloss_feather")
     {
         params.glossFeather = FloatOf(value, params.glossFeather);
+    }
+    else if (key == "light_min_area")
+    {
+        params.lightMinArea = std::max(0.0f, FloatOf(value, params.lightMinArea));
+    }
+    else if (key == "disabled_stages")
+    {
+        const float raw = FloatOf(value, 0.0f);
+        params.disabledStagesMask = raw > 0.0f ? uint32_t(raw + 0.5f) : 0u;
     }
 }
 
@@ -2556,16 +2583,71 @@ std::string MergeEmitterLightsText(const std::string &doc,
 bool IsEmittedMaterialKey(std::string_view key,
                           const std::vector<std::pair<const char *, std::string>> &values)
 {
-    static constexpr const char *kAlwaysReplacedKeys[] = {
-        "enabled",         "luma",        "color_emissive", "gloss",
-        "color_gloss",     "gloss_threshold", "gloss_feather",
-        "texture_sss",     "sss_strength", "sss_color",     "sss_radius",
-        "sss",             "sss_threshold", "sss_feather",
+    // Any key managed by ReadMaterial / OwnedValues must be replaced from the panel's current
+    // state on save so clearing or resetting a field back to its default deletes the old YAML line.
+    static constexpr const char *kOwnedMaterialKeys[] = {
+        "enabled",
+        "texture_base",
+        "texture_normals",
+        "texture_emissive",
+        "texture_overlay",
+        "texture_gloss",
+        "texture_scale_u",
+        "texture_scale_v",
+        "texture_offset_u",
+        "texture_offset_v",
+        "bump_scale",
+        "roughness_override",
+        "metalness_factor",
+        "metalness_from_normal_alpha",
+        "base_factor",
+        "emissive_factor",
+        "luma_blend",
+        "emissive_blend",
+        "transparency",
+        "is_light",
+        "exact_normals",
+        "force_rasterize",
+        "light_styles",
+        "light_color",
+        "light_brightness",
+        "light_focus",
+        "light_focus_soft",
+        "light_projector",
+        "light_min_area",
+        "disabled_stages",
+        "light_shafts",
+        "light_shafts_power",
+        "light_shafts_distance",
+        "light_shafts_falloff",
+        "mirror",
+        "material_glass",
+        "material_water",
+        "glass_ior",
+        "glass_thickness",
+        "glass_color",
+        "luma",
+        "color_emissive",
+        "luma_threshold",
+        "color_emissive_threshold",
+        "luma_feather",
+        "color_emissive_feather",
+        "gloss",
+        "color_gloss",
+        "gloss_threshold",
+        "gloss_feather",
+        "texture_sss",
+        "sss_strength",
+        "sss_color",
+        "sss_radius",
+        "sss",
+        "sss_threshold",
+        "sss_feather",
     };
 
-    for (const char *replaced : kAlwaysReplacedKeys)
+    for (const char *owned : kOwnedMaterialKeys)
     {
-        if (key == replaced)
+        if (key == owned)
         {
             return true;
         }
@@ -2691,6 +2773,33 @@ bool EditorMaterialsDocument::Load(const std::string &path, std::string &error)
 
     m_exists = true;
     return true;
+}
+
+bool EditorMaterialsDocument::LoadFromText(std::string text)
+{
+    m_text = std::move(text);
+    m_exists = true;
+    return true;
+}
+
+std::vector<std::string> EditorMaterialsDocument::MaterialNames() const
+{
+    std::vector<std::string> names;
+    if (m_text.empty())
+    {
+        return names;
+    }
+
+    const std::vector<TextLine> lines = SplitLines(m_text);
+    for (size_t i = 0; i < lines.size(); i++)
+    {
+        std::string found;
+        if (NameOf(lines[i].View(m_text), found))
+        {
+            names.push_back(std::move(found));
+        }
+    }
+    return names;
 }
 
 size_t EditorMaterialsDocument::FindEntry(const std::string &name) const
@@ -2974,6 +3083,123 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
     return true;
 }
 
+namespace
+{
+
+std::vector<std::pair<const char *, std::string>>
+OwnedEntryValues(const EditorMaterialEntry &entry)
+{
+    std::vector<std::pair<const char *, std::string>> values = OwnedValues(entry.params);
+    if (entry.clearDefaultEmissive && entry.params.emissiveTexture.empty())
+    {
+        values.emplace_back("texture_emissive", "NONE");
+    }
+    if (entry.clearDefaultMirror && !entry.params.mirror)
+    {
+        values.emplace_back("mirror", "false");
+    }
+    return values;
+}
+
+size_t FindTouchedMaterialEntry(const std::vector<EditorMaterialEntry> &entries,
+                                const std::vector<bool> &written, std::string_view line)
+{
+    std::string found;
+    if (!NameOf(line, found))
+    {
+        return size_t(-1);
+    }
+
+    for (size_t e = 0; e < entries.size(); e++)
+    {
+        // The same resolution a read uses, so an entry the file already carries under the
+        // game's key form is updated in place rather than appended a second time under
+        // the scene's bare miptex name.
+        if (!written[e] && MaterialNameMatches(entries[e].name, found))
+        {
+            return e;
+        }
+    }
+
+    return size_t(-1);
+}
+
+void SkipNestedMaterialBlock(const std::string &text, const std::vector<TextLine> &lines,
+                             size_t body, size_t keyIndent, size_t &k)
+{
+    for (k++; k < body; k++)
+    {
+        const std::string_view nested = lines[k].View(text);
+        if (!IsBlankLine(nested) && LeadingWhitespace(nested) <= keyIndent)
+        {
+            break;
+        }
+    }
+
+    if (k < body)
+    {
+        k--;
+    }
+}
+
+size_t AppendMergedExistingMaterialEntry(const std::string &text,
+                                         const std::vector<TextLine> &lines, size_t head,
+                                         const EditorMaterialEntry &entry, std::string &merged)
+{
+    const std::string_view line = lines[head].View(text);
+    merged += line;
+    if (!line.empty() && line.back() != '\n')
+    {
+        merged += '\n';
+    }
+
+    const size_t body = FindMaterialEntryEnd(lines, text, head);
+    const size_t keyIndent = InferMaterialKeyIndent(lines, text, head + 1, body);
+    const std::string indent(keyIndent != size_t(-1) ? keyIndent : LeadingWhitespace(line) + 2,
+                             ' ');
+    const std::vector<std::pair<const char *, std::string>> values = OwnedEntryValues(entry);
+
+    for (const auto &[key, value] : values)
+    {
+        AppendOwnedValue(merged, indent, key, value, entry.params);
+    }
+
+    for (size_t k = head + 1; k < body; k++)
+    {
+        const std::string_view bodyLine = lines[k].View(text);
+        const std::string_view key = KeyOf(bodyLine);
+        const bool emitted = !key.empty() && LeadingWhitespace(bodyLine) == keyIndent &&
+                             IsEmittedMaterialKey(key, values);
+        if (emitted)
+        {
+            SkipNestedMaterialBlock(text, lines, body, keyIndent, k);
+            continue;
+        }
+
+        merged += bodyLine;
+    }
+
+    return body - 1;
+}
+
+void AppendNewMaterialEntry(const EditorMaterialEntry &entry, std::string &merged)
+{
+    // A file whose last line had no terminator would otherwise swallow the new entry.
+    if (!merged.empty() && merged.back() != '\n')
+    {
+        merged += '\n';
+    }
+
+    merged += "  - name: " + MaterialKeyName(entry.name) + "\n";
+
+    for (const auto &[key, value] : OwnedEntryValues(entry))
+    {
+        AppendOwnedValue(merged, std::string(4, ' '), key, value, entry.params);
+    }
+}
+
+} // namespace
+
 std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMaterialEntry> &entries) const
 {
     std::string merged;
@@ -2990,23 +3216,7 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
     for (size_t i = 0; i < lines.size(); i++)
     {
         const std::string_view line = lines[i].View(m_text);
-        std::string found;
-        size_t entry = size_t(-1);
-
-        if (NameOf(line, found))
-        {
-            for (size_t e = 0; e < entries.size(); e++)
-            {
-                // The same resolution a read uses, so an entry the file already carries under the
-                // game's key form is updated in place rather than appended a second time under
-                // the scene's bare miptex name.
-                if (!written[e] && MaterialNameMatches(entries[e].name, found))
-                {
-                    entry = e;
-                    break;
-                }
-            }
-        }
+        const size_t entry = FindTouchedMaterialEntry(entries, written, line);
 
         if (entry == size_t(-1))
         {
@@ -3014,123 +3224,15 @@ std::string EditorMaterialsDocument::WriteMerged(const std::vector<EditorMateria
             continue;
         }
 
-        merged += line;
-
-        if (!line.empty() && line.back() != '\n')
-        {
-            merged += '\n';
-        }
-
-        // the rest of the entry is kept as it was: the keys the editor cannot express, the
-        // comments, the nested luma blocks and the original ordering
-        size_t body = i + 1;
-
-        for (; body < lines.size(); body++)
-        {
-            const std::string_view bodyLine = lines[body].View(m_text);
-            std::string nextName;
-
-            // A sequence item of its own name starts the next entry whatever indentation the file
-            // happens to use, so it never becomes part of this entry's body.
-            if (!IsBodyLine(bodyLine) || NameOf(bodyLine, nextName))
-            {
-                break;
-            }
-        }
-
-        // The entry's own keys sit at the shallowest indentation of its body; a nested block is
-        // deeper, so a key the editor owns that appears inside one stays with that block.
-        size_t keyIndent = size_t(-1);
-
-        for (size_t k = i + 1; k < body; k++)
-        {
-            const std::string_view bodyLine = lines[k].View(m_text);
-
-            if (KeyOf(bodyLine).empty())
-            {
-                continue;
-            }
-
-            const size_t level = LeadingWhitespace(bodyLine);
-
-            if (level < keyIndent)
-            {
-                keyIndent = level;
-            }
-        }
-
-        // New values take the indentation the entry already used, so a hand-written file keeps its
-        // shape; an entry with no keys at all gets the writer's own two spaces deeper.
-        const std::string indent(keyIndent != size_t(-1) ? keyIndent : LeadingWhitespace(line) + 2, ' ');
-
-        const std::vector<std::pair<const char *, std::string>> values =
-            OwnedValues(entries[entry].params);
-
-        for (const auto &[key, value] : values)
-        {
-            AppendOwnedValue(merged, indent, key, value, entries[entry].params);
-        }
-
-        for (size_t k = i + 1; k < body; k++)
-        {
-            const std::string_view bodyLine = lines[k].View(m_text);
-            const std::string_view key = KeyOf(bodyLine);
-            bool emitted = false;
-
-            // Only a key the writer just wrote is taken out of the body: one it left at its file
-            // default stays where it was, so an untouched value keeps its own line.
-            if (!key.empty() && LeadingWhitespace(bodyLine) == keyIndent)
-            {
-                emitted = IsEmittedMaterialKey(key, values);
-            }
-
-            if (emitted)
-            {
-                // A list-valued key carries everything nested under it, so the block goes with the
-                // key line; leaving it behind would duplicate the blocks the writer just wrote.
-                for (k++; k < body; k++)
-                {
-                    const std::string_view nested = lines[k].View(m_text);
-
-                    if (!IsBlankLine(nested) && LeadingWhitespace(nested) <= keyIndent)
-                    {
-                        break;
-                    }
-                }
-
-                if (k < body)
-                {
-                    k--;
-                }
-
-                continue;
-            }
-
-            merged += bodyLine;
-        }
-
+        i = AppendMergedExistingMaterialEntry(m_text, lines, i, entries[entry], merged);
         written[entry] = true;
-        i = body - 1;
     }
 
     for (size_t e = 0; e < entries.size(); e++)
     {
-        if (written[e])
+        if (!written[e])
         {
-            continue;
-        }
-
-        // A file whose last line had no terminator would otherwise swallow the new entry.
-        if (!merged.empty() && merged.back() != '\n')
-        {
-            merged += '\n';
-        }
-
-        merged += "  - name: " + MaterialKeyName(entries[e].name) + "\n";
-
-        for (const auto &[key, value] : OwnedValues(entries[e].params))
-        {
-            AppendOwnedValue(merged, std::string(4, ' '), key, value, entries[e].params);
+            AppendNewMaterialEntry(entries[e], merged);
         }
     }
 
@@ -3223,6 +3325,17 @@ bool EditorLevelDocument::Load(const std::string &path, std::string &error)
         m_text += '\n';
     }
 
+    return true;
+}
+
+bool EditorLevelDocument::LoadFromText(std::string text)
+{
+    m_text = std::move(text);
+    if (!m_text.empty() && m_text.back() != '\n')
+    {
+        m_text += '\n';
+    }
+    m_exists = true;
     return true;
 }
 

@@ -42,10 +42,13 @@ DeclareCustomFetchBicubicSamplesMin16(FetchHistorySamples16, WrapHistory16)
 DeclareCustomTextureSampleMin16(HistorySample16, FFX_FSR3UPSCALER_GET_LANCZOS_SAMPLER1D(FFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE), FetchHistorySamples16)
 #endif
 
-FfxFloat32x2 GetMotionVector(FfxInt32x2 iPxHrPos, FfxFloat32x2 fHrUv)
+FfxFloat32x2 GetMotionVector(FfxInt32x2 iPxHrPos, FfxFloat32x2 fHrUv, FfxFloat32x2 fLrUvHwSampler)
 {
 #if FFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS
-    const FfxFloat32x2 fDilatedMotionVector = LoadDilatedMotionVector(FFX_MIN16_I2(fHrUv * RenderSize()));
+    const FfxFloat32x2 fNearestMv = LoadDilatedMotionVector(FFX_MIN16_I2(fHrUv * RenderSize()));
+    const FfxFloat32x2 fBilinearMv = SampleDilatedMotionVector(fLrUvHwSampler);
+    const FfxFloat32 fMvDiffPx = Get4KVelocity(fBilinearMv - fNearestMv);
+    const FfxFloat32x2 fDilatedMotionVector = (fMvDiffPx < 4.0f) ? fBilinearMv : fNearestMv;
 #else
     const FfxFloat32x2 fDilatedMotionVector = LoadInputMotionVector(iPxHrPos);
 #endif

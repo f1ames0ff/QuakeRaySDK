@@ -46,15 +46,15 @@ void RectifyHistory(
     FFX_PARAMETER_INOUT AccumulationPassData data
 )
 {
-    const FfxFloat32 f4kVelocityFactor = ffxSaturate(params.f4KVelocity / 20.0f) * VelocityFactor();
-    const FfxFloat32 fDistanceFactor        = 0.0f;
+    const FfxFloat32 f4kVelocityFactor = ffxSaturate(params.f4KVelocity / 20.0f);
+    const FfxFloat32 fDistanceFactor        = ffxSaturate(0.75f - params.fFarthestDepthInMeters / 20.0f);
     const FfxFloat32 fAccumulationFactor    = 1.0f - params.fAccumulation;
     const FfxFloat32 fReactiveFactor        = ffxPow(params.fReactiveMask, 1.0f / 2.0f);
     const FfxFloat32 fShadingChangeFactor   = params.fShadingChange;
     const FfxFloat32 fBoxScaleT             = ffxMax(f4kVelocityFactor, ffxMax(fDistanceFactor, ffxMax(fAccumulationFactor, ffxMax(fReactiveFactor, fShadingChangeFactor))));
     
-    const FfxFloat32   fBoxScale     = ffxLerp(3.0f, 1.0f, fBoxScaleT);
-    const FfxFloat32x3 fScaledBoxVec = data.clippingBox.boxVec * FfxFloat32x3(1.7f, 1.0f, 1.0f) * fBoxScale;
+    const FfxFloat32   fBoxScale     = ffxLerp(1.25f, 0.85f, fBoxScaleT);
+    const FfxFloat32x3 fScaledBoxVec = data.clippingBox.boxVec * FfxFloat32x3(1.1f, 1.0f, 1.0f) * fBoxScale;
 
     const FfxFloat32x3 fClampedScaledBoxVec     = ffxMax(fScaledBoxVec, FfxFloat32x3(1.193e-7f, 1.193e-7f, 1.193e-7f));
     const FfxFloat32x3 fTransformedHistoryColor = (data.fHistoryColor - data.clippingBox.boxCenter) / fClampedScaledBoxVec;
@@ -63,10 +63,9 @@ void RectifyHistory(
         const FfxFloat32x3 fClampedHistoryColor = normalize(fTransformedHistoryColor);
         const FfxFloat32x3 fFinalClampedHistoryColor = (fClampedHistoryColor * fScaledBoxVec) + data.clippingBox.boxCenter;
 
-        // Scale history color using rectification info, also using accumulation mask to avoid potential invalid color protection
-        const FfxFloat32 fHistoryContribution = ffxMax(params.fLumaInstabilityFactor, data.fLockContributionThisFrame) * params.fAccumulation * (1 - params.fDisocclusion);
-        data.fHistoryColor = ffxLerp(fFinalClampedHistoryColor, data.fHistoryColor, ffxSaturate(fHistoryContribution));
+        data.fHistoryColor = fFinalClampedHistoryColor;
     }
+    data.fHistoryColor = clamp(data.fHistoryColor, data.clippingBox.aabbMin, data.clippingBox.aabbMax);
 }
 
 void UpdateLockStatus(AccumulationPassCommonParams params, FFX_PARAMETER_INOUT AccumulationPassData data)
@@ -94,9 +93,9 @@ void UpdateLockStatus(AccumulationPassCommonParams params, FFX_PARAMETER_INOUT A
 
 void ComputeBaseAccumulationWeight(const AccumulationPassCommonParams params, FFX_PARAMETER_INOUT AccumulationPassData data)
 {
-    FfxFloat32 fBaseAccumulation = params.fAccumulation;
+    FfxFloat32 fBaseAccumulation = ffxMin(params.fAccumulation, 0.25f);
 
-    fBaseAccumulation = ffxMin(fBaseAccumulation, ffxLerp(fBaseAccumulation, 0.15f, ffxSaturate(ffxMax(0.0f, (params.f4KVelocity * VelocityFactor()) / 0.5f))));
+    fBaseAccumulation = ffxMin(fBaseAccumulation, ffxLerp(fBaseAccumulation, 0.08f, ffxSaturate(ffxMax(0.0f, (params.f4KVelocity * VelocityFactor()) / 0.5f))));
 
     data.fHistoryWeight = fBaseAccumulation;
 }
@@ -110,7 +109,7 @@ void InitPassData(FfxInt32x2 iPxHrPos, FFX_PARAMETER_INOUT AccumulationPassCommo
     params.fLrUvJittered                = fHrUv + Jitter() / RenderSize();
     params.fLrUv_HwSampler              = ClampUv(params.fLrUvJittered, RenderSize(), MaxRenderSize());
 
-    params.fMotionVector                = GetMotionVector(iPxHrPos, fHrUv);
+    params.fMotionVector                = GetMotionVector(iPxHrPos, fHrUv, params.fLrUv_HwSampler);
     params.f4KVelocity                  = Get4KVelocity(params.fMotionVector);
 
     ComputeReprojectedUVs(params);
@@ -155,8 +154,6 @@ void Accumulate(FfxInt32x2 iPxHrPos)
     ComputeUpsampledColorAndWeight(params, data);
 
     RectifyHistory(params, data);
-
-    data.fHistoryWeight = 0.0f;
 
     Accumulate(params, data);
 

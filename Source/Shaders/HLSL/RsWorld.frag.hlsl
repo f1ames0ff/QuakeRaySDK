@@ -144,7 +144,8 @@ RsWorldFragOutput main( [[vk::location(0)]] float4 vertColor    : TEXCOORD0,
 
         emisBlendCode = uint( emisSample.a * 255.0 + 0.5 );
     }
-    o.outScreenEmission = rmeEmissionToScreenEmission( emis ) * albedoAlpha.rgb;
+    o.outScreenEmission = rmeEmissionToScreenEmission( emis ) * albedoAlpha.rgb *
+                          saturate( rasterizerFragInfo.color.rgb * vertColor.rgb );
 
     if( emisBlendCode != 0u )
     {

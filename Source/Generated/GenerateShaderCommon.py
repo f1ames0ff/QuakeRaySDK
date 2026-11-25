@@ -581,8 +581,8 @@ GLOBAL_UNIFORM_MEMBERS = [
     (FLOAT32, 1, "primaryRayMinDist",             1),
 
     (UINT32, 1, "rayCullMaskWorld_Shadow",        1),
-    (UINT32, 1, "__pad5",                        1),
-    (UINT32, 1, "__pad6",                        1),
+    (FLOAT32, 1, "jitterPrevX",                   1),
+    (FLOAT32, 1, "jitterPrevY",                   1),
     (UINT32, 1, "twirlPortalNormal",              1),
 
     (UINT32, 1, "lightIndexIgnoreFPVShadows",     1),

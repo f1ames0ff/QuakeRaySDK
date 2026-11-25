@@ -796,6 +796,37 @@ void VulkanDevice::CompleteAcquireForPresent()
     AcquireFrameImage(true);
 }
 
+static QrFloat2D ComputeFrameJitter(const RenderResolutionHelper &renderResolution, uint32_t frameId)
+{
+    if (renderResolution.IsNvDlssEnabled())
+    {
+        return HaltonSequence::GetJitter_Halton23(frameId);
+    }
+    if (renderResolution.IsAmdFsr3Enabled())
+    {
+        return FidelityFX::FSR::GetJitter(renderResolution.GetResolutionState(), frameId);
+    }
+    return QrFloat2D{ 0.0f, 0.0f };
+}
+
+static void PrepareFramebuffersForResolution(const RenderResolutionHelper &renderResolution,
+                                             Framebuffers *framebuffers,
+                                             qray::NvrhiFrameSkeleton *nvrhiFrameSkeleton)
+{
+    const ResolutionState resolutionState = renderResolution.GetResolutionState();
+    if (!framebuffers->NeedsPrepareForSize(resolutionState))
+    {
+        return;
+    }
+
+    const bool needWait = (nvrhiFrameSkeleton == nullptr);
+    if (nvrhiFrameSkeleton != nullptr)
+    {
+        nvrhiFrameSkeleton->ReleaseFramebufferTargets();
+    }
+    framebuffers->PrepareForSize(resolutionState, needWait);
+}
+
 static void FillUniformTonemappingAndSky(ShGlobalUniform *gu,
                                          const QrDrawFrameInfo &drawInfo,
                                          CubemapManager *cubemapManager,
@@ -917,8 +948,13 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->upscaledRenderWidth  = static_cast< float >( renderResolution.UpscaledWidth() );
         gu->upscaledRenderHeight = static_cast< float >( renderResolution.UpscaledHeight() );
 
-        gu->jitterX = 0.0f;
-        gu->jitterY = 0.0f;
+        gu->jitterPrevX = gu->jitterX;
+        gu->jitterPrevY = gu->jitterY;
+
+        const QrFloat2D jitter = ComputeFrameJitter(renderResolution, frameId);
+
+        gu->jitterX = jitter.data[ 0 ];
+        gu->jitterY = jitter.data[ 1 ];
     }
 
     gu->lightCount     = scene->GetLightManager()->GetLightCount();
@@ -1966,6 +2002,9 @@ void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
 
     if (canRender)
     {
+        PrepareFramebuffersForResolution(renderResolution, framebuffers.get(),
+                                         nvrhiFrameSkeleton.get());
+
         {
             CpuProfileScope fillUniform(cpuProfiler, QR_CPU_PASS_PREPARE);
             FillUniform(uniform->GetData(), *drawInfo);

@@ -31,6 +31,15 @@ namespace
 {
 
 float g_uiScale = 1.0f;
+bool g_iconFontLoaded = false;
+
+constexpr const char *kFaRotateLeft = "\xEF\x8B\xAA";
+constexpr const char *kFaCopy = "\xEF\x83\x85";
+constexpr const char *kFaPaste = "\xEF\x83\xAA";
+constexpr const char *kFaTrash = "\xEF\x87\xB8";
+constexpr const char *kFaEyedropper = "\xEF\x87\xBB";
+constexpr const char *kFaDrawPolygon = "\xEF\x97\xAE";
+constexpr const char *kFaPaintbrush = "\xEF\x87\xBC";
 
 float Scaled(float px)
 {
@@ -47,9 +56,12 @@ ImU32 ColorImU32(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255)
     return IM_COL32(r, g, b, a);
 }
 
-void ShowTooltip(const char *tooltip)
+void ShowTooltip(const char *tooltip, bool allowWhenDisabled = false)
 {
-    if (tooltip == nullptr || tooltip[0] == '\0' || !ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    const ImGuiHoveredFlags flags =
+        ImGuiHoveredFlags_DelayShort |
+        (allowWhenDisabled ? ImGuiHoveredFlags_AllowWhenDisabled : ImGuiHoveredFlags_None);
+    if (tooltip == nullptr || tooltip[0] == '\0' || !ImGui::IsItemHovered(flags))
     {
         return;
     }
@@ -69,55 +81,25 @@ void ReportItemRect(const EditorGuiRowOpts &opts)
     }
 }
 
-void DrawResetArrowIcon(ImDrawList *drawList, ImVec2 center, float radius, ImU32 color)
+std::string MakeIconButtonLabel(const char *faGlyph, const char *fallbackAscii, const char *idSuffix)
 {
-    constexpr float kPi = 3.14159265f;
-    const float start = 0.25f * kPi;
-    const float end = 1.75f * kPi;
-    drawList->PathArcTo(center, radius, start, end, 14);
-    drawList->PathStroke(color, ImDrawFlags_None, std::max(1.4f, 1.6f * g_uiScale));
-
-    const float tipX = center.x + std::cos(end) * radius;
-    const float tipY = center.y + std::sin(end) * radius;
-    const float head = std::max(3.0f, 3.2f * g_uiScale);
-    drawList->AddTriangleFilled(ImVec2(tipX - head * 0.2f, tipY - head * 0.6f),
-                                ImVec2(tipX - head * 1.1f, tipY + head * 0.45f),
-                                ImVec2(tipX + head * 0.7f, tipY + head * 0.45f), color);
+    std::string label = g_iconFontLoaded ? faGlyph : fallbackAscii;
+    label += idSuffix;
+    return label;
 }
 
-void DrawCopyIcon(ImDrawList *drawList, ImVec2 p, float s, ImU32 color)
+bool IconButton(const char *faGlyph, const char *fallbackAscii, const char *idSuffix, ImVec2 size,
+                ImVec4 textColor, const char *tooltip, bool allowWhenDisabled = false)
 {
-    const float pad = s * 0.22f;
-    const float w = s * 0.42f;
-    const float h = s * 0.50f;
-    const float t = std::max(1.2f, 1.25f * g_uiScale);
-    drawList->AddRect(ImVec2(p.x + pad + s * 0.14f, p.y + pad),
-                      ImVec2(p.x + pad + s * 0.14f + w, p.y + pad + h), color, 1.0f, 0, t);
-    drawList->AddRectFilled(ImVec2(p.x + pad, p.y + pad + s * 0.14f),
-                            ImVec2(p.x + pad + w, p.y + pad + s * 0.14f + h),
-                            ColorImU32(22, 27, 34, 240));
-    drawList->AddRect(ImVec2(p.x + pad, p.y + pad + s * 0.14f),
-                      ImVec2(p.x + pad + w, p.y + pad + s * 0.14f + h), color, 1.0f, 0, t);
-}
-
-void DrawPasteIcon(ImDrawList *drawList, ImVec2 p, float s, ImU32 color)
-{
-    const float t = std::max(1.2f, 1.25f * g_uiScale);
-    drawList->AddRect(ImVec2(p.x + s * 0.26f, p.y + s * 0.28f),
-                      ImVec2(p.x + s * 0.74f, p.y + s * 0.82f), color, 1.5f, 0, t);
-    drawList->AddRectFilled(ImVec2(p.x + s * 0.37f, p.y + s * 0.18f),
-                            ImVec2(p.x + s * 0.63f, p.y + s * 0.33f), color, 1.0f);
-}
-
-void DrawTrashIcon(ImDrawList *drawList, ImVec2 p, float s, ImU32 color)
-{
-    const float t = std::max(1.2f, 1.25f * g_uiScale);
-    drawList->AddLine(ImVec2(p.x + s * 0.24f, p.y + s * 0.32f),
-                      ImVec2(p.x + s * 0.76f, p.y + s * 0.32f), color, t);
-    drawList->AddLine(ImVec2(p.x + s * 0.40f, p.y + s * 0.22f),
-                      ImVec2(p.x + s * 0.60f, p.y + s * 0.22f), color, t);
-    drawList->AddRect(ImVec2(p.x + s * 0.30f, p.y + s * 0.32f),
-                      ImVec2(p.x + s * 0.70f, p.y + s * 0.78f), color, 1.0f, 0, t);
+    const std::string label = MakeIconButtonLabel(faGlyph, fallbackAscii, idSuffix);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+    const bool clicked = ImGui::Button(label.c_str(), size);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    ShowTooltip(tooltip, allowWhenDisabled);
+    return clicked;
 }
 
 void BeginTwoColumnRow(const char *label, const EditorGuiRowOpts &opts, float rightReserve)
@@ -385,16 +367,20 @@ bool EditorGuiTabs(const char *const *labels, int32_t count, int32_t *activeInde
     if (showResetTrash)
     {
         ImGui::SameLine();
-        const ImVec2 pos = ImGui::GetCursorScreenPos();
-        if (ImGui::Button("##TabResetTrash", ImVec2(trashSize, trashSize)) && outResetClicked != nullptr)
+        if (IconButton(kFaTrash, "X", "##TabResetTrash", ImVec2(trashSize, trashSize),
+                       ColorU8(236, 178, 118), resetTooltip) &&
+            outResetClicked != nullptr)
         {
             *outResetClicked = true;
         }
-        DrawTrashIcon(ImGui::GetWindowDrawList(), pos, trashSize, ColorImU32(236, 178, 118));
-        ShowTooltip(resetTooltip);
     }
 
     return changed;
+}
+
+void EditorGuiSetIconFontLoaded(bool loaded)
+{
+    g_iconFontLoaded = loaded;
 }
 
 void EditorGuiSectionHeader(const char *label, const char *tooltip)
@@ -424,15 +410,12 @@ bool EditorGuiResetButton(const char *id, bool changed, const char *tooltip)
     }
 
     ImGui::PushID(id);
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::PushStyleColor(ImGuiCol_Button, ColorU8(46, 40, 26, 210));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorU8(76, 64, 34, 240));
-    const bool clicked = ImGui::Button("##rst", ImVec2(size, size));
+    const bool clicked = IconButton(kFaRotateLeft, "R", "##rst", ImVec2(size, size),
+                                    ColorU8(246, 198, 92),
+                                    tooltip != nullptr ? tooltip : "Reset to loaded value");
     ImGui::PopStyleColor(2);
-    DrawResetArrowIcon(ImGui::GetWindowDrawList(),
-                       ImVec2(pos.x + size * 0.5f, pos.y + size * 0.5f), size * 0.27f,
-                       ColorImU32(246, 198, 92));
-    ShowTooltip(tooltip != nullptr ? tooltip : "Reset to loaded value");
     ImGui::PopID();
     return clicked;
 }
@@ -441,45 +424,79 @@ uint32_t EditorGuiBlockActions(const char *id, bool canCopy, bool canPaste, bool
 {
     uint32_t actions = kEditorGuiActionNone;
     const float s = Scaled(kEditorGuiActionSize);
+    const ImVec4 activeCol = ColorU8(215, 224, 236);
+    const ImVec4 disabledCol = ColorU8(110, 118, 128);
     ImGui::PushID(id);
 
     ImGui::BeginDisabled(!canCopy);
-    const ImVec2 cPos = ImGui::GetCursorScreenPos();
-    if (ImGui::Button("##cp", ImVec2(s, s)))
+    if (IconButton(kFaCopy, "C", "##cp", ImVec2(s, s), canCopy ? activeCol : disabledCol, "Copy"))
     {
         actions |= kEditorGuiActionCopy;
     }
-    DrawCopyIcon(ImGui::GetWindowDrawList(), cPos, s,
-                 canCopy ? ColorImU32(215, 224, 236) : ColorImU32(110, 118, 128));
-    ShowTooltip("Copy");
     ImGui::EndDisabled();
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!canPaste);
-    const ImVec2 pPos = ImGui::GetCursorScreenPos();
-    if (ImGui::Button("##ps", ImVec2(s, s)))
+    if (IconButton(kFaPaste, "V", "##ps", ImVec2(s, s), canPaste ? activeCol : disabledCol,
+                   "Paste"))
     {
         actions |= kEditorGuiActionPaste;
     }
-    DrawPasteIcon(ImGui::GetWindowDrawList(), pPos, s,
-                  canPaste ? ColorImU32(215, 224, 236) : ColorImU32(110, 118, 128));
-    ShowTooltip("Paste");
     ImGui::EndDisabled();
 
     if (canRemove)
     {
         ImGui::SameLine();
-        const ImVec2 rPos = ImGui::GetCursorScreenPos();
-        if (ImGui::Button("##rm", ImVec2(s, s)))
+        if (IconButton(kFaTrash, "X", "##rm", ImVec2(s, s), ColorU8(238, 118, 118), "Remove"))
         {
             actions |= kEditorGuiActionRemove;
         }
-        DrawTrashIcon(ImGui::GetWindowDrawList(), rPos, s, ColorImU32(238, 118, 118));
-        ShowTooltip("Remove");
     }
 
     ImGui::PopID();
     return actions;
+}
+
+int32_t EditorGuiMaskAddButtons(const char *id, bool canAdd)
+{
+    int32_t clicked = -1;
+    const float s = Scaled(26.0f);
+    const ImVec4 col = canAdd ? ColorU8(215, 224, 236) : ColorU8(110, 118, 128);
+
+    ImGui::PushID(id);
+    ImGui::BeginDisabled(!canAdd);
+
+    struct AddBtnSpec
+    {
+        const char *glyph;
+        const char *fallback;
+        const char *btnId;
+        const char *tooltip;
+        const char *disabledTooltip;
+        int32_t result;
+    };
+    const AddBtnSpec specs[3] = {
+        { kFaEyedropper, "C", "##add_color", "Add color", "Add color (block limit reached)", 0 },
+        { kFaDrawPolygon, "M", "##add_mask", "Add mask", "Add mask (block limit reached)", 1 },
+        { kFaPaintbrush, "B", "##add_brush", "Add brush", "Add brush (block limit reached)", 2 },
+    };
+
+    for (int32_t i = 0; i < 3; ++i)
+    {
+        if (i > 0)
+        {
+            ImGui::SameLine();
+        }
+        if (IconButton(specs[i].glyph, specs[i].fallback, specs[i].btnId, ImVec2(s, s), col,
+                       canAdd ? specs[i].tooltip : specs[i].disabledTooltip, true))
+        {
+            clicked = specs[i].result;
+        }
+    }
+
+    ImGui::EndDisabled();
+    ImGui::PopID();
+    return clicked;
 }
 
 bool EditorGuiCheckbox(const char *label, bool *value, const EditorGuiRowOpts &opts)
@@ -669,16 +686,26 @@ bool EditorGuiComboFiltered(const char *label, int32_t *selected, const EditorGu
 }
 
 bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClicked,
-                          const EditorGuiRowOpts &opts)
+                          const EditorGuiRowOpts &opts, bool *generateAiClicked)
 {
     if (browseClicked != nullptr)
     {
         *browseClicked = false;
     }
+    if (generateAiClicked != nullptr)
+    {
+        *generateAiClicked = false;
+    }
 
     ImGui::PushID(label);
+    const float spacingX = ImGui::GetStyle().ItemSpacing.x;
     const float browseW = Scaled(kEditorGuiBrowseWidth);
-    BeginTwoColumnRow(label, opts, browseW + ImGui::GetStyle().ItemSpacing.x);
+    static constexpr const char *kAiLabel = "Generate with AI";
+    const float aiW = generateAiClicked != nullptr
+                          ? (ImGui::CalcTextSize(kAiLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f)
+                          : 0.0f;
+    const float extraReserve = (generateAiClicked != nullptr) ? (aiW + spacingX) : 0.0f;
+    BeginTwoColumnRow(label, opts, browseW + spacingX + extraReserve);
 
     char buffer[260] = {};
     std::snprintf(buffer, sizeof(buffer), "%s", path.c_str());
@@ -705,6 +732,21 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
     if (ImGui::Button("...", ImVec2(browseW, 0.0f)) && browseClicked != nullptr)
     {
         *browseClicked = true;
+    }
+    ShowTooltip("Browse texture assets");
+
+    if (generateAiClicked != nullptr)
+    {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ColorU8(42, 74, 108, 240));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorU8(58, 98, 140, 250));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorU8(70, 118, 168, 255));
+        if (ImGui::Button(kAiLabel, ImVec2(aiW, 0.0f)))
+        {
+            *generateAiClicked = true;
+        }
+        ImGui::PopStyleColor(3);
+        ShowTooltip("Generate this texture map from the current diffuse texture using AI.");
     }
     ImGui::EndDisabled();
 

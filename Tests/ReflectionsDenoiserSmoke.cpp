@@ -246,7 +246,7 @@ constexpr std::array<FbEntry, 7> kAtrousLfBindings = {{
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH, false },
 }};
 
-constexpr std::array<FbEntry, 27> kAtrousBindings = {{
+constexpr std::array<FbEntry, 28> kAtrousBindings = {{
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_H_F, true },
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_H_F, true },
     { FB_IMAGE_INDEX_Q2_ATROUS_PONG_H_F, true },
@@ -262,6 +262,7 @@ constexpr std::array<FbEntry, 27> kAtrousBindings = {{
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY, false },
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS, false },
     { FB_IMAGE_INDEX_DEPTH_GRAD, false },
+    { FB_IMAGE_INDEX_SURFACE_POSITION, false },
     { FB_IMAGE_INDEX_VIEW_DIRECTION, false },
     { FB_IMAGE_INDEX_THROUGHPUT, false },
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH, false },
@@ -727,7 +728,7 @@ struct SynthHarness
     void DispatchPrepareFinal(nvrhi::ICommandList *cmd, uint32_t gx, uint32_t gy) const;
     void RecordFilteredChain(nvrhi::ICommandList *cmd, uint32_t fullGroups,
                              uint32_t gradGroups, uint32_t atrousLfGroups,
-                             uint32_t temporalGroups) const;
+                             uint32_t temporalGroupsX, uint32_t temporalGroupsY) const;
     void RunFrame(const FrameConfig &cfg) const;
 };
 
@@ -1044,7 +1045,7 @@ void SynthHarness::DispatchPrepareFinal(nvrhi::ICommandList *cmd, uint32_t gx, u
 
 void SynthHarness::RecordFilteredChain(nvrhi::ICommandList *cmd, uint32_t fullGroups,
                                        uint32_t gradGroups, uint32_t atrousLfGroups,
-                                       uint32_t temporalGroups) const
+                                       uint32_t temporalGroupsX, uint32_t temporalGroupsY) const
 {
     DispatchBundle(cmd, gradImg, nullptr, gradGroups, gradGroups, nullptr);
     for (uint32_t iter = 0; iter < 7; iter++)
@@ -1057,7 +1058,7 @@ void SynthHarness::RecordFilteredChain(nvrhi::ICommandList *cmd, uint32_t fullGr
             RequireUavBarriers(cmd, std::array<nvrhi::ITexture *, 2>{ fb[p0], fb[p1] });
         }
     }
-    DispatchBundle(cmd, temporal, nullptr, temporalGroups, temporalGroups, nullptr);
+    DispatchBundle(cmd, temporal, nullptr, temporalGroupsX, temporalGroupsY, nullptr);
     for (uint32_t iter = 0; iter < 4; iter++)
     {
         DispatchBundle(cmd, atrousLf, nullptr, atrousLfGroups, atrousLfGroups, &iter);
@@ -1118,9 +1119,10 @@ void SynthHarness::RunFrame(const FrameConfig &cfg) const
     tp.prevCamPosX = cfg.prevCamPosX;
 
     const uint32_t fullGroups = (kWidth + 15u) / 16u;
-    const uint32_t gradGroups = (kGradWidth + 15u) / 16u;
+    const uint32_t gradGroups = (kThirdWidth + 15u) / 16u;
     const uint32_t atrousLfGroups = (kThirdWidth + 15u) / 16u;
-    const uint32_t temporalGroups = (kWidth + 14u) / 15u;
+    const uint32_t temporalGroupsX = (kWidth + 23u) / 24u;
+    const uint32_t temporalGroupsY = (kHeight + 11u) / 12u;
 
     auto cmd = device->createCommandList();
     cmd->open();
@@ -1137,7 +1139,7 @@ void SynthHarness::RunFrame(const FrameConfig &cfg) const
 
     if (cfg.fltEnable >= 0.5f)
     {
-        RecordFilteredChain(cmd, fullGroups, gradGroups, atrousLfGroups, temporalGroups);
+        RecordFilteredChain(cmd, fullGroups, gradGroups, atrousLfGroups, temporalGroupsX, temporalGroupsY);
     }
 
     if (cfg.runPrepareFinal)
@@ -1562,8 +1564,9 @@ void VerifyPoisonedGradBorderProbe(const std::vector<float> &gradPong,
         for (uint32_t cx = 0; cx < kWidth; cx++)
         {
             if (cx / 3u < kGradWidth && cy / 3u < kGradHeight) continue;
-            Require(gradPong[(size_t(cy / 3u) * kThirdWidth + (cx / 3u)) * 2u + 1u] > 100.0f,
-                    "poisoned %3 border texel stays untouched in gradPong");
+            const float borderGrad = gradPong[(size_t(cy / 3u) * kThirdWidth + (cx / 3u)) * 2u + 1u];
+            Require(std::isfinite(borderGrad) && borderGrad >= 0.0f && borderGrad < 10.0f,
+                    "ceil-1/3 gradient passes cleanly overwrite poisoned %3 border texel in gradPong");
             uint32_t fx = 0, fy = 0;
             CheckerToFlat(cx, cy, kWidth, fx, fy);
             const uint32_t cgx = std::min(cx / 3u, kGradWidth - 1u);

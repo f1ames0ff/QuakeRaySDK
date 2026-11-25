@@ -830,6 +830,17 @@ void RecordSkyDrawCommand(nvrhi::ICommandList *pCommandList,
         pCommandList->draw(args);
     }
 }
+
+void BuildSkyDefaultViewProj(const float proj[16], const float skyView[16],
+                             const float jitter[2], uint32_t width, uint32_t height,
+                             bool flipY, float outViewProj[16])
+{
+    float jitteredProj[16];
+    memcpy(jitteredProj, proj, sizeof(jitteredProj));
+    jitteredProj[2 * 4 + 0] += 2.0f * jitter[0] / float(width);
+    jitteredProj[2 * 4 + 1] += (flipY ? -2.0f : 2.0f) * jitter[1] / float(height);
+    Matrix::Multiply(outViewProj, skyView, jitteredProj);
+}
 } // namespace
 
 void RhiSkyPass::Render(nvrhi::ICommandList *pCommandList,
@@ -874,14 +885,10 @@ void RhiSkyPass::Render(nvrhi::ICommandList *pCommandList,
     // the render resolution, then the sky view (the frame's view with the viewer moved to the sky
     // viewer position) multiplies it. Every sky upload passes a null viewProjection today
     // (Quake/gl_sky.c:1085), so this default is the transform of every draw.
-    float jitteredProj[16];
-    memcpy(jitteredProj, proj, sizeof(jitteredProj));
-    jitteredProj[2 * 4 + 0] += jitter[0] / float(target.width);
-    jitteredProj[2 * 4 + 1] += jitter[1] / float(target.height);
-
     float skyView[16];
     Matrix::SetNewViewerPosition(skyView, view, skyViewerPos);
-    Matrix::Multiply(defaultViewProj, skyView, jitteredProj);
+    BuildSkyDefaultViewProj(proj, skyView, jitter, target.width, target.height,
+                            !legacyViewport, defaultViewProj);
 
     // The engine textures the table wrapped since the last frame need their first-use state
     // declared in the first list that binds the table (RhiTextureSource.h); this is that list.
@@ -1007,13 +1014,8 @@ void RhiSkyPass::RenderWorld(nvrhi::ICommandList *pCommandList,
     // the render resolution and the frame's plain view multiplies it. The sky moves the viewer to
     // the sky position first (SetNewViewerPosition, Rasterizer.cpp:203-210); the world deliberately
     // does not, so the shared camera stored by SetSkyCamera is used as it is.
-    float jitteredProj[16];
-    memcpy(jitteredProj, proj, sizeof(jitteredProj));
-    jitteredProj[2 * 4 + 0] += jitter[0] / float(target.width);
-    jitteredProj[2 * 4 + 1] += jitter[1] / float(target.height);
-
-    float defaultViewProj[16];
-    Matrix::Multiply(defaultViewProj, view, jitteredProj);
+    BuildSkyDefaultViewProj(proj, view, jitter, target.width, target.height,
+                            true, defaultViewProj);
 
     // A no-op when the sky's Render already drained the table's pending wraps in this list; kept
     // so that a list that records the world without the sky still declares them.

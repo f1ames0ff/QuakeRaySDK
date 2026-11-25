@@ -39,10 +39,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <clocale>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
+#include <string_view>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -352,6 +357,10 @@ struct EditorWindow::Impl
         case FocusIn:
         case FocusOut:
         {
+            if (xevent.xfocus.mode == NotifyGrab || xevent.xfocus.mode == NotifyUngrab)
+            {
+                break;
+            }
             EditorEvent event = {};
             event.type = EditorEventType::Focus;
             event.down = (xevent.type == FocusIn);
@@ -614,11 +623,13 @@ void EditorWindow::SetMouseCapture(bool capture)
 
     if (capture)
     {
+        const unsigned long cursor =
+            m_impl->cursorVisible ? kX11None : m_impl->invisibleCursor;
         const int status = XGrabPointer(
             m_impl->display, m_impl->window, 1,
             ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
             GrabModeAsync, GrabModeAsync, m_impl->window,
-            kX11None, CurrentTime);
+            cursor, CurrentTime);
         m_impl->mouseCaptured = (status == GrabSuccess);
     }
     else
@@ -628,6 +639,24 @@ void EditorWindow::SetMouseCapture(bool capture)
     }
 
     XFlush(m_impl->display);
+}
+
+bool EditorWindow::HasFocus() const
+{
+    if (!IsValid() || m_impl->display == nullptr)
+    {
+        return false;
+    }
+
+    Window focusWindow = kX11None;
+    int revertTo = 0;
+    XGetInputFocus(m_impl->display, &focusWindow, &revertTo);
+    return focusWindow == m_impl->window;
+}
+
+bool EditorWindow::IsMouseCaptured() const
+{
+    return IsValid() && m_impl->mouseCaptured;
 }
 
 void EditorWindow::BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const
@@ -677,4 +706,191 @@ std::string EditorExecutableDirectory()
 
         buffer.resize(buffer.size() * 2, '\0');
     }
+}
+
+namespace
+{
+
+void BuildChildEnvironment(const std::vector<std::pair<std::string, std::string>> &overrides,
+                           std::vector<std::string> &ownedEnv, std::vector<char *> &envp)
+{
+    ownedEnv.clear();
+    envp.clear();
+
+    if (::environ != nullptr)
+    {
+        for (char **entry = ::environ; *entry != nullptr; ++entry)
+        {
+            const std::string_view sv(*entry);
+            const size_t eq = sv.find('=');
+            const std::string_view key = (eq == std::string_view::npos) ? sv : sv.substr(0, eq);
+            const bool overridden = std::any_of(
+                overrides.begin(), overrides.end(),
+                [key](const std::pair<std::string, std::string> &kv) { return kv.first == key; });
+            if (!overridden)
+            {
+                ownedEnv.emplace_back(sv);
+            }
+        }
+    }
+
+    for (const auto &[k, v] : overrides)
+    {
+        ownedEnv.push_back(k + "=" + v);
+    }
+
+    envp.reserve(ownedEnv.size() + 1u);
+    for (std::string &entry : ownedEnv)
+    {
+        envp.push_back(entry.data());
+    }
+    envp.push_back(nullptr);
+}
+
+bool ReadPipeErrno(int fd, int &outErr)
+{
+    for (;;)
+    {
+        const ssize_t r = read(fd, &outErr, sizeof(outErr));
+        if (r < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        close(fd);
+        return r == ssize_t(sizeof(outErr));
+    }
+}
+
+[[noreturn]] void ChildExecFailure(int pipeFd, int err)
+{
+    const ssize_t written = write(pipeFd, &err, sizeof(err));
+    (void)written;
+    close(pipeFd);
+    _exit(127);
+}
+
+} // namespace
+
+bool EditorSpawnProcess(const EditorProcessLaunch &launch, EditorChildProcess &outProcess,
+                        std::string &outError)
+{
+    outProcess.handle = 0;
+    if (launch.executable.empty() || access(launch.executable.c_str(), X_OK) != 0)
+    {
+        outError = "game executable not found or not executable: " + launch.executable;
+        return false;
+    }
+
+    std::vector<std::string> ownedArgs;
+    ownedArgs.reserve(launch.arguments.size() + 1u);
+    ownedArgs.push_back(launch.executable);
+    for (const std::string &arg : launch.arguments)
+    {
+        ownedArgs.push_back(arg);
+    }
+
+    std::vector<char *> argv;
+    argv.reserve(ownedArgs.size() + 1u);
+    for (std::string &arg : ownedArgs)
+    {
+        argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+
+    std::vector<std::string> ownedEnv;
+    std::vector<char *> envp;
+    if (!launch.envOverrides.empty())
+    {
+        BuildChildEnvironment(launch.envOverrides, ownedEnv, envp);
+    }
+
+    int errPipe[2] = { -1, -1 };
+    if (pipe(errPipe) != 0)
+    {
+        outError = std::string("failed to create process pipe: ") + std::strerror(errno);
+        return false;
+    }
+    fcntl(errPipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(errPipe[1], F_SETFD, FD_CLOEXEC);
+
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        const int err = errno;
+        close(errPipe[0]);
+        close(errPipe[1]);
+        outError = std::string("fork failed: ") + std::strerror(err);
+        return false;
+    }
+
+    if (pid == 0)
+    {
+        close(errPipe[0]);
+        if (!launch.workingDirectory.empty() && chdir(launch.workingDirectory.c_str()) != 0)
+        {
+            ChildExecFailure(errPipe[1], errno);
+        }
+        if (envp.empty())
+        {
+            execv(launch.executable.c_str(), argv.data());
+        }
+        else
+        {
+            execve(launch.executable.c_str(), argv.data(), envp.data());
+        }
+        ChildExecFailure(errPipe[1], errno);
+    }
+
+    close(errPipe[1]);
+    int childErr = 0;
+    if (ReadPipeErrno(errPipe[0], childErr))
+    {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        outError = "failed to start " + launch.executable + ": " + std::strerror(childErr);
+        return false;
+    }
+
+    outProcess.handle = intptr_t(pid);
+    return true;
+}
+
+bool EditorIsProcessRunning(EditorChildProcess &process, int *outExitCode)
+{
+    if (process.handle == 0)
+    {
+        return false;
+    }
+
+    const pid_t pid = pid_t(process.handle);
+    int status = 0;
+    const pid_t waited = waitpid(pid, &status, WNOHANG);
+    if (waited == 0)
+    {
+        return true;
+    }
+
+    if (outExitCode != nullptr)
+    {
+        if (waited > 0 && WIFEXITED(status))
+        {
+            *outExitCode = WEXITSTATUS(status);
+        }
+        else if (waited > 0 && WIFSIGNALED(status))
+        {
+            *outExitCode = 128 + WTERMSIG(status);
+        }
+        else
+        {
+            *outExitCode = -1;
+        }
+    }
+
+    process.handle = 0;
+    return false;
+}
+
+void EditorDetachProcess(EditorChildProcess &process)
+{
+    process.handle = 0;
 }

@@ -17,12 +17,14 @@
 
 #include "EditorUi.h"
 
+#include "EditorGui.h"
 #include "EditorMaterial.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 
 #include <imgui.h>
 
@@ -121,7 +123,7 @@ void ApplyEditorStyle()
 } // namespace
 
 bool EditorUi::Initialize(EditorWindow *window, QrInstance instance, const std::string &fontPath,
-                          std::string &error)
+                          std::string &error, const std::string &iconFontPath)
 {
     if (m_ready)
     {
@@ -156,6 +158,35 @@ bool EditorUi::Initialize(EditorWindow *window, QrInstance instance, const std::
         config.SizePixels = 17.0f;
         font = io.Fonts->AddFontDefault(&config);
     }
+
+    std::string resolvedIconPath = iconFontPath;
+    if (resolvedIconPath.empty() && !fontPath.empty())
+    {
+        const std::filesystem::path sibling =
+            std::filesystem::path(fontPath).parent_path() / "fa-solid-900.ttf";
+        std::error_code ec;
+        if (std::filesystem::exists(sibling, ec))
+        {
+            resolvedIconPath = sibling.string();
+        }
+    }
+
+    bool iconFontLoaded = false;
+    if (!resolvedIconPath.empty())
+    {
+        std::error_code ec;
+        if (std::filesystem::exists(resolvedIconPath, ec))
+        {
+            static constexpr ImWchar kFaRanges[] = { 0xF000, 0xF8FF, 0 };
+            ImFontConfig iconCfg;
+            iconCfg.MergeMode = true;
+            iconCfg.PixelSnapH = true;
+            ImFont *merged = io.Fonts->AddFontFromFileTTF(resolvedIconPath.c_str(), 14.5f,
+                                                          &iconCfg, kFaRanges);
+            iconFontLoaded = (merged != nullptr);
+        }
+    }
+    EditorGuiSetIconFontLoaded(iconFontLoaded);
 
     unsigned char *pixels = nullptr;
     int width = 0;
@@ -210,6 +241,7 @@ void EditorUi::Shutdown()
     }
 
     ImGui::DestroyContext();
+    EditorGuiSetIconFontLoaded(false);
     m_ready = false;
 }
 
