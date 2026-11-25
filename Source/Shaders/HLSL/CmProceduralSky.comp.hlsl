@@ -175,13 +175,13 @@ float3 evalStarfield(float3 dir, float skyLuma, float3 starParams, float celesti
     float densityScale = clamp(starParams.y, 0.0, 4.0);
 
     // Tier 1: Rare bright 1st/2nd magnitude stars with optical halo
-    float3 stars = evalStarTier(rotDir, 28.0, 0.06, 0.0021, 0.0085, 2.2, 1.8,
+    float3 stars = evalStarTier(rotDir, 28.0, 0.06, 0.0021, 0.0085, 1.4, 1.8,
                                 densityScale, twinkleClock, horizonScint, texelRad);
     // Tier 2: Medium constellation stars
-    stars += evalStarTier(rotDir, 64.0, 0.09, 0.0014, 0.0032, 0.85, 2.8,
+    stars += evalStarTier(rotDir, 64.0, 0.09, 0.0014, 0.0032, 0.55, 2.8,
                           densityScale, twinkleClock, horizonScint, texelRad);
     // Tier 3: Fine background star dust
-    stars += evalStarTier(rotDir, 130.0, 0.13, 0.0011, 0.0, 0.35, 3.8,
+    stars += evalStarTier(rotDir, 130.0, 0.13, 0.0011, 0.0, 0.22, 3.8,
                           densityScale, twinkleClock, horizonScint, texelRad);
 
     return stars * vis;
@@ -216,7 +216,7 @@ void evalMoon(float3 dir, float3 moonDir, float moonRadius, float3 moonColor,
     float sinAng = length(cross(dir, moonDir));
     float angDist = atan2(sinAng, max(mu, 1.0e-5));
 
-    float aura = exp(-angDist * angDist / max(moonRadius * moonRadius * 1.8, 1.0e-6)) * 0.09;
+    float aura = exp(-angDist * angDist / max(moonRadius * moonRadius * 1.8, 1.0e-6)) * 0.025;
     moonRadiance += moonColor * horizonTrans * aura * moonAbove;
 
     if (angDist > moonRadius + edgeW)
@@ -261,7 +261,7 @@ void evalMoon(float3 dir, float3 moonDir, float moonRadius, float3 moonColor,
     float ndl = max(dot(localN, lightLocal), 0.0);
     float ndv = max(localN.z, 0.06);
     float lommel = (ndl / max(ndl + ndv * 0.55, 1.0e-4)) * smoothstep(0.0, 0.06, ndl);
-    float litSurface = (0.022 + 2.35 * lommel) * surfaceAlbedo;
+    float litSurface = (0.010 + 0.55 * lommel) * surfaceAlbedo;
 
     moonRadiance += moonColor * horizonTrans * litSurface * moonDiscMask;
 }

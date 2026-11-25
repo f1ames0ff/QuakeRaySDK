@@ -374,6 +374,74 @@ void CheckAaaCloudEclipse(nvrhi::IDevice *device,
               << ", eclipsed=" << eclipsedCentre << ", starsPeak=" << starsOnPeak << '\n';
 }
 
+double LumaAtFaceCenter(const std::vector<float> &cube, size_t crop, size_t face)
+{
+    const size_t idx = (face * crop * crop + (crop / 2) * crop + (crop / 2)) * 4;
+    return 0.2126 * cube[idx] + 0.7152 * cube[idx + 1] + 0.0722 * cube[idx + 2];
+}
+
+void CheckAaaSunsetAsymmetryAndNightMoon(nvrhi::IDevice *device,
+                                          qray::rhi::RhiFrameContext &frames,
+                                          qray::RhiProceduralSkyPass &sky)
+{
+    qray::RhiProceduralSkyPass::Params aaa = MakeAaaBaseParams();
+    aaa.sunDirection[0] = 0.6f;
+    aaa.sunDirection[2] = 0.8f;
+    aaa.sunDirection[3] = 1.0f;
+    frames.BeginSlot(0);
+    sky.Render(frames.GetCommandList(0), 0, aaa);
+    frames.EndSlot(0);
+    const double dayZenithLuma = LumaAtFaceCenter(ReadCube(device, sky.GetEnvironmentTexture(), 0, 16), 16, 4);
+
+    // Align sunset sun along face 0 horizontal direction tilted to z = +0.03.
+    const float fx = aaa.faceBasis[2][0];
+    const float fy = aaa.faceBasis[2][1];
+    const float fLen = std::max(std::sqrt(fx * fx + fy * fy), 1e-4f);
+    const float hx = fx / fLen;
+    const float hy = fy / fLen;
+    const float sunNorm = std::sqrt(1.0f + 0.03f * 0.03f);
+    aaa.sunDirection[0] = hx / sunNorm;
+    aaa.sunDirection[1] = hy / sunNorm;
+    aaa.sunDirection[2] = 0.03f / sunNorm;
+    aaa.sunDirection[3] = 1.0f;
+    frames.BeginSlot(1);
+    sky.Render(frames.GetCommandList(1), 1, aaa);
+    frames.EndSlot(1);
+    const auto sunsetEnv = ReadCube(device, sky.GetEnvironmentTexture(), 0, 16);
+    const double sunSideLuma = LumaAtFaceCenter(sunsetEnv, 16, 0);
+    const double oppSideLuma = LumaAtFaceCenter(sunsetEnv, 16, 1);
+    Require(sunSideLuma > oppSideLuma * 3.0,
+            "AAA sunset sky lacked directional brightness asymmetry");
+
+    // Midnight sky must stay dark (<5% of daytime zenith) while keeping moonward asymmetry.
+    aaa.sunDirection[0] = 0.0f;
+    aaa.sunDirection[1] = 0.0f;
+    aaa.sunDirection[2] = -0.8f;
+    aaa.sunDirection[3] = 0.0f;
+    aaa.moonDirection[0] = hx * 0.866025f;
+    aaa.moonDirection[1] = hy * 0.866025f;
+    aaa.moonDirection[2] = 0.5f;
+    aaa.moonDirection[3] = 0.022f;
+    aaa.moonParams[0] = 0.65f;
+    aaa.moonParams[1] = 0.73f;
+    aaa.moonParams[2] = 0.90f;
+    aaa.moonParams[3] = 0.85f;
+    frames.BeginSlot(0);
+    sky.Render(frames.GetCommandList(0), 0, aaa);
+    frames.EndSlot(0);
+    const auto nightEnv = ReadCube(device, sky.GetEnvironmentTexture(), 0, 16);
+    const double nightZenithLuma = LumaAtFaceCenter(nightEnv, 16, 4);
+    const double moonSideLuma = LumaAtFaceCenter(nightEnv, 16, 0);
+    const double moonOppLuma = LumaAtFaceCenter(nightEnv, 16, 1);
+    Require(nightZenithLuma < dayZenithLuma * 0.05,
+            "AAA midnight sky stayed too bright under moonlight");
+    Require(moonSideLuma > moonOppLuma * 1.8,
+            "AAA night sky lacked moonward directional asymmetry");
+    std::cout << "AAA sunset asymmetry=" << (sunSideLuma / std::max(oppSideLuma, 1e-6))
+              << "x, night/day=" << (nightZenithLuma / std::max(dayZenithLuma, 1e-6))
+              << ", moon asymmetry=" << (moonSideLuma / std::max(moonOppLuma, 1e-6)) << "x\n";
+}
+
 int main(int argc, char **argv)
 {
     try
@@ -732,6 +800,7 @@ int main(int argc, char **argv)
 
             const double starsOnPeak = CheckAaaZenithAndStars(device, frames, sky);
             CheckAaaCloudEclipse(device, frames, clouds, sky, starsOnPeak);
+            CheckAaaSunsetAsymmetryAndNightMoon(device, frames, sky);
 
             frames.WaitForIdle();
         }

@@ -100,17 +100,22 @@ float3 atmoOpticalDepth(float3 ro, float3 rd, float rayLen, int steps)
     return od;
 }
 
-float atmoHorizonMask(float altitudeMeters, float3 lightDir)
+float atmoHorizonMaskCos(float altitudeMeters, float cosZenith)
 {
     float h = max(altitudeMeters, 10.0);
     float r = ATMO_PLANET_RADIUS + h;
     float sinDip = -sqrt(max(h * (2.0 * ATMO_PLANET_RADIUS + h), 0.0)) / r;
-    return smoothstep(sinDip - 0.024, sinDip + 0.015, lightDir.z);
+    return smoothstep(sinDip - 0.024, sinDip + 0.015, cosZenith);
 }
 
-float3 evalSunTransmittanceAtAltitude(float altitudeMeters, float3 sunDir, AtmosphereConfig cfg)
+float atmoHorizonMask(float altitudeMeters, float3 lightDir)
 {
-    float horizon = atmoHorizonMask(altitudeMeters, sunDir);
+    return atmoHorizonMaskCos(altitudeMeters, lightDir.z);
+}
+
+float3 evalLightTransmittance(float altitudeMeters, float cosZenith, AtmosphereConfig cfg)
+{
+    float horizon = atmoHorizonMaskCos(altitudeMeters, cosZenith);
     if (horizon <= 0.0)
     {
         return (float3)0.0;
@@ -125,13 +130,9 @@ float3 evalSunTransmittanceAtAltitude(float altitudeMeters, float3 sunDir, Atmos
     float r = ATMO_PLANET_RADIUS + h;
     float sinDip = -sqrt(max(h * (2.0 * ATMO_PLANET_RADIUS + h), 0.0)) / r;
 
-    float3 safeDir = sunDir;
-    float minDirZ = sinDip * 0.85 + 0.004;
-    if (safeDir.z < minDirZ)
-    {
-        safeDir.z = minDirZ;
-        safeDir = normalize(safeDir);
-    }
+    float safeZ = max(cosZenith, sinDip * 0.85 + 0.004);
+    float safeH = sqrt(max(0.0, 1.0 - safeZ * safeZ));
+    float3 safeDir = float3(safeH, 0.0, safeZ);
 
     float3 ro = float3(0.0, 0.0, r);
     float2 topHit = atmoRaySphere(ro, safeDir, ATMO_TOP_RADIUS);
@@ -140,6 +141,11 @@ float3 evalSunTransmittanceAtAltitude(float altitudeMeters, float3 sunDir, Atmos
 
     float3 tau = cfg.rayleighExt * od.x + cfg.mieExt * od.y + cfg.ozoneExt * od.z;
     return horizon * exp(-tau);
+}
+
+float3 evalSunTransmittanceAtAltitude(float altitudeMeters, float3 sunDir, AtmosphereConfig cfg)
+{
+    return evalLightTransmittance(altitudeMeters, sunDir.z, cfg);
 }
 
 float atmoRayleighPhase(float mu)
@@ -183,7 +189,7 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
         return (float3)0.0;
     }
 
-    const int STEPS = 8;
+    const int STEPS = 12;
     float stepLen = rayLen / (float)STEPS;
 
     float3 inscatterR = (float3)0.0;
@@ -196,13 +202,14 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
     float3 sunDirectColor = sunEnabled > 0.5 ? sunTint : (float3)0.0;
     float3 moonIllum = moonEnabled > 0.5 ? moonColor : (float3)0.0;
 
-    float sunHorizon = sunEnabled > 0.5 ? atmoHorizonMask(18000.0, sunDir) : 0.0;
-    float moonHorizon = moonEnabled > 0.5 ? atmoHorizonMask(12000.0, moonDir) : 0.0;
+    bool traceSun = sunEnabled > 0.5 && sunDir.z > -0.26;
+    bool traceMoon = moonEnabled > 0.5 && moonDir.z > -0.22;
 
     for (int i = 0; i < STEPS; i++)
     {
         float3 pos = ro + rd * (((float)i + 0.5) * stepLen);
-        float h = max(length(pos) - ATMO_PLANET_RADIUS, 0.0);
+        float rPos = length(pos);
+        float h = max(rPos - ATMO_PLANET_RADIUS, 0.0);
 
         float dR = exp(-h / ATMO_H_RAYLEIGH);
         float dM = exp(-h / ATMO_H_MIE);
@@ -211,17 +218,19 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
         accumOd += float3(dR, dM, dO) * stepLen;
         float3 tView = exp(-(cfg.rayleighExt * accumOd.x + cfg.mieExt * accumOd.y + cfg.ozoneExt * accumOd.z));
 
-        if (sunHorizon > 0.0)
+        if (traceSun)
         {
-            float3 tSun = evalSunTransmittanceAtAltitude(h, sunDir, cfg);
+            float localSunZ = dot(pos, sunDir) / max(rPos, 1.0);
+            float3 tSun = evalLightTransmittance(h, localSunZ, cfg);
             float3 weight = tView * tSun * stepLen;
             inscatterR += weight * dR;
             inscatterM += weight * dM;
         }
 
-        if (moonHorizon > 0.0)
+        if (traceMoon)
         {
-            float3 tMoon = evalSunTransmittanceAtAltitude(h, moonDir, cfg);
+            float localMoonZ = dot(pos, moonDir) / max(rPos, 1.0);
+            float3 tMoon = evalLightTransmittance(h, localMoonZ, cfg);
             float3 mWeight = tView * tMoon * stepLen;
             moonR += mWeight * dR;
             moonM += mWeight * dM;
@@ -236,21 +245,27 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
 
     float muMoon = dot(rd, moonDir);
     float phaseRMoon = atmoRayleighPhase(muMoon);
-    float phaseMMoon = atmoMiePhase(muMoon, 0.74);
+    float phaseMMoon = atmoMiePhase(muMoon, 0.76);
 
-    // Multi-scattering approximation: prevents zenith crush at twilight while preserving ozone color separation.
+    // Multi-scattering approximation: prevents zenith crush at twilight while keeping anti-sun darker.
     float twilightFactor = sunEnabled > 0.5 ? smoothstep(-0.14, 0.15, sunDir.z) : 0.0;
-    float3 twilightAmbient = cfg.rayleighScatter * 9000.0 * (0.04 + 0.14 * saturate(rd.z + 0.25)) *
-                             sunIllum * (0.08 + 0.92 * smoothstep(-0.08, 0.30, sunDir.z)) * twilightFactor;
+    float lowSun = 1.0 - smoothstep(-0.04, 0.38, sunDir.z);
+    float sunAzimuthBias = lerp(1.0, lerp(0.16, 1.35, smoothstep(-0.70, 0.85, muSun)), lowSun);
+    float antiSunShadow = lerp(1.0, lerp(0.28, 1.0, smoothstep(-0.85, 0.35, muSun)),
+                               lowSun * (1.0 - smoothstep(0.0, 0.60, rd.z)));
+    float3 twilightAmbient = cfg.rayleighScatter * 8000.0 * (0.03 + 0.12 * saturate(rd.z + 0.25)) *
+                             sunIllum * (0.06 + 0.94 * smoothstep(-0.08, 0.30, sunDir.z)) *
+                             twilightFactor * sunAzimuthBias;
 
-    float3 scatterSun = (inscatterR * cfg.rayleighScatter * phaseRSun * sunIllum +
+    float3 scatterSun = (inscatterR * cfg.rayleighScatter * phaseRSun * sunIllum * antiSunShadow +
                          inscatterM * cfg.mieScatter * phaseMSun * sunDirectColor) * 14.5 +
                         twilightAmbient;
 
-    float3 scatterMoon = (moonR * cfg.rayleighScatter * phaseRMoon +
-                          moonM * cfg.mieScatter * phaseMMoon) * moonIllum * 1.15;
+    float moonAzimuthBias = lerp(0.18, 1.0, smoothstep(-0.65, 0.75, muMoon));
+    float3 scatterMoon = (moonR * cfg.rayleighScatter * phaseRMoon * 0.07 * moonAzimuthBias +
+                          moonM * cfg.mieScatter * phaseMMoon * 0.20) * moonIllum;
 
-    float3 airglow = cfg.tint * (0.004 * saturate(cfg.density));
+    float3 airglow = cfg.tint * (0.0012 * saturate(cfg.density));
 
     return (scatterSun + scatterMoon + airglow) * cfg.scatterGain;
 }
@@ -279,20 +294,20 @@ float3 evalAtmosphereSky(float3 viewDir, float3 sunDir, float sunEnabled, float3
 void evalCloudSkyAmbient(float3 sunDir, float sunEnabled, float3 sunTint,
                          float3 moonDir, float moonEnabled, float3 moonColor,
                          AtmosphereConfig cfg,
-                         out float3 zenithAmbient, out float3 horizonAmbient)
+                         out float3 zenithAmbient, out float3 horizSunward, out float3 horizAway)
 {
     float3 dummyTrans;
     zenithAmbient = evalAtmosphereRay(float3(0.0, 0.0, 1.0), sunDir, sunEnabled, sunTint,
                                       moonDir, moonEnabled, moonColor, cfg, dummyTrans);
 
-    float3 horizDir = length(sunDir.xy) > 1.0e-4
-        ? normalize(float3(sunDir.xy, 0.14))
+    float2 primaryXY = (sunEnabled > 0.5 && sunDir.z > -0.15) ? sunDir.xy : moonDir.xy;
+    float3 horizDir = length(primaryXY) > 1.0e-4
+        ? normalize(float3(primaryXY, 0.14))
         : normalize(float3(1.0, 0.0, 0.14));
-    float3 horizSunward = evalAtmosphereRay(horizDir, sunDir, sunEnabled, sunTint,
-                                            moonDir, moonEnabled, moonColor, cfg, dummyTrans);
-    float3 horizAway = evalAtmosphereRay(float3(-horizDir.xy, 0.14), sunDir, sunEnabled, sunTint,
-                                         moonDir, moonEnabled, moonColor, cfg, dummyTrans);
-    horizonAmbient = horizSunward * 0.65 + horizAway * 0.35;
+    horizSunward = evalAtmosphereRay(horizDir, sunDir, sunEnabled, sunTint,
+                                     moonDir, moonEnabled, moonColor, cfg, dummyTrans);
+    horizAway = evalAtmosphereRay(float3(-horizDir.xy, 0.14), sunDir, sunEnabled, sunTint,
+                                  moonDir, moonEnabled, moonColor, cfg, dummyTrans);
 }
 
 #endif

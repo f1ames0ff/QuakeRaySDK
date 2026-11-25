@@ -3972,7 +3972,7 @@ void EditorApp::UploadSun()
             const float phaseScale = m_settings.moonPhase >= 0.0f
                 ? (0.18f + 0.82f * std::clamp(m_settings.moonPhase, 0.0f, 1.0f))
                 : 0.7f;
-            const float moonScale = radiance * 0.06f * std::max(0.0f, m_settings.moonIntensity) *
+            const float moonScale = radiance * 0.006f * std::max(0.0f, m_settings.moonIntensity) *
                                     phaseScale * std::min(1.0f, toMoon[2] * 5.0f);
             sun.color = { moonScale * m_settings.moonColor[0],
                           moonScale * m_settings.moonColor[1],

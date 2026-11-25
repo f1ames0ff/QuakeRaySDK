@@ -178,15 +178,18 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                      (!aaaMode || atmoHorizonMask(layer.altitude + layer.thickness, sunDir) > 0.0);
 
     float3 zenithAmbient = (float3)0.0;
-    float3 horizonAmbient = (float3)0.0;
+    float3 horizSunward = (float3)0.0;
+    float3 horizAway = (float3)0.0;
     if (aaaMode)
     {
         float3 sunTintRaw = max(params.sunTint.xyz, (float3)0.0) * max(params.sunTint.w, 0.0);
         evalCloudSkyAmbient(sunDir, sunActive ? 1.0 : 0.0, sunTintRaw,
                             moonDir, moonActive ? 1.0 : 0.0, moonBase,
-                            atmo, zenithAmbient, horizonAmbient);
-        zenithAmbient *= max(params.cloudLayer.w, 0.0);
-        horizonAmbient *= max(params.cloudLayer.w, 0.0);
+                            atmo, zenithAmbient, horizSunward, horizAway);
+        float skyScale = max(params.cloudLayer.w, 0.0);
+        zenithAmbient *= skyScale;
+        horizSunward *= skyScale;
+        horizAway *= skyScale;
     }
 
     float3 legacySunColor = params.sunDiscColor.xyz * max(params.cloudLayer.z, 0.0) * (sunLight > 0.5 ? sunLight : 0.0);
@@ -286,14 +289,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                     float moonTau = cloudCoarseTau(layer, p, moonDir);
                     float moonVis = exp(-moonTau);
                     float moonRim = lerp(1.0, powder, clamp(-muMoon, 0.0, 1.0));
-                    float3 moonColorHere = moonBase * evalSunTransmittanceAtAltitude(p.z, moonDir, atmo) * 0.55;
+                    float3 moonColorHere = moonBase * evalSunTransmittanceAtAltitude(p.z, moonDir, atmo) * 0.055;
                     light += moonColorHere * (moonVis * moonPhaseFn * moonRim +
                                               cloudMultiScatter(moonTau, moonMultiPhase));
                 }
 
                 if (aaaMode)
                 {
-                    float3 skyFill = lerp(horizonAmbient * 0.45 + zenithAmbient * 0.55,
+                    float align = sunActive ? muSun : muMoon;
+                    float3 localHoriz = lerp(horizAway, horizSunward, smoothstep(-0.65, 0.70, align));
+                    float3 skyFill = lerp(localHoriz * 0.45 + zenithAmbient * 0.55,
                                           zenithAmbient, smoothstep(0.15, 0.85, h)) * 1.15;
                     light += skyFill * skyShield;
                 }
