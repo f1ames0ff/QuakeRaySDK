@@ -111,6 +111,11 @@ public:
 
         if (WasFrameStarted())
         {
+            if (slot.frameCmd != VK_NULL_HANDLE)
+            {
+                return slot.frameCmd;
+            }
+
             if (slot.inFrameMaterialCmd == VK_NULL_HANDLE)
             {
                 slot.inFrameMaterialCmd = cmdManager->StartGraphicsCmd();
