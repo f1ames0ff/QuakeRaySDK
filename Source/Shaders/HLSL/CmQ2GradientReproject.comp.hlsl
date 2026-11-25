@@ -95,6 +95,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     const int currTracedParity = (int)(globalUniform.frameId & 1u);
     const int prevTracedParity = currTracedParity ^ 1;
 
+    const float2 jitter_delta = float2(
+        globalUniform.jitterX - globalUniform.jitterPrevX,
+        globalUniform.jitterY - globalUniform.jitterPrevY);
+    const bool has_jitter = any(abs(float2(globalUniform.jitterX, globalUniform.jitterY)) > 1e-4)
+                         || any(abs(jitter_delta) > 1e-4);
+
     bool found = false;
     int2 found_offset = (int2)0;
     int2 found_pos_prev = (int2)0;
@@ -121,7 +127,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             if (!is_checkerboarded_surface)
             {
                 int2 p_flat = q2CheckerToFlat(p, width);
-                float2 pos_prev_flat = ((float2)p_flat + (float2)0.5) * float2(inv_width, inv_height) + motion.xy;
+                float2 pos_prev_flat = ((float2)p_flat + (float2)0.5 + jitter_delta) * float2(inv_width, inv_height) + motion.xy;
                 int2 pp_flat = int2(floor(pos_prev_flat * float2(width, height)));
 
                 if (pp_flat.x < 0 || pp_flat.x >= width || pp_flat.y < 0 || pp_flat.y >= height)
@@ -141,7 +147,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                     field_right = width;
                 }
 
-                float2 pos_prev = ((float2(p) + (float2)0.5) * float2(inv_width * 2.0, inv_height) + motion.xy) * float2(width / 2, height);
+                float2 pos_prev = (float2(p) + (float2)0.5 + float2(0.5 * jitter_delta.x, jitter_delta.y)) + motion.xy * float2(width / 2, height);
                 pp = int2(floor(pos_prev));
 
                 if (pp.x < field_left || pp.x >= field_right || pp.y < 0 || pp.y >= height)
@@ -182,7 +188,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             {
                 const float3 albedo_curr = framebufAlbedo_Sampled.Load(int3(getRegularPixFromCheckerboardPix(p), 0)).rgb;
                 const float3 albedo_prev = framebufAlbedo_Prev_Sampled.Load(int3(getRegularPixFromCheckerboardPix(pp), 0)).rgb;
-                if (any(abs(albedo_curr - albedo_prev) > 0.01))
+                const float albedo_tol = has_jitter ? 0.12 : 0.01;
+                if (any(abs(albedo_curr - albedo_prev) > albedo_tol))
                 {
                     continue;
                 }

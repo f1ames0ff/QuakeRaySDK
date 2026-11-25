@@ -87,9 +87,9 @@ const RhiPresentParams PRESENT_PARAMS =
 const uint32_t PRESENT_PARAMS_VERSIONS = 4;
 
 constexpr uint32_t kLightShaftVolumeSizes[3][3] = {
-    { 256u, 144u,  80u },
-    { 384u, 216u,  96u },
-    { 448u, 256u, 128u },
+    { 128u,  72u,  64u },
+    { 192u, 108u,  96u },
+    { 256u, 144u, 128u },
 };
 
 constexpr float kLightShaftTeleportDistMeters = 6.4f;
@@ -2975,11 +2975,12 @@ bool NvrhiFrameSkeleton::TryRenderGodRaysShadowMap(nvrhi::ICommandList *pCommand
 
 bool NvrhiFrameSkeleton::PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *pCommandList,
                                                             uint32_t frameIndex,
-                                                            const SkyFrameInputs::GodRays &godRays,
+                                                            const SkyFrameInputs &sky,
                                                             const ShGlobalUniform *pUniform,
                                                             bool froxelSunActive,
                                                             RhiRtGodRaysPass::Params &godRaysParams)
 {
+    const SkyFrameInputs::GodRays &godRays = sky.godRays;
     const bool lightShaftsActive = godRaysParams.lightShaftCount > 0u;
     if (!lightShaftsActive || lightShaftVolumePass == nullptr || !lightShaftVolumePass->IsCreated())
     {
@@ -3023,10 +3024,13 @@ bool NvrhiFrameSkeleton::PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *
 
     nvrhi::BindingSetHandle volumeLightSet =
         rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex) : nullptr;
+    const RhiLightShaftVolumePass::DepthBoundsInput depthBounds{
+        sky.framebuffers, sky.width, sky.height,
+    };
     if (lightShaftVolumePass->Render(
             pCommandList, frameIndex, worldUniformBuffer.Get(),
             accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
-            volumeLightSet.Get(), volumeParams))
+            volumeLightSet.Get(), volumeParams, depthBounds))
     {
         godRaysPass->SetLightShaftVolume(lightShaftVolumePass->GetTexture(frameIndex),
                                          lightShaftVolumePass->GetInjectionTexture(frameIndex),
@@ -3096,7 +3100,7 @@ bool NvrhiFrameSkeleton::RecordGodRaysAndLightShafts(nvrhi::ICommandList *pComma
         effectiveModes.sunShadowMapNeeded = shadowRendered;
         effectiveModes.traceReflections = modes.traceReflections && shadowRendered;
         PopulateGodRaysParams(sky.godRays, shadowMapVP, shadowMapDepthScale, effectiveModes, godRaysParams);
-        PrepareLightShaftVolumeForGodRays(pCommandList, frameIndex, sky.godRays, pUniform,
+        PrepareLightShaftVolumeForGodRays(pCommandList, frameIndex, sky, pUniform,
                                           effectiveModes.froxelSunActive, godRaysParams);
         reflectionsPending = godRaysPass->RenderInput(
             pCommandList, frameIndex, sky.framebuffers, sky.width, sky.height,

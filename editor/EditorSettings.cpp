@@ -19,7 +19,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 
+#include "EditorSession.h"
 #include "Scene.h"
 
 namespace
@@ -535,4 +538,545 @@ void EvalEditorSunGroundTransmittance(const EditorRenderSettings &settings,
         const float ms = std::max(directT[ch], floorVal);
         outTrans[ch] = smoothHorizon * (directT[ch] + (ms - directT[ch]) * (grazing * 0.42f));
     }
+}
+
+namespace
+{
+
+template <typename FieldPtr>
+bool ApplyNamedFloat(const std::string &name, float value, const std::pair<const char *, FieldPtr> *table,
+                     size_t count, EditorRenderSettings &settings)
+{
+    for (size_t i = 0; i < count; i++)
+    {
+        if (name == table[i].first)
+        {
+            settings.*(table[i].second) = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ApplySkyColorText(const std::string &name, const std::string &text,
+                       EditorRenderSettings &settings)
+{
+    if (name != "rt_sky_color" && name != "rt_sky_clouds_color" &&
+        name != "rt_sky_sun_color" && name != "rt_sky_moon_color")
+    {
+        return false;
+    }
+
+    float color[3] = { 0.0f, 0.0f, 0.0f };
+    if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
+    {
+        return true;
+    }
+
+    const float scale =
+        (color[0] > 1.0f || color[1] > 1.0f || color[2] > 1.0f) ? (1.0f / 255.0f) : 1.0f;
+    float *target = name == "rt_sky_color"        ? settings.skyColor
+                    : name == "rt_sky_clouds_color" ? settings.cloudsColor
+                    : name == "rt_sky_sun_color"    ? settings.sunColor
+                                                    : settings.moonColor;
+    for (int axis = 0; axis < 3; axis++)
+    {
+        target[axis] = color[axis] * scale;
+    }
+    return true;
+}
+
+bool ApplySkyFloatSetting(const std::string &name, float value, EditorRenderSettings &settings,
+                          EditorSunState &sun)
+{
+    static constexpr std::pair<const char *, float EditorRenderSettings::*> kSkyFloats[] = {
+        { "rt_sky", &EditorRenderSettings::skyScale },
+        { "rt_sky_brightness", &EditorRenderSettings::skyBrightness },
+        { "rt_sky_light_mult", &EditorRenderSettings::skyLightMultiplier },
+        { "rt_sky_clouds_alpha", &EditorRenderSettings::cloudsAlpha },
+        { "rt_sky_clouds_coverage", &EditorRenderSettings::cloudsCoverage },
+        { "rt_sky_clouds_density", &EditorRenderSettings::cloudsDensity },
+        { "rt_sky_clouds_speed", &EditorRenderSettings::cloudsSpeed },
+        { "rt_sky_clouds_height", &EditorRenderSettings::cloudsHeight },
+        { "rt_sky_clouds_thickness", &EditorRenderSettings::cloudsThickness },
+        { "rt_sky_sun_size", &EditorRenderSettings::sunDiscSize },
+        { "rt_sky_godrays_intensity", &EditorRenderSettings::godRaysIntensity },
+        { "rt_sky_godrays_sky_threshold", &EditorRenderSettings::godRaysSkyThreshold },
+        { "rt_sky_time", &EditorRenderSettings::timeOfDay },
+        { "rt_sky_time_speed", &EditorRenderSettings::timeOfDaySpeed },
+        { "rt_sky_latitude", &EditorRenderSettings::skyLatitude },
+        { "rt_sky_azimuth", &EditorRenderSettings::skyAzimuth },
+        { "rt_sky_atmosphere_density", &EditorRenderSettings::atmosphereDensity },
+        { "rt_sky_mie", &EditorRenderSettings::atmosphereMie },
+        { "rt_sky_ozone", &EditorRenderSettings::atmosphereOzone },
+        { "rt_sky_stars_density", &EditorRenderSettings::starDensity },
+        { "rt_sky_stars", &EditorRenderSettings::starIntensity },
+        { "rt_sky_moon", &EditorRenderSettings::moonIntensity },
+        { "rt_sky_moon_size", &EditorRenderSettings::moonSize },
+        { "rt_sky_moon_phase", &EditorRenderSettings::moonPhase },
+    };
+    if (ApplyNamedFloat(name, value, kSkyFloats, sizeof(kSkyFloats) / sizeof(kSkyFloats[0]),
+                        settings))
+    {
+        return true;
+    }
+    if (name == "rt_sky_sun")
+    {
+        sun.radiance = value * kEditorSkySunRadiance;
+        return true;
+    }
+    if (name == "rt_sky_sun_pitch")
+    {
+        sun.pitch = value;
+        return true;
+    }
+    if (name == "rt_sky_sun_yaw")
+    {
+        sun.yaw = value;
+        return true;
+    }
+    return false;
+}
+
+void ApplySkyScalarSetting(const std::string &name, float value, int32_t integer,
+                           EditorRenderSettings &settings, EditorSunState &sun)
+{
+    if (ApplySkyFloatSetting(name, value, settings, sun))
+    {
+        return;
+    }
+    if (name == "rt_sky_ambient_lod")
+    {
+        settings.skyAmbientLod = integer;
+    }
+    else if (name == "rt_sky_nee")
+    {
+        settings.skyNee = integer != 0;
+    }
+    else if (name == "rt_physical_sky")
+    {
+        if (integer != 0)
+        {
+            settings.skyType = QR_SKY_TYPE_PROCEDURAL;
+        }
+        else if (settings.skyType == QR_SKY_TYPE_PROCEDURAL)
+        {
+            settings.skyType = QR_SKY_TYPE_RASTERIZED_GEOMETRY;
+        }
+    }
+    else if (name == "rt_sky_clouds")
+    {
+        settings.clouds = integer != 0;
+    }
+    else if (name == "rt_sky_clouds_quality")
+    {
+        settings.cloudsQuality = integer;
+    }
+    else if (name == "rt_physical_sun")
+    {
+        sun.enabled = integer != 0;
+    }
+    else if (name == "rt_sky_godrays")
+    {
+        settings.godRays = integer != 0;
+    }
+    else if (name == "rt_sky_time_enable")
+    {
+        settings.timeOfDayEnable = integer != 0;
+    }
+    else if (name == "rt_sky_stars_enable")
+    {
+        settings.starsEnabled = integer != 0;
+    }
+}
+
+bool ApplyWaterColorText(const std::string &name, const std::string &text,
+                         EditorRenderSettings &settings)
+{
+    if (name != "rt_water_color" && name != "rt_water_acidcolor")
+    {
+        return false;
+    }
+
+    float color[3] = { 0.0f, 0.0f, 0.0f };
+    if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
+    {
+        return true;
+    }
+
+    float *target = name == "rt_water_color" ? settings.waterColor : settings.acidColor;
+    for (int axis = 0; axis < 3; axis++)
+    {
+        target[axis] = Clamp(color[axis] * (1.0f / 255.0f), 0.0f, 1.0f);
+    }
+    return true;
+}
+
+bool ApplyDtalSetting(const std::string &name, float value, int32_t integer,
+                      EditorRenderSettings &settings)
+{
+    static constexpr std::pair<const char *, float EditorRenderSettings::*> kDtalFloats[] = {
+        { "rt_dtal_clearance", &EditorRenderSettings::dtalClearance },
+        { "rt_dtal_minarea", &EditorRenderSettings::dtalMinArea },
+        { "rt_dtal_proxy_minarea", &EditorRenderSettings::dtalProxyMinArea },
+        { "rt_dtal_proxy_model_minarea", &EditorRenderSettings::dtalProxyModelMinArea },
+        { "rt_dtal_spacing", &EditorRenderSettings::dtalSpacing },
+        { "rt_dtal_model_minarea", &EditorRenderSettings::dtalModelMinArea },
+    };
+    if (ApplyNamedFloat(name, value, kDtalFloats, sizeof(kDtalFloats) / sizeof(kDtalFloats[0]),
+                        settings))
+    {
+        return true;
+    }
+
+    static constexpr std::pair<const char *, int32_t EditorRenderSettings::*> kDtalInts[] = {
+        { "rt_dtal_maxpolys", &EditorRenderSettings::dtalMaxPolys },
+        { "rt_dtal_groups", &EditorRenderSettings::dtalGroups },
+        { "rt_dtal_maxgroups", &EditorRenderSettings::dtalMaxGroups },
+        { "rt_level_light_maxpolys", &EditorRenderSettings::levelLightMaxPolys },
+        { "rt_dtal_debug", &EditorRenderSettings::dtalDebug },
+        { "rt_dtal_model_maxpolys", &EditorRenderSettings::dtalModelMaxPolys },
+        { "rt_dtal_model_budget", &EditorRenderSettings::dtalModelBudget },
+    };
+    for (const auto &entry : kDtalInts)
+    {
+        if (name == entry.first)
+        {
+            settings.*(entry.second) = integer;
+            return true;
+        }
+    }
+    if (name == "rt_dtal_proxy")
+    {
+        settings.dtalProxy = integer != 0;
+        return true;
+    }
+    return false;
+}
+
+bool ApplyGlobalFloatSetting(const std::string &name, float value, EditorRenderSettings &settings)
+{
+    static constexpr std::pair<const char *, float EditorRenderSettings::*> kGlobalFloats[] = {
+        { "rt_truelight", &EditorRenderSettings::truelight },
+        { "rt_brightness", &EditorRenderSettings::brightness },
+        { "rt_globallight_mult", &EditorRenderSettings::globalLightMult },
+        { "rt_sky_sun_disc", &EditorRenderSettings::sunDiscScale },
+        { "rt_tonemap_white", &EditorRenderSettings::tonemapWhite },
+        { "rt_tonemap_chroma", &EditorRenderSettings::tonemapChroma },
+        { "rt_tonemap_desat", &EditorRenderSettings::tonemapDesat },
+        { "rt_tonemap_max_log", &EditorRenderSettings::tonemapMaxLog },
+        { "rt_tonemap_min_log", &EditorRenderSettings::tonemapMinLog },
+        { "rt_volume_scatter", &EditorRenderSettings::volumeScatter },
+        { "rt_volume_ambient", &EditorRenderSettings::volumeAmbient },
+        { "rt_volume_far", &EditorRenderSettings::volumeFar },
+        { "rt_volume_lintensity", &EditorRenderSettings::volumeLightIntensity },
+        { "rt_volume_lassymetry", &EditorRenderSettings::volumeAsymmetry },
+        { "rt_normalmap_stren", &EditorRenderSettings::normalMapStrength },
+        { "rt_emis_mapboost", &EditorRenderSettings::emissionMapBoost },
+        { "rt_emis_light_intensity", &EditorRenderSettings::emissionLightIntensity },
+        { "rt_emis_maxscrcolor", &EditorRenderSettings::emissionMaxScreenColor },
+        { "rt_emis_sharpmask", &EditorRenderSettings::emissionSharpMask },
+        { "rt_tal_selflit", &EditorRenderSettings::talSelfLitOffset },
+        { "rt_roughmin", &EditorRenderSettings::minRoughness },
+        { "rt_denoiser", &EditorRenderSettings::denoiser },
+        { "rt_restir", &EditorRenderSettings::restir },
+        { "rt_restir_candidates", &EditorRenderSettings::restirCandidates },
+        { "rt_gi_level", &EditorRenderSettings::giLevel },
+        { "rt_nee_samples", &EditorRenderSettings::neeSamples },
+        { "rt_sensit_dir", &EditorRenderSettings::sensitivityDirect },
+        { "rt_sensit_indir", &EditorRenderSettings::sensitivityIndirect },
+        { "rt_sensit_spec", &EditorRenderSettings::sensitivitySpecular },
+        { "rt_sky_sun_bounce_range", &EditorRenderSettings::sunBounceRange },
+        { "rt_sky_sun_bounce_scale", &EditorRenderSettings::sunBounceScale },
+        { "rt_no_textures", &EditorRenderSettings::noTextures },
+        { "rt_antifirefly", &EditorRenderSettings::antifirefly },
+        { "rt_renderscale", &EditorRenderSettings::renderScale },
+        { "rt_bloom_emis_mult", &EditorRenderSettings::bloomEmissionMultiplier },
+        { "rt_bloom_intensity", &EditorRenderSettings::bloomIntensity },
+        { "rt_bloom_threshold", &EditorRenderSettings::bloomThreshold },
+        { "rt_bloom_knee", &EditorRenderSettings::bloomKnee },
+        { "rt_bloom_scatter", &EditorRenderSettings::bloomScatter },
+        { "rt_bloom_radius", &EditorRenderSettings::bloomRadius },
+        { "rt_vignette", &EditorRenderSettings::vignetteIntensity },
+        { "rt_vignette_start", &EditorRenderSettings::vignetteStart },
+        { "rt_vignette_end", &EditorRenderSettings::vignetteEnd },
+        { "rt_vignette_roundness", &EditorRenderSettings::vignetteRoundness },
+        { "rt_filmgrain", &EditorRenderSettings::filmGrainIntensity },
+        { "rt_filmgrain_size", &EditorRenderSettings::filmGrainSize },
+        { "rt_sharpen_strength", &EditorRenderSettings::sharpenStrength },
+        { "rt_local_exposure", &EditorRenderSettings::localExposure },
+        { "fov", &EditorRenderSettings::fovDegrees },
+        { "rt_water_speed", &EditorRenderSettings::waterSpeed },
+        { "rt_water_normstren", &EditorRenderSettings::waterNormalStrength },
+        { "rt_water_normsharp", &EditorRenderSettings::waterNormalSharpness },
+        { "rt_water_scale", &EditorRenderSettings::waterScale },
+        { "m_yaw", &EditorRenderSettings::mouseYaw },
+        { "m_pitch", &EditorRenderSettings::mousePitch },
+        { "rt_light_shafts_intensity", &EditorRenderSettings::lightShaftsIntensity },
+    };
+    if (ApplyNamedFloat(name, value, kGlobalFloats,
+                        sizeof(kGlobalFloats) / sizeof(kGlobalFloats[0]), settings))
+    {
+        return true;
+    }
+    if (name == "sensitivity")
+    {
+        settings.mouseSensitivity = Clamp(value, 0.1f, 50.0f);
+        return true;
+    }
+    return false;
+}
+
+bool ApplyGlobalBoolOrIntSetting(const std::string &name, float value, int32_t integer,
+                                 EditorRenderSettings &settings)
+{
+    static constexpr std::pair<const char *, bool EditorRenderSettings::*> kBoolBindings[] = {
+        { "rt_pause_world", &EditorRenderSettings::pauseWorld },
+        { "rt_level_lights", &EditorRenderSettings::levelLights },
+        { "rt_model_lights", &EditorRenderSettings::modelLights },
+        { "rt_ef_crt", &EditorRenderSettings::crtEnabled },
+        { "fov_adapt", &EditorRenderSettings::fovAdapt },
+        { "rt_emissive_nee", &EditorRenderSettings::emissiveNee },
+        { "rt_light_shafts", &EditorRenderSettings::lightShafts },
+    };
+    for (const auto &entry : kBoolBindings)
+    {
+        if (name == entry.first)
+        {
+            settings.*(entry.second) = value != 0.0f;
+            return true;
+        }
+    }
+    if (name == "rt_reflrefr_earlyout")
+    {
+        settings.reflRefrEarlyOut = value > 0.0f;
+        return true;
+    }
+    if (name == "rt_tonemap")
+    {
+        settings.tonemapType = std::clamp(integer, 0, 4);
+        return true;
+    }
+    if (name == "rt_volume_type")
+    {
+        settings.volumeType = std::clamp(integer, 0, 2);
+        return true;
+    }
+    if (name == "rt_q2_depthgrad")
+    {
+        settings.q2DepthGrad = integer;
+        return true;
+    }
+    if (name == "rt_q2_lightstats")
+    {
+        settings.q2LightStats = integer;
+        return true;
+    }
+    if (name == "rt_bloom_quality")
+    {
+        settings.bloomQuality = integer;
+        return true;
+    }
+    if (name == "rt_light_shafts_resolution")
+    {
+        settings.lightShaftsResolution = std::clamp(integer, 0, 2);
+        return true;
+    }
+    if (name == "rt_shadowrays")
+    {
+        settings.shadowRays = uint32_t(std::clamp(integer, 0, 8));
+        return true;
+    }
+    if (name == "rt_upscale_fsr31")
+    {
+        settings.upscaleFsr31 = std::clamp(integer, 0, 6);
+        return true;
+    }
+    if (name == "rt_upscale_dlss")
+    {
+        settings.upscaleDlss = std::clamp(integer, 0, 5);
+        return true;
+    }
+    if (name == "rt_sharpen")
+    {
+        settings.sharpenMode = std::clamp(integer, 0, 2);
+        return true;
+    }
+    return false;
+}
+
+void TrimAsciiEdges(std::string &text)
+{
+    size_t first = 0;
+    while (first < text.size() &&
+           (text[first] == ' ' || text[first] == '\t' || text[first] == '\r'))
+    {
+        first++;
+    }
+    if (first > 0)
+    {
+        text.erase(0, first);
+    }
+    while (!text.empty() &&
+           (text.back() == ' ' || text.back() == '\t' || text.back() == '\r'))
+    {
+        text.pop_back();
+    }
+}
+
+void StripSetCommandPrefix(std::string &name)
+{
+    TrimAsciiEdges(name);
+    for (const char *prefix : { "seta ", "seta\t", "set ", "set\t" })
+    {
+        const size_t len = std::strlen(prefix);
+        if (name.compare(0, len, prefix) == 0)
+        {
+            name.erase(0, len);
+            TrimAsciiEdges(name);
+            return;
+        }
+    }
+}
+
+bool ParseConfigLine(const std::string &line, std::string &name, std::string &value)
+{
+    const size_t open = line.find('"');
+    if (open == std::string::npos || open == 0)
+    {
+        return false;
+    }
+    const size_t close = line.find('"', open + 1);
+    if (close == std::string::npos)
+    {
+        return false;
+    }
+    name = line.substr(0, open);
+    value = line.substr(open + 1, close - open - 1);
+    StripSetCommandPrefix(name);
+    return !name.empty() && name[0] != '/' && name[0] != '#';
+}
+
+} // namespace
+
+void ApplyEditorSkyText(const std::string &name, const std::string &text,
+                        EditorRenderSettings &settings, EditorSunState &sun)
+{
+    if (ApplySkyColorText(name, text, settings))
+    {
+        return;
+    }
+
+    float value = 0.0f;
+    if (std::sscanf(text.c_str(), "%f", &value) != 1)
+    {
+        return;
+    }
+    ApplySkyScalarSetting(name, value, int32_t(value), settings, sun);
+}
+
+void ApplyEditorSkyScope(const EditorLevelSky &sky, bool onlySet,
+                         EditorRenderSettings &settings, EditorSunState &sun)
+{
+    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+    {
+        if (sky.values[i].empty() || (onlySet && !sky.set[i]))
+        {
+            continue;
+        }
+        ApplyEditorSkyText(kEditorSkyKeyNames[i], sky.values[i], settings, sun);
+    }
+}
+
+bool ApplyEditorGlobalSettingText(const std::string &name, const std::string &text,
+                                  EditorRenderSettings &settings, EditorSunState &sun)
+{
+    if (EditorSkyKeyIndex(name) >= 0)
+    {
+        ApplyEditorSkyText(name, text, settings, sun);
+        return true;
+    }
+    if (ApplyWaterColorText(name, text, settings))
+    {
+        return true;
+    }
+
+    float value = 0.0f;
+    if (std::sscanf(text.c_str(), "%f", &value) != 1)
+    {
+        return false;
+    }
+    const int32_t integer = int32_t(value);
+    return ApplyGlobalFloatSetting(name, value, settings) ||
+           ApplyGlobalBoolOrIntSetting(name, value, integer, settings) ||
+           ApplyDtalSetting(name, value, integer, settings);
+}
+
+int ApplyEditorConfigText(const std::string &text, EditorRenderSettings &settings,
+                          EditorSunState &sun)
+{
+    std::string name;
+    std::string value;
+    int applied = 0;
+    size_t offset = 0;
+    while (offset < text.size())
+    {
+        size_t end = text.find('\n', offset);
+        if (end == std::string::npos)
+        {
+            end = text.size();
+        }
+        const std::string line = text.substr(offset, end - offset);
+        offset = end + 1;
+        if (ParseConfigLine(line, name, value) &&
+            ApplyEditorGlobalSettingText(name, value, settings, sun))
+        {
+            applied++;
+        }
+    }
+    return applied;
+}
+
+void EditorSunDirectionToSun(const EditorSunState &sun, float outDir[3])
+{
+    const float pitch = sun.pitch * 0.01745329252f;
+    const float yaw = sun.yaw * 0.01745329252f;
+    const float cosPitch = std::cos(pitch);
+    outDir[0] = -cosPitch * std::cos(yaw);
+    outDir[1] = -cosPitch * std::sin(yaw);
+    outDir[2] = std::sin(pitch);
+}
+
+float EvaluateEditorLightStyle(int32_t styleIndex, double timeSeconds)
+{
+    if (styleIndex <= 0 || styleIndex >= kEditorStyleCount)
+    {
+        return 1.0f;
+    }
+
+    static constexpr const char *kStylePatterns[kEditorStyleCount] = {
+        "m",
+        "mmnmmommommnonmmonqnmmo",
+        "abcdefghijklmnopqrstuvwxyzyxwvutsrqponmlkjihgfedcba",
+        "mmmmmaaaaammmmmaaaaaabcdefgabcdefg",
+        "mamamamamama",
+        "jklmnopqrstuvwxyzyxwvutsrqponmlkj",
+        "nmonqnmomnmomomno",
+        "mmmaaaabcdefgmmmmaaaammmaamm",
+        "mmmaaammmaaammmabcdefaaaammmmabcdefmmmaaaa",
+        "aaaaaaaazzzzzzzz",
+        "mmamammmmammamamaaamammma",
+        "abcdefghijklmnopqrrqponmlkjihgfedcba",
+    };
+
+    const char *pattern = kStylePatterns[styleIndex];
+    const size_t len = std::strlen(pattern);
+    if (len == 0)
+    {
+        return 1.0f;
+    }
+
+    const int frame = std::max(0, static_cast<int>(std::floor(std::max(0.0, timeSeconds) * 10.0)));
+    const char ch = pattern[static_cast<size_t>(frame) % len];
+    return std::max(0.0f, static_cast<float>(ch - 'a') / 12.0f);
 }

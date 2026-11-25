@@ -253,3 +253,28 @@ const EditorLight *BaselineCustomLightAt(int32_t customIndex,
                                          const std::vector<EditorLight> &customLights,
                                          const std::vector<EditorLight> &baselineCustomLights);
 
+struct EditorLightClipboard
+{
+    std::vector<EditorLight> lights;
+    float copyCameraPos[3] = {};
+    float copyCameraForward[3] = {};
+    uint32_t pasteCount = 0;
+};
+
+// Snapshots selected scene and/or custom lights into sanitized templates (offset folded into
+// position, emitter/classname metadata cleared) ordered ascending by index.
+std::vector<EditorLight> BuildCopiedLights(const std::vector<EditorLight> &sceneLights,
+                                           const std::vector<int32_t> &selectedScene,
+                                           int32_t singleScene,
+                                           const std::vector<EditorLight> &customLights,
+                                           const std::vector<int32_t> &selectedCustom,
+                                           int32_t singleCustom);
+
+// Produces pasted custom lights from `clipboard` at the current camera: steps upward in place when
+// the camera has barely moved/turned, or places the group's centroid ahead of the moved camera.
+std::vector<EditorLight> BuildPastedLights(EditorLightClipboard &clipboard,
+                                           const float cameraPos[3],
+                                           const float cameraForward[3],
+                                           float stepUnits = 16.0f,
+                                           float spawnDistanceUnits = 96.0f);
+

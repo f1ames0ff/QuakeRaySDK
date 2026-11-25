@@ -24,6 +24,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <qray/qray.h>
@@ -41,57 +42,6 @@ enum class EditorSurfaceKind
     Lava,
     Teleport,
     Sky,
-};
-
-struct EditorTexture
-{
-    std::string name;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    std::vector<uint8_t> rgba;
-    // Per-texel fullbright mask extracted from Quake palette indices 224..255 (0 or 255).
-    std::vector<uint8_t> fullbright;
-    bool isExternal = false;
-    bool isEmissiveShader = false;
-    bool isMirrorShader = false;
-    bool isCutoutUnderlay = false;
-    bool isMetallicEnv = false;
-    bool isWetGloss = false;
-    std::vector<uint8_t> roughnessMask;
-    std::vector<uint8_t> metallicMask;
-    float surfaceLightValue = 0.0f;
-    bool hasSurfaceLightColor = false;
-    float surfaceLightColor[3] = { 1.0f, 1.0f, 1.0f };
-};
-
-// One BSP polygon of a surface, kept because a textured area light is built from a face's own
-// corners: the vertex list above is a triangle fan that no longer says where one polygon ends and
-// the next begins, and a light fitted over a fan that spans two faces would stand for a shape the
-// level does not have.
-struct EditorSurfaceFace
-{
-    float normal[3] = { 0.0f, 0.0f, 0.0f };
-    uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
-    uint32_t aliasInstanceId = 0;
-    std::vector<QrFloat3D> positions;
-    std::vector<QrFloat2D> texCoords;
-};
-
-// One texture's worth of faces: the editor uploads each group as its own
-// geometry with that texture's material, the way r_world.c uploads one surface
-// per material at a time.
-struct EditorSurface
-{
-    std::string textureName;
-    int32_t texture = -1;
-    std::vector<int32_t> animationFrames;
-    EditorSurfaceKind kind = EditorSurfaceKind::Opaque;
-    bool hasAuthoredNormals = false;
-    bool isCutoutUnderlay = false;
-    std::vector<QrVertex> vertices;
-    std::vector<uint32_t> indices;
-    // The polygons the vertices above fan out of, in the order Scene.cpp met them.
-    std::vector<EditorSurfaceFace> faces;
 };
 
 enum class EditorWaveType : uint8_t
@@ -177,6 +127,84 @@ struct EditorOverlayStage
     bool dynamic = false;
 };
 
+struct EditorTexture
+{
+    std::string name;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> rgba;
+    // Per-texel fullbright mask extracted from Quake palette indices 224..255 (0 or 255).
+    std::vector<uint8_t> fullbright;
+    bool isExternal = false;
+    bool isEmissiveShader = false;
+    bool isMirrorShader = false;
+    bool isCutoutUnderlay = false;
+    bool isMetallicEnv = false;
+    bool isWetGloss = false;
+    std::vector<uint8_t> roughnessMask;
+    std::vector<uint8_t> metallicMask;
+    float surfaceLightValue = 0.0f;
+    bool hasSurfaceLightColor = false;
+    float surfaceLightColor[3] = { 1.0f, 1.0f, 1.0f };
+    // Universal shader-stage metadata populated by engine adapters (Q3/RTCW .shader, etc.).
+    std::string defaultBaseTexture;
+    std::string defaultEmissiveTexture;
+    std::string defaultOverlayTexture;
+    size_t baseStageIndex = (std::numeric_limits<size_t>::max)();
+    bool isNonTracedOverlay = false;
+    bool twoSided = false;
+    bool autoSprite = false;
+    bool autoSprite2 = false;
+    EditorWaveType deformWave = EditorWaveType::None;
+    float deformFrequency = 0.0f;
+    float deformAmplitude = 0.0f;
+    std::vector<EditorOverlayStage> shaderStages;
+};
+
+struct EditorCameraBasis
+{
+    float origin[3] = {};
+    float forward[3] = {};
+    float right[3] = {};
+    float up[3] = {};
+    float tanHalfFovX = 1.0f;
+    float tanHalfFovY = 1.0f;
+    float viewportWidth = 0.0f;
+    float viewportHeight = 0.0f;
+};
+
+// One polygon of a surface, kept because a textured area light is built from a face's own
+// corners: the vertex list above is a triangle fan that no longer says where one polygon ends and
+// the next begins, and a light fitted over a fan that spans two faces would stand for a shape the
+// level does not have.
+struct EditorSurfaceFace
+{
+    float normal[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t cluster = QR_CLUSTER_LIGHT_NO_CLUSTER;
+    uint32_t aliasInstanceId = 0;
+    std::vector<QrFloat3D> positions;
+    std::vector<QrFloat2D> texCoords;
+};
+
+// One texture's worth of faces: the editor uploads each group as its own
+// geometry with that texture's material, the way r_world.c uploads one surface
+// per material at a time.
+struct EditorSurface
+{
+    std::string textureName;
+    int32_t texture = -1;
+    std::vector<int32_t> animationFrames;
+    EditorSurfaceKind kind = EditorSurfaceKind::Opaque;
+    bool hasAuthoredNormals = false;
+    bool isCutoutUnderlay = false;
+    bool isOverlayOnly = false;
+    bool noMarks = false;
+    std::vector<QrVertex> vertices;
+    std::vector<uint32_t> indices;
+    // The polygons the vertices above fan out of, in the order Scene.cpp met them.
+    std::vector<EditorSurfaceFace> faces;
+};
+
 struct EditorOverlaySurface
 {
     std::string shaderName;
@@ -256,6 +284,9 @@ struct EditorAliasInstance
     float modelSizeMeters = 0.5f;
     uint64_t uniqueID = 0;
     uint32_t aliasInstanceId = 0;
+    bool hasBounds = false;
+    float boundsMin[3] = {};
+    float boundsMax[3] = {};
 };
 
 // Radiance per unit of a map light's `light` key, matching RT_FIXUP_LIGHT_INTENSITY: the game
@@ -360,6 +391,7 @@ struct EditorSceneLoadOptions
 {
     const EditorAssetSource *assets = nullptr;
     bool multiplayer = false;
+    bool includeInlineSubmodels = true;
 };
 
 // palette768 is the 768-byte Quake palette (gfx/palette.lmp); when it is null
@@ -433,6 +465,30 @@ struct EditorPreviewModel
     std::vector<EditorPreviewModelFrame> frames;
 };
 
+struct EditorPlayLevelRequest
+{
+    std::string executableDir;
+    std::string gameExecutable;
+    std::string gameDir;
+    std::string scenePath;
+    std::string levelName;
+    std::string shaderFolder;
+    std::string blueNoisePath;
+    std::string waterNormalPath;
+    std::string materialsPath;
+    std::string lightsPath;
+    std::string configPath;
+    bool multiplayer = false;
+};
+
+struct EditorLaunchCommand
+{
+    std::string executable;
+    std::string workingDirectory;
+    std::vector<std::string> arguments;
+    std::vector<std::pair<std::string, std::string>> envOverrides;
+};
+
 struct EditorFormatAdapter
 {
     std::vector<std::string> extraArchiveExtensions;
@@ -463,6 +519,10 @@ struct EditorFormatAdapter
     bool (*loadExternalImageRgba)(const EditorAssetSource *assets, const std::string &requestedPath,
                                   std::vector<uint8_t> &outRgba, uint32_t &outWidth,
                                   uint32_t &outHeight, std::string &outResolvedPath) = nullptr;
+
+    bool (*buildPlayLevelCommand)(const EditorPlayLevelRequest &request,
+                                  EditorLaunchCommand &outCommand,
+                                  std::string &outError) = nullptr;
 };
 
 void RegisterEditorFormatAdapter(const EditorFormatAdapter &adapter);

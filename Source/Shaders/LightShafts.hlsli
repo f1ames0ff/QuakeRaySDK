@@ -81,7 +81,7 @@ struct LightShaftVolumeParams_BT
     uint historyValid;
     uint sunEnabled;
     uint temporalEnabled;
-    uint pad0;
+    uint depthBoundsEnabled;
     LightShaft_BT lightShafts[MAX_LIGHT_SHAFTS];
 };
 
@@ -112,6 +112,31 @@ bool shaftDirectionConeAllows(float3 origin, float3 direction, float outerCos, f
 bool shaftConeAllows(const LightShaft_BT shaft, float3 center, float boundsRadius)
 {
     return shaftDirectionConeAllows(shaft.positionRadius.xyz, shaft.direction.xyz, shaft.cone.y, center, boundsRadius);
+}
+
+int computeColumnMaxActiveSlice(Texture2D<float> boundsTex,
+                                int2 column,
+                                uint3 volumeSize,
+                                float nearPlane,
+                                float farPlane)
+{
+    const int2 maxCoord = int2((int)volumeSize.x - 1, (int)volumeSize.y - 1);
+    float colMaxDepth = 0.0;
+
+    [unroll]
+    for (int dy = -1; dy <= 1; dy++)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            const int2 c = clamp(column + int2(dx, dy), int2(0, 0), maxCoord);
+            colMaxDepth = max(colMaxDepth, boundsTex.Load(int3(c, 0)));
+        }
+    }
+
+    const float denom = max(farPlane - nearPlane, 0.001);
+    const float tMax = sqrt(saturate((colMaxDepth - nearPlane) / denom));
+    return min((int)ceil(tMax * (float)volumeSize.z) + 2, (int)volumeSize.z - 1);
 }
 
 #endif

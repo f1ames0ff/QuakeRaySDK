@@ -321,30 +321,6 @@ void qray::FidelityFX::FSR::RecreateContext()
         throw QrException(QR_GRAPHICS_API_ERROR, "Failed to create FSR context");
     }
 
-    float velocityFactor = 0.0f;
-    ffxConfigureDescUpscaleKeyValue velocityConfig = {};
-    velocityConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
-    velocityConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FVELOCITYFACTOR;
-    velocityConfig.u64         = 0;
-    velocityConfig.ptr         = &velocityFactor;
-    ffxConfigure(&m_context, &velocityConfig.header);
-
-    float shadingChangeScale = 0.0f;
-    ffxConfigureDescUpscaleKeyValue shadingChangeConfig = {};
-    shadingChangeConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
-    shadingChangeConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FSHADINGCHANGESCALE;
-    shadingChangeConfig.u64         = 0;
-    shadingChangeConfig.ptr         = &shadingChangeScale;
-    ffxConfigure(&m_context, &shadingChangeConfig.header);
-
-    float reactivenessScale = 0.0f;
-    ffxConfigureDescUpscaleKeyValue reactivenessConfig = {};
-    reactivenessConfig.header.type = FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE;
-    reactivenessConfig.key         = FFX_API_CONFIGURE_UPSCALE_KEY_FREACTIVENESSSCALE;
-    reactivenessConfig.u64         = 0;
-    reactivenessConfig.ptr         = &reactivenessScale;
-    ffxConfigure(&m_context, &reactivenessConfig.header);
-
     s_contextForJitter = m_context;
     m_loggedFirstDispatch = false;
 

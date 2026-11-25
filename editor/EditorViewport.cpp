@@ -28,7 +28,11 @@ namespace
 constexpr float kOutlineNearClip = 1.0f;
 constexpr float kOutlineNudgeUnits = 0.35f;
 constexpr size_t kOutlineMaxVerts = 256;
-constexpr int kMaxEmissivePolysPerFace = 64;
+
+float Dot3(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
 
 bool RayTriangleIntersect(const float origin[3], const float direction[3], const float a[3],
                           const float b[3], const float c[3], float &outDistance)
@@ -163,145 +167,29 @@ bool PickSurfaceTrianglesFallback(const float origin[3], const float direction[3
     return hit;
 }
 
-float Dot3(const float a[3], const float b[3])
+bool PickSingleSurface(const EditorSurface &surface, const float origin[3],
+                       const float direction[3], int32_t &outFace, float &outDist,
+                       uint32_t &outCluster)
 {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-int ClipUvPolyEdge(const QrFloat2D *in, int n, int axis, float edge, bool keepGreater,
-                   QrFloat2D *out)
-{
-    int m = 0;
-
-    for (int i = 0; i < n; i++)
+    if (surface.faces.empty())
     {
-        const QrFloat2D a = in[i];
-        const QrFloat2D b = in[(i + 1) % n];
-        const float da = keepGreater ? (a.data[axis] - edge) : (edge - a.data[axis]);
-        const float db = keepGreater ? (b.data[axis] - edge) : (edge - b.data[axis]);
-        const bool ia = da >= 0.0f;
-        const bool ib = db >= 0.0f;
+        outFace = -1;
+        return PickSurfaceTrianglesFallback(origin, direction, surface, outDist, outCluster);
+    }
 
-        if (ia)
+    bool hit = false;
+    for (size_t f = 0; f < surface.faces.size(); f++)
+    {
+        float dist = 0.0f;
+        if (PickFaceFan(origin, direction, surface.faces[f], dist) && (!hit || dist < outDist))
         {
-            if (m >= MAX_TEXTURED_AREA_LIGHT_VERTS)
-            {
-                return 0;
-            }
-
-            out[m++] = a;
-        }
-
-        if (ia != ib)
-        {
-            const float t = da / (da - db);
-
-            if (m >= MAX_TEXTURED_AREA_LIGHT_VERTS)
-            {
-                return 0;
-            }
-
-            out[m++] = { a.data[0] + t * (b.data[0] - a.data[0]),
-                         a.data[1] + t * (b.data[1] - a.data[1]) };
+            hit = true;
+            outFace = int32_t(f);
+            outDist = dist;
+            outCluster = surface.faces[f].cluster;
         }
     }
-
-    return m;
-}
-
-int ClipUvPolyToRect(const QrFloat2D *in, int n, const float uvMin[2], const float uvMax[2],
-                     QrFloat2D *out)
-{
-    QrFloat2D tmp[MAX_TEXTURED_AREA_LIGHT_VERTS];
-    int m = ClipUvPolyEdge(in, n, 0, uvMin[0], true, tmp);
-
-    if (m < 3)
-    {
-        return 0;
-    }
-
-    m = ClipUvPolyEdge(tmp, m, 0, uvMax[0], false, out);
-
-    if (m < 3)
-    {
-        return 0;
-    }
-
-    m = ClipUvPolyEdge(out, m, 1, uvMin[1], true, tmp);
-
-    if (m < 3)
-    {
-        return 0;
-    }
-
-    return ClipUvPolyEdge(tmp, m, 1, uvMax[1], false, out);
-}
-
-float UvPolyAreaAndCentroid(const QrFloat2D *uv, int n, float outCentroidUv[2])
-{
-    double area2 = 0.0;
-    double cx = 0.0;
-    double cy = 0.0;
-
-    for (int i = 0; i < n; i++)
-    {
-        const QrFloat2D &a = uv[i];
-        const QrFloat2D &b = uv[(i + 1) % n];
-        const double cross = double(a.data[0]) * double(b.data[1]) -
-                             double(b.data[0]) * double(a.data[1]);
-        area2 += cross;
-        cx += (double(a.data[0]) + double(b.data[0])) * cross;
-        cy += (double(a.data[1]) + double(b.data[1])) * cross;
-    }
-
-    if (std::fabs(area2) > 1e-12)
-    {
-        outCentroidUv[0] = float(cx / (3.0 * area2));
-        outCentroidUv[1] = float(cy / (3.0 * area2));
-    }
-    else
-    {
-        outCentroidUv[0] = uv[0].data[0];
-        outCentroidUv[1] = uv[0].data[1];
-    }
-
-    return float(0.5 * std::fabs(area2));
-}
-
-void InsertClippedGlowPoly(std::vector<EditorClippedGlowPoly> &outPolys,
-                           const EditorClippedGlowPoly &poly)
-{
-    outPolys.push_back(poly);
-    std::sort(outPolys.begin(), outPolys.end(),
-              [](const EditorClippedGlowPoly &a, const EditorClippedGlowPoly &b) {
-                  return a.area > b.area;
-              });
-
-    if (outPolys.size() > size_t(kMaxEmissivePolysPerFace))
-    {
-        outPolys.pop_back();
-    }
-}
-
-void ComputeUvTileRange(const std::vector<QrFloat2D> &surfUv, int outMin[2], int outMax[2])
-{
-    float uvMin[2] = { surfUv[0].data[0], surfUv[0].data[1] };
-    float uvMax[2] = { surfUv[0].data[0], surfUv[0].data[1] };
-
-    for (size_t i = 1; i < surfUv.size(); i++)
-    {
-        for (int k = 0; k < 2; k++)
-        {
-            uvMin[k] = std::min(uvMin[k], surfUv[i].data[k]);
-            uvMax[k] = std::max(uvMax[k], surfUv[i].data[k]);
-        }
-    }
-
-    for (int k = 0; k < 2; k++)
-    {
-        outMin[k] = int(std::floor(uvMin[k]));
-        outMax[k] = int(std::fmax(std::ceil(uvMax[k]) - 1.0, double(outMin[k])));
-    }
+    return hit;
 }
 
 } // namespace
@@ -391,38 +279,73 @@ void EmitClippedPolygonOutline(ImDrawList *drawList, const EditorCameraBasis &ca
     }
 }
 
+void EmitClippedAabbOutline(ImDrawList *drawList, const EditorCameraBasis &cam,
+                            const float boundsMin[3], const float boundsMax[3], uint32_t color,
+                            float thickness)
+{
+    if (drawList == nullptr || boundsMin == nullptr || boundsMax == nullptr)
+    {
+        return;
+    }
+
+    float mn[3] = {};
+    float mx[3] = {};
+    for (int axis = 0; axis < 3; axis++)
+    {
+        const float lo = std::min(boundsMin[axis], boundsMax[axis]);
+        const float hi = std::max(boundsMin[axis], boundsMax[axis]);
+        mn[axis] = lo - kOutlineNudgeUnits;
+        mx[axis] = hi + kOutlineNudgeUnits;
+        if (mx[axis] - mn[axis] < 2.0f)
+        {
+            const float mid = 0.5f * (lo + hi);
+            mn[axis] = mid - 1.0f;
+            mx[axis] = mid + 1.0f;
+        }
+    }
+
+    const float corners[8][3] = {
+        { mn[0], mn[1], mn[2] }, { mx[0], mn[1], mn[2] }, { mx[0], mx[1], mn[2] },
+        { mn[0], mx[1], mn[2] }, { mn[0], mn[1], mx[2] }, { mx[0], mn[1], mx[2] },
+        { mx[0], mx[1], mx[2] }, { mn[0], mx[1], mx[2] },
+    };
+    static constexpr int kEdges[12][2] = {
+        { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
+        { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
+        { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
+    };
+
+    for (const auto &edge : kEdges)
+    {
+        float seg[4] = {};
+        if (ProjectClippedEdge(cam, corners[edge[0]], corners[edge[1]], seg))
+        {
+            drawList->AddLine(ImVec2(seg[0], seg[1]), ImVec2(seg[2], seg[3]), ImU32(color),
+                              thickness);
+        }
+    }
+}
+
 EditorFacePick PickSceneFace(const EditorScene &scene, const float origin[3],
-                             const float direction[3])
+                             const float direction[3], const EditorMaterialTable *materials)
 {
     EditorFacePick best;
 
     for (size_t s = 0; s < scene.surfaces.size(); s++)
     {
         const EditorSurface &surface = scene.surfaces[s];
-
-        if (surface.faces.empty())
+        if (materials != nullptr && !materials->For(surface).enabled)
         {
-            float dist = 0.0f;
-            uint32_t cluster = 0;
-
-            if (PickSurfaceTrianglesFallback(origin, direction, surface, dist, cluster) &&
-                (best.surface < 0 || dist < best.distance))
-            {
-                best = { int32_t(s), -1, dist, {}, cluster };
-            }
-
             continue;
         }
 
-        for (size_t f = 0; f < surface.faces.size(); f++)
+        int32_t face = -1;
+        float dist = 0.0f;
+        uint32_t cluster = 0;
+        if (PickSingleSurface(surface, origin, direction, face, dist, cluster) &&
+            (best.surface < 0 || dist < best.distance))
         {
-            float dist = 0.0f;
-
-            if (PickFaceFan(origin, direction, surface.faces[f], dist) &&
-                (best.surface < 0 || dist < best.distance))
-            {
-                best = { int32_t(s), int32_t(f), dist, {}, surface.faces[f].cluster };
-            }
+            best = { int32_t(s), face, dist, {}, cluster };
         }
     }
 
@@ -435,75 +358,4 @@ EditorFacePick PickSceneFace(const EditorScene &scene, const float origin[3],
     }
 
     return best;
-}
-
-bool ClipFaceUvToGlowPolygons(const std::vector<QrFloat2D> &surfUv, const float A[3],
-                               const float B[3], const float C[3],
-                               const EditorMaterialEmission &emission,
-                               std::vector<EditorClippedGlowPoly> &outPolys)
-{
-    outPolys.clear();
-
-    if (!emission.hasGlow || surfUv.size() < 3 || surfUv.size() > MAX_TEXTURED_AREA_LIGHT_VERTS)
-    {
-        return false;
-    }
-
-    int tileMin[2] = {};
-    int tileMax[2] = {};
-    ComputeUvTileRange(surfUv, tileMin, tileMax);
-
-    const double tileSpanX = double(tileMax[0]) - double(tileMin[0]) + 1.0;
-    const double tileSpanY = double(tileMax[1]) - double(tileMin[1]) + 1.0;
-
-    if (tileSpanX <= 0.0 || tileSpanY <= 0.0 || tileSpanX * tileSpanY > double(kMaxEmissivePolysPerFace))
-    {
-        return false;
-    }
-
-    const float cross[3] = {
-        A[1] * B[2] - A[2] * B[1],
-        A[2] * B[0] - A[0] * B[2],
-        A[0] * B[1] - A[1] * B[0],
-    };
-    const float jacobian = std::sqrt(Dot3(cross, cross));
-
-    for (int ty = tileMin[1]; ty <= tileMax[1]; ty++)
-    {
-        for (int tx = tileMin[0]; tx <= tileMax[0]; tx++)
-        {
-            const float uvMinTile[2] = { float(tx) + emission.glowUvMin[0],
-                                         float(ty) + emission.glowUvMin[1] };
-            const float uvMaxTile[2] = { float(tx) + emission.glowUvMax[0],
-                                         float(ty) + emission.glowUvMax[1] };
-
-            EditorClippedGlowPoly poly;
-            poly.numVerts =
-                ClipUvPolyToRect(surfUv.data(), int(surfUv.size()), uvMinTile, uvMaxTile, poly.uvVerts);
-
-            if (poly.numVerts < 3)
-            {
-                continue;
-            }
-
-            float uvCentroid[2] = {};
-            const float uvArea = UvPolyAreaAndCentroid(poly.uvVerts, poly.numVerts, uvCentroid);
-
-            if (uvArea <= 1e-9f)
-            {
-                continue;
-            }
-
-            poly.area = uvArea * jacobian;
-
-            for (int k = 0; k < 3; k++)
-            {
-                poly.center[k] = A[k] * uvCentroid[0] + B[k] * uvCentroid[1] + C[k];
-            }
-
-            InsertClippedGlowPoly(outPolys, poly);
-        }
-    }
-
-    return true;
 }

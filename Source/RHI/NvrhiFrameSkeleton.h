@@ -35,6 +35,7 @@
 #include "RhiCloudsPass.h"
 #include "RhiProceduralSkyPass.h"
 #include "RhiRtGodRaysPass.h"
+#include "RhiRtPrimaryPass.h"
 #include "RhiShadowMapPass.h"
 
 namespace qray
@@ -564,7 +565,7 @@ private:
                                    float &shadowMapDepthScale) const;
     bool PrepareLightShaftVolumeForGodRays(nvrhi::ICommandList *pCommandList,
                                            uint32_t frameIndex,
-                                           const SkyFrameInputs::GodRays &godRays,
+                                           const SkyFrameInputs &sky,
                                            const ShGlobalUniform *pUniform,
                                            bool froxelSunActive,
                                            RhiRtGodRaysPass::Params &godRaysParams);

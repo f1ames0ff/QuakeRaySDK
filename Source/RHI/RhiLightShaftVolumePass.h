@@ -32,11 +32,20 @@
 namespace qray
 {
 
+class Framebuffers;
+
 namespace rhi
 {
 class RhiFrameContext;
 class RhiTextureTable;
 }
+
+struct DepthBoundsInput
+{
+    const Framebuffers *framebuffers = nullptr;
+    uint32_t renderWidth = 0;
+    uint32_t renderHeight = 0;
+};
 
 class RhiLightShaftVolumePass final
 {
@@ -44,14 +53,15 @@ public:
     using PrintFunction = std::function<void(const char *)>;
 
     static constexpr uint32_t MAX_LIGHT_SHAFTS = 64;
-    static constexpr uint32_t VOLUME_SIZE_X = 384;
-    static constexpr uint32_t VOLUME_SIZE_Y = 216;
+    static constexpr uint32_t VOLUME_SIZE_X = 192;
+    static constexpr uint32_t VOLUME_SIZE_Y = 108;
     static constexpr uint32_t VOLUME_SIZE_Z = 96;
-    static constexpr uint32_t MAX_VOLUME_SIZE_X = 448;
-    static constexpr uint32_t MAX_VOLUME_SIZE_Y = 256;
+    static constexpr uint32_t MAX_VOLUME_SIZE_X = 256;
+    static constexpr uint32_t MAX_VOLUME_SIZE_Y = 144;
     static constexpr uint32_t MAX_VOLUME_SIZE_Z = 128;
     static constexpr uint32_t GROUP_SIZE_X = 4;
     static constexpr uint32_t GROUP_SIZE_Y = 4;
+    static constexpr uint32_t GROUP_SIZE_Z = 4;
     static constexpr uint32_t LIGHT_LIST_CAPACITY = 32;
     static constexpr uint32_t LIGHT_LIST_TILE = 8;
     static constexpr uint32_t LIGHT_LIST_Z_BINS = 8;
@@ -102,7 +112,7 @@ public:
         uint32_t historyValid;
         uint32_t sunEnabled;
         uint32_t temporalEnabled;
-        uint32_t pad0;
+        uint32_t depthBoundsEnabled;
         LightShaft lightShafts[MAX_LIGHT_SHAFTS];
     };
 
@@ -123,12 +133,15 @@ public:
 
     bool IsCreated() const { return created; }
 
+    using DepthBoundsInput = qray::DepthBoundsInput;
+
     bool Render(nvrhi::ICommandList *pCommandList,
                 uint32_t frameIndex,
                 nvrhi::IBuffer *pUniformBuffer,
                 nvrhi::rt::IAccelStruct *pTopLevel,
                 nvrhi::IBindingSet *pLightSet,
-                const Params &params);
+                const Params &params,
+                const DepthBoundsInput &depthBounds = {});
 
     nvrhi::ITexture *GetTexture(uint32_t frameIndex) const;
     nvrhi::ITexture *GetInjectionTexture(uint32_t frameIndex) const;
@@ -144,11 +157,14 @@ private:
     {
         nvrhi::TextureHandle texture;
         nvrhi::TextureHandle integratedTexture;
+        nvrhi::TextureHandle depthBoundsTexture;
+        nvrhi::TextureHandle depthWorldTexture;
         nvrhi::BindingSetHandle uavSet;
         nvrhi::BindingSetHandle integratedUavSet;
         nvrhi::BindingSetHandle prefixSet;
         nvrhi::BindingSetHandle paramsSet;
         nvrhi::BindingSetHandle assignSet;
+        nvrhi::BindingSetHandle depthBoundsSet;
         nvrhi::BindingSetHandle uniformSet;
         nvrhi::BindingSetHandle tlasSet;
         nvrhi::BufferHandle paramsBuffer;
@@ -157,6 +173,9 @@ private:
         nvrhi::BufferHandle rayCounterBuffer;
         nvrhi::IBuffer *uniformBuffer = nullptr;
         nvrhi::rt::IAccelStruct *topLevel = nullptr;
+        uint64_t depthWorldHandle = 0;
+        uint32_t depthWorldWidth = 0;
+        uint32_t depthWorldHeight = 0;
     };
 
     bool LoadShaders();
@@ -170,6 +189,12 @@ private:
     bool IsTargetReady(const Target &target) const;
     bool PrepareUniformSet(Target &target, nvrhi::IBuffer *pUniformBuffer);
     bool PrepareTlasSet(Target &target, nvrhi::rt::IAccelStruct *pTopLevel);
+    void RetireDepthBoundsResources(Target &target);
+    bool PrepareDepthBoundsSet(Target &target,
+                               uint32_t frameIndex,
+                               const DepthBoundsInput &depthBounds);
+    void ClearDepthBoundsIfNeeded(nvrhi::ICommandList *pCommandList);
+    void DispatchDepthBounds(nvrhi::ICommandList *pCommandList, Target &target);
 
     nvrhi::IDevice *device = nullptr;
     rhi::RhiFrameContext *frameContext = nullptr;
@@ -182,21 +207,25 @@ private:
     nvrhi::ShaderHandle volumeShader;
     nvrhi::ShaderHandle prefixShader;
     nvrhi::ShaderHandle assignShader;
+    nvrhi::ShaderHandle depthBoundsShader;
     nvrhi::BindingLayoutHandle tlasLayout;
     nvrhi::BindingLayoutHandle paramsLayout;
     nvrhi::BindingLayoutHandle uniformLayout;
     nvrhi::BindingLayoutHandle volumeLayout;
     nvrhi::BindingLayoutHandle prefixLayout;
     nvrhi::BindingLayoutHandle assignLayout;
+    nvrhi::BindingLayoutHandle depthBoundsLayout;
     nvrhi::ComputePipelineHandle volumePipeline;
     nvrhi::ComputePipelineHandle prefixPipeline;
     nvrhi::ComputePipelineHandle assignPipeline;
+    nvrhi::ComputePipelineHandle depthBoundsPipeline;
     nvrhi::SamplerHandle sampler;
 
     uint32_t volumeSizeX = VOLUME_SIZE_X;
     uint32_t volumeSizeY = VOLUME_SIZE_Y;
     uint32_t volumeSizeZ = VOLUME_SIZE_Z;
     bool historyReset = true;
+    bool depthBoundsCleared = false;
 
     rhi::RhiCloudShadowBinding cloudShadowBinding;
     Target targets[MAX_FRAMES_IN_FLIGHT];

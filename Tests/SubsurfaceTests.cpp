@@ -344,6 +344,131 @@ bool TestEditorMaterialBakeNormalAlpha()
     return Check(g_destroyCount == 2, "EditorMaterialBakes::Destroy cleanup mismatch");
 }
 
+EditorScene MakeMirrorTestScene()
+{
+    EditorScene scene;
+    EditorTexture envTex;
+    envTex.name = "env_glass";
+    envTex.width = 2;
+    envTex.height = 2;
+    envTex.rgba = {
+        180, 90, 220, 255, 180, 90, 220, 255,
+        180, 90, 220, 255, 180, 90, 220, 255,
+    };
+    EditorOverlayStage stEnv;
+    stEnv.map = "textures/effects/tinfxb.tga";
+    stEnv.isEnvironment = true;
+    EditorOverlayStage stGlow;
+    stGlow.map = "env_glow.tga";
+    envTex.baseStageIndex = 0u;
+    envTex.shaderStages = { stEnv, stGlow };
+
+    EditorTexture plainTex = envTex;
+    plainTex.name = "plain_metal";
+    plainTex.shaderStages.clear();
+
+    EditorTexture glowTex;
+    glowTex.name = "env_glow";
+    glowTex.width = 2;
+    glowTex.height = 2;
+    glowTex.rgba = {
+        0, 255, 0, 255, 0, 255, 0, 255,
+        0, 255, 0, 255, 0, 255, 0, 255,
+    };
+    scene.textures = { envTex, plainTex, glowTex };
+    return scene;
+}
+
+bool UploadedAlbedoStartsWith(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    return g_lastUpload.albedo.size() >= 4 && g_lastUpload.albedo[0] == r &&
+           g_lastUpload.albedo[1] == g && g_lastUpload.albedo[2] == b &&
+           g_lastUpload.albedo[3] == a;
+}
+
+bool TestMirrorOverlayPromotionPredicate()
+{
+    EditorMaterialParams plain;
+    EditorMaterialParams mirror;
+    mirror.mirror = true;
+    EditorMaterialParams glass;
+    glass.type = EditorMaterialType::Glass;
+    return Check(!EditorMaterialPromotesOverlayToTraced(plain) &&
+                     EditorMaterialPromotesOverlayToTraced(mirror) &&
+                     EditorMaterialPromotesOverlayToTraced(glass),
+                 "EditorMaterialPromotesOverlayToTraced predicate mismatch");
+}
+
+bool TestMirrorEnvAndDiffuseBake()
+{
+    if (!TestMirrorOverlayPromotionPredicate())
+    {
+        return false;
+    }
+
+    const EditorScene scene = MakeMirrorTestScene();
+    const auto resolveTex = [&scene](const std::string &texName) {
+        return ResolveSceneTexByName(scene, texName);
+    };
+
+    EditorMaterialBakes bakes;
+    QrInstance fakeInstance = reinterpret_cast<QrInstance>(static_cast<uintptr_t>(3));
+    const uint32_t destroyBefore = g_destroyCount;
+
+    EditorMaterialParams envMirror;
+    envMirror.mirror = true;
+    const QrMaterial envMirrorMat =
+        bakes.Get(fakeInstance, "env_glass", envMirror, scene, {}, resolveTex);
+    const bool whiteEnvOk =
+        UploadedAlbedoStartsWith(255, 255, 255, 255) && !g_lastUpload.rme.empty() &&
+        g_lastUpload.rme[0] == 0;
+    const QrMaterial plainMirrorMat =
+        bakes.Get(fakeInstance, "plain_metal", envMirror, scene, {}, resolveTex);
+
+    EditorMaterialParams bakedPlainMirror = envMirror;
+    bakedPlainMirror.glossTexture = "env_glow";
+    const QrMaterial bakedPlainMirrorMat =
+        bakes.Get(fakeInstance, "plain_metal", bakedPlainMirror, scene, {}, resolveTex);
+    const bool keptDiffuseOk = UploadedAlbedoStartsWith(180, 90, 220, 255);
+
+    const QrMaterial forcedEnvMat =
+        bakes.Get(fakeInstance, "plain_metal", envMirror, scene, {}, resolveTex, true);
+    const bool forcedWhiteOk = UploadedAlbedoStartsWith(255, 255, 255, 255);
+
+    bakes.Destroy(fakeInstance);
+    const bool bakesOk = envMirrorMat != QR_NO_MATERIAL && plainMirrorMat == QR_NO_MATERIAL &&
+                         bakedPlainMirrorMat != QR_NO_MATERIAL && forcedEnvMat != QR_NO_MATERIAL;
+    return Check(bakesOk && whiteEnvOk && keptDiffuseOk && forcedWhiteOk &&
+                     g_destroyCount == destroyBefore + 3,
+                 "mirror promotion / neutral env albedo bake mismatch");
+}
+
+bool TestDisabledEmissiveStageSuppressesBake()
+{
+    const EditorScene scene = MakeMirrorTestScene();
+    const auto resolveTex = [&scene](const std::string &texName) {
+        return ResolveSceneTexByName(scene, texName);
+    };
+
+    EditorMaterialBakes bakes;
+    QrInstance fakeInstance = reinterpret_cast<QrInstance>(static_cast<uintptr_t>(4));
+    const uint32_t destroyBefore = g_destroyCount;
+
+    EditorMaterialParams maskedGlow;
+    maskedGlow.emissiveTexture = "env_glow";
+    maskedGlow.disabledStagesMask = (1u << 1);
+    const QrMaterial suppressedGlowMat =
+        bakes.Get(fakeInstance, "env_glass", maskedGlow, scene, {}, resolveTex);
+    maskedGlow.disabledStagesMask = 0u;
+    const QrMaterial activeGlowMat =
+        bakes.Get(fakeInstance, "env_glass", maskedGlow, scene, {}, resolveTex);
+
+    bakes.Destroy(fakeInstance);
+    const bool cleanupOk = g_destroyCount == destroyBefore + 1;
+    return Check(suppressedGlowMat == QR_NO_MATERIAL && activeGlowMat != QR_NO_MATERIAL && cleanupOk,
+                 "disabling emissive shader stage must suppress baked emission");
+}
+
 } // namespace
 
 extern "C" {
@@ -398,6 +523,8 @@ int main()
     const bool ok = TestPackingEndpointsAndPrecision() && TestPackingMonotonicAndSanitization() &&
                     TestPassThroughAndInstanceLayout() && TestApplyEditorSubsurface() &&
                     TestColorKeyAndFeatherSssMask() && TestPolygonAndTextureSssMask() &&
-                    TestEditorMaterialBakeNormalAlpha();
+                    TestEditorMaterialBakeNormalAlpha() &&
+                    TestMirrorEnvAndDiffuseBake() &&
+                    TestDisabledEmissiveStageSuppressesBake();
     return ok ? 0 : 1;
 }

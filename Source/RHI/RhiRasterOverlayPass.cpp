@@ -1303,8 +1303,8 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
         // viewer position (the sky's SetNewViewerPosition stays out of this path).
         float jitteredProj[16];
         memcpy(jitteredProj, pProj, sizeof(jitteredProj));
-        jitteredProj[2 * 4 + 0] += jitter[0] / float(width);
-        jitteredProj[2 * 4 + 1] += jitter[1] / float(height);
+        jitteredProj[2 * 4 + 0] += 2.0f * jitter[0] / float(width);
+        jitteredProj[2 * 4 + 1] += 2.0f * jitter[1] / float(height);
 
         float defaultViewProj[16];
         Matrix::Multiply(defaultViewProj, pView, jitteredProj);

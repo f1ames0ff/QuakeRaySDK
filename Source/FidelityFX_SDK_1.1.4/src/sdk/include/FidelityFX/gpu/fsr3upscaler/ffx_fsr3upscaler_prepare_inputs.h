@@ -86,6 +86,7 @@ DepthExtents FindDepthExtents(FFX_PARAMETER_IN FfxInt32x2 iPxPos)
     extents.fNearestCoord   = iPxPos;
     extents.fNearest        = depth[0];
     extents.fFarthest       = depth[0];
+    const FfxFloat32 fCenterViewDepth = GetViewSpaceDepth(depth[0]);
     FFX_UNROLL
     for (iSampleIndex = 1; iSampleIndex < iSampleCount; ++iSampleIndex) {
 
@@ -94,15 +95,24 @@ DepthExtents FindDepthExtents(FFX_PARAMETER_IN FfxInt32x2 iPxPos)
 
             FfxFloat32 fNdDepth = depth[iSampleIndex];
 #if FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH
+            extents.fFarthest = ffxMin(extents.fFarthest, fNdDepth);
             if (fNdDepth > extents.fNearest) {
-                extents.fFarthest       = ffxMin(extents.fFarthest, fNdDepth);
-#else
-            if (fNdDepth < extents.fNearest) {
-                extents.fFarthest       = ffxMax(extents.fFarthest, fNdDepth);
-#endif
-                extents.fNearestCoord   = iPos;
-                extents.fNearest        = fNdDepth;
+                const FfxFloat32 fNdViewDepth = GetViewSpaceDepth(fNdDepth);
+                if ((fCenterViewDepth - fNdViewDepth) > (0.05f * fCenterViewDepth)) {
+                    extents.fNearestCoord   = iPos;
+                    extents.fNearest        = fNdDepth;
+                }
             }
+#else
+            extents.fFarthest = ffxMax(extents.fFarthest, fNdDepth);
+            if (fNdDepth < extents.fNearest) {
+                const FfxFloat32 fNdViewDepth = GetViewSpaceDepth(fNdDepth);
+                if ((fCenterViewDepth - fNdViewDepth) > (0.05f * fCenterViewDepth)) {
+                    extents.fNearestCoord   = iPos;
+                    extents.fNearest        = fNdDepth;
+                }
+            }
+#endif
         }
     }
 

@@ -173,6 +173,8 @@ struct EditorMaterialEntry
 {
     std::string name;
     EditorMaterialParams params;
+    bool clearDefaultEmissive = false;
+    bool clearDefaultMirror = false;
 };
 
 // The target qray.materials.yaml. The editor owns eleven of the file's keys and the file may
@@ -185,9 +187,11 @@ public:
     // Reads the target. A missing file is not an error - the writer then emits the header and
     // the qray_materials: key - but an unreadable one is reported through `error`.
     bool Load(const std::string &path, std::string &error);
+    bool LoadFromText(std::string text);
 
     bool Exists() const { return m_exists; }
     const std::string &Text() const { return m_text; }
+    std::vector<std::string> MaterialNames() const;
     bool HasMaterial(const std::string &name) const;
     bool HasMaterialWithPrefix(const std::string &prefix) const;
     // Reads the keys the editor owns out of `name`'s entry. Keys the entry does not carry leave
@@ -215,6 +219,7 @@ class EditorLevelDocument
 {
 public:
     bool Load(const std::string &path, std::string &error);
+    bool LoadFromText(std::string text);
 
     bool Exists() const { return m_exists; }
     const std::string &Text() const { return m_text; }

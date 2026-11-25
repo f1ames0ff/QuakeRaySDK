@@ -940,3 +940,137 @@ const EditorLight *BaselineCustomLightAt(int32_t customIndex,
     const size_t idx = size_t(customIndex);
     return idx < baselineCustomLights.size() ? &baselineCustomLights[idx] : nullptr;
 }
+
+namespace
+{
+
+EditorLight SanitizeLightForCopy(const EditorLight &src)
+{
+    EditorLight copy = src;
+    if (copy.hasOffset)
+    {
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            copy.position[axis] += copy.offset[axis];
+            copy.offset[axis] = 0.0f;
+        }
+        copy.hasOffset = false;
+    }
+    copy.className.clear();
+    copy.emitterUniqueID = 0;
+    copy.modelSizeMeters = 0.0f;
+    copy.enabled = true;
+    return copy;
+}
+
+void AppendCopiedFromList(const std::vector<EditorLight> &source,
+                          const std::vector<int32_t> &multi, int32_t single,
+                          std::vector<EditorLight> &out)
+{
+    std::vector<int32_t> indices = multi;
+    if (indices.empty() && single >= 0)
+    {
+        indices.push_back(single);
+    }
+    indices.erase(std::remove_if(indices.begin(), indices.end(),
+                                 [limit = source.size()](int32_t idx) {
+                                     return idx < 0 || size_t(idx) >= limit;
+                                 }),
+                  indices.end());
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    for (int32_t idx : indices)
+    {
+        out.push_back(SanitizeLightForCopy(source[size_t(idx)]));
+    }
+}
+
+} // namespace
+
+std::vector<EditorLight> BuildCopiedLights(const std::vector<EditorLight> &sceneLights,
+                                           const std::vector<int32_t> &selectedScene,
+                                           int32_t singleScene,
+                                           const std::vector<EditorLight> &customLights,
+                                           const std::vector<int32_t> &selectedCustom,
+                                           int32_t singleCustom)
+{
+    std::vector<EditorLight> out;
+    AppendCopiedFromList(sceneLights, selectedScene, singleScene, out);
+    AppendCopiedFromList(customLights, selectedCustom, singleCustom, out);
+    return out;
+}
+
+std::vector<EditorLight> BuildPastedLights(EditorLightClipboard &clipboard,
+                                           const float cameraPos[3],
+                                           const float cameraForward[3], float stepUnits,
+                                           float spawnDistanceUnits)
+{
+    if (clipboard.lights.empty() || cameraPos == nullptr || cameraForward == nullptr)
+    {
+        return {};
+    }
+
+    const float dx = cameraPos[0] - clipboard.copyCameraPos[0];
+    const float dy = cameraPos[1] - clipboard.copyCameraPos[1];
+    const float dz = cameraPos[2] - clipboard.copyCameraPos[2];
+    const float distSq = dx * dx + dy * dy + dz * dz;
+    const float forwardDot = cameraForward[0] * clipboard.copyCameraForward[0] +
+                             cameraForward[1] * clipboard.copyCameraForward[1] +
+                             cameraForward[2] * clipboard.copyCameraForward[2];
+
+    if (distSq < 32.0f * 32.0f && forwardDot > 0.9f)
+    {
+        clipboard.pasteCount++;
+        std::vector<EditorLight> pasted = clipboard.lights;
+        const float zShift = stepUnits * float(clipboard.pasteCount);
+        for (EditorLight &l : pasted)
+        {
+            l.position[2] += zShift;
+        }
+        return pasted;
+    }
+
+    double cx = 0.0;
+    double cy = 0.0;
+    double cz = 0.0;
+    for (const EditorLight &l : clipboard.lights)
+    {
+        cx += double(l.position[0]);
+        cy += double(l.position[1]);
+        cz += double(l.position[2]);
+    }
+    const double inv = 1.0 / double(clipboard.lights.size());
+    const float centroid[3] = { float(cx * inv), float(cy * inv), float(cz * inv) };
+
+    const float forwardLen = std::sqrt(cameraForward[0] * cameraForward[0] +
+                                       cameraForward[1] * cameraForward[1] +
+                                       cameraForward[2] * cameraForward[2]);
+    const float invLen = forwardLen > 1e-6f ? (1.0f / forwardLen) : 0.0f;
+    const float normForward[3] = {
+        forwardLen > 1e-6f ? cameraForward[0] * invLen : 1.0f,
+        forwardLen > 1e-6f ? cameraForward[1] * invLen : 0.0f,
+        forwardLen > 1e-6f ? cameraForward[2] * invLen : 0.0f,
+    };
+
+    const float target[3] = {
+        cameraPos[0] + normForward[0] * spawnDistanceUnits,
+        cameraPos[1] + normForward[1] * spawnDistanceUnits,
+        cameraPos[2] + normForward[2] * spawnDistanceUnits,
+    };
+    const float delta[3] = {
+        target[0] - centroid[0],
+        target[1] - centroid[1],
+        target[2] - centroid[2],
+    };
+
+    for (EditorLight &l : clipboard.lights)
+    {
+        l.position[0] += delta[0];
+        l.position[1] += delta[1];
+        l.position[2] += delta[2];
+    }
+    std::copy_n(cameraPos, 3, clipboard.copyCameraPos);
+    std::copy_n(cameraForward, 3, clipboard.copyCameraForward);
+    clipboard.pasteCount = 0u;
+    return clipboard.lights;
+}

@@ -21,6 +21,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <qray/qray.h>
 
@@ -131,6 +133,8 @@ public:
     bool WarpCursorToCenter(int32_t &outX, int32_t &outY);
     void SetCursorVisible(bool visible);
     void SetMouseCapture(bool capture);
+    bool HasFocus() const;
+    bool IsMouseCaptured() const;
     void BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const;
 
 private:
@@ -143,3 +147,21 @@ private:
 void EditorDebugLog(const char *message);
 void EditorShowError(const EditorWindow *window, const char *title, const char *message);
 std::string EditorExecutableDirectory();
+
+struct EditorProcessLaunch
+{
+    std::string executable;
+    std::string workingDirectory;
+    std::vector<std::string> arguments;
+    std::vector<std::pair<std::string, std::string>> envOverrides;
+};
+
+struct EditorChildProcess
+{
+    intptr_t handle = 0;
+};
+
+bool EditorSpawnProcess(const EditorProcessLaunch &launch, EditorChildProcess &outProcess,
+                        std::string &outError);
+bool EditorIsProcessRunning(EditorChildProcess &process, int *outExitCode = nullptr);
+void EditorDetachProcess(EditorChildProcess &process);

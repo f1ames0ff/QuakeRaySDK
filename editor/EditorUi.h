@@ -60,7 +60,7 @@ class EditorUi
 {
 public:
     bool Initialize(EditorWindow *window, QrInstance instance, const std::string &fontPath,
-                    std::string &error);
+                    std::string &error, const std::string &iconFontPath = {});
     void Shutdown();
 
     void BeginFrame(float deltaSeconds, uint32_t clientWidth, uint32_t clientHeight);

@@ -22,8 +22,8 @@
 #include <string>
 
 // Layout constants ported from Quake/qr_gui.cpp for two-column QuakeRay inspector rows.
-inline constexpr float kEditorGuiPanelWidth = 484.0f;
-inline constexpr float kEditorGuiLabelWidth = 186.0f;
+inline constexpr float kEditorGuiPanelWidth = 536.0f;
+inline constexpr float kEditorGuiLabelWidth = 176.0f;
 inline constexpr float kEditorGuiResetSize = 24.0f;
 inline constexpr float kEditorGuiActionSize = 24.0f;
 inline constexpr float kEditorGuiBrowseWidth = 26.0f;
@@ -79,6 +79,9 @@ void EditorGuiBeginScroll(const char *id);
 // Ends the scrollable region started by EditorGuiBeginScroll.
 void EditorGuiEndScroll();
 
+// Notifies the widget layer whether the FontAwesome solid icon font was merged into the atlas.
+void EditorGuiSetIconFontLoaded(bool loaded);
+
 // Draws equal-width tabs plus an optional trash reset button on the right edge.
 // Returns true if the user clicked a different tab.
 bool EditorGuiTabs(const char *const *labels, int32_t count, int32_t *activeIndex,
@@ -87,11 +90,15 @@ bool EditorGuiTabs(const char *const *labels, int32_t count, int32_t *activeInde
 // Draws a tinted section header bar with separator line and optional hover tooltip.
 void EditorGuiSectionHeader(const char *label, const char *tooltip = nullptr);
 
-// Draws a vector-drawn circular reset-arrow button; interactive only when `changed` is true.
+// Draws a FontAwesome circular reset-arrow button; interactive only when `changed` is true.
 bool EditorGuiResetButton(const char *id, bool changed, const char *tooltip = nullptr);
 
-// Draws Copy / Paste / Remove vector icon buttons right-aligned on the current line.
+// Draws Copy / Paste / Remove FontAwesome icon buttons right-aligned on the current line.
 uint32_t EditorGuiBlockActions(const char *id, bool canCopy, bool canPaste, bool canRemove);
+
+// Draws Add Color (eyedropper), Add Mask (polygon), and Add Brush (paintbrush) FontAwesome icon
+// buttons on the current line. Returns 0 (Color), 1 (Polygon), 2 (Brush), or -1 if none clicked.
+int32_t EditorGuiMaskAddButtons(const char *id, bool canAdd);
 
 // Draws a two-column checkbox row with optional reset icon on the right.
 bool EditorGuiCheckbox(const char *label, bool *value, const EditorGuiRowOpts &opts = {});
@@ -112,9 +119,10 @@ bool EditorGuiCombo(const char *label, int32_t *selected, const char *const *ite
 bool EditorGuiComboFiltered(const char *label, int32_t *selected, const EditorGuiComboModel &model,
                             const EditorGuiRowOpts &opts = {});
 
-// Draws a two-column texture path box with a `[...]` browse button and optional reset icon.
+// Draws a two-column texture path box with `[...]` browse, optional `Generate with AI` action, and
+// optional reset icon.
 bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClicked,
-                          const EditorGuiRowOpts &opts = {});
+                          const EditorGuiRowOpts &opts = {}, bool *generateAiClicked = nullptr);
 
 // Draws a two-column RGB swatch + `#RRGGBB` hex picker row with optional reset icon.
 bool EditorGuiColorHex(const char *label, float rgb[3], const EditorGuiRowOpts &opts = {});

@@ -31,28 +31,24 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <imgui.h>
 
+#if !defined(_WIN32)
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace
 {
 
-// RT_LIGHT_Emit numbers map lights from UINT16_MAX upwards and keeps the editor's world
-// geometry IDs (1..N) out of the way.
-constexpr uint64_t kFirstLightUniqueID = uint64_t(UINT16_MAX);
-
-// RT_ClusterLightReachStatic(): rt_light_reach_static (25 m at QUAKEUNIT_IN_METERS 0.025, i.e.
-// 1000 units) for static brush emissives, while dynamic lights use rt_light_reach_dynamic (10 m,
-// 400 units) so moving lights and torch mode only touch local clusters.
-constexpr float kLightReachUnits = 1000.0f;
-constexpr float kDynamicLightReachUnits = 400.0f;
-constexpr float kLightTopUpReachUnits = 1000.0f;
-
 uint64_t LightUniqueID(size_t index)
 {
-    return kFirstLightUniqueID + uint64_t(index);
+    return EditorLightUniqueID(index);
 }
 
 // Texture names are matched without case: Quake data mixes "FLOOR1_1" and "floor1_1" spellings
@@ -72,14 +68,9 @@ std::string LowercaseName(const std::string &name)
     return lowered;
 }
 
-// The editor's own lights start past the whole range a map could ever fill, so adding or
-// removing one can never collide with a map light - the way the game numbers custom lights
-// from UINT32_MAX + 1 while map lights come from UINT16_MAX.
-constexpr uint64_t kFirstCustomLightUniqueID = kFirstLightUniqueID + 0x10000;
-
 uint64_t CustomLightUniqueID(size_t index)
 {
-    return kFirstCustomLightUniqueID + uint64_t(index);
+    return EditorCustomLightUniqueID(index);
 }
 
 // -1 is the Entity tab's NONE: the game's own combo offers it for a map light that must stay
@@ -646,45 +637,6 @@ bool HasPakExtension(const std::filesystem::path &path)
     return LowercaseName(path.extension().string()) == ".pak";
 }
 
-template <typename Pred, typename AddFn>
-void AddSortedArchives(const std::string &directory, Pred &&matches, AddFn &&add)
-{
-    std::error_code ec;
-    std::vector<std::string> archives;
-
-    for (const std::filesystem::directory_entry &entry :
-         std::filesystem::directory_iterator(directory, ec))
-    {
-        if (entry.is_regular_file(ec) && matches(entry.path()))
-        {
-            archives.push_back(entry.path().string());
-        }
-    }
-
-    // Mount higher-numbered/later archives first so overrides win on reads.
-    std::sort(archives.begin(), archives.end(), [](const std::string &a, const std::string &b) {
-        return LowercaseName(a) > LowercaseName(b);
-    });
-
-    for (const std::string &archive : archives)
-    {
-        add(archive);
-    }
-}
-
-void AddPaksFromDirectory(EditorAssetSource &assets, const std::string &directory)
-{
-    if (directory.empty())
-    {
-        return;
-    }
-
-    AddSortedArchives(directory, HasZipPackExtension,
-                      [&assets](const std::string &path) { assets.AddZip(path); });
-    AddSortedArchives(directory, HasPakExtension,
-                      [&assets](const std::string &path) { assets.AddPak(path); });
-}
-
 void NormalizeFolder(std::string &folder)
 {
     if (!folder.empty())
@@ -753,454 +705,23 @@ void LookAt(const float eye[3], const float target[3], const float up[3], float 
     view[15] = 1.0f;
 }
 
-bool TryReadDecodedImage(const EditorAssetSource &assets, const std::string &candidate,
-                         uint32_t &outWidth, uint32_t &outHeight, std::vector<uint8_t> &outRgba)
-{
-    std::vector<uint8_t> encoded;
-    return assets.ReadFile(candidate, encoded) &&
-           DecodeEditorImageRgba(encoded, outWidth, outHeight, outRgba);
-}
-
-bool HasFileExtension(const std::string &path)
-{
-    const size_t slash = path.find_last_of('/');
-    const size_t dot = path.find_last_of('.');
-    return dot != std::string::npos && (slash == std::string::npos || dot > slash);
-}
-
-void AppendExternalPathBases(const std::string &key, std::vector<std::string> &out)
-{
-    out.push_back(key);
-
-    if (key.rfind("textures/", 0) != 0)
-    {
-        out.push_back("textures/" + key);
-    }
-
-    const size_t baseCount = out.size();
-
-    for (size_t i = 0; i < baseCount; i++)
-    {
-        std::string alt = out[i];
-        const size_t star = alt.find('*');
-
-        if (star != std::string::npos)
-        {
-            alt[star] = '#';
-            out.push_back(std::move(alt));
-        }
-    }
-}
-
-bool TryLoadExternalImage(const EditorAssetSource &assets, const std::string &key,
-                          uint32_t &outWidth, uint32_t &outHeight, std::vector<uint8_t> &outRgba)
-{
-    static constexpr const char *kExtensions[] = { ".png", ".tga", ".jpg", ".jpeg" };
-
-    std::vector<std::string> bases;
-    AppendExternalPathBases(key, bases);
-
-    for (const std::string &base : bases)
-    {
-        if (TryReadDecodedImage(assets, base, outWidth, outHeight, outRgba))
-        {
-            return true;
-        }
-
-        std::string stem = base;
-        if (HasFileExtension(base))
-        {
-            const size_t dot = base.rfind('.');
-            stem = dot != std::string::npos ? base.substr(0, dot) : base;
-        }
-
-        for (const char *ext : kExtensions)
-        {
-            if (TryReadDecodedImage(assets, stem + ext, outWidth, outHeight, outRgba))
-            {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-void BuildFullbrightRmeAndEmission(const EditorTexture &texture, std::vector<uint8_t> &outRme,
-                                   EditorMaterialEmission &outEmission)
-{
-    const size_t pixels = size_t(texture.width) * size_t(texture.height);
-    const uint8_t defaultRough = uint8_t(kEditorDefaultRoughness * 255.0f);
-    outRme.resize(pixels * 4);
-
-    double emissR = 0.0;
-    double emissG = 0.0;
-    double emissB = 0.0;
-    double emissMean = 0.0;
-    int minX = int(texture.width);
-    int minY = int(texture.height);
-    int maxX = -1;
-    int maxY = -1;
-
-    for (uint32_t y = 0; y < texture.height; y++)
-    {
-        for (uint32_t x = 0; x < texture.width; x++)
-        {
-            const size_t p = size_t(y) * size_t(texture.width) + size_t(x);
-            const uint8_t fb = texture.fullbright[p];
-            const size_t offset = p * 4;
-            outRme[offset + 0] = defaultRough;
-            outRme[offset + 1] = 0;
-            outRme[offset + 2] = fb;
-            outRme[offset + 3] = 0;
-
-            if (fb > 0)
-            {
-                const float e = fb / 255.0f;
-                emissR += texture.rgba[offset + 0] * e;
-                emissG += texture.rgba[offset + 1] * e;
-                emissB += texture.rgba[offset + 2] * e;
-                emissMean += e;
-
-                if (e > kEditorGlowThreshold)
-                {
-                    minX = std::min(minX, int(x));
-                    maxX = std::max(maxX, int(x));
-                    minY = std::min(minY, int(y));
-                    maxY = std::max(maxY, int(y));
-                }
-            }
-        }
-    }
-
-    outEmission = {};
-    outEmission.valid = true;
-    outEmission.mean = float(emissMean / double(pixels));
-    outEmission.meanBase = outEmission.mean;
-
-    if (outEmission.meanBase > 1e-6f)
-    {
-        const double scale = 1.0 / (double(pixels) * 255.0 * double(outEmission.meanBase));
-        outEmission.color[0] = float(emissR * scale);
-        outEmission.color[1] = float(emissG * scale);
-        outEmission.color[2] = float(emissB * scale);
-    }
-
-    FinalizeEditorGlowExtents(minX, minY, maxX, maxY, texture.width, texture.height, outEmission);
-}
-
-bool CreatePoolMaterialForTexture(QrInstance instance, const EditorTexture &texture,
-                                  QrMaterial &outMaterial, EditorMaterialEmission &outEmission)
-{
-    outMaterial = QR_NO_MATERIAL;
-    outEmission = {};
-
-    const size_t pixels = size_t(texture.width) * size_t(texture.height);
-
-    if (texture.width == 0 || texture.height == 0 || texture.rgba.size() != pixels * 4)
-    {
-        return false;
-    }
-
-    QrMaterialCreateInfo info = {};
-    info.size = { texture.width, texture.height };
-    info.textures.pDataAlbedoAlpha = texture.rgba.data();
-    info.filter = QR_SAMPLER_FILTER_LINEAR;
-    info.addressModeU = QR_SAMPLER_ADDRESS_MODE_REPEAT;
-    info.addressModeV = QR_SAMPLER_ADDRESS_MODE_REPEAT;
-
-    std::vector<uint8_t> rme;
-
-    if (texture.fullbright.size() == pixels)
-    {
-        BuildFullbrightRmeAndEmission(texture, rme, outEmission);
-        if (texture.roughnessMask.size() == pixels)
-        {
-            for (size_t p = 0; p < pixels; p++)
-            {
-                rme[p * 4u + 0u] = texture.roughnessMask[p];
-            }
-        }
-        if (texture.metallicMask.size() == pixels)
-        {
-            for (size_t p = 0; p < pixels; p++)
-            {
-                rme[p * 4u + 1u] = texture.metallicMask[p];
-            }
-        }
-        info.textures.pDataRoughnessMetallicEmission = rme.data();
-    }
-    else if (texture.roughnessMask.size() == pixels || texture.metallicMask.size() == pixels)
-    {
-        const uint8_t defaultRough = uint8_t(kEditorDefaultRoughness * 255.0f);
-        rme.resize(pixels * 4u);
-        for (size_t p = 0; p < pixels; p++)
-        {
-            rme[p * 4u + 0u] = texture.roughnessMask.size() == pixels ? texture.roughnessMask[p]
-                                                                      : defaultRough;
-            rme[p * 4u + 1u] = texture.metallicMask.size() == pixels ? texture.metallicMask[p] : 0u;
-            rme[p * 4u + 2u] = 0u;
-            rme[p * 4u + 3u] = 0u;
-        }
-        info.textures.pDataRoughnessMetallicEmission = rme.data();
-    }
-
-    return qrCreateMaterial(instance, &info, &outMaterial) == QR_SUCCESS;
-}
-
-bool SurfaceCastsDtalLight(float truelight, const EditorMaterialParams &params,
-                           const EditorMaterialEmission &emission)
-{
-    return params.enabled && truelight > 0.0f && params.luma && params.lightBrightness > 0.0f &&
-           (params.hasLightColor || emission.meanBase > 0.0f);
-}
-
-void AttachWorldClusterVis(const EditorWorldClusters &clusters, QrWorldLightsUploadInfo &upload)
-{
-    if (!clusters.visData.empty() && clusters.visOffsets.size() == upload.numClusters &&
-        clusters.pvsRowBytes > 0)
-    {
-        upload.pVisData = clusters.visData.data();
-        upload.visDataSize = uint32_t(clusters.visData.size());
-        upload.pvsRowBytes = clusters.pvsRowBytes;
-        upload.pVisOffsets = clusters.visOffsets.data();
-    }
-    if (!clusters.skyVis.empty())
-    {
-        upload.pClusterSkyVisibility = clusters.skyVis.data();
-    }
-}
-
-float ComputeEditorRenderScale(float renderScalePercent)
-{
-    if (!(renderScalePercent > 0.0f))
-    {
-        return 1.0f;
-    }
-
-    return std::clamp(renderScalePercent / 100.0f, 0.2f, 1.0f);
-}
-
-QrRenderSharpenTechnique SharpenTechniqueForSetting(int32_t sharpenMode)
-{
-    switch (sharpenMode)
-    {
-    case 2:
-        return QR_RENDER_SHARPEN_TECHNIQUE_AMD_CAS;
-    case 1:
-        return QR_RENDER_SHARPEN_TECHNIQUE_NAIVE;
-    default:
-        return QR_RENDER_SHARPEN_TECHNIQUE_NONE;
-    }
-}
-
-void ApplyEditorResolutionParams(QrInstance instance, const EditorRenderSettings &settings,
-                                 uint32_t clientWidth, uint32_t clientHeight,
-                                 QrDrawFrameRenderResolutionParams &out)
-{
-    const float scale = ComputeEditorRenderScale(settings.renderScale);
-    out.customRenderSize = { uint32_t(float(clientWidth) * scale),
-                             uint32_t(float(clientHeight) * scale) };
-    out.pPixelizedRenderSize = nullptr;
-    out.sharpenTechnique = SharpenTechniqueForSetting(settings.sharpenMode);
-    out.upscaleTechnique = QR_RENDER_UPSCALE_TECHNIQUE_LINEAR;
-    out.resolutionMode = QR_RENDER_RESOLUTION_MODE_CUSTOM;
-
-    if (settings.upscaleDlss >= 1 && settings.upscaleDlss <= 5 &&
-        qrIsRenderUpscaleTechniqueAvailable(instance, QR_RENDER_UPSCALE_TECHNIQUE_NVIDIA_DLSS))
-    {
-        static constexpr QrRenderResolutionMode kDlssModes[5] = {
-            QR_RENDER_RESOLUTION_MODE_QUALITY,
-            QR_RENDER_RESOLUTION_MODE_BALANCED,
-            QR_RENDER_RESOLUTION_MODE_PERFORMANCE,
-            QR_RENDER_RESOLUTION_MODE_ULTRA_PERFORMANCE,
-            QR_RENDER_RESOLUTION_MODE_CUSTOM,
-        };
-        out.upscaleTechnique = QR_RENDER_UPSCALE_TECHNIQUE_NVIDIA_DLSS;
-        out.resolutionMode = kDlssModes[settings.upscaleDlss - 1];
-    }
-
-    if (settings.upscaleFsr31 >= 1 && settings.upscaleFsr31 <= 6 &&
-        qrIsRenderUpscaleTechniqueAvailable(instance, QR_RENDER_UPSCALE_TECHNIQUE_AMD_FSR3))
-    {
-        static constexpr QrRenderResolutionMode kFsrResModes[6] = {
-            QR_RENDER_RESOLUTION_MODE_NATIVE_AA,
-            QR_RENDER_RESOLUTION_MODE_QUALITY,
-            QR_RENDER_RESOLUTION_MODE_BALANCED,
-            QR_RENDER_RESOLUTION_MODE_PERFORMANCE,
-            QR_RENDER_RESOLUTION_MODE_ULTRA_PERFORMANCE,
-            QR_RENDER_RESOLUTION_MODE_CUSTOM,
-        };
-        out.upscaleTechnique = QR_RENDER_UPSCALE_TECHNIQUE_AMD_FSR3;
-        out.resolutionMode = kFsrResModes[settings.upscaleFsr31 - 1];
-    }
-}
-
-struct ScrollingSkyContext
-{
-    const float *origin = nullptr;
-    double timeSeconds = 0.0;
-    float halfExtent = 0.0f;
-};
-
-void ComputeSkyBoxVertex(float s, float t, int axis, const ScrollingSkyContext &ctx,
-                         float outPos[3])
-{
-    static constexpr int kStToVec[6][3] = {
-        { 3, -1, 2 },
-        { -3, 1, 2 },
-        { 1, 3, 2 },
-        { -1, -3, 2 },
-        { -2, -1, 3 },
-        { 2, -1, -3 },
-    };
-
-    const float b[3] = { s * ctx.halfExtent, t * ctx.halfExtent, ctx.halfExtent };
-
-    for (int j = 0; j < 3; j++)
-    {
-        const int k = kStToVec[axis][j];
-        const int axisIdx = std::clamp((k < 0 ? -k : k) - 1, 0, 2);
-        const float component = k < 0 ? -b[axisIdx] : b[axisIdx];
-        outPos[j] = component + ctx.origin[j];
-    }
-}
-
-void MakeScrollingSkyVertex(const float posQuake[3], const ScrollingSkyContext &ctx,
-                            float speed, QrVertex &outVertex)
-{
-    const float dir[3] = {
-        posQuake[0] - ctx.origin[0],
-        posQuake[1] - ctx.origin[1],
-        (posQuake[2] - ctx.origin[2]) * 3.0f,
-    };
-    const float len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    const float scale = len > 1e-6f ? (6.0f * 63.0f) / len : 0.0f;
-    const float scroll = float(std::fmod(ctx.timeSeconds * double(speed), 128.0));
-
-    outVertex = {};
-    outVertex.position[0] = EditorMetersLength(posQuake[0]);
-    outVertex.position[1] = EditorMetersLength(posQuake[1]);
-    outVertex.position[2] = EditorMetersLength(posQuake[2]);
-    outVertex.texCoord[0] = (scroll + dir[0] * scale) * (1.0f / 128.0f);
-    outVertex.texCoord[1] = (scroll + dir[1] * scale) * (1.0f / 128.0f);
-    outVertex.packedColor = 0xFFFFFFFFu;
-}
-
-void AppendScrollingSkyQuad(const float corners[4][3], const ScrollingSkyContext &ctx,
-                            std::vector<QrVertex> &solidVerts, std::vector<QrVertex> &alphaVerts)
-{
-    static constexpr uint32_t kQuadTri[6] = { 0, 1, 2, 0, 2, 3 };
-
-    for (uint32_t corner : kQuadTri)
-    {
-        QrVertex solid = {};
-        MakeScrollingSkyVertex(corners[corner], ctx, 8.0f, solid);
-        solidVerts.push_back(solid);
-
-        QrVertex alpha = {};
-        MakeScrollingSkyVertex(corners[corner], ctx, 16.0f, alpha);
-        alphaVerts.push_back(alpha);
-    }
-}
-
-void AppendScrollingSkyFace(int axis, const ScrollingSkyContext &ctx,
-                            std::vector<QrVertex> &solidVerts, std::vector<QrVertex> &alphaVerts)
-{
-    const int di = 4;
-    const int dj = axis < 4 ? di * 2 : di;
-
-    for (int i = 0; i < di; i++)
-    {
-        const float s0 = -1.0f + 2.0f * float(i) / float(di);
-        const float s1 = -1.0f + 2.0f * float(i + 1) / float(di);
-
-        for (int j = 0; j < dj; j++)
-        {
-            const float t0 = -1.0f + 2.0f * float(j) / float(dj);
-            const float t1 = -1.0f + 2.0f * float(j + 1) / float(dj);
-
-            float corners[4][3];
-            ComputeSkyBoxVertex(s0, t0, axis, ctx, corners[0]);
-            ComputeSkyBoxVertex(s0, t1, axis, ctx, corners[1]);
-            ComputeSkyBoxVertex(s1, t1, axis, ctx, corners[2]);
-            ComputeSkyBoxVertex(s1, t0, axis, ctx, corners[3]);
-            AppendScrollingSkyQuad(corners, ctx, solidVerts, alphaVerts);
-        }
-    }
-}
-
-void UploadSkyboxGeometry(QrInstance instance, const ScrollingSkyContext &ctx,
-                          const QrMaterial materials[6], const uint32_t widths[6],
-                          const uint32_t heights[6], const QrFloat4D &skyColor)
-{
-    static constexpr int kSkyTexOrder[6] = { 0, 2, 1, 3, 4, 5 };
-    static constexpr float kCornerST[4][2] = {
-        { -1.0f, -1.0f },
-        { -1.0f, 1.0f },
-        { 1.0f, 1.0f },
-        { 1.0f, -1.0f },
-    };
-    static constexpr uint32_t kQuadTri[6] = { 0, 1, 2, 0, 2, 3 };
-
-    QrRasterizedGeometryUploadInfo upload = {};
-    upload.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SKY;
-    upload.transform.matrix[0][0] = 1.0f;
-    upload.transform.matrix[1][1] = 1.0f;
-    upload.transform.matrix[2][2] = 1.0f;
-    upload.color = skyColor;
-
-    for (int axis = 0; axis < 6; axis++)
-    {
-        const int face = kSkyTexOrder[axis];
-
-        if (materials[face] == QR_NO_MATERIAL || widths[face] == 0 || heights[face] == 0)
-        {
-            continue;
-        }
-
-        const float w = float(widths[face]);
-        const float h = float(heights[face]);
-        QrVertex corners[4] = {};
-
-        for (int c = 0; c < 4; c++)
-        {
-            const float s = kCornerST[c][0];
-            const float t = kCornerST[c][1];
-            float posQuake[3] = {};
-            ComputeSkyBoxVertex(s, t, axis, ctx, posQuake);
-
-            float u = (s + 1.0f) * 0.5f;
-            float v = (t + 1.0f) * 0.5f;
-            u = u * (w - 1.0f) / w + 0.5f / w;
-            v = 1.0f - (v * (h - 1.0f) / h + 0.5f / h);
-
-            corners[c].position[0] = EditorMetersLength(posQuake[0]);
-            corners[c].position[1] = EditorMetersLength(posQuake[1]);
-            corners[c].position[2] = EditorMetersLength(posQuake[2]);
-            corners[c].texCoord[0] = u;
-            corners[c].texCoord[1] = v;
-            corners[c].packedColor = 0xFFFFFFFFu;
-        }
-
-        QrVertex faceVerts[6] = {};
-
-        for (int i = 0; i < 6; i++)
-        {
-            faceVerts[i] = corners[kQuadTri[i]];
-        }
-
-        upload.vertexCount = 6;
-        upload.pVertices = faceVerts;
-        upload.material = materials[face];
-        qrUploadRasterizedGeometry(instance, &upload, nullptr, nullptr);
-    }
-}
-
 }
 
 EditorApp::EditorApp(void *nativeInstance)
     : m_nativeInstance(nativeInstance)
+    , m_scene(m_runtime.scene)
+    , m_materials(m_runtime.materials)
+    , m_materialBakes(m_runtime.materialBakes)
+    , m_settings(m_runtime.settings)
+    , m_sun(m_runtime.sun)
+    , m_customLights(m_runtime.customLights)
+    , m_emissiveLights(m_runtime.emissiveLights)
+    , m_generatedLightBases(m_runtime.generatedLightBases)
+    , m_emitterLightOverrides(m_runtime.emitterLightOverrides)
+    , m_textureMaterials(m_runtime.textureMaterials)
+    , m_textureEmissions(m_runtime.textureEmissions)
+    , m_textureIndexByName(m_runtime.textureIndexByName)
+    , m_missingExternalTextures(m_runtime.missingExternalTextures)
 {
 }
 
@@ -1347,533 +868,569 @@ bool EditorApp::CreateMaterial()
 
 QrGeometryPassThroughType EditorApp::PassThroughTypeForSurface(EditorSurfaceKind kind)
 {
-    switch (kind)
-    {
-    case EditorSurfaceKind::Water:
-        return QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_REFLECT_REFRACT;
-    case EditorSurfaceKind::Slime:
-        return QR_GEOMETRY_PASS_THROUGH_TYPE_ACID_REFLECT_REFRACT;
-    case EditorSurfaceKind::Fence:
-        return QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED;
-    default:
-        return QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
-    }
-}
-
-QrMaterial EditorApp::SurfaceMaterial(const EditorSurface &surface) const
-{
-    if (surface.texture >= 0 && size_t(surface.texture) < m_textureMaterials.size())
-    {
-        const QrMaterial material = m_textureMaterials[size_t(surface.texture)];
-
-        if (material != QR_NO_MATERIAL)
-        {
-            return material;
-        }
-    }
-
-    return m_material;
+    return EditorSceneRuntime::PassThroughTypeForSurface(kind);
 }
 
 namespace
 {
-int32_t FindTextureIndexByKey(const std::unordered_map<std::string, int32_t> &indexByName,
-                              const std::string &key)
+
+bool AnySceneSurfaceUsesTexture(const EditorScene &scene, int32_t textureIndex)
 {
-    static constexpr const char kPrefix[] = "textures/";
-    const std::string base = key.rfind(kPrefix, 0) == 0 ? key.substr(sizeof(kPrefix) - 1) : key;
-
-    std::string candidates[4] = { key, base, std::string(), std::string() };
-
-    if (!base.empty() && (base[0] == '*' || base[0] == '#'))
+    for (const EditorSurface &surf : scene.surfaces)
     {
-        candidates[2] = base;
-        candidates[2][0] = base[0] == '*' ? '#' : '*';
-    }
-
-    if (base.size() >= 2 && base[0] == '+' && (base[1] < '0' || base[1] > '9'))
-    {
-        candidates[3] = "+0" + base.substr(1);
-    }
-
-    for (const std::string &candidate : candidates)
-    {
-        if (candidate.empty())
+        if (surf.texture == textureIndex)
         {
-            continue;
-        }
-
-        const auto found = indexByName.find(candidate);
-
-        if (found != indexByName.end())
-        {
-            return found->second;
+            return true;
         }
     }
-
-    return -1;
+    return false;
 }
+
 } // namespace
 
-int32_t EditorApp::TextureIndexByName(const std::string &name) const
+int32_t EditorApp::RegisterOrUpdateGeneratedTexture(const std::string &relPath, uint32_t width,
+                                                    uint32_t height,
+                                                    const std::vector<uint8_t> &rgba)
 {
-    const std::string key = NormalizeAssetKey(name);
-
-    if (key.empty() || key == "none")
+    const std::string key = NormalizeAssetKey(relPath);
+    if (key.empty() || width == 0 || height == 0 || rgba.size() != size_t(width) * size_t(height) * 4u)
     {
         return -1;
     }
 
-    return FindTextureIndexByKey(m_textureIndexByName, key);
-}
+    m_missingExternalTextures.erase(key);
+    m_textureBrowserCatalogBuilt = false;
 
-int32_t EditorApp::ResolveOrLoadTexture(const std::string &name)
-{
-    const std::string key = NormalizeAssetKey(name);
-
-    if (key.empty() || key == "none")
+    const int32_t existing = TextureIndexByName(key);
+    if (existing >= 0 && size_t(existing) < m_scene.textures.size())
     {
-        return -1;
-    }
+        EditorTexture &tex = m_scene.textures[size_t(existing)];
+        tex.width = width;
+        tex.height = height;
+        tex.rgba = rgba;
+        tex.fullbright.clear();
+        tex.roughnessMask.clear();
+        tex.metallicMask.clear();
 
-    if (const int32_t existing = TextureIndexByName(key); existing >= 0)
-    {
+        if (m_instance != nullptr && size_t(existing) < m_textureMaterials.size())
+        {
+            if (m_textureMaterials[size_t(existing)] != QR_NO_MATERIAL)
+            {
+                qrDestroyMaterial(m_instance, m_textureMaterials[size_t(existing)]);
+                m_textureMaterials[size_t(existing)] = QR_NO_MATERIAL;
+            }
+            EditorMaterialEmission emission;
+            EditorSceneRuntime::CreatePoolMaterial(m_instance, tex,
+                                                   m_textureMaterials[size_t(existing)], emission);
+            if (size_t(existing) < m_textureEmissions.size())
+            {
+                m_textureEmissions[size_t(existing)] = emission;
+            }
+            if (m_materialBakes.InvalidateTexture(m_instance, existing) ||
+                AnySceneSurfaceUsesTexture(m_scene, existing))
+            {
+                m_materialsChanged = true;
+            }
+            m_previewMaterialBakes.InvalidateTexture(m_instance, existing);
+        }
         return existing;
     }
 
-    if (m_missingExternalTextures.count(key) != 0)
-    {
-        return -1;
-    }
-
-    uint32_t width = 0;
-    uint32_t height = 0;
-    std::vector<uint8_t> rgba;
-
-    if (!TryLoadExternalImage(m_assets, key, width, height, rgba))
-    {
-        m_missingExternalTextures.insert(key);
-        return -1;
-    }
-
     const int32_t newIndex = int32_t(m_scene.textures.size());
-    EditorTexture texture;
-    texture.name = key;
-    texture.width = width;
-    texture.height = height;
-    texture.rgba = std::move(rgba);
-    texture.isExternal = true;
-    m_scene.textures.push_back(std::move(texture));
+    EditorTexture tex;
+    tex.name = key;
+    tex.width = width;
+    tex.height = height;
+    tex.rgba = rgba;
+    tex.isExternal = true;
+    m_scene.textures.push_back(std::move(tex));
 
     QrMaterial material = QR_NO_MATERIAL;
     EditorMaterialEmission emission;
-
     if (m_instance != nullptr)
     {
-        CreatePoolMaterialForTexture(m_instance, m_scene.textures.back(), material, emission);
+        EditorSceneRuntime::CreatePoolMaterial(m_instance, m_scene.textures.back(), material,
+                                               emission);
     }
 
     m_textureMaterials.push_back(material);
     m_textureEmissions.push_back(emission);
     m_textureIndexByName.emplace(key, newIndex);
-
     static constexpr const char kPrefix[] = "textures/";
-
     if (key.rfind(kPrefix, 0) == 0)
     {
         m_textureIndexByName.emplace(key.substr(sizeof(kPrefix) - 1), newIndex);
     }
-
     return newIndex;
 }
 
-EditorMaterialEmission EditorApp::MaterialEmissionOf(QrMaterial material) const
+namespace
 {
-    const EditorMaterialEmission baked = m_materialBakes.EmissionOf(material);
 
-    if (baked.valid)
+bool AiSlotMapping(EditorApp::EditorTextureSlot slot, EditorAiMapKind &outKind,
+                   const char *&outKindName, const char *&outSuffix)
+{
+    switch (slot)
     {
-        return baked;
+    case EditorApp::EditorTextureSlot::Normals:
+        outKind = EditorAiMapKind::Normals;
+        outKindName = "normals";
+        outSuffix = "_norm.tga";
+        return true;
+    case EditorApp::EditorTextureSlot::Emissive:
+        outKind = EditorAiMapKind::Emissive;
+        outKindName = "emissive";
+        outSuffix = "_luma.tga";
+        return true;
+    case EditorApp::EditorTextureSlot::Gloss:
+        outKind = EditorAiMapKind::Gloss;
+        outKindName = "gloss";
+        outSuffix = "_gloss.tga";
+        return true;
+    default:
+        return false;
+    }
+}
+
+void AssignAiSlotPath(EditorMaterialParams &params, EditorApp::EditorTextureSlot slot,
+                      const std::string &relPath)
+{
+    switch (slot)
+    {
+    case EditorApp::EditorTextureSlot::Normals:
+        params.normalTexture = relPath;
+        break;
+    case EditorApp::EditorTextureSlot::Emissive:
+        params.emissiveTexture = relPath;
+        break;
+    case EditorApp::EditorTextureSlot::Gloss:
+        params.glossTexture = relPath;
+        break;
+    default:
+        break;
+    }
+}
+
+std::string ResolveAiOutputRoot(const std::string &gamePath, const std::string &materialsPath,
+                                const std::string &scenePath)
+{
+    if (!gamePath.empty())
+    {
+        return gamePath;
+    }
+    std::string matDir = EditorDirectoryOf(materialsPath);
+    if (!matDir.empty())
+    {
+        return matDir;
+    }
+    std::string sceneDir = EditorDirectoryOf(scenePath);
+    if (!sceneDir.empty())
+    {
+        return sceneDir;
+    }
+    return ".";
+}
+
+std::string SanitizeAiStem(std::string stem)
+{
+    static constexpr std::string_view kUnsafeChars = "*#: ?\"<>|";
+    for (char &ch : stem)
+    {
+        if (ch == '\\')
+        {
+            ch = '/';
+        }
+        else if (kUnsafeChars.find(ch) != std::string_view::npos)
+        {
+            ch = '_';
+        }
+    }
+    while (!stem.empty() && stem.front() == '/')
+    {
+        stem.erase(stem.begin());
+    }
+    while (stem.compare(0, 2, "./") == 0)
+    {
+        stem.erase(0, 2);
+    }
+    return stem.empty() ? std::string("generated") : stem;
+}
+
+std::string BuildAiGeneratedRelativePath(const std::string &matName, const std::string &baseTexture,
+                                         const char *suffix)
+{
+    std::string raw = !baseTexture.empty() ? baseTexture : matName;
+    raw = LowercaseName(SanitizeAiStem(std::move(raw)));
+
+    const size_t slash = raw.find_last_of('/');
+    const size_t dot = raw.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+    {
+        raw.resize(dot);
     }
 
-    const size_t count = std::min(m_textureMaterials.size(), m_textureEmissions.size());
+    const bool hasRootFolder =
+        raw.compare(0, 9, "textures/") == 0 || raw.compare(0, 7, "models/") == 0 ||
+        raw.compare(0, 6, "progs/") == 0 || raw.compare(0, 4, "gfx/") == 0 ||
+        raw.compare(0, 8, "sprites/") == 0;
+    const std::string prefixed = hasRootFolder ? raw : ("textures/" + raw);
+    return prefixed + suffix;
+}
 
-    for (size_t i = 0; i < count; i++)
+bool WriteBinaryFileAtomic(const std::filesystem::path &path, const std::vector<uint8_t> &bytes)
+{
+    std::error_code ec;
+    if (!path.parent_path().empty())
     {
-        if (m_textureMaterials[i] == material)
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+
+    const std::filesystem::path tmpPath = path.string() + ".tmp";
+    {
+        std::ofstream file(tmpPath, std::ios::binary);
+        if (!file)
         {
-            return m_textureEmissions[i];
+            return false;
+        }
+        file.write(reinterpret_cast<const char *>(bytes.data()), std::streamsize(bytes.size()));
+        if (!file)
+        {
+            return false;
         }
     }
 
-    return EditorMaterialEmission{};
+    std::filesystem::rename(tmpPath, path, ec);
+    if (!ec)
+    {
+        return true;
+    }
+
+    std::filesystem::remove(tmpPath, ec);
+    return false;
 }
 
-// A material's texture_base replaces the image the map put on the surface, so the surface's own
-// material is swapped out before ApplyEditorMaterial sets the rest of the parameters. A name the
-// scene does not carry, or NONE, keeps the map's image: the override only wins where it resolves.
-//
-// The keys the SDK has no upload field for -- the extra images, bump_scale, transparency,
-// luma_blend -- are folded into a packed material set here, and that bake replaces the pool
-// material entirely because the shader reads those channels instead of the scalars.
-QrMaterial EditorApp::SurfaceMaterialWithOverride(const EditorSurface &surface,
-                                                 const EditorMaterialParams &params)
+std::filesystem::path FindAiGeneratorScript()
 {
-    const std::string &effectiveName = m_materials.EffectiveNameFor(surface);
-    const auto resolve = [this](const std::string &name) { return ResolveOrLoadTexture(name); };
-
-    const QrMaterial baked = m_materialBakes.Get(m_instance, effectiveName, params, m_scene,
-                                                 m_textureMaterials, resolve);
-
-    if (baked != QR_NO_MATERIAL)
+    std::error_code ec;
+    const std::string resolved = ResolveDefaultAssetPath("tools/generate_texture_ai.py");
+    if (std::filesystem::is_regular_file(resolved, ec))
     {
-        return baked;
+        return resolved;
     }
 
-    int32_t index = ResolveOrLoadTexture(params.baseTexture);
-
-    if (index < 0 && !effectiveName.empty() && effectiveName != surface.textureName)
+    std::filesystem::path sourceRel =
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "tools" /
+        "generate_texture_ai.py";
+    if (std::filesystem::is_regular_file(sourceRel, ec))
     {
-        index = TextureIndexByName(effectiveName);
+        return sourceRel;
     }
 
-    if (index >= 0 && size_t(index) < m_textureMaterials.size())
-    {
-        const QrMaterial material = m_textureMaterials[size_t(index)];
+    return {};
+}
 
-        if (material != QR_NO_MATERIAL)
+std::filesystem::path FindAiPythonExecutable()
+{
+#if !defined(_WIN32)
+    static constexpr const char *kCandidates[] = {
+        "/home/user/Soft/miniconda3/envs/pantella-env/bin/python",
+        "/usr/bin/python3",
+    };
+    if (const char *envPy = std::getenv("QRAY_AI_PYTHON");
+        envPy != nullptr && envPy[0] != '\0' && access(envPy, X_OK) == 0)
+    {
+        return envPy;
+    }
+    for (const char *candidate : kCandidates)
+    {
+        if (access(candidate, X_OK) == 0)
         {
-            return material;
+            return candidate;
         }
     }
-
-    return SurfaceMaterial(surface);
+#endif
+    return {};
 }
 
-void EditorApp::DestroyPoolMaterials()
+bool RunExternalAiGenerator(const std::filesystem::path &srcPath,
+                            const std::filesystem::path &outPath, const char *kindName)
 {
-    if (m_instance != nullptr)
+#if defined(_WIN32)
+    (void)srcPath;
+    (void)outPath;
+    (void)kindName;
+    return false;
+#else
+    const std::filesystem::path pythonExe = FindAiPythonExecutable();
+    const std::filesystem::path scriptPath = FindAiGeneratorScript();
+    if (pythonExe.empty() || scriptPath.empty())
     {
-        for (QrMaterial &material : m_textureMaterials)
+        return false;
+    }
+
+    std::string py = pythonExe.string();
+    std::string sc = scriptPath.string();
+    std::string flIn = "--input";
+    std::string argIn = srcPath.string();
+    std::string flOut = "--output";
+    std::string argOut = outPath.string();
+    std::string flKind = "--kind";
+    std::string argKind = kindName;
+    char *const argv[] = {
+        py.data(), sc.data(), flIn.data(), argIn.data(), flOut.data(), argOut.data(), flKind.data(),
+        argKind.data(), nullptr,
+    };
+
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        return false;
+    }
+    if (pid == 0)
+    {
+        execv(py.c_str(), argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+    {
+        return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
+}
+
+bool TryReadTgaOrImageFile(const std::filesystem::path &path, uint32_t expectedW, uint32_t expectedH,
+                           std::vector<uint8_t> &outRgba)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+    {
+        return false;
+    }
+    std::vector<uint8_t> encoded((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+    uint32_t w = 0;
+    uint32_t h = 0;
+    return DecodeEditorImageRgba(encoded, w, h, outRgba) && w == expectedW && h == expectedH;
+}
+
+void ComputeAiTargetDimensions(uint32_t srcW, uint32_t srcH, uint32_t &outW, uint32_t &outH)
+{
+    constexpr uint32_t kMinAiDim = 1024u;
+    if (srcW == 0u || srcH == 0u)
+    {
+        outW = kMinAiDim;
+        outH = kMinAiDim;
+        return;
+    }
+    const uint32_t minSide = std::min(srcW, srcH);
+    if (minSide >= kMinAiDim)
+    {
+        outW = srcW;
+        outH = srcH;
+        return;
+    }
+    const double scale = double(kMinAiDim) / double(minSide);
+    outW = std::max<uint32_t>(kMinAiDim, uint32_t(std::lround(double(srcW) * scale)));
+    outH = std::max<uint32_t>(kMinAiDim, uint32_t(std::lround(double(srcH) * scale)));
+}
+
+void UpscaleBufferWrappedBilinear(const uint8_t *src, uint32_t srcW, uint32_t srcH,
+                                  uint32_t channels, uint32_t dstW, uint32_t dstH,
+                                  std::vector<uint8_t> &out)
+{
+    const size_t totalBytes = size_t(dstW) * size_t(dstH) * size_t(channels);
+    if (srcW == dstW && srcH == dstH)
+    {
+        out.assign(src, src + totalBytes);
+        return;
+    }
+
+    auto wrap = [](int32_t c, uint32_t limit) -> uint32_t {
+        const int32_t m = c % int32_t(limit);
+        return uint32_t(m < 0 ? (m + int32_t(limit)) : m);
+    };
+    out.resize(totalBytes);
+    for (uint32_t y = 0; y < dstH; y++)
+    {
+        const float v = ((float(y) + 0.5f) / float(dstH)) * float(srcH) - 0.5f;
+        const int32_t y0 = int32_t(std::floor(v));
+        const float fy = v - float(y0);
+        const uint32_t wy0 = wrap(y0, srcH);
+        const uint32_t wy1 = wrap(y0 + 1, srcH);
+        for (uint32_t x = 0; x < dstW; x++)
         {
-            if (material != QR_NO_MATERIAL)
+            const float u = ((float(x) + 0.5f) / float(dstW)) * float(srcW) - 0.5f;
+            const int32_t x0 = int32_t(std::floor(u));
+            const float fx = u - float(x0);
+            const uint32_t wx0 = wrap(x0, srcW);
+            const uint32_t wx1 = wrap(x0 + 1, srcW);
+            const uint8_t *p00 = src + (size_t(wy0) * srcW + wx0) * channels;
+            const uint8_t *p10 = src + (size_t(wy0) * srcW + wx1) * channels;
+            const uint8_t *p01 = src + (size_t(wy1) * srcW + wx0) * channels;
+            const uint8_t *p11 = src + (size_t(wy1) * srcW + wx1) * channels;
+            uint8_t *dst = out.data() + (size_t(y) * dstW + x) * channels;
+            for (uint32_t c = 0; c < channels; c++)
             {
-                qrDestroyMaterial(m_instance, material);
-                material = QR_NO_MATERIAL;
+                const float top = float(p00[c]) + (float(p10[c]) - float(p00[c])) * fx;
+                const float bot = float(p01[c]) + (float(p11[c]) - float(p01[c])) * fx;
+                dst[c] = uint8_t(std::clamp(std::lround(top + (bot - top) * fy), 0l, 255l));
+            }
+        }
+    }
+}
+
+struct AiGeneratedResult
+{
+    std::vector<uint8_t> rgba;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool usedOnnx = false;
+};
+
+bool GenerateAiTexturePixels(const EditorTexture &diffuseTex, EditorAiMapKind aiKind,
+                             const char *kindName, const std::filesystem::path &outPath,
+                             AiGeneratedResult &out)
+{
+    out.usedOnnx = false;
+    ComputeAiTargetDimensions(diffuseTex.width, diffuseTex.height, out.width, out.height);
+
+    std::vector<uint8_t> upscaledDiffuse;
+    UpscaleBufferWrappedBilinear(diffuseTex.rgba.data(), diffuseTex.width, diffuseTex.height, 4u,
+                                 out.width, out.height, upscaledDiffuse);
+
+    const std::vector<uint8_t> srcTga =
+        EncodeEditorTgaRgba(upscaledDiffuse.data(), out.width, out.height);
+    if (!srcTga.empty())
+    {
+        const std::filesystem::path srcTmp = outPath.string() + ".src.tmp.tga";
+        if (WriteBinaryFileAtomic(srcTmp, srcTga))
+        {
+            const bool externalOk = RunExternalAiGenerator(srcTmp, outPath, kindName);
+            std::error_code ec;
+            std::filesystem::remove(srcTmp, ec);
+            if (externalOk && TryReadTgaOrImageFile(outPath, out.width, out.height, out.rgba))
+            {
+                out.usedOnnx = true;
+                return true;
             }
         }
     }
 
-    m_textureMaterials.clear();
-    m_textureEmissions.clear();
-    m_textureIndexByName.clear();
-    m_missingExternalTextures.clear();
-    m_textureBrowserCatalogBuilt = false;
-
-    while (!m_scene.textures.empty() && m_scene.textures.back().isExternal)
+    std::vector<uint8_t> upscaledMask;
+    const uint8_t *fbPtr = nullptr;
+    if (diffuseTex.fullbright.size() == size_t(diffuseTex.width) * size_t(diffuseTex.height))
     {
-        m_scene.textures.pop_back();
+        UpscaleBufferWrappedBilinear(diffuseTex.fullbright.data(), diffuseTex.width,
+                                     diffuseTex.height, 1u, out.width, out.height, upscaledMask);
+        fbPtr = upscaledMask.data();
     }
+    if (!GenerateEditorAiTextureFromDiffuse(upscaledDiffuse.data(), out.width, out.height, fbPtr,
+                                            aiKind, out.rgba))
+    {
+        return false;
+    }
+    const std::vector<uint8_t> outTga =
+        EncodeEditorTgaRgba(out.rgba.data(), out.width, out.height);
+    return !outTga.empty() && WriteBinaryFileAtomic(outPath, outTga);
 }
 
-void EditorApp::DestroySkyMaterials()
-{
-    m_hasSkybox = false;
-
-    for (int i = 0; i < 6; i++)
-    {
-        if (m_instance != nullptr && m_skyboxMaterials[i] != QR_NO_MATERIAL)
-        {
-            qrDestroyMaterial(m_instance, m_skyboxMaterials[i]);
-        }
-
-        m_skyboxMaterials[i] = QR_NO_MATERIAL;
-        m_skyboxWidths[i] = 0;
-        m_skyboxHeights[i] = 0;
-    }
-
-    if (m_instance == nullptr)
-    {
-        return;
-    }
-
-    if (m_skySolidMaterial != QR_NO_MATERIAL)
-    {
-        qrDestroyMaterial(m_instance, m_skySolidMaterial);
-        m_skySolidMaterial = QR_NO_MATERIAL;
-    }
-
-    if (m_skyAlphaMaterial != QR_NO_MATERIAL)
-    {
-        qrDestroyMaterial(m_instance, m_skyAlphaMaterial);
-        m_skyAlphaMaterial = QR_NO_MATERIAL;
-    }
-}
-
-namespace
-{
-bool LoadSkyboxFaceImage(const EditorAssetSource &assets, const std::string &baseKey,
-                         const char *suffix, uint32_t &outWidth, uint32_t &outHeight,
-                         std::vector<uint8_t> &outRgba)
-{
-    if (TryLoadExternalImage(assets, baseKey + suffix, outWidth, outHeight, outRgba))
-    {
-        return true;
-    }
-
-    if (!baseKey.empty() && baseKey.back() != '_')
-    {
-        return TryLoadExternalImage(assets, baseKey + "_" + suffix, outWidth, outHeight, outRgba);
-    }
-
-    return false;
-}
-
-void AccumulateSkyboxRgb(const std::vector<uint8_t> &rgba, uint32_t width, uint32_t height,
-                         double rgbSum[3], uint64_t &pixelCount)
-{
-    const size_t pixels = size_t(width) * size_t(height);
-
-    for (size_t p = 0; p < pixels; p++)
-    {
-        rgbSum[0] += rgba[p * 4 + 0];
-        rgbSum[1] += rgba[p * 4 + 1];
-        rgbSum[2] += rgba[p * 4 + 2];
-    }
-
-    pixelCount += pixels;
-}
-
-bool LoadSkyboxFaceWithFallback(const EditorAssetSource &assets, const std::string &baseKey,
-                                const std::string &altKey, const char *suffix, uint32_t &outWidth,
-                                uint32_t &outHeight, std::vector<uint8_t> &outRgba)
-{
-    if (LoadSkyboxFaceImage(assets, baseKey, suffix, outWidth, outHeight, outRgba))
-    {
-        return outWidth > 0 && outHeight > 0 &&
-               outRgba.size() >= size_t(outWidth) * size_t(outHeight) * 4;
-    }
-    if (baseKey != altKey &&
-        LoadSkyboxFaceImage(assets, altKey, suffix, outWidth, outHeight, outRgba))
-    {
-        return outWidth > 0 && outHeight > 0 &&
-               outRgba.size() >= size_t(outWidth) * size_t(outHeight) * 4;
-    }
-    return false;
-}
 } // namespace
 
-namespace
+bool EditorApp::GenerateMaterialTextureWithAi(int32_t materialIndex, EditorTextureSlot slot)
 {
-
-struct SkyboxFacePixels
-{
-    uint32_t width = 0;
-    uint32_t height = 0;
-    std::vector<uint8_t> rgba;
-};
-
-bool ResolveSkyboxFaceRgba(const EditorAssetSource &assets, const EditorScene &scene,
-                           const std::string &baseKey, const std::string &q1Key, int faceIdx,
-                           SkyboxFacePixels &outFace)
-{
-    static constexpr const char *kSkyboxSuffixes[6] = { "rt", "bk", "lf", "ft", "up", "dn" };
-    if (!scene.skyboxName.empty() &&
-        LoadSkyboxFaceWithFallback(assets, baseKey, q1Key, kSkyboxSuffixes[faceIdx], outFace.width,
-                                   outFace.height, outFace.rgba))
-    {
-        return true;
-    }
-
-    if (scene.generatedSkyboxSize == 0)
-    {
-        return false;
-    }
-    const size_t expectedBytes =
-        size_t(scene.generatedSkyboxSize) * size_t(scene.generatedSkyboxSize) * 4u;
-    if (scene.generatedSkyboxFaces[size_t(faceIdx)].size() < expectedBytes)
+    if (materialIndex < 0 || size_t(materialIndex) >= m_materials.Count())
     {
         return false;
     }
 
-    outFace.width = scene.generatedSkyboxSize;
-    outFace.height = scene.generatedSkyboxSize;
-    outFace.rgba = scene.generatedSkyboxFaces[size_t(faceIdx)];
+    EditorAiMapKind aiKind = EditorAiMapKind::Normals;
+    const char *kindName = nullptr;
+    const char *suffix = nullptr;
+    if (!AiSlotMapping(slot, aiKind, kindName, suffix))
+    {
+        return false;
+    }
+
+    const std::string &matName = m_materials.NameAt(size_t(materialIndex));
+    EditorMaterialParams &params = m_materials.At(size_t(materialIndex));
+    int32_t diffuseIdx = ResolveOrLoadTexture(params.baseTexture);
+    if (diffuseIdx < 0)
+    {
+        diffuseIdx = ResolveOrLoadTexture(matName);
+    }
+
+    if (diffuseIdx < 0 || size_t(diffuseIdx) >= m_scene.textures.size() ||
+        m_scene.textures[size_t(diffuseIdx)].rgba.empty())
+    {
+        Notify("No diffuse texture loaded for " + matName);
+        PrintMessage(("ai texture: no diffuse texture for " + matName).c_str(), this);
+        return false;
+    }
+
+    const EditorTexture &diffuseTex = m_scene.textures[size_t(diffuseIdx)];
+    const std::string relPath = BuildAiGeneratedRelativePath(matName, params.baseTexture, suffix);
+    const std::string outputRoot =
+        ResolveAiOutputRoot(m_gamePath, m_sessionPaths.materials, m_scenePath);
+    const std::filesystem::path outPath = std::filesystem::path(outputRoot) / relPath;
+
+    AiGeneratedResult generated;
+    if (!GenerateAiTexturePixels(diffuseTex, aiKind, kindName, outPath, generated))
+    {
+        Notify("AI texture generation failed for " + matName);
+        PrintMessage(("ai texture: failed for " + matName).c_str(), this);
+        return false;
+    }
+
+    m_assets.AddDirectory(outputRoot);
+    RegisterOrUpdateGeneratedTexture(relPath, generated.width, generated.height, generated.rgba);
+    AssignAiSlotPath(params, slot, relPath);
+    MarkMaterialEdited(materialIndex);
+
+    const std::string backendTag = generated.usedOnnx ? "DeepBump ONNX" : "intrinsic filter";
+    PrintMessage(("ai texture (" + backendTag + "): " + matName + " -> " + relPath).c_str(),
+                 this);
+    Notify("AI generated " + relPath);
     return true;
 }
 
-} // namespace
-
-void EditorApp::CreateSkyboxMaterials()
+QrMaterial EditorApp::SurfaceMaterial(const EditorSurface &surface) const
 {
-    if (m_instance == nullptr)
-    {
-        return;
-    }
-
-    const std::string rawKey = NormalizeAssetKey(m_scene.skyboxName);
-    const std::string q1Key = NormalizeAssetKey("gfx/env/" + m_scene.skyboxName);
-    const std::string &baseKey =
-        (m_scene.usesExternalLightingModel || rawKey.rfind("env/", 0) == 0) ? rawKey : q1Key;
-
-    double rgbSum[3] = { 0.0, 0.0, 0.0 };
-    uint64_t pixelCount = 0;
-    int loadedFaces = 0;
-
-    for (int i = 0; i < 6; i++)
-    {
-        SkyboxFacePixels face;
-        if (!ResolveSkyboxFaceRgba(m_assets, m_scene, baseKey, q1Key, i, face))
-        {
-            continue;
-        }
-        const uint32_t width = face.width;
-        const uint32_t height = face.height;
-        const std::vector<uint8_t> &rgba = face.rgba;
-
-        QrMaterialCreateInfo info = {};
-        info.size = { width, height };
-        info.filter = QR_SAMPLER_FILTER_LINEAR;
-        info.addressModeU = QR_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        info.addressModeV = QR_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        info.textures.pDataAlbedoAlpha = rgba.data();
-
-        if (qrCreateMaterial(m_instance, &info, &m_skyboxMaterials[i]) == QR_SUCCESS)
-        {
-            m_skyboxWidths[i] = width;
-            m_skyboxHeights[i] = height;
-            loadedFaces++;
-            AccumulateSkyboxRgb(rgba, width, height, rgbSum, pixelCount);
-        }
-    }
-
-    m_hasSkybox = loadedFaces > 0;
-
-    if (!m_scene.skyboxName.empty() || m_hasSkybox)
-    {
-        const std::string label =
-            m_scene.skyboxName.empty() ? std::string("generated cloud sky") : m_scene.skyboxName;
-        PrintMessage(("skybox '" + label + "': " + std::to_string(loadedFaces) + "/6 faces loaded")
-                         .c_str(),
-                     this);
-    }
-
-    if (m_hasSkybox && !m_scene.hasSkyFlatColor && pixelCount > 0)
-    {
-        const double scale = 1.0 / (double(pixelCount) * 255.0);
-        m_scene.skyFlatColor[0] = float(rgbSum[0] * scale);
-        m_scene.skyFlatColor[1] = float(rgbSum[1] * scale);
-        m_scene.skyFlatColor[2] = float(rgbSum[2] * scale);
-        m_scene.hasSkyFlatColor = true;
-    }
+    return m_runtime.SurfaceMaterial(surface, m_material);
 }
 
-void EditorApp::CreateScrollingSkyMaterials()
+int32_t EditorApp::TextureIndexByName(const std::string &name) const
 {
-    DestroySkyMaterials();
-    CreateSkyboxMaterials();
+    return m_runtime.TextureIndexByName(name);
+}
 
-    if (m_instance == nullptr || !m_scene.hasScrollingSky || m_scene.skyLayerWidth == 0 ||
-        m_scene.skyLayerHeight == 0)
-    {
-        return;
-    }
+int32_t EditorApp::ResolveOrLoadTexture(const std::string &name)
+{
+    return m_runtime.ResolveOrLoadTexture(m_instance, m_assets, name);
+}
 
-    const size_t expectedBytes = size_t(m_scene.skyLayerWidth) * size_t(m_scene.skyLayerHeight) * 4;
+EditorMaterialEmission EditorApp::MaterialEmissionOf(QrMaterial material) const
+{
+    return m_runtime.MaterialEmissionOf(material);
+}
 
-    if (m_scene.skySolidRgba.size() != expectedBytes ||
-        m_scene.skyAlphaRgba.size() != expectedBytes)
-    {
-        return;
-    }
+QrMaterial EditorApp::SurfaceMaterialWithOverride(const EditorSurface &surface,
+                                                 const EditorMaterialParams &params)
+{
+    return m_runtime.SurfaceMaterialWithOverride(m_instance, m_assets, surface, params, m_material);
+}
 
-    QrMaterialCreateInfo info = {};
-    info.size = { m_scene.skyLayerWidth, m_scene.skyLayerHeight };
-    info.filter = QR_SAMPLER_FILTER_LINEAR;
-    info.addressModeU = QR_SAMPLER_ADDRESS_MODE_REPEAT;
-    info.addressModeV = QR_SAMPLER_ADDRESS_MODE_REPEAT;
-
-    info.textures.pDataAlbedoAlpha = m_scene.skySolidRgba.data();
-    qrCreateMaterial(m_instance, &info, &m_skySolidMaterial);
-
-    info.textures.pDataAlbedoAlpha = m_scene.skyAlphaRgba.data();
-    qrCreateMaterial(m_instance, &info, &m_skyAlphaMaterial);
+void EditorApp::DestroyPoolMaterials()
+{
+    m_runtime.DestroyPoolMaterials(m_instance);
+    m_textureBrowserCatalogBuilt = false;
 }
 
 void EditorApp::UploadScrollingSky(double timeSeconds, float skyDistance)
 {
-    if (m_instance == nullptr ||
-        (m_settings.skyType != QR_SKY_TYPE_RASTERIZED_GEOMETRY &&
-         m_settings.skyType != QR_SKY_TYPE_CUBEMAP))
-    {
-        return;
-    }
-
-    const ScrollingSkyContext ctx{
-        m_cameraPosition,
-        timeSeconds,
-        std::max(skyDistance * 0.5f, 512.0f) / std::sqrt(3.0f),
-    };
-
-    const float visibleSkyScale =
-        std::max(0.0f, m_settings.skyScale * m_settings.skyBrightness * m_settings.brightness);
-    const QrFloat4D skyColor = { visibleSkyScale, visibleSkyScale, visibleSkyScale, 1.0f };
-
-    const bool hasScrolling = m_scene.hasScrollingSky && m_skySolidMaterial != QR_NO_MATERIAL &&
-                              m_skyAlphaMaterial != QR_NO_MATERIAL;
-
-    if (m_settings.skyType == QR_SKY_TYPE_CUBEMAP)
-    {
-        if (m_hasSkybox)
-        {
-            UploadSkyboxGeometry(m_instance, ctx, m_skyboxMaterials, m_skyboxWidths,
-                                 m_skyboxHeights, skyColor);
-            return;
-        }
-        if (!hasScrolling)
-        {
-            return;
-        }
-    }
-    else if (!hasScrolling)
-    {
-        if (m_hasSkybox)
-        {
-            UploadSkyboxGeometry(m_instance, ctx, m_skyboxMaterials, m_skyboxWidths,
-                                 m_skyboxHeights, skyColor);
-        }
-        return;
-    }
-
-    std::vector<QrVertex> solidVerts;
-    std::vector<QrVertex> alphaVerts;
-    solidVerts.reserve(1152);
-    alphaVerts.reserve(1152);
-
-    for (int axis = 0; axis < 6; axis++)
-    {
-        AppendScrollingSkyFace(axis, ctx, solidVerts, alphaVerts);
-    }
-
-    QrRasterizedGeometryUploadInfo upload = {};
-    upload.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SKY;
-    upload.transform.matrix[0][0] = 1.0f;
-    upload.transform.matrix[1][1] = 1.0f;
-    upload.transform.matrix[2][2] = 1.0f;
-    upload.color = skyColor;
-
-    upload.vertexCount = uint32_t(solidVerts.size());
-    upload.pVertices = solidVerts.data();
-    upload.material = m_skySolidMaterial;
-    qrUploadRasterizedGeometry(m_instance, &upload, nullptr, nullptr);
-
-    upload.vertexCount = uint32_t(alphaVerts.size());
-    upload.pVertices = alphaVerts.data();
-    upload.material = m_skyAlphaMaterial;
-    upload.pipelineState = QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE;
-    upload.blendFuncSrc = QR_BLEND_FACTOR_SRC_ALPHA;
-    upload.blendFuncDst = QR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    qrUploadRasterizedGeometry(m_instance, &upload, nullptr, nullptr);
+    m_runtime.UploadSky(m_instance, m_cameraPosition, timeSeconds, skyDistance);
 }
 
 bool EditorApp::CreateTextureMaterials()
@@ -1883,56 +1440,14 @@ bool EditorApp::CreateTextureMaterials()
         return false;
     }
 
-    // A reload replaces every image the bakes were built from, so none of them can be reused.
-    m_materialBakes.Destroy(m_instance);
     m_previewMaterialBakes.Destroy(m_instance);
-    DestroyPoolMaterials();
-
-    m_textureMaterials.assign(m_scene.textures.size(), QR_NO_MATERIAL);
-    m_textureEmissions.assign(m_scene.textures.size(), EditorMaterialEmission{});
-
-    for (size_t i = 0; i < m_scene.textures.size(); i++)
-    {
-        const std::string key = NormalizeAssetKey(m_scene.textures[i].name);
-
-        if (!key.empty())
-        {
-            m_textureIndexByName.emplace(key, int32_t(i));
-        }
-    }
-
-    for (const EditorSurface &surface : m_scene.surfaces)
-    {
-        if (surface.texture >= 0 && !surface.textureName.empty())
-        {
-            m_textureIndexByName.emplace(NormalizeAssetKey(surface.textureName), surface.texture);
-        }
-    }
-
-    uint32_t created = 0;
-
-    for (size_t i = 0; i < m_scene.textures.size(); i++)
-    {
-        if (CreatePoolMaterialForTexture(m_instance, m_scene.textures[i], m_textureMaterials[i],
-                                         m_textureEmissions[i]))
-        {
-            created++;
-        }
-    }
-
-    CreateScrollingSkyMaterials();
-
-    PrintMessage(("texture materials: " + std::to_string(created) + "/" +
-                  std::to_string(m_scene.textures.size())).c_str(), this);
-
-    return true;
+    m_textureBrowserCatalogBuilt = false;
+    return m_runtime.CreateTextureMaterials(
+        m_instance, m_assets, [this](const char *msg) { PrintMessage(msg, this); });
 }
 
 namespace
 {
-
-void ApplySkyScope(const EditorLevelSky &sky, bool onlySet, EditorRenderSettings &settings,
-                   EditorSunState &sun);
 
 std::string FileExtensionLower(const std::string &path)
 {
@@ -2060,13 +1575,11 @@ void MountAdapterAncestorBaseDirs(EditorAssetSource &assets, const std::string &
         std::string direct = directory;
         direct.push_back('/');
         direct.append(baseDir);
-        assets.AddDirectory(direct);
-        AddPaksFromDirectory(assets, direct);
+        MountEditorGameDirectory(assets, direct);
         std::string debugDir = directory;
         debugDir.append("/Debug/");
         debugDir.append(baseDir);
-        assets.AddDirectory(debugDir);
-        AddPaksFromDirectory(assets, debugDir);
+        MountEditorGameDirectory(assets, debugDir);
     }
 }
 
@@ -2094,8 +1607,7 @@ void MountSceneAncestors(EditorAssetSource &assets, const std::string &scenePath
 
         for (const std::string &candidate : candidates)
         {
-            assets.AddDirectory(candidate);
-            AddPaksFromDirectory(assets, candidate);
+            MountEditorGameDirectory(assets, candidate);
         }
         MountAdapterAncestorBaseDirs(assets, directory);
 
@@ -2189,9 +1701,7 @@ void MountDirectoryIfNew(EditorAssetSource &assets, const std::filesystem::path 
     }
 
     mounted.push_back(canon);
-    const std::string dirStr = dir.string();
-    assets.AddDirectory(dirStr);
-    AddPaksFromDirectory(assets, dirStr);
+    MountEditorGameDirectory(assets, dir.string());
 }
 
 void InitBrowserDirectory(std::string &dir, char *input, size_t inputSize,
@@ -2303,8 +1813,7 @@ void EditorApp::RebuildMapCatalog()
     if (!m_gamePath.empty())
     {
         EditorAssetSource modOnlyAssets;
-        modOnlyAssets.AddDirectory(m_gamePath);
-        AddPaksFromDirectory(modOnlyAssets, m_gamePath);
+        MountEditorGameDirectory(modOnlyAssets, m_gamePath);
         modOnlyAssets.ListMapAssets(entries);
     }
     else
@@ -2356,7 +1865,7 @@ namespace
 {
 
 constexpr uint64_t kPreviewModelUniqueId = 0x70000001ULL;
-constexpr uint64_t kPreviewLightUniqueId = kFirstCustomLightUniqueID + 0x10001;
+constexpr uint64_t kPreviewLightUniqueId = kEditorPreviewLightUniqueID;
 constexpr float kPreviewWorldRadius = 6.5f;
 
 void ComputePreviewOrbitRotation(const EditorCameraBasis &cam, float yaw, float pitch,
@@ -2465,7 +1974,8 @@ int32_t EditorApp::EnsurePreviewSkinTexture(const EditorTexture &skin)
     EditorMaterialEmission emission;
     if (m_instance != nullptr)
     {
-        CreatePoolMaterialForTexture(m_instance, m_scene.textures.back(), material, emission);
+        EditorSceneRuntime::CreatePoolMaterial(m_instance, m_scene.textures.back(), material,
+                                               emission);
     }
 
     m_textureMaterials.push_back(material);
@@ -2680,12 +2190,13 @@ void EditorApp::ComputePreviewPose(float outCenter[3], float &outScale,
 }
 
 QrMaterial EditorApp::ResolvePreviewMaterial(const std::string &skinName,
-                                             const EditorMaterialParams &params)
+                                             const EditorMaterialParams &params,
+                                             bool forceEnvBase)
 {
     const auto resolve = [this](const std::string &n) { return ResolveOrLoadTexture(n); };
 
     const QrMaterial baked = m_previewMaterialBakes.Get(m_instance, skinName, params, m_scene,
-                                                        m_textureMaterials, resolve);
+                                                        m_textureMaterials, resolve, forceEnvBase);
 
     if (baked != QR_NO_MATERIAL)
     {
@@ -2720,764 +2231,6 @@ void ApplyPreviewPoseTransform(const float rotation[3][3], float scale,
             upload.transform.matrix[row][col] = rotation[row][col] * scale;
         }
         upload.transform.matrix[row][3] = worldCenter[row];
-    }
-}
-
-void CleanAdditiveBlackBackground(std::vector<uint8_t> &pixels)
-{
-    for (size_t i = 0; i + 3u < pixels.size(); i += 4u)
-    {
-        const uint8_t peak = std::max({ pixels[i + 0], pixels[i + 1], pixels[i + 2] });
-        if (peak <= 6u)
-        {
-            pixels[i + 0] = 0;
-            pixels[i + 1] = 0;
-            pixels[i + 2] = 0;
-        }
-        else if (peak < 18u)
-        {
-            const float scale = float(peak - 6u) / 12.0f;
-            for (int c = 0; c < 3; c++)
-            {
-                pixels[i + c] =
-                    uint8_t(std::clamp(float(pixels[i + c]) * scale, 0.0f, 255.0f));
-            }
-        }
-    }
-}
-
-bool TryResolveTextureFromList(const std::vector<EditorTexture> &textures,
-                               const std::string &requestedPath,
-                               std::vector<uint8_t> &outRgba,
-                               uint32_t &outWidth, uint32_t &outHeight)
-{
-    const std::string needle = NormalizeEditorAssetPath(requestedPath);
-    const std::string needleStem = StripEditorImageExtension(needle);
-    if (needle.empty())
-    {
-        return false;
-    }
-
-    for (const EditorTexture &tex : textures)
-    {
-        if (tex.width == 0 || tex.height == 0 ||
-            tex.rgba.size() != size_t(tex.width) * size_t(tex.height) * 4u)
-        {
-            continue;
-        }
-        const std::string cand = NormalizeEditorAssetPath(tex.name);
-        if (cand == needle || StripEditorImageExtension(cand) == needleStem ||
-            ("textures/" + cand) == needle || ("textures/" + StripEditorImageExtension(cand)) == needleStem)
-        {
-            outWidth = tex.width;
-            outHeight = tex.height;
-            outRgba = tex.rgba;
-            return true;
-        }
-    }
-    return false;
-}
-
-void ComputeEnvironmentTexCoord(const EditorCameraBasis &cam, const float pos[3],
-                                const float normal[3], float out[2])
-{
-    float view[3] = {
-        pos[0] - cam.origin[0],
-        pos[1] - cam.origin[1],
-        pos[2] - cam.origin[2],
-    };
-    const float len = std::sqrt(view[0] * view[0] + view[1] * view[1] + view[2] * view[2]);
-    if (len <= 1.0e-4f)
-    {
-        out[0] = 0.5f;
-        out[1] = 0.5f;
-        return;
-    }
-    view[0] /= len;
-    view[1] /= len;
-    view[2] /= len;
-
-    const float facing = view[0] * normal[0] + view[1] * normal[1] + view[2] * normal[2];
-    const float refl[3] = {
-        view[0] - 2.0f * facing * normal[0],
-        view[1] - 2.0f * facing * normal[1],
-        view[2] - 2.0f * facing * normal[2],
-    };
-
-    const float eyeX =
-        -(refl[0] * cam.right[0] + refl[1] * cam.right[1] + refl[2] * cam.right[2]);
-    const float eyeY = refl[0] * cam.up[0] + refl[1] * cam.up[1] + refl[2] * cam.up[2];
-    const float eyeZ =
-        -(refl[0] * cam.forward[0] + refl[1] * cam.forward[1] + refl[2] * cam.forward[2]);
-
-    const float denom =
-        2.0f * std::sqrt(eyeX * eyeX + eyeY * eyeY + (eyeZ + 1.0f) * (eyeZ + 1.0f));
-    if (denom <= 1.0e-4f)
-    {
-        out[0] = 0.5f;
-        out[1] = 0.5f;
-        return;
-    }
-    out[0] = 0.5f + eyeX / denom;
-    out[1] = 0.5f - eyeY / denom;
-}
-
-struct EditorWaveDeformParams
-{
-    EditorWaveType wave = EditorWaveType::None;
-    float spread = 0.0f;
-    float base = 0.0f;
-    float amplitude = 0.0f;
-    float phase = 0.0f;
-    float frequency = 0.0f;
-};
-
-void DeformWaveVertices(std::vector<QrVertex> &verts, const EditorWaveDeformParams &deform,
-                        float timeSeconds)
-{
-    if (deform.wave == EditorWaveType::None)
-    {
-        return;
-    }
-    for (QrVertex &v : verts)
-    {
-        const float phaseOffset =
-            deform.frequency != 0.0f
-                ? (v.position[0] + v.position[1] + v.position[2]) * deform.spread
-                : 0.0f;
-        const float disp = EvaluateEditorWaveSigned(
-            deform.wave, deform.base, deform.amplitude, deform.phase + phaseOffset,
-            deform.frequency, timeSeconds);
-        v.position[0] += v.normal[0] * disp;
-        v.position[1] += v.normal[1] * disp;
-        v.position[2] += v.normal[2] * disp;
-    }
-}
-
-void DeformAutoSpriteQuad(QrVertex quad[4], const EditorCameraBasis &cam)
-{
-    const float nx = -cam.forward[0];
-    const float ny = -cam.forward[1];
-    const float nz = -cam.forward[2];
-    float mid[3] = {};
-    float minU = quad[0].texCoord[0];
-    float maxU = quad[0].texCoord[0];
-    float minV = quad[0].texCoord[1];
-    float maxV = quad[0].texCoord[1];
-    for (int i = 0; i < 4; i++)
-    {
-        for (int c = 0; c < 3; c++)
-        {
-            mid[c] += quad[i].position[c];
-        }
-        minU = std::min(minU, quad[i].texCoord[0]);
-        maxU = std::max(maxU, quad[i].texCoord[0]);
-        minV = std::min(minV, quad[i].texCoord[1]);
-        maxV = std::max(maxV, quad[i].texCoord[1]);
-    }
-    mid[0] *= 0.25f;
-    mid[1] *= 0.25f;
-    mid[2] *= 0.25f;
-
-    float distSum = 0.0f;
-    for (int i = 0; i < 4; i++)
-    {
-        const float dx = quad[i].position[0] - mid[0];
-        const float dy = quad[i].position[1] - mid[1];
-        const float dz = quad[i].position[2] - mid[2];
-        distSum += std::sqrt(dx * dx + dy * dy + dz * dz);
-    }
-    const float radius = (distSum * 0.25f) * 0.70710678f;
-    const float left[3] = { -cam.right[0] * radius, -cam.right[1] * radius,
-                            -cam.right[2] * radius };
-    const float up[3] = { cam.up[0] * radius, cam.up[1] * radius, cam.up[2] * radius };
-    const float uvs[4][2] = { { minU, minV }, { maxU, minV }, { maxU, maxV }, { minU, maxV } };
-    const float signs[4][2] = {
-        { 1.0f, 1.0f }, { -1.0f, 1.0f }, { -1.0f, -1.0f }, { 1.0f, -1.0f }
-    };
-    for (int i = 0; i < 4; i++)
-    {
-        for (int c = 0; c < 3; c++)
-        {
-            quad[i].position[c] = mid[c] + signs[i][0] * left[c] + signs[i][1] * up[c];
-        }
-        quad[i].normal[0] = nx;
-        quad[i].normal[1] = ny;
-        quad[i].normal[2] = nz;
-        quad[i].texCoord[0] = uvs[i][0];
-        quad[i].texCoord[1] = uvs[i][1];
-    }
-}
-
-void ComputeQuadMinorAxis(const float mid[2][3], const EditorCameraBasis &cam, float outMinor[3])
-{
-    const float major[3] = {
-        mid[1][0] - mid[0][0],
-        mid[1][1] - mid[0][1],
-        mid[1][2] - mid[0][2],
-    };
-    outMinor[0] = major[1] * cam.forward[2] - major[2] * cam.forward[1];
-    outMinor[1] = major[2] * cam.forward[0] - major[0] * cam.forward[2];
-    outMinor[2] = major[0] * cam.forward[1] - major[1] * cam.forward[0];
-    const float minorLen = std::sqrt(outMinor[0] * outMinor[0] + outMinor[1] * outMinor[1] +
-                                     outMinor[2] * outMinor[2]);
-    if (minorLen > 1.0e-5f)
-    {
-        outMinor[0] /= minorLen;
-        outMinor[1] /= minorLen;
-        outMinor[2] /= minorLen;
-        return;
-    }
-    outMinor[0] = cam.right[0];
-    outMinor[1] = cam.right[1];
-    outMinor[2] = cam.right[2];
-}
-
-void DeformAutoSprite2Quad(QrVertex quad[4], const uint32_t quadIdx[6], uint32_t baseVertex,
-                           const EditorCameraBasis &cam)
-{
-    static constexpr uint32_t kEdgeVerts[6][2] = {
-        { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 },
-    };
-    float edgeLenSq[6] = {};
-    for (int e = 0; e < 6; e++)
-    {
-        const QrVertex &a = quad[kEdgeVerts[e][0]];
-        const QrVertex &b = quad[kEdgeVerts[e][1]];
-        const float dx = a.position[0] - b.position[0];
-        const float dy = a.position[1] - b.position[1];
-        const float dz = a.position[2] - b.position[2];
-        edgeLenSq[e] = dx * dx + dy * dy + dz * dz;
-    }
-
-    int bestPair = 0;
-    float bestSum = edgeLenSq[0] + edgeLenSq[5];
-    for (int p = 1; p < 3; p++)
-    {
-        const float sum = edgeLenSq[p] + edgeLenSq[5 - p];
-        if (sum < bestSum)
-        {
-            bestSum = sum;
-            bestPair = p;
-        }
-    }
-    const int shortEdges[2] = { bestPair, 5 - bestPair };
-    float mid[2][3] = {};
-    for (int j = 0; j < 2; j++)
-    {
-        const QrVertex &a = quad[kEdgeVerts[shortEdges[j]][0]];
-        const QrVertex &b = quad[kEdgeVerts[shortEdges[j]][1]];
-        for (int c = 0; c < 3; c++)
-        {
-            mid[j][c] = 0.5f * (a.position[c] + b.position[c]);
-        }
-    }
-
-    float minor[3] = {};
-    ComputeQuadMinorAxis(mid, cam, minor);
-    for (int j = 0; j < 2; j++)
-    {
-        const uint32_t aLocal = kEdgeVerts[shortEdges[j]][0];
-        const uint32_t bLocal = kEdgeVerts[shortEdges[j]][1];
-        const float halfLen = 0.5f * std::sqrt(edgeLenSq[shortEdges[j]]);
-        bool foundOrder = false;
-        for (int k = 0; k < 5 && !foundOrder; k++)
-        {
-            foundOrder = (quadIdx[k] == baseVertex + aLocal && quadIdx[k + 1] == baseVertex + bLocal);
-        }
-        const float dirSign = foundOrder ? -1.0f : 1.0f;
-        for (int c = 0; c < 3; c++)
-        {
-            quad[aLocal].position[c] = mid[j][c] + dirSign * halfLen * minor[c];
-            quad[bLocal].position[c] = mid[j][c] - dirSign * halfLen * minor[c];
-        }
-    }
-    for (int i = 0; i < 4; i++)
-    {
-        quad[i].normal[0] = -cam.forward[0];
-        quad[i].normal[1] = -cam.forward[1];
-        quad[i].normal[2] = -cam.forward[2];
-    }
-}
-
-void DeformQuadInPlace(QrVertex quad[4], const uint32_t quadIdx[6], uint32_t baseVertex,
-                       bool autoSprite2, const EditorCameraBasis &cam)
-{
-    if (!autoSprite2)
-    {
-        DeformAutoSpriteQuad(quad, cam);
-        return;
-    }
-    DeformAutoSprite2Quad(quad, quadIdx, baseVertex, cam);
-}
-
-void SetSequentialQuadIndices(uint32_t *dst, uint32_t base)
-{
-    dst[0] = base + 0u;
-    dst[1] = base + 1u;
-    dst[2] = base + 2u;
-    dst[3] = base + 0u;
-    dst[4] = base + 2u;
-    dst[5] = base + 3u;
-}
-
-bool AreSequentialQuads(const std::vector<QrVertex> &verts, const std::vector<uint32_t> &indices)
-{
-    if (verts.size() % 4u != 0u || indices.size() != (verts.size() / 4u) * 6u)
-    {
-        return false;
-    }
-    for (size_t q = 0; q < verts.size() / 4u; q++)
-    {
-        const uint32_t base = uint32_t(q * 4u);
-        for (size_t k = 0; k < 6u; k++)
-        {
-            const uint32_t idx = indices[q * 6u + k];
-            if (idx < base || idx >= base + 4u)
-            {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-struct ExpandedMeshBuffers
-{
-    std::vector<QrVertex> verts;
-    std::vector<uint32_t> indices;
-};
-
-bool CollectUniqueQuadVertices(const std::vector<uint32_t> &indices, size_t offset,
-                               size_t vertCount, uint32_t unique[6], size_t &uniqueCount)
-{
-    uniqueCount = 0;
-    for (size_t j = 0; j < 6u; j++)
-    {
-        const uint32_t idx = indices[offset + j];
-        if (idx >= vertCount)
-        {
-            return false;
-        }
-        bool seen = false;
-        for (size_t u = 0; u < uniqueCount && !seen; u++)
-        {
-            seen = (unique[u] == idx);
-        }
-        if (!seen)
-        {
-            unique[uniqueCount++] = idx;
-        }
-    }
-    return true;
-}
-
-void AppendExpandedQuadGroup(const std::vector<QrVertex> &verts,
-                             const std::vector<uint32_t> &indices, size_t offset,
-                             bool autoSprite2, const EditorCameraBasis &cam,
-                             ExpandedMeshBuffers &dst)
-{
-    uint32_t unique[6] = {};
-    size_t uniqueCount = 0;
-    if (!CollectUniqueQuadVertices(indices, offset, verts.size(), unique, uniqueCount))
-    {
-        return;
-    }
-
-    const uint32_t base = uint32_t(dst.verts.size());
-    if (uniqueCount != 4u)
-    {
-        for (size_t j = 0; j < 6u; j++)
-        {
-            dst.verts.push_back(verts[indices[offset + j]]);
-            dst.indices.push_back(base + uint32_t(j));
-        }
-        return;
-    }
-
-    QrVertex quad[4];
-    uint32_t quadIdx[6] = {};
-    for (int u = 0; u < 4; u++)
-    {
-        quad[u] = verts[unique[u]];
-    }
-    for (int j = 0; j < 6; j++)
-    {
-        const uint32_t srcIdx = indices[offset + j];
-        for (uint32_t u = 0; u < 4u; u++)
-        {
-            if (unique[u] == srcIdx)
-            {
-                quadIdx[j] = base + u;
-                break;
-            }
-        }
-    }
-    DeformQuadInPlace(quad, quadIdx, base, autoSprite2, cam);
-    dst.verts.insert(dst.verts.end(), std::begin(quad), std::end(quad));
-    if (!autoSprite2)
-    {
-        const size_t idxStart = dst.indices.size();
-        dst.indices.resize(idxStart + 6u);
-        SetSequentialQuadIndices(&dst.indices[idxStart], base);
-    }
-    else
-    {
-        dst.indices.insert(dst.indices.end(), std::begin(quadIdx), std::end(quadIdx));
-    }
-}
-
-void DeformAutoSpriteVertices(std::vector<QrVertex> &verts, std::vector<uint32_t> &indices,
-                              bool autoSprite, bool autoSprite2, const EditorCameraBasis &cam)
-{
-    if ((!autoSprite && !autoSprite2) || verts.size() < 4u || indices.size() < 6u)
-    {
-        return;
-    }
-
-    if (AreSequentialQuads(verts, indices))
-    {
-        for (size_t q = 0; q < verts.size() / 4u; q++)
-        {
-            const uint32_t base = uint32_t(q * 4u);
-            DeformQuadInPlace(&verts[base], &indices[q * 6u], base, autoSprite2, cam);
-            if (!autoSprite2)
-            {
-                SetSequentialQuadIndices(&indices[q * 6u], base);
-            }
-        }
-        return;
-    }
-
-    if (indices.size() % 6u != 0u)
-    {
-        return;
-    }
-
-    ExpandedMeshBuffers expanded;
-    expanded.verts.reserve((indices.size() / 6u) * 4u);
-    expanded.indices.reserve(indices.size());
-    for (size_t k = 0; k + 5u < indices.size(); k += 6u)
-    {
-        AppendExpandedQuadGroup(verts, indices, k, autoSprite2, cam, expanded);
-    }
-    if (!expanded.verts.empty() && !expanded.indices.empty())
-    {
-        verts.swap(expanded.verts);
-        indices.swap(expanded.indices);
-    }
-}
-
-void ApplyOverlayTcMods(const EditorOverlayStage &stage, float timeSeconds,
-                        const std::vector<QrVertex> &source, std::vector<QrVertex> &out)
-{
-    constexpr float kPi = 3.14159265358979323846f;
-    out = source;
-    for (const EditorTcMod &mod : stage.tcMods)
-    {
-        switch (mod.type)
-        {
-        case EditorTcModType::Scale:
-            for (QrVertex &v : out)
-            {
-                v.texCoord[0] *= mod.params[0];
-                v.texCoord[1] *= mod.params[1];
-            }
-            break;
-        case EditorTcModType::Scroll:
-        {
-            const float du = mod.params[0] * timeSeconds;
-            const float dv = mod.params[1] * timeSeconds;
-            for (QrVertex &v : out)
-            {
-                v.texCoord[0] += du;
-                v.texCoord[1] += dv;
-            }
-            break;
-        }
-        case EditorTcModType::Rotate:
-        {
-            const float rad = -mod.params[0] * timeSeconds * (kPi / 180.0f);
-            const float c = std::cos(rad);
-            const float s = std::sin(rad);
-            for (QrVertex &v : out)
-            {
-                const float du = v.texCoord[0] - 0.5f;
-                const float dv = v.texCoord[1] - 0.5f;
-                v.texCoord[0] = du * c - dv * s + 0.5f;
-                v.texCoord[1] = du * s + dv * c + 0.5f;
-            }
-            break;
-        }
-        case EditorTcModType::Stretch:
-        {
-            const float w = EvaluateEditorWave(mod.wave, mod.params[0], mod.params[1],
-                                               mod.params[2], mod.params[3], timeSeconds);
-            const float inv = 1.0f / std::max(0.001f, w);
-            for (QrVertex &v : out)
-            {
-                v.texCoord[0] = (v.texCoord[0] - 0.5f) * inv + 0.5f;
-                v.texCoord[1] = (v.texCoord[1] - 0.5f) * inv + 0.5f;
-            }
-            break;
-        }
-        case EditorTcModType::Turb:
-        {
-            const float amp = mod.params[1];
-            const float now = mod.params[2] + timeSeconds * mod.params[3];
-            for (QrVertex &v : out)
-            {
-                v.texCoord[0] +=
-                    std::sin(((v.position[0] + v.position[2]) * 0.001f * mod.params[3] + now) *
-                             2.0f * kPi) *
-                    amp;
-                v.texCoord[1] +=
-                    std::sin((v.position[1] * 0.001f * mod.params[3] + now) * 2.0f * kPi) * amp;
-            }
-            break;
-        }
-        }
-    }
-}
-
-std::string ActiveOverlayStageTexture(const EditorOverlayStage &stage, float timeSeconds)
-{
-    if (stage.animationMaps.empty() || stage.animationFps <= 0.0f)
-    {
-        return stage.map;
-    }
-    const size_t frame =
-        size_t(std::floor(std::max(timeSeconds, 0.0f) * stage.animationFps)) %
-        stage.animationMaps.size();
-    return stage.animationMaps[frame];
-}
-
-struct OverlayUploadInput
-{
-    bool cutoutUnderlay = false;
-    bool tracedBase = false;
-    bool metallicEnvBase = false;
-    float surfaceLight = 0.0f;
-    size_t baseStageIndex = (std::numeric_limits<size_t>::max)();
-    size_t firstStage = 0u;
-    size_t endStage = 0u;
-    const std::vector<EditorOverlayStage> *stages = nullptr;
-    const std::vector<QrVertex> *vertices = nullptr;
-    const std::vector<uint32_t> *indices = nullptr;
-};
-
-bool IsSimpleAlphaBlendOverlay(const EditorOverlayStage &stage, float surfaceLight)
-{
-    if (stage.animated || stage.isEnvironment || stage.rgbWave != EditorWaveType::None ||
-        stage.alphaWave != EditorWaveType::None || surfaceLight > 0.0f)
-    {
-        return false;
-    }
-    const bool normalAlpha = stage.blendSrc == QR_BLEND_FACTOR_SRC_ALPHA &&
-                             stage.blendDst == QR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    const bool invAlpha = stage.blendSrc == QR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA &&
-                          stage.blendDst == QR_BLEND_FACTOR_SRC_ALPHA;
-    return normalAlpha || invAlpha;
-}
-
-bool ShouldSkipTracedOverlayStage(const OverlayUploadInput &input, const std::string &baseMap,
-                                   size_t stageIndex, const EditorOverlayStage &stage, bool isAdditive)
-{
-    if (input.metallicEnvBase)
-    {
-        return !isAdditive || stageIndex <= input.baseStageIndex;
-    }
-    if (!input.tracedBase)
-    {
-        return false;
-    }
-    if (stage.blendSrc == QR_BLEND_FACTOR_DST_COLOR && stage.blendDst == QR_BLEND_FACTOR_ZERO)
-    {
-        const std::string stageKey = NormalizeEditorAssetPath(stage.map);
-        if (stageKey == NormalizeEditorAssetPath(baseMap) || stageKey == "textures/sfx/shadow")
-        {
-            return true;
-        }
-    }
-    return IsSimpleAlphaBlendOverlay(stage, input.surfaceLight);
-}
-
-bool ComputeStageBlendAndState(const OverlayUploadInput &input, const EditorOverlayStage &stage,
-                               QrBlendFactor &source, QrBlendFactor &destination, uint32_t &state)
-{
-    source = stage.blendSrc;
-    destination = stage.blendDst;
-    state = QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST;
-    if (stage.blended)
-    {
-        state |= QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE;
-    }
-    else
-    {
-        if (!input.cutoutUnderlay)
-        {
-            state |= QR_RASTERIZED_GEOMETRY_STATE_DEPTH_WRITE;
-        }
-        source = QR_BLEND_FACTOR_ONE;
-        destination = QR_BLEND_FACTOR_ZERO;
-    }
-    if (stage.alphaTested)
-    {
-        state |= QR_RASTERIZED_GEOMETRY_STATE_ALPHA_TEST;
-    }
-    return stage.additive ||
-           (source == QR_BLEND_FACTOR_ONE && destination == QR_BLEND_FACTOR_ONE) ||
-           (source == QR_BLEND_FACTOR_SRC_ALPHA && destination == QR_BLEND_FACTOR_ONE);
-}
-
-void PrepareOverlayStageVertices(const OverlayUploadInput &input, const EditorOverlayStage &stage,
-                               const EditorCameraBasis &cam, float timeSeconds,
-                               std::vector<QrVertex> &stageVertices,
-                               std::vector<QrVertex> &modVertices)
-{
-    stageVertices = *input.vertices;
-    if (stage.isEnvironment)
-    {
-        for (QrVertex &v : stageVertices)
-        {
-            ComputeEnvironmentTexCoord(cam, v.position, v.normal, v.texCoord);
-        }
-    }
-    if (!stage.tcMods.empty())
-    {
-        ApplyOverlayTcMods(stage, timeSeconds, stageVertices, modVertices);
-        stageVertices.swap(modVertices);
-    }
-
-    const bool keepRgb =
-        !input.cutoutUnderlay &&
-        (stage.rgbGen == EditorColorGen::Vertex || stage.rgbGen == EditorColorGen::Entity);
-    const bool keepAlpha =
-        stage.alphaGen == EditorAlphaGen::Vertex || stage.alphaGen == EditorAlphaGen::Entity;
-    for (QrVertex &v : stageVertices)
-    {
-        const uint32_t c = v.packedColor;
-        const uint32_t rgb = keepRgb ? (c & 0x00FFFFFFu) : 0x00FFFFFFu;
-        const uint32_t a = keepAlpha ? (c & 0xFF000000u) : 0xFF000000u;
-        v.packedColor = rgb | a;
-        v.position[0] = EditorMetersLength(v.position[0]);
-        v.position[1] = EditorMetersLength(v.position[1]);
-        v.position[2] = EditorMetersLength(v.position[2]);
-    }
-}
-
-struct OverlayStageUploadState
-{
-    QrInstance instance = nullptr;
-    const OverlayUploadInput *input = nullptr;
-    const EditorCameraBasis *cam = nullptr;
-    float timeSeconds = 0.0f;
-    const std::string *baseMap = nullptr;
-    const std::function<QrMaterial(const std::string &, bool, bool, bool)> *resolveMat = nullptr;
-    std::vector<QrVertex> *stageVertices = nullptr;
-    std::vector<QrVertex> *modVertices = nullptr;
-};
-
-bool ShouldAddScreenEmissionToOverlayStage(const OverlayUploadInput &input,
-                                           const EditorOverlayStage &stage, bool isAdditive)
-{
-    const bool waveNotDim = stage.rgbWave == EditorWaveType::None ||
-                            (stage.rgbWaveBase + std::fabs(stage.rgbWaveAmplitude)) > 0.35f;
-    const bool isSelfLitOpaque =
-        !stage.blended && (input.surfaceLight > 0.0f || input.cutoutUnderlay);
-    return ((isAdditive && !stage.isEnvironment) || isSelfLitOpaque) && waveNotDim;
-}
-
-void UploadSingleOverlayStage(const OverlayStageUploadState &ctx, size_t stageIndex)
-{
-    const OverlayUploadInput &input = *ctx.input;
-    const EditorOverlayStage &stage = (*input.stages)[stageIndex];
-    const std::string textureName = ActiveOverlayStageTexture(stage, ctx.timeSeconds);
-    if (textureName.empty() || stage.isLightmap)
-    {
-        return;
-    }
-
-    QrBlendFactor source = QR_BLEND_FACTOR_ONE;
-    QrBlendFactor destination = QR_BLEND_FACTOR_ZERO;
-    uint32_t state = 0;
-    const bool isAdditive =
-        ComputeStageBlendAndState(input, stage, source, destination, state);
-    if (!input.cutoutUnderlay &&
-        ShouldSkipTracedOverlayStage(input, *ctx.baseMap, stageIndex, stage, isAdditive))
-    {
-        return;
-    }
-
-    const bool addScreenEmission = ShouldAddScreenEmissionToOverlayStage(input, stage, isAdditive);
-    const QrMaterial material =
-        (*ctx.resolveMat)(textureName, stage.clampMap, isAdditive && !stage.isEnvironment,
-                          addScreenEmission);
-    if (material == QR_NO_MATERIAL)
-    {
-        return;
-    }
-
-    PrepareOverlayStageVertices(input, stage, *ctx.cam, ctx.timeSeconds, *ctx.stageVertices,
-                                *ctx.modVertices);
-
-    const float rgbWave = EvaluateEditorWave(stage.rgbWave, stage.rgbWaveBase,
-                                             stage.rgbWaveAmplitude, stage.rgbWavePhase,
-                                             stage.rgbWaveFrequency, ctx.timeSeconds);
-    const float alphaWave = EvaluateEditorWave(stage.alphaWave, stage.alphaWaveBase,
-                                               stage.alphaWaveAmplitude, stage.alphaWavePhase,
-                                               stage.alphaWaveFrequency, ctx.timeSeconds);
-    const float gain =
-        (isAdditive || (!stage.blended && input.surfaceLight > 0.0f)) ? 1.5f : 1.0f;
-
-    QrRasterizedGeometryUploadInfo info = {};
-    info.renderType = QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT;
-    info.vertexCount = uint32_t(ctx.stageVertices->size());
-    info.pVertices = ctx.stageVertices->data();
-    info.indexCount = uint32_t(input.indices->size());
-    info.pIndices = input.indices->data();
-    info.transform.matrix[0][0] = 1.0f;
-    info.transform.matrix[1][1] = 1.0f;
-    info.transform.matrix[2][2] = 1.0f;
-    info.color = { rgbWave * gain, rgbWave * gain, rgbWave * gain, alphaWave };
-    info.texCoordScale[0] = 1.0f;
-    info.texCoordScale[1] = 1.0f;
-    info.material = material;
-    info.pipelineState = state;
-    info.blendFuncSrc = source;
-    info.blendFuncDst = destination;
-    qrUploadRasterizedGeometry(ctx.instance, &info, nullptr, nullptr);
-}
-
-void UploadOverlayStageSet(
-    QrInstance instance, const OverlayUploadInput &input, const EditorCameraBasis &cam,
-    float timeSeconds,
-    const std::function<QrMaterial(const std::string &, bool, bool, bool)> &resolveMat)
-{
-    if (instance == nullptr || input.stages == nullptr || input.vertices == nullptr ||
-        input.indices == nullptr || input.vertices->empty() || input.indices->empty())
-    {
-        return;
-    }
-
-    const size_t firstStage = input.firstStage;
-    const size_t endStage = std::min(input.endStage, input.stages->size());
-    if (firstStage >= endStage)
-    {
-        return;
-    }
-
-    const std::string baseMap =
-        input.baseStageIndex < input.stages->size() ? (*input.stages)[input.baseStageIndex].map : "";
-    std::vector<QrVertex> stageVertices;
-    std::vector<QrVertex> modVertices;
-    const OverlayStageUploadState uploadCtx{
-        instance, &input, &cam, timeSeconds, &baseMap, &resolveMat, &stageVertices, &modVertices,
-    };
-
-    for (size_t stageIndex = firstStage; stageIndex < endStage; stageIndex++)
-    {
-        UploadSingleOverlayStage(uploadCtx, stageIndex);
     }
 }
 
@@ -3551,26 +2304,40 @@ struct PreviewSectionUploadContext
     float timeSeconds = 0.0f;
     const EditorMaterialTable *materials = nullptr;
     QrMaterial cutoutBackingMaterial = QR_NO_MATERIAL;
-    const std::function<QrMaterial(const std::string &, const EditorMaterialParams &)> *resolveMat =
-        nullptr;
+    const std::function<QrMaterial(const std::string &, const EditorMaterialParams &, bool)>
+        *resolveMat = nullptr;
     const std::function<QrMaterial(const std::string &, bool, bool, bool)> *resolveOverlayMat =
         nullptr;
 };
 
-void UploadPreviewTracedSection(const PreviewSectionUploadContext &ctx, size_t secIndex,
+struct PreviewSectionState
+{
+    size_t secIndex = 0;
+    std::string matName;
+    EditorMaterialParams params;
+    bool promoteOverlayToTraced = false;
+    bool baseStageDisabled = false;
+    bool hasEnabledUnderlay = false;
+};
+
+struct PreviewOverlaySliceRange
+{
+    size_t firstStage = 0;
+    size_t endStage = 0;
+    float normalOffset = 0.0f;
+    bool cutoutUnderlay = false;
+};
+
+void UploadPreviewTracedSection(const PreviewSectionUploadContext &ctx,
                                 const EditorPreviewModelSection &sec,
-                                const std::string &matName, std::vector<QrVertex> &verts,
+                                const PreviewSectionState &state, std::vector<QrVertex> &verts,
                                 std::vector<QrVertex> &meterVertices)
 {
-    EditorMaterialParams secParams;
-    const int32_t matIdx = ctx.materials->IndexOf(matName);
-    if (matIdx >= 0 && size_t(matIdx) < ctx.materials->Count())
-    {
-        secParams = ctx.materials->At(size_t(matIdx));
-    }
     const PreviewSectionUploadPose &pose = *ctx.pose;
+    const bool isEnvBase =
+        sec.baseStageIndex < sec.stages.size() && sec.stages[sec.baseStageIndex].isEnvironment;
     QrGeometryUploadInfo upload = {};
-    upload.uniqueID = 0x70000000u + uint64_t(secIndex);
+    upload.uniqueID = 0x70000000u + uint64_t(state.secIndex);
     upload.flags = QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT |
                    (sec.hasAuthoredNormals ? 0u : QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT);
     upload.geomType = QR_GEOMETRY_TYPE_DYNAMIC;
@@ -3581,8 +2348,8 @@ void UploadPreviewTracedSection(const PreviewSectionUploadContext &ctx, size_t s
     upload.pIndices = sec.indices.data();
     upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
     upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
-    upload.geomMaterial.layerMaterials[0] = (*ctx.resolveMat)(matName, secParams);
-    ApplyEditorMaterial(secParams,
+    upload.geomMaterial.layerMaterials[0] = (*ctx.resolveMat)(state.matName, state.params, isEnvBase);
+    ApplyEditorMaterial(state.params,
                         sec.alphaTested ? QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED
                                         : QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE,
                         upload);
@@ -3590,14 +2357,14 @@ void UploadPreviewTracedSection(const PreviewSectionUploadContext &ctx, size_t s
     EditorMetersGeometry(upload, meterVertices);
     qrUploadGeometry(ctx.instance, &upload);
 
-    if (!sec.cutoutFrameUnderlay || ctx.cutoutBackingMaterial == QR_NO_MATERIAL)
+    if (!state.hasEnabledUnderlay || ctx.cutoutBackingMaterial == QR_NO_MATERIAL)
     {
         return;
     }
     std::vector<QrVertex> backingVerts = verts;
     OffsetEditorVerticesAlongSmoothNormals(backingVerts, sec.indices, -1.6f);
     QrGeometryUploadInfo backingUpload = {};
-    backingUpload.uniqueID = 0x71000000u + uint64_t(secIndex);
+    backingUpload.uniqueID = 0x71000000u + uint64_t(state.secIndex);
     backingUpload.flags = QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT |
                           (sec.hasAuthoredNormals ? 0u : QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT);
     backingUpload.geomType = QR_GEOMETRY_TYPE_DYNAMIC;
@@ -3620,40 +2387,69 @@ void UploadPreviewTracedSection(const PreviewSectionUploadContext &ctx, size_t s
 
 void UploadPreviewSectionOverlaySlice(const PreviewSectionUploadContext &ctx,
                                       const EditorPreviewModelSection &sec,
-                                      const std::vector<QrVertex> &verts, bool cutoutUnderlay,
-                                      size_t firstStage, size_t endStage, float normalOffset)
+                                      const PreviewSectionState &state,
+                                      const std::vector<QrVertex> &verts,
+                                      const PreviewOverlaySliceRange &slice)
 {
-    if (firstStage >= endStage)
+    if (slice.firstStage >= slice.endStage)
     {
         return;
     }
     std::vector<QrVertex> overlayVerts = verts;
     std::vector<uint32_t> overlayIndices = sec.indices;
-    if (normalOffset != 0.0f)
+    if (slice.normalOffset != 0.0f)
     {
-        OffsetEditorVerticesAlongSmoothNormals(overlayVerts, overlayIndices, normalOffset);
+        OffsetEditorVerticesAlongSmoothNormals(overlayVerts, overlayIndices, slice.normalOffset);
     }
     TransformPreviewVerticesToWorld(ctx.pose->rotation, ctx.pose->scale, ctx.pose->worldCenter,
                                     overlayVerts);
-    DeformAutoSpriteVertices(overlayVerts, overlayIndices, sec.autoSprite, sec.autoSprite2,
-                             *ctx.cam);
+    DeformEditorAutoSpriteVertices(overlayVerts, overlayIndices, sec.autoSprite, sec.autoSprite2,
+                                   *ctx.cam);
 
-    OverlayUploadInput input;
-    input.cutoutUnderlay = cutoutUnderlay;
+    EditorOverlayUploadInput input;
+    input.cutoutUnderlay = slice.cutoutUnderlay;
     input.tracedBase = sec.tracedBase;
     input.metallicEnvBase = sec.metallicEnvBase;
+    input.suppressEnvironmentStages =
+        state.params.mirror && state.params.type == EditorMaterialType::None;
+    input.promotedOverlayToTraced = state.promoteOverlayToTraced;
     input.surfaceLight = sec.surfaceLight;
+    input.colorScale = state.params.baseFactor;
+    input.alphaScale =
+        (state.params.type == EditorMaterialType::Glass) ? state.params.transparency : 1.0f;
+    input.disabledStagesMask = state.params.disabledStagesMask;
     input.baseStageIndex = sec.baseStageIndex;
-    input.firstStage = firstStage;
-    input.endStage = endStage;
+    input.firstStage = slice.firstStage;
+    input.endStage = slice.endStage;
     input.stages = &sec.stages;
     input.vertices = &overlayVerts;
     input.indices = &overlayIndices;
-    UploadOverlayStageSet(ctx.instance, input, *ctx.cam, ctx.timeSeconds, *ctx.resolveOverlayMat);
+    UploadEditorOverlayStageSet(ctx.instance, input, *ctx.cam, ctx.timeSeconds,
+                                *ctx.resolveOverlayMat);
+}
+
+bool PreviewSectionHasEnabledUnderlay(const EditorPreviewModelSection &sec,
+                                      uint32_t disabledStagesMask)
+{
+    if (!sec.cutoutFrameUnderlay || sec.baseStageIndex == 0u ||
+        sec.baseStageIndex > sec.stages.size())
+    {
+        return false;
+    }
+    for (size_t i = 0u; i < sec.baseStageIndex; i++)
+    {
+        if (!sec.stages[i].isLightmap &&
+            (i >= 32u || ((disabledStagesMask >> i) & 1u) == 0u))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void UploadPreviewSectionOverlays(const PreviewSectionUploadContext &ctx,
                                   const EditorPreviewModelSection &sec,
+                                  const PreviewSectionState &state,
                                   const std::vector<QrVertex> &verts)
 {
     if (!sec.usesOverlay || sec.stages.empty())
@@ -3663,18 +2459,81 @@ void UploadPreviewSectionOverlays(const PreviewSectionUploadContext &ctx,
     if (sec.cutoutFrameUnderlay && sec.baseStageIndex > 0u &&
         sec.baseStageIndex <= sec.stages.size())
     {
-        UploadPreviewSectionOverlaySlice(ctx, sec, verts, true, 0u, sec.baseStageIndex, -0.8f);
+        const PreviewOverlaySliceRange underlaySlice{
+            0u, sec.baseStageIndex, !state.baseStageDisabled ? -0.8f : 0.0f, !state.baseStageDisabled,
+        };
+        UploadPreviewSectionOverlaySlice(ctx, sec, state, verts, underlaySlice);
         if (sec.baseStageIndex + 1u < sec.stages.size())
         {
-            UploadPreviewSectionOverlaySlice(ctx, sec, verts, false, sec.baseStageIndex + 1u,
-                                             sec.stages.size(), 0.25f);
+            const PreviewOverlaySliceRange upperSlice{
+                sec.baseStageIndex + 1u, sec.stages.size(), !state.baseStageDisabled ? 0.25f : 0.0f,
+                false,
+            };
+            UploadPreviewSectionOverlaySlice(ctx, sec, state, verts, upperSlice);
         }
         return;
     }
     const size_t firstStage =
         (sec.tracedBase && sec.baseStageIndex < sec.stages.size()) ? (sec.baseStageIndex + 1u) : 0u;
-    const float offset = sec.tracedBase ? 0.25f : 0.0f;
-    UploadPreviewSectionOverlaySlice(ctx, sec, verts, false, firstStage, sec.stages.size(), offset);
+    const float offset = ((sec.tracedBase || state.promoteOverlayToTraced) && !state.baseStageDisabled)
+                             ? 0.25f
+                             : 0.0f;
+    const PreviewOverlaySliceRange slice{ firstStage, sec.stages.size(), offset, false };
+    UploadPreviewSectionOverlaySlice(ctx, sec, state, verts, slice);
+}
+
+void UploadOnePreviewModelSection(const PreviewSectionUploadContext &ctx, size_t secIndex,
+                                  const EditorPreviewModelSection &sec,
+                                  std::vector<QrVertex> &verts, std::vector<QrVertex> &meterVertices)
+{
+    if (sec.vertices.empty() || sec.indices.empty())
+    {
+        return;
+    }
+    const std::string matName = ResolveSectionMaterialForPreset(*ctx.model, sec, ctx.pose->skinIndex);
+    if (!matName.empty() && ctx.model->hiddenMaterials.count(LowercaseName(matName)) != 0u)
+    {
+        return;
+    }
+
+    EditorMaterialParams secParams;
+    const int32_t matIdx = ctx.materials->IndexOf(matName);
+    if (matIdx >= 0 && size_t(matIdx) < ctx.materials->Count())
+    {
+        secParams = ctx.materials->At(size_t(matIdx));
+    }
+    if (!secParams.enabled)
+    {
+        return;
+    }
+
+    verts = sec.vertices;
+    for (QrVertex &v : verts)
+    {
+        v.cluster = ctx.pose->cluster;
+    }
+    const EditorWaveDeformParams deform{
+        sec.deformWave, sec.deformSpread, sec.deformBase,
+        sec.deformAmplitude, sec.deformPhase, sec.deformFrequency,
+    };
+    DeformEditorWaveVertices(verts, deform, ctx.timeSeconds);
+
+    const bool baseDisabled = sec.baseStageIndex < sec.stages.size() && sec.baseStageIndex < 32u &&
+                              ((secParams.disabledStagesMask >> sec.baseStageIndex) & 1u) != 0u;
+    const PreviewSectionState state{
+        secIndex,
+        matName,
+        secParams,
+        sec.isNonTracedOverlay && EditorMaterialPromotesOverlayToTraced(secParams),
+        baseDisabled,
+        PreviewSectionHasEnabledUnderlay(sec, secParams.disabledStagesMask),
+    };
+
+    if ((!sec.isNonTracedOverlay || state.promoteOverlayToTraced) && !state.baseStageDisabled)
+    {
+        UploadPreviewTracedSection(ctx, sec, state, verts, meterVertices);
+    }
+    UploadPreviewSectionOverlays(ctx, sec, state, verts);
 }
 
 void UploadPreviewModelSections(const PreviewSectionUploadContext &ctx,
@@ -3684,296 +2543,33 @@ void UploadPreviewModelSections(const PreviewSectionUploadContext &ctx,
     std::vector<QrVertex> meterVertices;
     for (size_t s = 0; s < frame.sections.size(); s++)
     {
-        const EditorPreviewModelSection &sec = frame.sections[s];
-        if (sec.vertices.empty() || sec.indices.empty())
-        {
-            continue;
-        }
-        const std::string matName =
-            ResolveSectionMaterialForPreset(*ctx.model, sec, ctx.pose->skinIndex);
-        if (!matName.empty() && ctx.model->hiddenMaterials.count(LowercaseName(matName)) != 0u)
-        {
-            continue;
-        }
-
-        verts = sec.vertices;
-        for (QrVertex &v : verts)
-        {
-            v.cluster = ctx.pose->cluster;
-        }
-        const EditorWaveDeformParams deform{
-            sec.deformWave, sec.deformSpread, sec.deformBase,
-            sec.deformAmplitude, sec.deformPhase, sec.deformFrequency,
-        };
-        DeformWaveVertices(verts, deform, ctx.timeSeconds);
-
-        if (!sec.isNonTracedOverlay)
-        {
-            UploadPreviewTracedSection(ctx, s, sec, matName, verts, meterVertices);
-        }
-        UploadPreviewSectionOverlays(ctx, sec, verts);
+        UploadOnePreviewModelSection(ctx, s, frame.sections[s], verts, meterVertices);
     }
-}
-
-void ApplySceneSunDefaults(const EditorScene &scene, EditorSunState &sun,
-                           EditorRenderSettings &settings)
-{
-    if (!scene.usesExternalLightingModel || !scene.hasSun)
-    {
-        return;
-    }
-
-    sun.enabled = true;
-    sun.pitch = std::clamp(scene.sunElevation, -89.0f, 89.0f);
-    float yaw = std::fmod(scene.sunDegrees + 180.0f, 360.0f);
-    if (yaw < 0.0f)
-    {
-        yaw += 360.0f;
-    }
-    sun.yaw = yaw;
-    const float refIntensity = 80.0f;
-    sun.radiance = 2.5f * std::clamp(scene.sunIntensity / refIntensity, 0.0f, 8.0f);
-    settings.sunColor[0] = scene.sunColor[0];
-    settings.sunColor[1] = scene.sunColor[1];
-    settings.sunColor[2] = scene.sunColor[2];
-}
-
-EditorMaterialParams DefaultSceneMaterialParams(const EditorScene &scene,
-                                                const std::string &name)
-{
-    EditorMaterialParams params;
-    if (!scene.usesExternalLightingModel)
-    {
-        return params;
-    }
-
-    const std::string needle = LowercaseName(name);
-    for (const EditorTexture &tex : scene.textures)
-    {
-        if (LowercaseName(tex.name) == needle)
-        {
-            if (tex.isMirrorShader)
-            {
-                params.mirror = true;
-            }
-            break;
-        }
-    }
-
-    return params;
 }
 
 } // namespace
 
 QrMaterial EditorApp::GetCutoutBackingMaterial()
 {
-    if (m_instance == nullptr)
-    {
-        return QR_NO_MATERIAL;
-    }
-    if (m_cutoutBackingMaterial != QR_NO_MATERIAL)
-    {
-        return m_cutoutBackingMaterial;
-    }
-
-    static constexpr uint32_t kSize = 4u;
-    std::vector<uint8_t> albedo(size_t(kSize) * size_t(kSize) * 4u);
-    std::vector<uint8_t> rme(size_t(kSize) * size_t(kSize) * 4u);
-    for (size_t i = 0; i < size_t(kSize) * size_t(kSize); i++)
-    {
-        albedo[i * 4u + 0u] = 8u;
-        albedo[i * 4u + 1u] = 8u;
-        albedo[i * 4u + 2u] = 8u;
-        albedo[i * 4u + 3u] = 255u;
-        rme[i * 4u + 0u] = 230u;
-        rme[i * 4u + 1u] = 0u;
-        rme[i * 4u + 2u] = 0u;
-        rme[i * 4u + 3u] = 0u;
-    }
-
-    QrMaterialCreateInfo info = {};
-    info.size = { kSize, kSize };
-    info.filter = QR_SAMPLER_FILTER_LINEAR;
-    info.addressModeU = QR_SAMPLER_ADDRESS_MODE_REPEAT;
-    info.addressModeV = QR_SAMPLER_ADDRESS_MODE_REPEAT;
-    info.textures.pDataAlbedoAlpha = albedo.data();
-    info.textures.pDataRoughnessMetallicEmission = rme.data();
-    qrCreateMaterial(m_instance, &info, &m_cutoutBackingMaterial);
-    return m_cutoutBackingMaterial;
-}
-
-namespace
-{
-struct OverlayOrderItem
-{
-    int group = 0;
-    float distSq = 0.0f;
-    size_t index = 0;
-};
-
-void BuildOverlayScreenEmissionRme(const std::vector<uint8_t> &rgba, size_t pxCount,
-                                   std::vector<uint8_t> &rme)
-{
-    rme.resize(pxCount * 4u, 0u);
-    for (size_t p = 0; p < pxCount; p++)
-    {
-        const uint8_t peak =
-            std::max({ rgba[p * 4u + 0u], rgba[p * 4u + 1u], rgba[p * 4u + 2u] });
-        rme[p * 4u + 0u] = 255u;
-        rme[p * 4u + 1u] = 0u;
-        rme[p * 4u + 2u] = peak;
-        rme[p * 4u + 3u] = 0u;
-    }
-}
-
-float ComputeOverlayCentroidDistSq(const std::vector<QrVertex> &vertices,
-                                     const EditorCameraBasis &cam)
-{
-    double cx = 0.0;
-    double cy = 0.0;
-    double cz = 0.0;
-    for (const QrVertex &v : vertices)
-    {
-        cx += v.position[0];
-        cy += v.position[1];
-        cz += v.position[2];
-    }
-    const float inv = 1.0f / float(vertices.size());
-    const float dx = float(cx) * inv - cam.origin[0];
-    const float dy = float(cy) * inv - cam.origin[1];
-    const float dz = float(cz) * inv - cam.origin[2];
-    return dx * dx + dy * dy + dz * dz;
-}
-
-std::vector<OverlayOrderItem> BuildOverlayOrder(
-    const std::vector<EditorOverlaySurface> &surfaces, const EditorCameraBasis &cam)
-{
-    std::vector<OverlayOrderItem> order;
-    order.reserve(surfaces.size());
-    for (size_t i = 0; i < surfaces.size(); i++)
-    {
-        const EditorOverlaySurface &surf = surfaces[i];
-        if (surf.vertices.empty() || surf.indices.empty() || surf.stages.empty())
-        {
-            continue;
-        }
-        const int group = surf.cutoutUnderlay ? 0 : (surf.tracedBase ? 1 : 2);
-        const float distSq =
-            (group == 2) ? ComputeOverlayCentroidDistSq(surf.vertices, cam) : 0.0f;
-        order.push_back({ group, distSq, i });
-    }
-
-    std::stable_sort(order.begin(), order.end(),
-                     [](const OverlayOrderItem &a, const OverlayOrderItem &b) {
-                         if (a.group != b.group)
-                         {
-                             return a.group < b.group;
-                         }
-                         if (a.group == 2)
-                         {
-                             return a.distSq > b.distSq;
-                         }
-                         return a.index < b.index;
-                     });
-    return order;
-}
-
-bool TryLoadAdapterOverlayImage(const EditorAssetSource &assets, const std::string &imageName,
-                                std::vector<uint8_t> &outRgba, uint32_t &outWidth,
-                                uint32_t &outHeight)
-{
-    const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
-    if (adapter == nullptr || adapter->loadExternalImageRgba == nullptr)
-    {
-        return TryLoadExternalImage(assets, imageName, outWidth, outHeight, outRgba);
-    }
-    std::string resolved;
-    return adapter->loadExternalImageRgba(&assets, imageName, outRgba, outWidth, outHeight,
-                                          resolved);
-}
-} // namespace
-
-bool EditorApp::LoadOverlayMaterialPixels(const std::string &imageName,
-                                          std::vector<uint8_t> &outRgba, uint32_t &outWidth,
-                                          uint32_t &outHeight) const
-{
-    const bool loaded =
-        TryLoadAdapterOverlayImage(m_assets, imageName, outRgba, outWidth, outHeight) ||
-        TryResolveTextureFromList(m_scene.textures, imageName, outRgba, outWidth, outHeight) ||
-        TryResolveTextureFromList(m_previewModel.surfaceTextures, imageName, outRgba, outWidth,
-                                  outHeight) ||
-        TryResolveTextureFromList(m_previewModel.skins, imageName, outRgba, outWidth, outHeight);
-    return loaded && outWidth > 0 && outHeight > 0 &&
-           outRgba.size() == size_t(outWidth) * size_t(outHeight) * 4u;
+    return m_runtime.overlayCache.GetCutoutBackingMaterial(m_instance);
 }
 
 QrMaterial EditorApp::GetOverlayStageMaterial(const std::string &imageName, bool clampMap,
                                               bool cleanAdditiveBlack, bool addScreenEmission)
 {
-    if (m_instance == nullptr || imageName.empty())
-    {
-        return QR_NO_MATERIAL;
-    }
-
-    const std::string key = NormalizeEditorAssetPath(imageName) + (clampMap ? "|c" : "|r") +
-                            (cleanAdditiveBlack ? "|a" : "|n") +
-                            (addScreenEmission ? "|e" : "|0");
-    const auto cached = m_overlayMaterials.find(key);
-    if (cached != m_overlayMaterials.end())
-    {
-        return cached->second;
-    }
-
-    std::vector<uint8_t> rgba;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    QrMaterial mat = QR_NO_MATERIAL;
-    std::vector<uint8_t> rme;
-    if (LoadOverlayMaterialPixels(imageName, rgba, width, height))
-    {
-        if (cleanAdditiveBlack)
-        {
-            CleanAdditiveBlackBackground(rgba);
-        }
-        QrMaterialCreateInfo info = {};
-        info.size = { width, height };
-        info.filter = QR_SAMPLER_FILTER_LINEAR;
-        info.addressModeU =
-            clampMap ? QR_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : QR_SAMPLER_ADDRESS_MODE_REPEAT;
-        info.addressModeV =
-            clampMap ? QR_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : QR_SAMPLER_ADDRESS_MODE_REPEAT;
-        info.textures.pDataAlbedoAlpha = rgba.data();
-        if (addScreenEmission)
-        {
-            BuildOverlayScreenEmissionRme(rgba, size_t(width) * size_t(height), rme);
-            info.textures.pDataRoughnessMetallicEmission = rme.data();
-        }
-        qrCreateMaterial(m_instance, &info, &mat);
-    }
-
-    m_overlayMaterials.emplace(key, mat);
-    return mat;
+    const std::vector<const std::vector<EditorTexture> *> extraLists = {
+        &m_previewModel.surfaceTextures,
+        &m_previewModel.skins,
+    };
+    const EditorOverlayMaterialRequest request{
+        imageName, clampMap, cleanAdditiveBlack, addScreenEmission, &extraLists,
+    };
+    return m_runtime.overlayCache.GetOverlayStageMaterial(m_instance, m_assets, m_scene, request);
 }
 
 void EditorApp::DestroyOverlayMaterials()
 {
-    if (m_instance != nullptr)
-    {
-        if (m_cutoutBackingMaterial != QR_NO_MATERIAL)
-        {
-            qrDestroyMaterial(m_instance, m_cutoutBackingMaterial);
-            m_cutoutBackingMaterial = QR_NO_MATERIAL;
-        }
-        for (auto &kv : m_overlayMaterials)
-        {
-            if (kv.second != QR_NO_MATERIAL)
-            {
-                qrDestroyMaterial(m_instance, kv.second);
-            }
-        }
-    }
-    m_cutoutBackingMaterial = QR_NO_MATERIAL;
-    m_overlayMaterials.clear();
+    m_runtime.DestroyOverlayMaterials(m_instance);
 }
 
 void EditorApp::UploadOverlayGeometry(float timeSeconds)
@@ -3983,52 +2579,12 @@ void EditorApp::UploadOverlayGeometry(float timeSeconds)
         return;
     }
 
-    const EditorCameraBasis cam = CameraBasis();
-    const std::vector<OverlayOrderItem> order = BuildOverlayOrder(m_scene.overlaySurfaces, cam);
-
-    const auto resolveOverlayMat = [this](const std::string &imageName, bool clampMap,
-                                          bool cleanAdditiveBlack, bool addScreenEmission) {
-        return GetOverlayStageMaterial(imageName, clampMap, cleanAdditiveBlack, addScreenEmission);
+    const std::vector<const std::vector<EditorTexture> *> extraLists = {
+        &m_previewModel.surfaceTextures,
+        &m_previewModel.skins,
     };
-
-    std::vector<QrVertex> deformedVerts;
-    std::vector<uint32_t> deformedIndices;
-    for (const OverlayOrderItem &item : order)
-    {
-        const EditorOverlaySurface &surf = m_scene.overlaySurfaces[item.index];
-        const bool needsDeform =
-            surf.deformWave != EditorWaveType::None || surf.autoSprite || surf.autoSprite2;
-
-        const std::vector<QrVertex> *vertsPtr = &surf.vertices;
-        const std::vector<uint32_t> *indicesPtr = &surf.indices;
-        if (needsDeform)
-        {
-            deformedVerts = surf.vertices;
-            deformedIndices = surf.indices;
-            const EditorWaveDeformParams deform{
-                surf.deformWave, surf.deformSpread, surf.deformBase,
-                surf.deformAmplitude, surf.deformPhase, surf.deformFrequency,
-            };
-            DeformWaveVertices(deformedVerts, deform, timeSeconds);
-            DeformAutoSpriteVertices(deformedVerts, deformedIndices, surf.autoSprite,
-                                     surf.autoSprite2, cam);
-            vertsPtr = &deformedVerts;
-            indicesPtr = &deformedIndices;
-        }
-
-        OverlayUploadInput input;
-        input.cutoutUnderlay = surf.cutoutUnderlay;
-        input.tracedBase = surf.tracedBase;
-        input.metallicEnvBase = surf.metallicEnvBase;
-        input.surfaceLight = surf.surfaceLight;
-        input.baseStageIndex = surf.baseStageIndex;
-        input.firstStage = surf.firstOverlayStage;
-        input.endStage = surf.endOverlayStage;
-        input.stages = &surf.stages;
-        input.vertices = vertsPtr;
-        input.indices = indicesPtr;
-        UploadOverlayStageSet(m_instance, input, cam, timeSeconds, resolveOverlayMat);
-    }
+    const EditorCameraBasis cam = CameraBasis();
+    m_runtime.UploadWorldOverlays(m_instance, m_assets, cam, timeSeconds, &extraLists);
 }
 
 void EditorApp::UploadPreviewModel(float timeSeconds)
@@ -4060,9 +2616,10 @@ void EditorApp::UploadPreviewModel(float timeSeconds)
         std::memcpy(pose.worldCenter, worldCenter, sizeof(pose.worldCenter));
         const EditorCameraBasis cam = CameraBasis();
         const QrMaterial cutoutBacking = GetCutoutBackingMaterial();
-        const std::function<QrMaterial(const std::string &, const EditorMaterialParams &)>
-            resolveMat = [this](const std::string &name, const EditorMaterialParams &p) {
-                return ResolvePreviewMaterial(name, p);
+        const std::function<QrMaterial(const std::string &, const EditorMaterialParams &, bool)>
+            resolveMat = [this](const std::string &name, const EditorMaterialParams &p,
+                                bool forceEnvBase) {
+                return ResolvePreviewMaterial(name, p, forceEnvBase);
             };
         const std::function<QrMaterial(const std::string &, bool, bool, bool)> resolveOverlayMat =
             [this](const std::string &imageName, bool clampMap, bool cleanAdditiveBlack,
@@ -4258,55 +2815,12 @@ void EditorApp::UnloadSceneResources()
     m_previewMaterialIndex = -1;
     m_previewModel = EditorPreviewModel{};
 
-    if (m_instance != nullptr)
-    {
-        if (qrBeginStaticGeometries(m_instance) == QR_SUCCESS)
-        {
-            qrSubmitStaticGeometries(m_instance);
-        }
-
-        QrWorldLightsUploadInfo emptyClusters = {};
-        emptyClusters.clusterGeneration = ++m_clusterGeneration;
-        qrUploadWorldLights(m_instance, &emptyClusters);
-
-        m_materialBakes.Destroy(m_instance);
-        m_previewMaterialBakes.Destroy(m_instance);
-        DestroyPoolMaterials();
-        DestroySkyMaterials();
-        DestroyOverlayMaterials();
-    }
-
-    m_emissiveLights.clear();
-    m_generatedLightBases.clear();
+    m_previewMaterialBakes.Destroy(m_instance);
+    m_runtime.DestroyGpuResources(m_instance);
+    m_textureBrowserCatalogBuilt = false;
     m_hasLightBuildSettings = false;
-    m_customLights.clear();
-    m_scene = EditorScene{};
-    m_materials = EditorMaterialTable{};
     m_selectedMaterial = -1;
 }
-
-namespace
-{
-
-void ApplySceneRenderDefaults(const EditorScene &scene, EditorSunState &sun,
-                              EditorRenderSettings &settings)
-{
-    ApplySceneSunDefaults(scene, sun, settings);
-    if (!scene.usesExternalLightingModel)
-    {
-        return;
-    }
-
-    if (!scene.skyboxName.empty() || scene.generatedSkyboxSize > 0)
-    {
-        settings.skyType = QR_SKY_TYPE_CUBEMAP;
-    }
-    settings.volumeType = 0;
-    settings.lightShafts = false;
-    settings.godRays = false;
-}
-
-} // namespace
 
 bool EditorApp::OpenSceneNow(const std::string &path)
 {
@@ -4365,7 +2879,7 @@ bool EditorApp::OpenSceneNow(const std::string &path)
 
     if (!m_skyGlobals.Empty())
     {
-        ApplySkyScope(m_skyGlobals, false, m_settings, m_sun);
+        ApplyEditorSkyScope(m_skyGlobals, false, m_settings, m_sun);
     }
 
     m_settings.fogColor[0] = 1.0f;
@@ -4373,7 +2887,7 @@ bool EditorApp::OpenSceneNow(const std::string &path)
     m_settings.fogColor[2] = 1.0f;
     m_settings.fogDensity = 0.0f;
 
-    ApplySceneRenderDefaults(m_scene, m_sun, m_settings);
+    m_runtime.ApplySceneRenderDefaults();
 
     LoadMaterialsSession();
     LoadGameConfigGlobals();
@@ -4620,95 +3134,59 @@ bool EditorApp::UploadScene()
     return UploadStaticGeometry();
 }
 
-bool EditorApp::UploadSurfaceGeometry(size_t surfaceIndex, const EditorSurface &surface,
-                                      std::vector<QrVertex> &meterVertices)
+namespace
 {
-    const EditorMaterialParams &params = m_materials.For(surface);
-    const QrMaterial material = SurfaceMaterialWithOverride(surface, params);
-    const EditorMaterialEmission emission = MaterialEmissionOf(material);
+struct SavedLightToken
+{
+    int32_t oldIndex = -1;
+    uint64_t uid = 0;
+    std::string className;
+};
 
-    QrGeometryUploadInfo upload = {};
-    upload.uniqueID = uint32_t(surfaceIndex) + 1;
-    upload.flags = surface.hasAuthoredNormals ? 0u : QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
-    upload.geomType = QR_GEOMETRY_TYPE_STATIC;
-    // A sky surface is not a wall: the game uploads the brushes whose faces carry a sky texture
-    // in the SKY lane (r_brush.c), and the renderer answers a ray that reaches one with sky
-    // radiance. Left as world geometry the brush is shaded like any other wall, which paints
-    // the sky opening as a lit slab instead of a sky.
-    const bool isSkySurface = surface.kind == EditorSurfaceKind::Sky;
-    upload.visibilityType =
-        isSkySurface ? QR_GEOMETRY_VISIBILITY_TYPE_SKY : QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
-    upload.vertexCount = uint32_t(surface.vertices.size());
-    upload.pVertices = surface.vertices.data();
-    upload.indexCount = uint32_t(surface.indices.size());
-    upload.pIndices = surface.indices.data();
-    upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
-    upload.geomMaterial.layerMaterials[0] = material;
-    ApplyEditorMaterial(params, PassThroughTypeForSurface(surface.kind), upload);
-
-    // Non-DTAL glowing surfaces must still emit along bounce rays (r_world.c), whereas DTAL
-    // area lights already account for their surface emission. When usesExternalLightingModel is
-    // true, predefined surface emitters are already represented as editable EditorLights unless the
-    // user explicitly enabled material luma emission.
-    if ((!m_scene.usesExternalLightingModel || params.luma) &&
-        !SurfaceCastsDtalLight(m_settings.truelight, params, emission))
-    {
-        upload.flags |= QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT;
-    }
-
-    upload.transform.matrix[0][0] = 1.0f;
-    upload.transform.matrix[1][1] = 1.0f;
-    upload.transform.matrix[2][2] = 1.0f;
-
-    EditorMetersGeometry(upload, meterVertices);
-
-    const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
-
-    if (uploadResult != QR_SUCCESS)
-    {
-        PrintMessage(("geometry upload for '" + surface.textureName + "': " +
-                      std::string(qrGetResultDescription(uploadResult))).c_str(), this);
-        return false;
-    }
-
-    if (surface.isCutoutUnderlay && !isSkySurface)
-    {
-        const QrMaterial backingMaterial = GetCutoutBackingMaterial();
-        if (backingMaterial != QR_NO_MATERIAL)
+std::vector<SavedLightToken> CaptureLightSelectionTokens(const std::vector<EditorLight> &lights,
+                                                         const std::vector<int32_t> &selectedLights,
+                                                         int32_t selectedLight)
+{
+    std::vector<SavedLightToken> savedSel;
+    auto pushSaved = [&](int32_t idx) {
+        if (idx >= 0 && size_t(idx) < lights.size())
         {
-            std::vector<QrVertex> backingVertices = surface.vertices;
-            OffsetEditorVerticesAlongSmoothNormals(backingVertices, surface.indices, -1.6f);
-            std::vector<QrVertex> backingMeterVertices;
-
-            QrGeometryUploadInfo backingUpload = {};
-            backingUpload.uniqueID = 0x100000000ull + uint64_t(surfaceIndex) + 1u;
-            backingUpload.flags =
-                (surface.hasAuthoredNormals ? 0u : QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT) |
-                QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT;
-            backingUpload.geomType = QR_GEOMETRY_TYPE_STATIC;
-            backingUpload.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
-            backingUpload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
-            backingUpload.vertexCount = uint32_t(backingVertices.size());
-            backingUpload.pVertices = backingVertices.data();
-            backingUpload.indexCount = uint32_t(surface.indices.size());
-            backingUpload.pIndices = surface.indices.data();
-            backingUpload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
-            backingUpload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
-            backingUpload.texCoordScale[0] = 1.0f;
-            backingUpload.texCoordScale[1] = 1.0f;
-            backingUpload.defaultRoughness = 0.9f;
-            backingUpload.geomMaterial.layerMaterials[0] = backingMaterial;
-            backingUpload.transform.matrix[0][0] = 1.0f;
-            backingUpload.transform.matrix[1][1] = 1.0f;
-            backingUpload.transform.matrix[2][2] = 1.0f;
-            EditorMetersGeometry(backingUpload, backingMeterVertices);
-            qrUploadGeometry(m_instance, &backingUpload);
+            savedSel.push_back(
+                { idx, lights[size_t(idx)].emitterUniqueID, lights[size_t(idx)].className });
         }
+    };
+    for (int32_t idx : selectedLights)
+    {
+        pushSaved(idx);
     }
-
-    return true;
+    if (savedSel.empty() && selectedLight >= 0)
+    {
+        pushSaved(selectedLight);
+    }
+    return savedSel;
 }
+
+int32_t MatchSavedLightTokenIndex(const std::vector<EditorLight> &lights,
+                                  const SavedLightToken &token)
+{
+    if (token.uid != 0)
+    {
+        for (size_t i = 0; i < lights.size(); i++)
+        {
+            if (lights[i].emitterUniqueID == token.uid && lights[i].className == token.className)
+            {
+                return int32_t(i);
+            }
+        }
+        return -1;
+    }
+    if (token.oldIndex >= 0 && size_t(token.oldIndex) < lights.size())
+    {
+        return token.oldIndex;
+    }
+    return -1;
+}
+} // namespace
 
 bool EditorApp::UploadStaticGeometry()
 {
@@ -4717,200 +3195,43 @@ bool EditorApp::UploadStaticGeometry()
         return false;
     }
 
-    const QrResult beginResult = qrBeginStaticGeometries(m_instance);
-
-    if (beginResult != QR_SUCCESS)
+    const std::vector<SavedLightToken> savedSel =
+        CaptureLightSelectionTokens(m_scene.lights, m_selectedLights, m_selectedLight);
+    const bool ok = m_runtime.UploadStaticGeometry(
+        m_instance, m_assets, m_material, [this](const char *msg) { PrintMessage(msg, this); });
+    if (!ok)
     {
-        PrintMessage(("begin static scene: " + std::string(qrGetResultDescription(beginResult))).c_str(), this);
         return false;
     }
 
-    // Every pass uploads the geometry the parameters produce now, so a bake the pass does not ask
-    // for again has nothing pointing at it once the new geometry is submitted.
-    m_materialBakes.BeginPass();
+    m_lastLightBuildSettings = m_settings;
+    m_hasLightBuildSettings = true;
 
-    uint32_t uploadedSurfaces = 0;
-
-    // The scene stays in Quake units -- the panel, the picking and the session file all read them
-    // -- so the meters the renderer is handed are a converted copy of each upload's vertices.
-    std::vector<QrVertex> meterVertices;
-
-    for (size_t surfaceIndex = 0; surfaceIndex < m_scene.surfaces.size(); surfaceIndex++)
+    m_selectedLights.clear();
+    m_selectedLight = -1;
+    for (const SavedLightToken &s : savedSel)
     {
-        const EditorSurface &surface = m_scene.surfaces[surfaceIndex];
-
-        if (surface.vertices.empty() || surface.indices.empty())
+        const int32_t matched = MatchSavedLightTokenIndex(m_scene.lights, s);
+        if (matched >= 0 &&
+            std::find(m_selectedLights.begin(), m_selectedLights.end(), matched) ==
+                m_selectedLights.end())
         {
-            continue;
-        }
-
-        if (!UploadSurfaceGeometry(surfaceIndex, surface, meterVertices))
-        {
-            return false;
-        }
-
-        uploadedSurfaces++;
-    }
-
-    if (uploadedSurfaces == 0 && !m_scene.vertices.empty() && !m_scene.indices.empty())
-    {
-        QrGeometryUploadInfo upload = {};
-        upload.uniqueID = 1;
-        upload.flags = QR_GEOMETRY_UPLOAD_GENERATE_NORMALS_BIT;
-        upload.geomType = QR_GEOMETRY_TYPE_STATIC;
-        upload.passThroughType = QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE;
-        upload.visibilityType = QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0;
-        upload.vertexCount = uint32_t(m_scene.vertices.size());
-        upload.pVertices = m_scene.vertices.data();
-        upload.indexCount = uint32_t(m_scene.indices.size());
-        upload.pIndices = m_scene.indices.data();
-        upload.layerColors[0] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        upload.layerBlendingTypes[0] = QR_GEOMETRY_MATERIAL_BLEND_TYPE_OPAQUE;
-        upload.geomMaterial.layerMaterials[0] = m_material;
-        ApplyEditorMaterial(EditorMaterialParams{}, QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE, upload);
-        upload.transform.matrix[0][0] = 1.0f;
-        upload.transform.matrix[1][1] = 1.0f;
-        upload.transform.matrix[2][2] = 1.0f;
-
-        EditorMetersGeometry(upload, meterVertices);
-
-        const QrResult uploadResult = qrUploadGeometry(m_instance, &upload);
-
-        if (uploadResult != QR_SUCCESS)
-        {
-            PrintMessage(("geometry upload: " + std::string(qrGetResultDescription(uploadResult))).c_str(), this);
-            return false;
+            m_selectedLights.push_back(matched);
         }
     }
-
-    PrintMessage(("geometry upload: " + std::to_string(uploadedSurfaces) + " surfaces").c_str(),
-                 this);
-
-    // Inside the pass, where the bakes the surfaces are drawn with are alive: a light reads the
-    // mask off the material of the very surface it stands for.
-    BuildEmissiveLights();
-
-    const QrResult submitResult = qrSubmitStaticGeometries(m_instance);
-
-    if (submitResult == QR_SUCCESS)
-    {
-        m_materialBakes.EndPass(m_instance);
-    }
-
-    PrintMessage(("material bakes: " + std::to_string(m_materialBakes.Count())).c_str(), this);
-    PrintMessage(("submit static scene: " + std::string(qrGetResultDescription(submitResult))).c_str(), this);
-    return submitResult == QR_SUCCESS;
+    SyncPrimaryLightSelection();
+    return true;
 }
 
 bool EditorApp::UploadWorldClusters()
 {
-    if (m_instance == nullptr)
-    {
-        return false;
-    }
-
-    const EditorWorldClusters &clusters = m_scene.worldClusters;
-
-    if (clusters.numLeafs == 0 || clusters.mins.empty())
-    {
-        // Clear any previous BSP cluster table on empty/OBJ scenes.
-        QrWorldLightsUploadInfo emptyUpload = {};
-        emptyUpload.clusterGeneration = ++m_clusterGeneration;
-        return qrUploadWorldLights(m_instance, &emptyUpload) == QR_SUCCESS;
-    }
-
-    QrWorldLightsUploadInfo upload = {};
-    upload.flags = 0;
-    upload.numClusters = uint32_t(clusters.mins.size());
-    upload.pClusterMins = clusters.mins.data();
-    upload.pClusterMaxs = clusters.maxs.data();
-    upload.pClusterFlags = clusters.flags.data();
-    upload.clusterGeneration = ++m_clusterGeneration;
-    AttachWorldClusterVis(clusters, upload);
-
-    std::vector<QrFloat3D> meterMins;
-    std::vector<QrFloat3D> meterMaxs;
-    EditorMetersWorldLights(upload, meterMins, meterMaxs);
-
-    const QrResult result = qrUploadWorldLights(m_instance, &upload);
-
-    if (result != QR_SUCCESS)
-    {
-        PrintMessage(("world clusters: " + std::string(qrGetResultDescription(result))).c_str(),
-                     this);
-        return false;
-    }
-
-    size_t resolved = 0;
-
-    for (const EditorLight &light : m_scene.lights)
-    {
-        if (light.cluster != QR_CLUSTER_LIGHT_NO_CLUSTER)
-        {
-            resolved++;
-        }
-    }
-
-    PrintMessage(("world clusters: " + std::to_string(upload.numClusters) +
-                  " clusters, lights resolved " + std::to_string(resolved) + "/" +
-                  std::to_string(m_scene.lights.size()))
-                     .c_str(),
-                 this);
-
-    size_t unclustered = 0;
-    size_t distinct = 0;
-    uint32_t highest = 0;
-    std::vector<uint8_t> seen(upload.numClusters, 0);
-
-    for (const QrVertex &vertex : m_scene.vertices)
-    {
-        if (vertex.cluster == 0)
-        {
-            unclustered++;
-            continue;
-        }
-
-        if (vertex.cluster < upload.numClusters && seen[vertex.cluster] == 0)
-        {
-            seen[vertex.cluster] = 1;
-            distinct++;
-        }
-
-        highest = std::max(highest, vertex.cluster);
-    }
-
-    PrintMessage(("surface clusters: " + std::to_string(m_scene.vertices.size() - unclustered) +
-                  "/" + std::to_string(m_scene.vertices.size()) + " vertices clustered, " +
-                  std::to_string(distinct) + " distinct, max " + std::to_string(highest))
-                     .c_str(),
-                 this);
-
-    return true;
+    return m_runtime.UploadWorldClusters(
+        m_instance, [this](const char *msg) { PrintMessage(msg, this); });
 }
-
-namespace
-{
-
-float ResolveEditorSunIntensity(const EditorRenderSettings &settings, const EditorSunState &sun)
-{
-    if (sun.enabled)
-    {
-        return sun.radiance;
-    }
-
-    const bool timeSunActive = settings.skyType == QR_SKY_TYPE_PROCEDURAL && settings.timeOfDayEnable;
-    return timeSunActive ? kEditorSkySunRadiance : 0.0f;
-}
-
-} // namespace
 
 void EditorApp::AdvanceCelestialClock(float deltaSeconds)
 {
-    if (m_settings.skyType == QR_SKY_TYPE_PROCEDURAL && m_settings.timeOfDayEnable &&
-        m_settings.timeOfDaySpeed > 0.0f)
-    {
-        m_celestialClockSeconds += double(deltaSeconds);
-    }
+    m_runtime.AdvanceCelestialClock(deltaSeconds);
 }
 
 void EditorApp::RenderSceneFrameContents(float deltaSeconds)
@@ -4960,6 +3281,41 @@ void EditorApp::RenderSceneFrameContents(float deltaSeconds)
     m_ui.EndFrame(m_instance, m_clientWidth, m_clientHeight);
 }
 
+void EditorApp::FlushPendingSceneUpdates()
+{
+    if (!m_sceneLoaded || ImGui::IsAnyItemActive())
+    {
+        return;
+    }
+
+    if (m_materialsChanged)
+    {
+        m_materialsChanged = false;
+        if (UploadStaticGeometry())
+        {
+            PrintMessage("materials applied: static scene re-uploaded", this);
+        }
+    }
+
+    RefreshGeneratedLightsIfSettingsChanged();
+}
+
+void EditorApp::MaintainFlyLookCapture()
+{
+    if (!m_sceneLoaded || !m_looking || !m_hasFocus || m_showPanel || HasModalOpen() ||
+        m_maxFrames != 0 || m_window.IsMouseCaptured())
+    {
+        return;
+    }
+
+    m_ui.SetCursorVisible(false);
+    m_window.SetMouseCapture(true);
+    if (m_window.IsMouseCaptured())
+    {
+        m_window.WarpCursorToCenter(m_lastMouseX, m_lastMouseY);
+    }
+}
+
 void EditorApp::Frame()
 {
     if (m_instance == nullptr)
@@ -4969,7 +3325,7 @@ void EditorApp::Frame()
 
     ProcessDeferredSessionAction();
 
-    if (!m_running)
+    if (!m_running || m_playProcess.handle != 0)
     {
         return;
     }
@@ -4985,20 +3341,8 @@ void EditorApp::Frame()
 
     m_frameTimeMs = deltaSeconds * 1000.0f;
 
-    if (m_sceneLoaded && m_materialsChanged && !ImGui::IsAnyItemActive())
-    {
-        m_materialsChanged = false;
-
-        if (UploadStaticGeometry())
-        {
-            PrintMessage("materials applied: static scene re-uploaded", this);
-        }
-    }
-
-    if (m_sceneLoaded && !ImGui::IsAnyItemActive())
-    {
-        RefreshGeneratedLightsIfSettingsChanged();
-    }
+    FlushPendingSceneUpdates();
+    MaintainFlyLookCapture();
 
     m_window.GetClientSize(m_clientWidth, m_clientHeight);
 
@@ -5067,44 +3411,7 @@ void EditorApp::SubmitSceneFrame()
     draw.renderUiOnly = m_sceneLoaded ? 0 : 1;
     draw.enableCpuProfiling = 0;
 
-    // The sun the viewport shows is the sun the sky and the shafts use, so the
-    // disc, the scattering direction and the directional light cannot disagree.
-    float toSun[3], toMoon[3], celestialRotRad = 0.0f;
-    ComputeEditorCelestialFrame(m_settings, m_sun, m_celestialClockSeconds, toSun, toMoon,
-                                celestialRotRad);
-    const float activeSunIntensity = ResolveEditorSunIntensity(m_settings, m_sun);
-
-    BuildEditorFrameParams(m_settings, toSun, toMoon, celestialRotRad, activeSunIntensity, eye,
-                           m_scene.hasSkyFlatColor ? m_scene.skyFlatColor : nullptr,
-                           m_frameParams);
-
-    // The render size the game derives in ResolutionToQray: rt_renderscale is a custom size and
-    // the SDK's blit is the upscale, because the editor asks for no device-level upscaler. The
-    // pixelized size stays null, as it does on the game's own path.
-    ApplyEditorResolutionParams(m_instance, m_settings, m_clientWidth, m_clientHeight,
-                                m_frameParams.resolution);
-
-    draw.pSkyParams = &m_frameParams.sky;
-    draw.pTonemappingParams = &m_frameParams.tonemap;
-    draw.pVolumetricParams = &m_frameParams.volume;
-    draw.pLevelFogParams = &m_frameParams.fog;
-    draw.pReflectRefractParams = &m_frameParams.reflectRefract;
-    draw.pTexturesParams = &m_frameParams.textures;
-    draw.pBloomParams = &m_frameParams.bloom;
-    // Left null, the renderer substitutes its own estimator -- one-unit gradient cells where
-    // the game asks for two metres, and its own sensitivity gradients -- so the preview would
-    // be shaded by a different integrator than the game that opens the same level.
-    draw.pIlluminationParams = &m_frameParams.illumination;
-    draw.forceAntiFirefly = m_frameParams.antifirefly;
-    draw.pRenderResolutionParams = &m_frameParams.resolution;
-    // Re-established here rather than left to the builder: every pointer has to name this frame's
-    // own block, which the builder cannot promise of a record it only fills.
-    m_frameParams.postEffects.pBloom = &m_frameParams.bloomEffect;
-    m_frameParams.postEffects.pVignette = &m_frameParams.vignette;
-    m_frameParams.postEffects.pFilmGrain = &m_frameParams.filmGrain;
-    m_frameParams.postEffects.pSharpen = &m_frameParams.sharpen;
-    m_frameParams.postEffects.pCRT = &m_frameParams.crt;
-    draw.postEffectParams = m_frameParams.postEffects;
+    m_runtime.PopulateDrawFrame(m_instance, eye, m_clientWidth, m_clientHeight, m_frameParams, draw);
 
     if (m_sceneLoaded)
     {
@@ -5430,6 +3737,31 @@ void EditorApp::HandleMouseButtonEvent(const EditorEvent &event)
     }
 }
 
+void EditorApp::HandleModeCtrlShortcut(EditorKey key)
+{
+    if (!m_sceneLoaded)
+    {
+        return;
+    }
+
+    if (key == EditorKey::S && HasUnsavedEditorChanges())
+    {
+        SaveSessionToDisk();
+    }
+    else if (key == EditorKey::P && CanPlayCurrentLevel() && m_playProcess.handle == 0)
+    {
+        RequestPlayLevel();
+    }
+    else if (key == EditorKey::C && m_editorMode == EditorMode::Light)
+    {
+        CopySelectedLights();
+    }
+    else if (key == EditorKey::V && m_editorMode == EditorMode::Light)
+    {
+        PasteCopiedLights();
+    }
+}
+
 void EditorApp::HandleCtrlShortcut(EditorKey key)
 {
     switch (key)
@@ -5452,13 +3784,8 @@ void EditorApp::HandleCtrlShortcut(EditorKey key)
             RequestSessionAction(PendingSessionAction::ReloadScene);
         }
         break;
-    case EditorKey::S:
-        if (m_sceneLoaded && HasUnsavedEditorChanges())
-        {
-            SaveSessionToDisk();
-        }
-        break;
     default:
+        HandleModeCtrlShortcut(key);
         break;
     }
 }
@@ -5553,11 +3880,53 @@ void EditorApp::HandleFocusEvent(bool focused)
     }
 }
 
+bool EditorApp::HandlePlayProcessEvent(const EditorEvent &event)
+{
+    if (m_playProcess.handle == 0)
+    {
+        return false;
+    }
+
+    if (event.type == EditorEventType::Focus)
+    {
+        m_ui.HandleEvent(event);
+        if (event.down)
+        {
+            m_hasFocus = true;
+        }
+        else
+        {
+            HandleFocusLost();
+        }
+    }
+    return true;
+}
+
+void EditorApp::RestoreFocusFromInputEvent(const EditorEvent &event)
+{
+    if (m_hasFocus || !event.down ||
+        (event.type != EditorEventType::Key && event.type != EditorEventType::MouseButton))
+    {
+        return;
+    }
+
+    m_hasFocus = true;
+    EditorEvent focusEvent = {};
+    focusEvent.type = EditorEventType::Focus;
+    focusEvent.down = true;
+    m_ui.HandleEvent(focusEvent);
+}
+
 void EditorApp::HandleEvent(const EditorEvent &event)
 {
     if (event.type == EditorEventType::Close)
     {
         RequestExit();
+        return;
+    }
+
+    if (HandlePlayProcessEvent(event))
+    {
         return;
     }
 
@@ -5567,6 +3936,8 @@ void EditorApp::HandleEvent(const EditorEvent &event)
         HandleFocusEvent(event.down);
         return;
     }
+
+    RestoreFocusFromInputEvent(event);
 
     if (IsCursorModeToggleEvent(event, HasModalOpen(), m_showPanel, m_ui.WantsTextInput()))
     {
@@ -5607,8 +3978,9 @@ bool EditorApp::CreateUi()
     std::string error;
 
     m_fontPath = ResolveDefaultAssetPath("fonts/Roboto-Regular.ttf");
+    const std::string iconFontPath = ResolveDefaultAssetPath("fonts/fa-solid-900.ttf");
 
-    if (!m_ui.Initialize(&m_window, m_instance, m_fontPath, error))
+    if (!m_ui.Initialize(&m_window, m_instance, m_fontPath, error, iconFontPath))
     {
         PrintMessage(("ui: " + error).c_str(), this);
         return false;
@@ -5719,176 +4091,23 @@ void EditorApp::UpdateCamera(float deltaSeconds)
 
 void EditorApp::SunDirection(float direction[3]) const
 {
-    // The game reads -forward of rt_sky_sun_pitch/rt_sky_sun_yaw as the direction towards the sun,
-    // so the editor derives it from the same pair and a level the game wrote puts its sun where the
-    // file says. AngleVectors puts -sin(pitch) on forward's z, which flips to +sin here.
-    const float pitch = m_sun.pitch * 0.01745329252f;
-    const float yaw = m_sun.yaw * 0.01745329252f;
-    const float cosPitch = std::cos(pitch);
-
-    direction[0] = -cosPitch * std::cos(yaw);
-    direction[1] = -cosPitch * std::sin(yaw);
-    direction[2] = std::sin(pitch);
+    EditorSunDirectionToSun(m_sun, direction);
 }
 
 void EditorApp::UploadSun()
 {
-    const bool timeSunActive = m_settings.skyType == QR_SKY_TYPE_PROCEDURAL && m_settings.timeOfDayEnable;
-    if (!m_sun.enabled && !timeSunActive)
-    {
-        return;
-    }
-
-    float toSun[3], toMoon[3], celestialRotRad = 0.0f;
-    ComputeEditorCelestialFrame(m_settings, m_sun, m_celestialClockSeconds, toSun, toMoon,
-                                celestialRotRad);
-
-    const float radiance = m_sun.radiance > 0.0f ? m_sun.radiance : kEditorSkySunRadiance;
-    QrDirectionalLightUploadInfo sun = {};
-    sun.uniqueID = 2;
-    sun.angularDiameterDegrees = m_sun.angularDiameter;
-
-    if (m_settings.timeOfDayEnable)
-    {
-        float trans[3];
-        EvalEditorSunGroundTransmittance(m_settings, toSun, trans);
-        const float dayWeight = trans[0] + trans[1] + trans[2];
-        if (dayWeight > 1e-4f)
-        {
-            sun.color = { radiance * m_settings.sunColor[0] * trans[0],
-                          radiance * m_settings.sunColor[1] * trans[1],
-                          radiance * m_settings.sunColor[2] * trans[2] };
-            sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
-        }
-        else if (toMoon[2] > 0.0f && m_settings.moonIntensity > 0.0f)
-        {
-            const float phaseScale = m_settings.moonPhase >= 0.0f
-                ? (0.18f + 0.82f * std::clamp(m_settings.moonPhase, 0.0f, 1.0f))
-                : 0.7f;
-            const float moonScale = radiance * 0.006f * std::max(0.0f, m_settings.moonIntensity) *
-                                    phaseScale * std::min(1.0f, toMoon[2] * 5.0f);
-            sun.color = { moonScale * m_settings.moonColor[0],
-                          moonScale * m_settings.moonColor[1],
-                          moonScale * m_settings.moonColor[2] };
-            sun.direction = { -toMoon[0], -toMoon[1], -toMoon[2] };
-        }
-        else
-        {
-            return;
-        }
-    }
-    else
-    {
-        sun.color = { radiance * m_settings.sunColor[0], radiance * m_settings.sunColor[1],
-                      radiance * m_settings.sunColor[2] };
-        sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
-    }
-
-    const QrResult result = qrUploadDirectionalLight(m_instance, &sun);
-
-    if (result != QR_SUCCESS)
-    {
-        static bool logged = false;
-
-        if (!logged)
-        {
-            logged = true;
-            PrintMessage(("sun: " + std::string(qrGetResultDescription(result))).c_str(), this);
-        }
-    }
+    m_runtime.UploadSun(m_instance, [this](const char *msg) { PrintMessage(msg, this); });
 }
-
-namespace
-{
-
-template <typename UploadInfo>
-void FillUploadLightShafts(UploadInfo &info, bool enabled, float power, float distance,
-                           float falloff)
-{
-    info.lightShafts = enabled ? 1 : 0;
-    info.lightShaftsPower = std::max(0.0f, power);
-    info.lightShaftsDistance = std::max(0.0f, distance);
-    info.lightShaftsFalloff = std::max(0.01f, falloff);
-}
-
-} // namespace
 
 void EditorApp::UploadLight(const EditorLight &light, uint64_t uniqueID, QrResult &lastResult)
 {
-    const float px = light.position[0] + (light.hasOffset ? light.offset[0] : 0.0f);
-    const float py = light.position[1] + (light.hasOffset ? light.offset[1] : 0.0f);
-    const float pz = light.position[2] + (light.hasOffset ? light.offset[2] : 0.0f);
-
-    // RT_LIGHT_Emit uploads a spot light when the entry's cone is on and its axis is not
-    // zero, and a spherical one otherwise.
-    const bool isSpot = light.spot && (light.direction[0] * light.direction[0] +
-                                       light.direction[1] * light.direction[1] +
-                                       light.direction[2] * light.direction[2]) > 0.0f;
-
-    if (isSpot)
-    {
-        QrSpotLightUploadInfo info = {};
-        info.uniqueID = uniqueID;
-        info.color = { light.color[0], light.color[1], light.color[2] };
-        info.position = { px, py, pz };
-        info.direction = { light.direction[0], light.direction[1], light.direction[2] };
-        info.radius = light.radius;
-        info.angleInner = light.angleInner * 0.01745329252f;
-        info.angleOuter = light.angleOuter * 0.01745329252f;
-        FillUploadLightShafts(info, light.lightShafts, light.lightShaftsPower,
-                              light.lightShaftsDistance, light.lightShaftsFalloff);
-
-        EditorMetersSpotLight(info);
-
-        lastResult = qrUploadSpotLight(m_instance, &info);
-    }
-    else
-    {
-        QrSphericalLightUploadInfo info = {};
-        // RT_UploadAllElights numbers map lights from UINT16_MAX upwards and
-        // keeps the editor's world geometry IDs (1..N) out of the way.
-        info.uniqueID = uniqueID;
-        info.color = { light.color[0], light.color[1], light.color[2] };
-        info.position = { px, py, pz };
-        info.radius = light.radius;
-        FillUploadLightShafts(info, light.lightShafts, light.lightShaftsPower,
-                              light.lightShaftsDistance, light.lightShaftsFalloff);
-
-        EditorMetersSphericalLight(info);
-
-        lastResult = qrUploadSphericalLight(m_instance, &info);
-    }
+    lastResult = EditorSceneRuntime::UploadSingleLight(m_instance, light, uniqueID);
 }
 
 void EditorApp::UploadLights()
 {
-    QrResult lastResult = QR_SUCCESS;
-
-    for (size_t index = 0; index < m_scene.lights.size(); index++)
-    {
-        if (!m_scene.lights[index].enabled)
-        {
-            continue;
-        }
-
-        UploadLight(m_scene.lights[index], LightUniqueID(index), lastResult);
-
-        if (lastResult != QR_SUCCESS)
-        {
-            break;
-        }
-    }
-
-    // The custom lights go in after the map's, like the second block of RT_UploadAllElights.
-    for (size_t index = 0; index < m_customLights.size() && lastResult == QR_SUCCESS; index++)
-    {
-        if (!m_customLights[index].enabled)
-        {
-            continue;
-        }
-
-        UploadLight(m_customLights[index], CustomLightUniqueID(index), lastResult);
-    }
+    const auto logFn = [this](const char *msg) { PrintMessage(msg, this); };
+    QrResult lastResult = m_runtime.UploadLights(m_instance, 0.0, false, logFn);
 
     if (m_torchMode && lastResult == QR_SUCCESS)
     {
@@ -5947,976 +4166,52 @@ void EditorApp::LogLightCluster(const EditorLight &light, uint64_t uniqueID, con
 namespace
 {
 
-void FillEditorLightClusterSource(const EditorLight &light, uint64_t uniqueID, float reach,
-                                  QrClusterLightSource &out)
+void AppendPriorityClusterSource(const EditorLight &light, uint64_t uniqueID, float reach,
+                                 std::vector<QrClusterLightSource> &sources)
 {
     const float px = light.position[0] + (light.hasOffset ? light.offset[0] : 0.0f);
     const float py = light.position[1] + (light.hasOffset ? light.offset[1] : 0.0f);
     const float pz = light.position[2] + (light.hasOffset ? light.offset[2] : 0.0f);
-    const float lum =
-        0.2125f * light.color[0] + 0.7154f * light.color[1] + 0.0721f * light.color[2];
-    const float effRadius = std::max(light.radius, 8.0f);
-    const float sphereAreaQu = 4.0f * 3.14159265f * effRadius * effRadius;
-    out = {};
-    out.uniqueID = uniqueID;
-    out.origin = { px, py, pz };
-    out.cluster = light.cluster;
-    out.reach = reach;
-    out.power = std::max(0.0f, lum * sphereAreaQu);
-}
-
-void AppendPriorityClusterSource(const EditorLight &light, uint64_t uniqueID, float reach,
-                                 std::vector<QrClusterLightSource> &sources)
-{
     QrClusterLightSource source = {};
-    FillEditorLightClusterSource(light, uniqueID, reach, source);
+    source.uniqueID = uniqueID;
+    source.origin = { px, py, pz };
+    source.cluster = light.cluster;
+    source.reach = reach;
     source.power = 1.0e7f;
     sources.push_back(source);
-}
-
-void AppendEmissiveClusterSources(const std::vector<EditorEmissiveLight> &emissiveLights,
-                                  float staticReach, float dynamicReach,
-                                  std::vector<QrClusterLightSource> &sources)
-{
-    // A surface light stands off its own surface rather than on it, so the cluster its origin
-    // falls in is the one in front of the geometry: RT_RegisterWorldModelLight puts the origin
-    // two units along the normal and clusters it there. It is registered with its own power,
-    // which is what ranks it against the level's other lights in a cluster list.
-    for (const EditorEmissiveLight &light : emissiveLights)
-    {
-        const float normal[3] = { light.info.normal.data[0], light.info.normal.data[1],
-                                  light.info.normal.data[2] };
-
-        QrClusterLightSource source = {};
-        source.uniqueID = light.info.uniqueID;
-        source.origin = { light.center[0] + 2.0f * normal[0],
-                          light.center[1] + 2.0f * normal[1],
-                          light.center[2] + 2.0f * normal[2] };
-        source.cluster = light.cluster;
-        source.reach = light.isAliasModel ? dynamicReach : staticReach;
-        source.radius = 0.0f;
-        source.clusterCount = 0;
-        source.pClusters = nullptr;
-        source.power = light.power;
-        sources.push_back(source);
-    }
-}
-
-QrClusterLightSourcesUploadInfo BuildClusterLightSourcesUpload(
-    std::vector<QrClusterLightSource> &sources, float topUpReachUnits)
-{
-    for (QrClusterLightSource &source : sources)
-    {
-        EditorMetersClusterLightSource(source);
-    }
-
-    QrClusterLightSourcesUploadInfo info = {};
-    info.numLights = uint32_t(sources.size());
-    info.pLights = sources.empty() ? nullptr : sources.data();
-    info.topUpReach = EditorMetersLength(topUpReachUnits);
-    info.allowIncremental = 1;
-    info.allowOverflow = 1;
-    info.validate = 0;
-    return info;
 }
 
 } // namespace
 
 void EditorApp::UploadClusterLightSources()
 {
-    if (m_scene.worldClusters.numLeafs == 0)
-    {
-        return;
-    }
-
-    const size_t mapLightCount = m_scene.lights.size();
-    const bool includePreviewLight = IsModelPreviewActive() && m_previewLight;
-    const size_t lightCount = mapLightCount + m_customLights.size() + m_emissiveLights.size() +
-                              size_t(m_torchMode) + size_t(includePreviewLight);
-
-    std::vector<QrClusterLightSource> sources;
-    sources.reserve(lightCount);
-
-    const float mapReach =
-        m_scene.usesExternalLightingModel ? kLightReachUnits : kDynamicLightReachUnits;
-    for (size_t mapIndex = 0; mapIndex < mapLightCount; mapIndex++)
-    {
-        if (!m_scene.lights[mapIndex].enabled)
-        {
-            continue;
-        }
-
-        QrClusterLightSource source = {};
-        FillEditorLightClusterSource(m_scene.lights[mapIndex], LightUniqueID(mapIndex), mapReach,
-                                     source);
-        sources.push_back(source);
-    }
-
-    for (size_t customIndex = 0; customIndex < m_customLights.size(); customIndex++)
-    {
-        if (!m_customLights[customIndex].enabled)
-        {
-            continue;
-        }
-
-        QrClusterLightSource source = {};
-        FillEditorLightClusterSource(m_customLights[customIndex], CustomLightUniqueID(customIndex),
-                                     kDynamicLightReachUnits, source);
-        sources.push_back(source);
-    }
-
+    std::vector<QrClusterLightSource> extraSources;
     if (m_torchMode)
     {
         EditorLight torchLight;
         std::copy_n(m_cameraPosition, 3, torchLight.position);
         torchLight.cluster = ResolveEditorLightCluster(m_scene, m_cameraPosition);
-        AppendPriorityClusterSource(torchLight, kFirstCustomLightUniqueID + 0x10000,
-                                    kDynamicLightReachUnits, sources);
+        AppendPriorityClusterSource(torchLight, kEditorTorchUniqueID,
+                                    kEditorDynamicLightReachUnits, extraSources);
     }
-    if (includePreviewLight)
+    if (IsModelPreviewActive() && m_previewLight)
     {
         EditorLight previewLight;
         BuildPreviewLight(previewLight);
-        AppendPriorityClusterSource(previewLight, kPreviewLightUniqueId, kDynamicLightReachUnits,
-                                    sources);
+        AppendPriorityClusterSource(previewLight, kPreviewLightUniqueId,
+                                    kEditorDynamicLightReachUnits, extraSources);
     }
 
-    AppendEmissiveClusterSources(m_emissiveLights, kLightReachUnits, kDynamicLightReachUnits,
-                                 sources);
-    const QrClusterLightSourcesUploadInfo info =
-        BuildClusterLightSourcesUpload(sources, kLightTopUpReachUnits);
-    const QrResult result = qrUploadClusterLightSources(m_instance, &info);
-
-    if (result != QR_SUCCESS)
-    {
-        static bool logged = false;
-
-        if (!logged)
-        {
-            logged = true;
-            PrintMessage(("cluster light sources: " + std::string(qrGetResultDescription(result)))
-                             .c_str(),
-                         this);
-        }
-    }
+    const EditorClusterLightUploadExtras extras{
+        extraSources.empty() ? nullptr : &extraSources,
+        nullptr,
+    };
+    m_runtime.UploadClusterLightSources(
+        m_instance, &extras, [this](const char *msg) { PrintMessage(msg, this); });
 }
 
 namespace
 {
-
-// The unique ID range of the textured area lights a level's own materials cast. Sits above
-// map lights, custom lights, and kTorchUniqueId (kFirstCustomLightUniqueID + 0x10000) so no
-// emissive surface light can collide with the interactive camera torch.
-constexpr uint64_t kFirstEmissiveLightUniqueID = kFirstCustomLightUniqueID + 0x20000;
-
-// RT_EMIS_INTENSITY_TO_RAW(rt_emis_light_intensity) times RT_FIXUP_LIGHT_INTENSITY, the two
-// calls RT_ScaleEmissiveLightColor makes: the game scales an emissive surface light's colour by
-// rt_emis_light_intensity * 0.01 times rt_globallight_mult (10), the Quake-to-metre area fix
-// (1 / 0.025^2 = 1600) and rt_brightness. The two constants are the ones kEditorSkySunRadiance
-// folds in as well, so a surface light and the sun of the same level are stated in the same units.
-constexpr float kEditorEmissionLightScale = 10.0f * 1600.0f * 0.01f;
-
-void CrossProduct(const float a[3], const float b[3], float out[3])
-{
-    out[0] = a[1] * b[2] - a[2] * b[1];
-    out[1] = a[2] * b[0] - a[0] * b[2];
-    out[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-float DotProduct(const float a[3], const float b[3])
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-float VectorLength(const float v[3])
-{
-    return std::sqrt(DotProduct(v, v));
-}
-
-bool NormalizeVector(float v[3])
-{
-    const float length = VectorLength(v);
-
-    if (!(length > 1e-9f))
-    {
-        return false;
-    }
-
-    v[0] /= length;
-    v[1] /= length;
-    v[2] /= length;
-    return true;
-}
-
-// The area of one convex polygon and its area weighted centre, summed over the same fan of
-// triangles r_world.c walks while it collects a face's corners.
-void MeasureFace(const std::vector<QrFloat3D> &corners, float &area, float center[3])
-{
-    area = 0.0f;
-    center[0] = 0.0f;
-    center[1] = 0.0f;
-    center[2] = 0.0f;
-
-    for (size_t corner = 2; corner < corners.size(); corner++)
-    {
-        float a[3];
-        float b[3];
-        float cross[3];
-
-        // The first corner is the fan's hub, so each triangle is (0, n-1, n).
-        for (int axis = 0; axis < 3; axis++)
-        {
-            a[axis] = corners[corner - 1].data[axis] - corners[0].data[axis];
-            b[axis] = corners[corner].data[axis] - corners[0].data[axis];
-        }
-
-        CrossProduct(a, b, cross);
-
-        const float triangleArea = 0.5f * VectorLength(cross);
-
-        if (!(triangleArea > 0.0f))
-        {
-            continue;
-        }
-
-        area += triangleArea;
-
-        for (int axis = 0; axis < 3; axis++)
-        {
-            center[axis] += triangleArea * (corners[0].data[axis] + corners[corner - 1].data[axis] +
-                                            corners[corner].data[axis]) /
-                            3.0f;
-        }
-    }
-
-    if (area > 0.0f)
-    {
-        for (int axis = 0; axis < 3; axis++)
-        {
-            center[axis] /= area;
-        }
-    }
-}
-
-void AccumulateUvLeastSquares(const std::vector<QrFloat3D> &corners,
-                              const std::vector<QrFloat2D> &texCoords, size_t count,
-                              double m[3][3], double rhs[3][3])
-{
-    double ss = 0.0;
-    double st = 0.0;
-    double tt = 0.0;
-    double ssum = 0.0;
-    double tsum = 0.0;
-    double sx[3] = {};
-    double tx[3] = {};
-    double psum[3] = {};
-
-    for (size_t i = 0; i < count; i++)
-    {
-        const double u = texCoords[i].data[0];
-        const double v = texCoords[i].data[1];
-
-        ss += u * u;
-        st += u * v;
-        tt += v * v;
-        ssum += u;
-        tsum += v;
-
-        for (int axis = 0; axis < 3; axis++)
-        {
-            const double p = corners[i].data[axis];
-
-            sx[axis] += u * p;
-            tx[axis] += v * p;
-            psum[axis] += p;
-        }
-    }
-
-    m[0][0] = ss;
-    m[0][1] = st;
-    m[0][2] = ssum;
-    m[1][0] = st;
-    m[1][1] = tt;
-    m[1][2] = tsum;
-    m[2][0] = ssum;
-    m[2][1] = tsum;
-    m[2][2] = double(count);
-
-    rhs[0][0] = sx[0];
-    rhs[0][1] = sx[1];
-    rhs[0][2] = sx[2];
-    rhs[1][0] = tx[0];
-    rhs[1][1] = tx[1];
-    rhs[1][2] = tx[2];
-    rhs[2][0] = psum[0];
-    rhs[2][1] = psum[1];
-    rhs[2][2] = psum[2];
-}
-
-void SwapRows3x3(double m[3][3], double rhs[3][3], int rowA, int rowB)
-{
-    if (rowA == rowB)
-    {
-        return;
-    }
-
-    for (int k = 0; k < 3; k++)
-    {
-        std::swap(m[rowA][k], m[rowB][k]);
-        std::swap(rhs[rowA][k], rhs[rowB][k]);
-    }
-}
-
-// The affine map from a face's uv to its position that r_world.c fits with a least-squares solve:
-// position = A * u + B * v + C. False when the corners do not pin one down, which is a face whose
-// uv collapses -- a texture projected edge on -- and one no light can follow.
-bool FitFaceUvToPosition(const std::vector<QrFloat3D> &corners,
-                         const std::vector<QrFloat2D> &texCoords, float A[3], float B[3],
-                         float C[3])
-{
-    const size_t count = std::min(corners.size(), texCoords.size());
-
-    if (count < 3)
-    {
-        return false;
-    }
-
-    double m[3][3] = {};
-    double rhs[3][3] = {};
-    AccumulateUvLeastSquares(corners, texCoords, count, m, rhs);
-
-    for (int col = 0; col < 3; col++)
-    {
-        int pivot = col;
-
-        for (int row = col + 1; row < 3; row++)
-        {
-            if (std::fabs(m[row][col]) > std::fabs(m[pivot][col]))
-            {
-                pivot = row;
-            }
-        }
-
-        if (std::fabs(m[pivot][col]) < 1e-9)
-        {
-            return false;
-        }
-
-        SwapRows3x3(m, rhs, col, pivot);
-
-        const double inverse = 1.0 / m[col][col];
-
-        for (int k = 0; k < 3; k++)
-        {
-            m[col][k] *= inverse;
-            rhs[col][k] *= inverse;
-        }
-
-        for (int row = 0; row < 3; row++)
-        {
-            if (row == col)
-            {
-                continue;
-            }
-
-            const double factor = m[row][col];
-
-            if (std::fabs(factor) < 1e-10)
-            {
-                continue;
-            }
-
-            for (int k = 0; k < 3; k++)
-            {
-                m[row][k] -= factor * m[col][k];
-                rhs[row][k] -= factor * rhs[col][k];
-            }
-        }
-    }
-
-    for (int axis = 0; axis < 3; axis++)
-    {
-        A[axis] = float(rhs[0][axis]);
-        B[axis] = float(rhs[1][axis]);
-        C[axis] = float(rhs[2][axis]);
-    }
-
-    return true;
-}
-
-// TexMgr_EmissiveCone: the cone a light material's light is held to, in radians. A material with
-// no focus and no projector lights its whole hemisphere, which the SDK states as two zero angles.
-void EmissiveCone(float focusDegrees, float softDegrees, bool projector, float &angleInner,
-                  float &angleOuter)
-{
-    angleInner = 0.0f;
-    angleOuter = 0.0f;
-
-    float outerDegrees = focusDegrees;
-
-    if (!(outerDegrees > 0.0f) || outerDegrees > 90.0f)
-    {
-        if (!projector)
-        {
-            return;
-        }
-
-        outerDegrees = 45.0f;
-    }
-
-    if (softDegrees < 0.0f)
-    {
-        softDegrees = projector ? 45.0f : outerDegrees * 0.1f;
-    }
-
-    if (softDegrees < 0.05f)
-    {
-        softDegrees = 0.05f;
-    }
-
-    if (softDegrees > outerDegrees)
-    {
-        softDegrees = outerDegrees;
-    }
-
-    angleOuter = outerDegrees * 0.01745329252f;
-    angleInner = (outerDegrees - softDegrees) * 0.01745329252f;
-}
-
-bool BuildSquaredAreaLight(const float center[3], float area, QrTexturedAreaLightUploadInfo &info)
-{
-    info.material = QR_NO_MATERIAL;
-    info.numVerts = 4;
-
-    float axis[3] = { 0.0f, 0.0f, 1.0f };
-
-    if (std::fabs(info.normal.data[2]) > 0.9f)
-    {
-        axis[0] = 1.0f;
-        axis[1] = 0.0f;
-        axis[2] = 0.0f;
-    }
-
-    float u[3];
-    CrossProduct(axis, info.normal.data, u);
-
-    if (!NormalizeVector(u))
-    {
-        return false;
-    }
-
-    float v[3];
-    CrossProduct(info.normal.data, u, v);
-
-    const float side = std::sqrt(area);
-    float corner[3];
-
-    for (int k = 0; k < 3; k++)
-    {
-        info.A.data[k] = u[k] * side;
-        info.B.data[k] = v[k] * side;
-        corner[k] = center[k] - 0.5f * side * u[k] - 0.5f * side * v[k];
-    }
-
-    info.C = { corner[0], corner[1], corner[2] };
-    info.uvVerts[0] = { 0.0f, 0.0f };
-    info.uvVerts[1] = { 1.0f, 0.0f };
-    info.uvVerts[2] = { 1.0f, 1.0f };
-    info.uvVerts[3] = { 0.0f, 1.0f };
-    return true;
-}
-
-bool EmitClippedGlowLights(const EditorMaterialEmission &emission,
-                           const EditorEmissiveLight &baseLight,
-                           const std::vector<QrFloat2D> &surfUv,
-                           std::vector<EditorEmissiveLight> &outLights, uint32_t &glowCount)
-{
-    std::vector<EditorClippedGlowPoly> polys;
-
-    if (!ClipFaceUvToGlowPolygons(surfUv, baseLight.info.A.data, baseLight.info.B.data,
-                                   baseLight.info.C.data, emission, polys))
-    {
-        return false;
-    }
-
-    for (const EditorClippedGlowPoly &poly : polys)
-    {
-        EditorEmissiveLight piece = baseLight;
-        piece.info.uniqueID = kFirstEmissiveLightUniqueID + outLights.size();
-        piece.info.numVerts = poly.numVerts;
-        std::copy_n(poly.uvVerts, MAX_TEXTURED_AREA_LIGHT_VERTS, piece.info.uvVerts);
-        piece.info.area = poly.area;
-        piece.info.meanEmiss = emission.glowMean;
-        piece.info.fit = 1;
-        std::copy_n(poly.center, 3, piece.center);
-
-        const float *c = piece.info.color.data;
-        piece.power =
-            poly.area * emission.glowMean * (0.2125f * c[0] + 0.7154f * c[1] + 0.0721f * c[2]);
-        outLights.push_back(piece);
-        glowCount++;
-    }
-
-    return true;
-}
-
-struct EmissiveLightCounts
-{
-    uint32_t fitted = 0;
-    uint32_t glowClipped = 0;
-    uint32_t squared = 0;
-};
-
-struct SurfaceEmissiveSpec
-{
-    const EditorMaterialEmission &emission;
-    QrMaterial lightMaterial = QR_NO_MATERIAL;
-    float color[3] = { 1.0f, 1.0f, 1.0f };
-    float rawColor[3] = { 1.0f, 1.0f, 1.0f };
-    float gain = 0.0f;
-    float proxyGain = 1.0f;
-    float meanEmiss = 1.0f;
-    float angleInner = 0.0f;
-    float angleOuter = 0.0f;
-    bool projector = false;
-    bool lightShafts = false;
-    float lightShaftsPower = 1.0f;
-    float lightShaftsDistance = 0.0f;
-    float lightShaftsFalloff = 1.0f;
-    bool masked = false;
-    int aliasMaxPolys = 0;
-    bool allowModelDtal = false;
-    float dtalMinArea = 0.0f;
-    float dtalProxyMinArea = 0.0f;
-    bool dtalProxy = false;
-    std::string textureName;
-};
-
-struct AliasPieceCandidate
-{
-    EditorEmissiveLight light;
-    uint8_t kind = 0;
-};
-
-struct AliasInstanceGroup
-{
-    uint32_t aliasInstanceId = 0;
-    int maxPolys = 0;
-    std::vector<AliasPieceCandidate> pieces;
-};
-
-struct DtalCollectState
-{
-    const EditorScene &scene;
-    std::vector<EditorEmissiveLight> &lights;
-    std::vector<EditorGeneratedLightBase> &proxies;
-    EmissiveLightCounts &counts;
-    std::vector<AliasInstanceGroup> &aliasGroups;
-    std::unordered_map<uint32_t, size_t> &aliasGroupIndex;
-};
-
-bool IsLevelLightModelTexture(const std::string &textureName)
-{
-    if (textureName.empty())
-    {
-        return false;
-    }
-
-    const std::string lowerTexName = LowercaseName(textureName);
-    const size_t slashPos = lowerTexName.find_last_of('/');
-    const size_t start = (slashPos == std::string::npos) ? 0 : slashPos + 1;
-    const size_t baseColonPos = lowerTexName.find(':', start);
-    const std::string base = lowerTexName.substr(
-        start, baseColonPos == std::string::npos ? std::string::npos : baseColonPos - start);
-
-    static constexpr const char *kLevelLightModels[] = {
-        "flame.mdl",
-        "flame2.mdl",
-        "lavaball.mdl",
-        "proj_balllava.mdl",
-        "laser.mdl",
-        "s_light.spr",
-        "b_light.spr",
-    };
-
-    for (const char *modelName : kLevelLightModels)
-    {
-        if (base == modelName)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-int AliasModelMaxPolys(const EditorRenderSettings &settings, const std::string &textureName)
-{
-    int maxPolys = std::clamp(settings.dtalModelMaxPolys, 0, 32);
-
-    if (IsLevelLightModelTexture(textureName))
-    {
-        maxPolys = std::min(maxPolys, std::clamp(settings.levelLightMaxPolys, 0, 32));
-    }
-
-    return maxPolys;
-}
-
-void CollectFaceEmissiveLights(const SurfaceEmissiveSpec &spec, size_t surfaceIndex,
-                               const EditorSurfaceFace &face,
-                               std::vector<EditorEmissiveLight> &outLights,
-                               EmissiveLightCounts &counts)
-{
-    if (face.positions.size() < 3)
-    {
-        return;
-    }
-
-    float area = 0.0f;
-    float center[3] = { 0.0f, 0.0f, 0.0f };
-    MeasureFace(face.positions, area, center);
-
-    if (!(area > 0.0f))
-    {
-        return;
-    }
-
-    EditorEmissiveLight light;
-    light.surfaceIndex = surfaceIndex;
-    light.cluster = face.cluster;
-    light.isAliasModel = (face.aliasInstanceId != 0);
-    std::copy_n(center, 3, light.center);
-
-    QrTexturedAreaLightUploadInfo &info = light.info;
-    info.uniqueID = kFirstEmissiveLightUniqueID + outLights.size();
-    info.color = { spec.color[0] * spec.gain, spec.color[1] * spec.gain, spec.color[2] * spec.gain };
-    info.normal = { face.normal[0], face.normal[1], face.normal[2] };
-    info.area = area;
-    info.meanEmiss = spec.meanEmiss;
-    info.material = spec.lightMaterial;
-    info.angleInner = spec.angleInner;
-    info.angleOuter = spec.angleOuter;
-    info.projector = spec.projector ? 1.0f : 0.0f;
-    info.isStatic = light.isAliasModel ? 0 : 1;
-    info.lightShafts = spec.lightShafts ? 1 : 0;
-    info.lightShaftsPower = std::max(0.0f, spec.lightShaftsPower);
-    info.lightShaftsDistance = std::max(0.0f, spec.lightShaftsDistance);
-    info.lightShaftsFalloff = std::max(0.01f, spec.lightShaftsFalloff);
-
-    float fitA[3] = { 0.0f, 0.0f, 0.0f };
-    float fitB[3] = { 0.0f, 0.0f, 0.0f };
-    float fitC[3] = { 0.0f, 0.0f, 0.0f };
-    const bool fitted =
-        FitFaceUvToPosition(face.positions, face.texCoords, fitA, fitB, fitC) &&
-        face.positions.size() <= MAX_TEXTURED_AREA_LIGHT_VERTS;
-
-    if (fitted)
-    {
-        info.numVerts = int(face.positions.size());
-        info.A = { fitA[0], fitA[1], fitA[2] };
-        info.B = { fitB[0], fitB[1], fitB[2] };
-        info.C = { fitC[0], fitC[1], fitC[2] };
-
-        for (int corner = 0; corner < info.numVerts; corner++)
-        {
-            info.uvVerts[corner] = face.texCoords[size_t(corner)];
-        }
-
-        if (spec.masked &&
-            EmitClippedGlowLights(spec.emission, light, face.texCoords, outLights, counts.glowClipped))
-        {
-            return;
-        }
-
-        counts.fitted++;
-    }
-    else if (BuildSquaredAreaLight(center, area, info))
-    {
-        counts.squared++;
-    }
-    else
-    {
-        return;
-    }
-
-    // fit says whether A, B, C describe the uv the light carries, which is true of the
-    // square as well: it has a uv of its own.
-    info.fit = 1;
-
-    // RT_RegisterWorldModelLight's power: the area, how much of it emits, and how bright
-    // that emission is. It is what the cluster lists rank the light by.
-    light.power = area * spec.meanEmiss *
-                  (0.2125f * info.color.data[0] + 0.7154f * info.color.data[1] +
-                   0.0721f * info.color.data[2]);
-
-    outLights.push_back(light);
-}
-
-void CollectAliasFacePieces(const SurfaceEmissiveSpec &spec, size_t surfaceIndex,
-                            const EditorSurfaceFace &face,
-                            std::vector<AliasPieceCandidate> &outPieces)
-{
-    std::vector<EditorEmissiveLight> scratch;
-    EmissiveLightCounts faceCounts;
-    CollectFaceEmissiveLights(spec, surfaceIndex, face, scratch, faceCounts);
-    const uint8_t kind = faceCounts.glowClipped > 0 ? 1 : (faceCounts.squared > 0 ? 2 : 0);
-
-    for (const EditorEmissiveLight &piece : scratch)
-    {
-        outPieces.push_back({ piece, kind });
-    }
-}
-
-void NudgeProxyPositionOutOfSolid(const EditorScene &scene, const float dir[3],
-                                   float radiusUnits, float pos[3])
-{
-    if (scene.worldClusters.numLeafs == 0)
-    {
-        return;
-    }
-
-    for (int step = 0; step < 4; step++)
-    {
-        const uint32_t cluster = ResolveEditorLightCluster(scene, pos);
-        if (cluster != 0 && cluster != QR_CLUSTER_LIGHT_NO_CLUSTER)
-        {
-            break;
-        }
-        pos[0] += dir[0] * radiusUnits;
-        pos[1] += dir[1] * radiusUnits;
-        pos[2] += dir[2] * radiusUnits;
-    }
-}
-
-void RecordEmissiveLightPiece(EditorEmissiveLight &piece, uint8_t kind,
-                              std::vector<EditorEmissiveLight> &outLights,
-                              EmissiveLightCounts &counts)
-{
-    piece.info.uniqueID = kFirstEmissiveLightUniqueID + outLights.size();
-    outLights.push_back(piece);
-    if (kind == 1)
-    {
-        counts.glowClipped++;
-    }
-    else if (kind == 2)
-    {
-        counts.squared++;
-    }
-    else
-    {
-        counts.fitted++;
-    }
-}
-
-void AppendProxyLightForFace(const SurfaceEmissiveSpec &spec, size_t surfaceIndex, size_t faceIndex,
-                             const float faceNormal[3], const float proxyCenter[3],
-                             float proxyArea, const EditorScene &scene,
-                             std::vector<EditorGeneratedLightBase> &outProxies)
-{
-    const float radiusUnits = std::max(std::sqrt(proxyArea / 12.566370614f), 1.0f);
-    float pos[3] = {
-        proxyCenter[0] / proxyArea,
-        proxyCenter[1] / proxyArea,
-        proxyCenter[2] / proxyArea,
-    };
-    float dir[3] = { faceNormal[0], faceNormal[1], faceNormal[2] };
-    if (!NormalizeVector(dir))
-    {
-        dir[0] = 0.0f;
-        dir[1] = 0.0f;
-        dir[2] = 1.0f;
-    }
-    NudgeProxyPositionOutOfSolid(scene, dir, radiusUnits, pos);
-
-    EditorGeneratedLightBase proxy;
-    proxy.name = spec.textureName;
-    proxy.uniqueID =
-        (uint64_t(1) << 60) | (uint64_t(surfaceIndex + 1) << 32) | uint64_t(faceIndex);
-    std::copy_n(pos, 3, proxy.position);
-    std::copy_n(spec.rawColor, 3, proxy.baseColor);
-    proxy.baseGain = spec.proxyGain * spec.meanEmiss;
-    proxy.defaultRadiusMeters = radiusUnits / kEditorUnitsPerMeter;
-    proxy.modelSizeMeters = 0.0f;
-    proxy.lightShafts = spec.lightShafts;
-    proxy.lightShaftsPower = spec.lightShaftsPower;
-    proxy.lightShaftsDistance = spec.lightShaftsDistance;
-    proxy.lightShaftsFalloff = spec.lightShaftsFalloff;
-    proxy.isAliasModel = false;
-
-    if (spec.angleOuter > 0.0f && spec.angleOuter <= 1.5707963f)
-    {
-        constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
-        proxy.spot = true;
-        std::copy_n(dir, 3, proxy.direction);
-        proxy.angleInner = spec.angleInner * kRadToDeg;
-        proxy.angleOuter = spec.angleOuter * kRadToDeg;
-    }
-
-    outProxies.push_back(std::move(proxy));
-}
-
-void CollectBrushFaceEmissiveOrProxy(const SurfaceEmissiveSpec &spec, size_t surfaceIndex,
-                                     size_t faceIndex, const EditorSurfaceFace &face,
-                                     DtalCollectState &state)
-{
-    std::vector<EditorEmissiveLight> scratch;
-    EmissiveLightCounts faceCounts;
-    CollectFaceEmissiveLights(spec, surfaceIndex, face, scratch, faceCounts);
-    const uint8_t kind = faceCounts.glowClipped > 0 ? 1 : (faceCounts.squared > 0 ? 2 : 0);
-
-    if (!(spec.dtalMinArea > 0.0f))
-    {
-        for (EditorEmissiveLight &piece : scratch)
-        {
-            RecordEmissiveLightPiece(piece, kind, state.lights, state.counts);
-        }
-        return;
-    }
-
-    float proxyArea = 0.0f;
-    float proxyCenter[3] = {};
-
-    for (EditorEmissiveLight &piece : scratch)
-    {
-        if (piece.info.area >= spec.dtalMinArea)
-        {
-            RecordEmissiveLightPiece(piece, kind, state.lights, state.counts);
-            continue;
-        }
-
-        proxyArea += piece.info.area;
-        for (int axis = 0; axis < 3; axis++)
-        {
-            proxyCenter[axis] += piece.info.area * piece.center[axis];
-        }
-    }
-
-    const float proxyFloor = std::min(spec.dtalMinArea, spec.dtalProxyMinArea);
-    if (proxyArea > 0.0f && spec.dtalProxy && proxyArea >= proxyFloor)
-    {
-        AppendProxyLightForFace(spec, surfaceIndex, faceIndex, face.normal, proxyCenter, proxyArea,
-                                state.scene, state.proxies);
-    }
-}
-
-void AppendSurfaceEmissiveFaces(const SurfaceEmissiveSpec &spec, size_t surfaceIndex,
-                                const EditorSurface &surface, DtalCollectState &state)
-{
-    for (size_t faceIndex = 0; faceIndex < surface.faces.size(); faceIndex++)
-    {
-        const EditorSurfaceFace &face = surface.faces[faceIndex];
-
-        if (face.aliasInstanceId == 0)
-        {
-            CollectBrushFaceEmissiveOrProxy(spec, surfaceIndex, faceIndex, face, state);
-            continue;
-        }
-
-        if (!spec.allowModelDtal || !spec.masked || !(spec.emission.meanBase > 0.0f))
-        {
-            continue;
-        }
-
-        auto [it, inserted] = state.aliasGroupIndex.emplace(face.aliasInstanceId, state.aliasGroups.size());
-        if (inserted)
-        {
-            state.aliasGroups.push_back(
-                AliasInstanceGroup{ face.aliasInstanceId, spec.aliasMaxPolys, {} });
-        }
-
-        CollectAliasFacePieces(spec, surfaceIndex, face, state.aliasGroups[it->second].pieces);
-    }
-}
-
-void AppendCappedAliasInstanceLights(std::vector<AliasInstanceGroup> &aliasGroups,
-                                     int32_t modelBudget,
-                                     std::vector<EditorEmissiveLight> &outLights,
-                                     EmissiveLightCounts &counts,
-                                     std::vector<uint32_t> &outQualifiedAliasIds)
-{
-    int32_t remainingBudget = std::max<int32_t>(0, modelBudget);
-
-    for (AliasInstanceGroup &group : aliasGroups)
-    {
-        if (remainingBudget <= 0 || group.maxPolys <= 0 || group.pieces.empty())
-        {
-            continue;
-        }
-
-        std::stable_sort(group.pieces.begin(), group.pieces.end(),
-                         [](const AliasPieceCandidate &a, const AliasPieceCandidate &b) {
-                             return a.light.info.area > b.light.info.area;
-                         });
-
-        const int32_t takeCount =
-            std::min<int32_t>(int32_t(group.pieces.size()), std::min(group.maxPolys, remainingBudget));
-
-        if (takeCount > 0)
-        {
-            outQualifiedAliasIds.push_back(group.aliasInstanceId);
-        }
-
-        for (int32_t i = 0; i < takeCount; i++)
-        {
-            AliasPieceCandidate &piece = group.pieces[size_t(i)];
-            RecordEmissiveLightPiece(piece.light, piece.kind, outLights, counts);
-            remainingBudget--;
-        }
-    }
-}
-
-void CollectAliasBases(const EditorScene &scene, const EditorMaterialTable &materials,
-                       const EditorRenderSettings &settings,
-                       const std::vector<uint32_t> &qualifiedAliasIds,
-                       std::vector<EditorGeneratedLightBase> &outBases)
-{
-    if (!(settings.truelight < 2.0f))
-    {
-        return;
-    }
-
-    for (const EditorAliasInstance &inst : scene.aliasInstances)
-    {
-        if (std::find(qualifiedAliasIds.begin(), qualifiedAliasIds.end(), inst.aliasInstanceId) !=
-            qualifiedAliasIds.end())
-        {
-            continue;
-        }
-
-        int32_t matIdx = materials.IndexOf(inst.textureName);
-        if (matIdx < 0)
-        {
-            matIdx = materials.IndexOf(inst.modelName);
-        }
-        if (matIdx < 0)
-        {
-            continue;
-        }
-
-        const EditorMaterialParams &params = materials.At(size_t(matIdx));
-        if (!params.enabled || !params.luma || !params.hasLightColor ||
-            !(params.lightBrightness > 0.0f))
-        {
-            continue;
-        }
-
-        EditorGeneratedLightBase base;
-        base.name = inst.textureName;
-        base.uniqueID = inst.uniqueID;
-        std::copy_n(inst.origin, 3, base.position);
-        std::copy_n(params.lightColor, 3, base.baseColor);
-        base.baseGain = params.lightBrightness * settings.emissionLightIntensity;
-        base.defaultRadiusMeters = 0.1f;
-        base.modelSizeMeters = std::max(inst.modelSizeMeters, 0.001f);
-        base.lightShafts = params.lightShafts;
-        base.lightShaftsPower = params.lightShaftsPower;
-        base.lightShaftsDistance = params.lightShaftsDistance;
-        base.lightShaftsFalloff = params.lightShaftsFalloff;
-        base.isAliasModel = true;
-        outBases.push_back(std::move(base));
-    }
-}
-
 std::string NormalizeEmitterBase(const std::string &name)
 {
     return NormalizeEmitterNameBase(name);
@@ -6931,117 +4226,6 @@ const EditorEmitterLightOverride *FindOverrideByExactName(
     const std::vector<EditorEmitterLightOverride> &list, const std::string &key)
 {
     return FindEmitterOverrideExact(list, key);
-}
-
-void ApplyGeneratedOverrideSpotAndOffset(const EditorGeneratedLightBase &base,
-                                         const EditorEmitterLightOverride *ov, EditorLight &light)
-{
-    light.spot = base.spot;
-    std::copy_n(base.direction, 3, light.direction);
-    light.angleInner = base.angleInner;
-    light.angleOuter = base.angleOuter;
-    light.lightShafts = base.lightShafts;
-    light.lightShaftsPower = base.lightShaftsPower;
-    light.lightShaftsDistance = base.lightShaftsDistance;
-    light.lightShaftsFalloff = base.lightShaftsFalloff;
-    light.groupEdit = true;
-    light.hasStyle = false;
-
-    if (ov != nullptr)
-    {
-        if (ov->hasSpot)
-        {
-            light.spot = ov->spot;
-        }
-        if (ov->hasDir && !ov->groupEdit)
-        {
-            std::copy_n(ov->dir, 3, light.direction);
-        }
-        if (ov->hasAngles)
-        {
-            light.angleInner = ov->angleInner;
-            light.angleOuter = ov->angleOuter;
-        }
-        if (ov->hasOffset)
-        {
-            light.hasOffset = true;
-            std::copy_n(ov->offset, 3, light.offset);
-        }
-        light.hasStyle = ov->hasStyle;
-        if (ov->hasStyle)
-        {
-            light.style = ov->style;
-        }
-        light.forceRasterize = ov->forceRasterize;
-        light.groupEdit = ov->groupEdit;
-        light.enabled = ov->enabled;
-    }
-
-    ClampEditorLightCone(light);
-}
-
-void ApplyGeneratedOverrideRadiometry(const EditorGeneratedLightBase &base,
-                                      const EditorEmitterLightOverride *ov,
-                                      const EditorRenderSettings &settings, EditorLight &light)
-{
-    const float ovRadius = (ov != nullptr && ov->hasRadius) ? ov->radius : base.defaultRadiusMeters;
-    const float radiusScale = base.modelSizeMeters > 0.0f ? base.modelSizeMeters : 1.0f;
-    light.radius = std::max(ovRadius * radiusScale * kEditorUnitsPerMeter, 0.5f);
-
-    const float *rgb = base.baseColor;
-    float baseGain = base.baseGain;
-    float ovIntensity = 1.0f;
-
-    if (ov != nullptr)
-    {
-        if (ov->hasColor)
-        {
-            rgb = ov->color;
-            baseGain = 1.0f;
-            light.hasColor = true;
-        }
-        if (ov->hasIntensity)
-        {
-            ovIntensity = ov->intensity;
-        }
-    }
-
-    const float scaledIntensity =
-        ovIntensity * baseGain * std::max(0.0f, settings.globalLightMult) *
-        std::max(0.0f, settings.brightness) * 10.0f;
-
-    SetEditorLightTint(light, rgb);
-    SetEditorLightIntensity(light, scaledIntensity);
-}
-
-EditorLight ResolveSingleGeneratedLight(const EditorGeneratedLightBase &base,
-                                        const EditorEmitterLightOverride *ov,
-                                        const EditorRenderSettings &settings,
-                                        const EditorScene &scene)
-{
-    EditorLight light;
-    std::copy_n(base.position, 3, light.position);
-    light.className = base.name;
-    light.emitterUniqueID = base.uniqueID;
-    light.modelSizeMeters = base.modelSizeMeters;
-
-    ApplyGeneratedOverrideSpotAndOffset(base, ov, light);
-    ApplyGeneratedOverrideRadiometry(base, ov, settings, light);
-
-    const float offX = light.hasOffset ? light.offset[0] : 0.0f;
-    const float offY = light.hasOffset ? light.offset[1] : 0.0f;
-    const float offZ = light.hasOffset ? light.offset[2] : 0.0f;
-    const float effectivePos[3] = {
-        light.position[0] + offX,
-        light.position[1] + offY,
-        light.position[2] + offZ,
-    };
-    light.cluster = ResolveEditorLightCluster(scene, effectivePos);
-    if (light.cluster == 0 || light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER)
-    {
-        light.cluster = ResolveEditorLightCluster(scene, light.position);
-    }
-    return light;
 }
 
 const EditorGeneratedLightBase *FindGeneratedBaseForLight(
@@ -7137,11 +4321,6 @@ void CopyEffectiveSpotAndFlags(const EditorLight &light, const EditorGeneratedLi
     }
 }
 
-bool IsDtalMaterialEnabled(const EditorMaterialParams &params)
-{
-    return params.enabled && params.luma && params.lightBrightness > 0.0f;
-}
-
 void MaybeAppendEmitterLightsYaml(std::string &merged,
                                   const std::vector<EditorEmitterLightOverride> &current,
                                   const std::vector<EditorEmitterLightOverride> &baseline)
@@ -7156,149 +4335,33 @@ void MaybeAppendEmitterLightsYaml(std::string &merged,
 
 void EditorApp::BuildEmissiveLights()
 {
-    m_emissiveLights.clear();
-    m_generatedLightBases.clear();
     m_lastLightBuildSettings = m_settings;
     m_hasLightBuildSettings = true;
 
-    std::vector<uint32_t> qualifiedAliasIds;
-    std::vector<EditorGeneratedLightBase> proxyBases;
+    const std::vector<SavedLightToken> savedSel =
+        CaptureLightSelectionTokens(m_scene.lights, m_selectedLights, m_selectedLight);
+    m_runtime.BuildEmissiveLights(
+        m_instance, m_assets, m_material, [this](const char *msg) { PrintMessage(msg, this); });
 
-    if (m_settings.truelight > 0.0f)
+    m_selectedLights.clear();
+    m_selectedLight = -1;
+    for (const SavedLightToken &s : savedSel)
     {
-        const float intensityScale =
-            kEditorEmissionLightScale * m_settings.emissionLightIntensity * m_settings.brightness;
-
-        EmissiveLightCounts counts;
-        std::vector<AliasInstanceGroup> aliasGroups;
-        std::unordered_map<uint32_t, size_t> aliasGroupIndex;
-        DtalCollectState collectState{
-            m_scene, m_emissiveLights, proxyBases, counts, aliasGroups, aliasGroupIndex,
-        };
-
-        for (size_t surfaceIndex = 0; surfaceIndex < m_scene.surfaces.size(); surfaceIndex++)
+        const int32_t matched = MatchSavedLightTokenIndex(m_scene.lights, s);
+        if (matched >= 0 &&
+            std::find(m_selectedLights.begin(), m_selectedLights.end(), matched) ==
+                m_selectedLights.end())
         {
-            const EditorSurface &surface = m_scene.surfaces[surfaceIndex];
-
-            if (surface.faces.empty() || surface.kind == EditorSurfaceKind::Sky)
-            {
-                continue;
-            }
-
-            const EditorMaterialParams &params = m_materials.For(surface);
-
-            if (!IsDtalMaterialEnabled(params))
-            {
-                continue;
-            }
-
-            const QrMaterial material = SurfaceMaterialWithOverride(surface, params);
-            const EditorMaterialEmission emission = MaterialEmissionOf(material);
-
-            if (!params.hasLightColor && !(emission.meanBase > 0.0f))
-            {
-                continue;
-            }
-
-            const bool masked = emission.valid;
-            const float *baseColor = params.hasLightColor ? params.lightColor : emission.color;
-            float angleInner = 0.0f;
-            float angleOuter = 0.0f;
-            EmissiveCone(params.lightFocus, params.lightFocusSoft, params.lightProjector,
-                         angleInner, angleOuter);
-
-            SurfaceEmissiveSpec spec{
-                emission,
-                masked ? material : QR_NO_MATERIAL,
-                { baseColor[0], baseColor[1], baseColor[2] },
-                { baseColor[0], baseColor[1], baseColor[2] },
-                params.lightBrightness * intensityScale,
-                params.lightBrightness * m_settings.emissionLightIntensity,
-                masked ? emission.mean : 1.0f,
-                angleInner,
-                angleOuter,
-                params.lightProjector,
-                params.lightShafts,
-                params.lightShaftsPower,
-                params.lightShaftsDistance,
-                params.lightShaftsFalloff,
-                masked,
-                AliasModelMaxPolys(m_settings, surface.textureName),
-                IsLevelLightModelTexture(surface.textureName)
-                    ? m_settings.levelLights
-                    : m_settings.modelLights,
-                m_settings.dtalMinArea,
-                m_settings.dtalProxyMinArea,
-                m_settings.dtalProxy,
-                surface.textureName,
-            };
-
-            AppendSurfaceEmissiveFaces(spec, surfaceIndex, surface, collectState);
-        }
-
-        AppendCappedAliasInstanceLights(aliasGroups, m_settings.dtalModelBudget, m_emissiveLights,
-                                        counts, qualifiedAliasIds);
-
-        PrintMessage(("area lights: " + std::to_string(m_emissiveLights.size()) + " from " +
-                      std::to_string(m_scene.surfaces.size()) + " surfaces, " +
-                      std::to_string(counts.fitted) + " fitted, " +
-                      std::to_string(counts.glowClipped) + " glow-clipped and " +
-                      std::to_string(counts.squared) + " squared")
-                         .c_str(),
-                     this);
-    }
-
-    CollectAliasBases(m_scene, m_materials, m_settings, qualifiedAliasIds, m_generatedLightBases);
-
-    if (m_settings.truelight > 0.0f)
-    {
-        for (EditorGeneratedLightBase &proxy : proxyBases)
-        {
-            m_generatedLightBases.push_back(std::move(proxy));
+            m_selectedLights.push_back(matched);
         }
     }
-
-    ReapplyGeneratedLights();
-    PrintMessage(("generated lights: " + std::to_string(m_scene.lights.size()) + " (" +
-                  std::to_string(m_generatedLightBases.size()) + " emitters)")
-                     .c_str(),
-                 this);
+    SyncPrimaryLightSelection();
 }
 
 const EditorEmitterLightOverride *EditorApp::FindEmitterOverride(const std::string &name,
                                                                  uint64_t uniqueID) const
 {
-    if (name.empty())
-    {
-        return nullptr;
-    }
-
-    std::vector<std::string> candidates;
-    BuildEmitterLookupCandidates(name, candidates);
-
-    if (uniqueID != 0)
-    {
-        const std::string suffix = "#" + std::to_string(uniqueID);
-        for (const std::string &base : candidates)
-        {
-            if (const EditorEmitterLightOverride *found =
-                    FindOverrideByExactName(m_emitterLightOverrides, base + suffix))
-            {
-                return found;
-            }
-        }
-    }
-
-    for (const std::string &base : candidates)
-    {
-        if (const EditorEmitterLightOverride *found =
-                FindOverrideByExactName(m_emitterLightOverrides, base))
-        {
-            return found;
-        }
-    }
-
-    return nullptr;
+    return FindEditorEmitterOverride(m_emitterLightOverrides, name, uniqueID);
 }
 
 bool EditorApp::HasOwnEmitterInstanceOverride(int32_t lightIndex) const
@@ -7439,74 +4502,6 @@ void EditorApp::SetEntityLightGroupEdit(int32_t lightIndex, bool groupEdit)
     ApplyEntityEmitterEdit(lightIndex, own);
 }
 
-namespace
-{
-struct SavedLightToken
-{
-    int32_t oldIndex = -1;
-    uint64_t uid = 0;
-    std::string className;
-};
-
-std::vector<SavedLightToken> CaptureLightSelectionTokens(const std::vector<EditorLight> &lights,
-                                                         const std::vector<int32_t> &selectedLights,
-                                                         int32_t selectedLight)
-{
-    std::vector<SavedLightToken> savedSel;
-    auto pushSaved = [&](int32_t idx) {
-        if (idx >= 0 && size_t(idx) < lights.size())
-        {
-            savedSel.push_back(
-                { idx, lights[size_t(idx)].emitterUniqueID, lights[size_t(idx)].className });
-        }
-    };
-    for (int32_t idx : selectedLights)
-    {
-        pushSaved(idx);
-    }
-    if (savedSel.empty() && selectedLight >= 0)
-    {
-        pushSaved(selectedLight);
-    }
-    return savedSel;
-}
-
-std::vector<EditorLight> CollectLeadingBspLights(const std::vector<EditorLight> &lights)
-{
-    std::vector<EditorLight> bsp;
-    for (const EditorLight &l : lights)
-    {
-        if (l.emitterUniqueID != 0)
-        {
-            break;
-        }
-        bsp.push_back(l);
-    }
-    return bsp;
-}
-
-int32_t MatchSavedLightTokenIndex(const std::vector<EditorLight> &lights,
-                                  const SavedLightToken &token)
-{
-    if (token.uid != 0)
-    {
-        for (size_t i = 0; i < lights.size(); i++)
-        {
-            if (lights[i].emitterUniqueID == token.uid && lights[i].className == token.className)
-            {
-                return int32_t(i);
-            }
-        }
-        return -1;
-    }
-    if (token.oldIndex >= 0 && size_t(token.oldIndex) < lights.size())
-    {
-        return token.oldIndex;
-    }
-    return -1;
-}
-} // namespace
-
 void EditorApp::ResetEntityEmitterLight(int32_t lightIndex)
 {
     if (lightIndex < 0 || size_t(lightIndex) >= m_scene.lights.size())
@@ -7538,15 +4533,7 @@ void EditorApp::ReapplyGeneratedLights()
 {
     const std::vector<SavedLightToken> savedSel =
         CaptureLightSelectionTokens(m_scene.lights, m_selectedLights, m_selectedLight);
-    const std::vector<EditorLight> currentBspLights = CollectLeadingBspLights(m_scene.lights);
-
-    m_scene.lights = currentBspLights;
-
-    for (const EditorGeneratedLightBase &base : m_generatedLightBases)
-    {
-        const EditorEmitterLightOverride *ov = FindEmitterOverride(base.name, base.uniqueID);
-        m_scene.lights.push_back(ResolveSingleGeneratedLight(base, ov, m_settings, m_scene));
-    }
+    m_runtime.ReapplyGeneratedLights();
 
     m_selectedLights.clear();
     m_selectedLight = -1;
@@ -7571,12 +4558,38 @@ void EditorApp::RestoreSceneLightsAfterSessionReload()
 
 void EditorApp::ClearDirtyFlagIfClean()
 {
-    if (m_sceneLoaded && m_touchedMaterials.empty() && LevelFingerprint() == m_levelFingerprint)
+    if (m_sceneLoaded && m_touchedMaterials.empty() && LevelFingerprint() == m_levelFingerprint &&
+        !HasUnsavedSystemSettings())
     {
         m_levelTouched = false;
         m_sessionDirty = false;
     }
 }
+
+namespace
+{
+
+bool DidDtalCoreSettingsChange(const EditorRenderSettings &a, const EditorRenderSettings &b)
+{
+    return a.truelight != b.truelight || a.levelLights != b.levelLights ||
+           a.modelLights != b.modelLights || a.dtalProxy != b.dtalProxy ||
+           a.dtalMinArea != b.dtalMinArea || a.dtalProxyMinArea != b.dtalProxyMinArea ||
+           a.dtalGroups != b.dtalGroups || a.dtalSpacing != b.dtalSpacing ||
+           a.emissionLightIntensity != b.emissionLightIntensity ||
+           a.emissiveNee != b.emissiveNee;
+}
+
+bool DidDtalLimitSettingsChange(const EditorRenderSettings &a, const EditorRenderSettings &b)
+{
+    return a.dtalMaxPolys != b.dtalMaxPolys || a.dtalMaxGroups != b.dtalMaxGroups ||
+           a.dtalModelMinArea != b.dtalModelMinArea ||
+           a.dtalProxyModelMinArea != b.dtalProxyModelMinArea ||
+           a.dtalModelMaxPolys != b.dtalModelMaxPolys ||
+           a.levelLightMaxPolys != b.levelLightMaxPolys ||
+           a.dtalModelBudget != b.dtalModelBudget;
+}
+
+} // namespace
 
 void EditorApp::RefreshGeneratedLightsIfSettingsChanged()
 {
@@ -7588,16 +4601,7 @@ void EditorApp::RefreshGeneratedLightsIfSettingsChanged()
 
     const EditorRenderSettings &prev = m_lastLightBuildSettings;
     const bool rebuildChanged =
-        m_settings.truelight != prev.truelight ||
-        m_settings.levelLights != prev.levelLights ||
-        m_settings.modelLights != prev.modelLights ||
-        m_settings.dtalProxy != prev.dtalProxy ||
-        m_settings.dtalMinArea != prev.dtalMinArea ||
-        m_settings.dtalProxyMinArea != prev.dtalProxyMinArea ||
-        m_settings.dtalModelMaxPolys != prev.dtalModelMaxPolys ||
-        m_settings.levelLightMaxPolys != prev.levelLightMaxPolys ||
-        m_settings.dtalModelBudget != prev.dtalModelBudget ||
-        m_settings.emissionLightIntensity != prev.emissionLightIntensity;
+        DidDtalCoreSettingsChange(m_settings, prev) || DidDtalLimitSettingsChange(m_settings, prev);
 
     const bool radiometryChanged =
         m_settings.brightness != prev.brightness ||
@@ -7605,6 +4609,10 @@ void EditorApp::RefreshGeneratedLightsIfSettingsChanged()
 
     if (rebuildChanged)
     {
+        if (m_settings.emissiveNee != prev.emissiveNee || m_settings.truelight != prev.truelight)
+        {
+            m_materialsChanged = true;
+        }
         BuildEmissiveLights();
     }
     else if (radiometryChanged)
@@ -7614,37 +4622,14 @@ void EditorApp::RefreshGeneratedLightsIfSettingsChanged()
     }
 }
 
+
 void EditorApp::UploadEmissiveLights()
 {
-    if (m_emissiveLights.empty() || m_instance == nullptr)
-    {
-        return;
-    }
-
-    std::vector<QrTexturedAreaLightUploadInfo> infos(m_emissiveLights.size());
-
-    for (size_t index = 0; index < m_emissiveLights.size(); index++)
-    {
-        infos[index] = m_emissiveLights[index].info;
-        EditorMetersAreaLight(infos[index]);
-    }
-
-    // One batch, the way RT_UploadAllWorldModelLights adds a model's whole list at once: the
-    // registry is rebuilt per frame, so the list has to go in every frame.
-    const QrResult result =
-        qrUploadTexturedAreaLights(m_instance, infos.data(), uint32_t(infos.size()));
-
-    if (result != QR_SUCCESS)
-    {
-        static bool logged = false;
-
-        if (!logged)
-        {
-            logged = true;
-            PrintMessage(("area lights: " + std::string(qrGetResultDescription(result))).c_str(),
-                         this);
-        }
-    }
+    const float timeSeconds = float(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - m_startTime).count());
+    m_runtime.UploadEmissiveLights(
+        m_instance, timeSeconds, nullptr,
+        [this](const char *msg) { PrintMessage(msg, this); });
 }
 
 void EditorApp::ViewBasis(float side[3], float up[3], float forward[3]) const
@@ -7951,6 +4936,86 @@ void EditorApp::CloneSelectedLight()
 
     AddCustomLight(selected, LightSpawn::Clone);
     PrintMessage((SelectedLightLabel() + ": cloned").c_str(), this);
+}
+
+void EditorApp::CopySelectedLights()
+{
+    std::vector<EditorLight> copied = BuildCopiedLights(
+        m_scene.lights, m_selectedLights, m_selectedLight, m_customLights,
+        m_selectedCustomLights, m_selectedCustomLight);
+    if (copied.empty())
+    {
+        Notify("copy: select light(s) first");
+        return;
+    }
+
+    float side[3] = {};
+    float up[3] = {};
+    float forward[3] = {};
+    ViewBasis(side, up, forward);
+
+    m_lightClipboard.lights = std::move(copied);
+    std::copy_n(m_cameraPosition, 3, m_lightClipboard.copyCameraPos);
+    std::copy_n(forward, 3, m_lightClipboard.copyCameraForward);
+    m_lightClipboard.pasteCount = 0u;
+
+    const std::string msg = "copied " + std::to_string(m_lightClipboard.lights.size()) +
+                            (m_lightClipboard.lights.size() == 1 ? " light" : " lights");
+    PrintMessage(("light: " + msg).c_str(), this);
+    Notify(msg);
+}
+
+void EditorApp::PasteCopiedLights()
+{
+    if (m_lightClipboard.lights.empty())
+    {
+        Notify("paste: light clipboard is empty");
+        return;
+    }
+
+    float side[3] = {};
+    float up[3] = {};
+    float forward[3] = {};
+    ViewBasis(side, up, forward);
+
+    std::vector<EditorLight> pasted =
+        BuildPastedLights(m_lightClipboard, m_cameraPosition, forward);
+    if (pasted.empty())
+    {
+        return;
+    }
+
+    std::vector<int32_t> newIndices;
+    newIndices.reserve(pasted.size());
+    for (EditorLight &light : pasted)
+    {
+        light.cluster = ResolveEditorLightCluster(m_scene, light.position);
+        if (light.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER && m_pickCluster != 0)
+        {
+            light.cluster = m_pickCluster;
+        }
+        const int32_t idx = int32_t(m_customLights.size());
+        m_customLights.push_back(std::move(light));
+        newIndices.push_back(idx);
+    }
+
+    m_selectedLight = -1;
+    m_selectedLights.clear();
+    m_selectedCustomLights = std::move(newIndices);
+    m_selectedCustomLight = m_selectedCustomLights.back();
+    m_selectedSurface = -1;
+    m_selectedFace = -1;
+    m_lightTab = 1;
+
+    const EditorLight &last = m_customLights[size_t(m_selectedCustomLight)];
+    m_hasPickPoint = true;
+    m_pickCluster = last.cluster;
+    std::copy_n(last.position, 3, m_pickPoint);
+
+    const std::string msg = "pasted " + std::to_string(pasted.size()) +
+                            (pasted.size() == 1 ? " light" : " lights");
+    PrintMessage(("light: " + msg).c_str(), this);
+    Notify(msg);
 }
 
 namespace
@@ -8435,7 +5500,8 @@ void EditorApp::UpdateHoverPick()
 
     if (m_editorMode == EditorMode::Material)
     {
-        const EditorFacePick facePick = PickSceneFace(m_scene, m_cameraPosition, direction);
+        const EditorFacePick facePick =
+            PickSceneFace(m_scene, m_cameraPosition, direction, &m_materials);
         if (facePick.surface >= 0)
         {
             m_hoverSurface = facePick.surface;
@@ -8469,7 +5535,8 @@ void EditorApp::Pick()
         return;
     }
 
-    const EditorFacePick facePick = PickSceneFace(m_scene, m_cameraPosition, direction);
+    const EditorFacePick facePick =
+        PickSceneFace(m_scene, m_cameraPosition, direction, &m_materials);
 
     if (m_editorMode == EditorMode::Light)
     {
@@ -8535,6 +5602,39 @@ void EditorApp::Pick()
 
 namespace
 {
+bool FindAliasInstanceBounds(const EditorScene &scene, const EditorSurface &surface,
+                             uint32_t aliasInstanceId, float outMin[3], float outMax[3])
+{
+    for (const EditorAliasInstance &inst : scene.aliasInstances)
+    {
+        if (inst.aliasInstanceId == aliasInstanceId && inst.hasBounds)
+        {
+            std::copy_n(inst.boundsMin, 3, outMin);
+            std::copy_n(inst.boundsMax, 3, outMax);
+            return true;
+        }
+    }
+
+    bool hasPoint = false;
+    for (const EditorSurfaceFace &f : surface.faces)
+    {
+        if (f.aliasInstanceId != aliasInstanceId)
+        {
+            continue;
+        }
+        for (const QrFloat3D &p : f.positions)
+        {
+            for (int axis = 0; axis < 3; axis++)
+            {
+                outMin[axis] = hasPoint ? std::min(outMin[axis], p.data[axis]) : p.data[axis];
+                outMax[axis] = hasPoint ? std::max(outMax[axis], p.data[axis]) : p.data[axis];
+            }
+            hasPoint = true;
+        }
+    }
+    return hasPoint;
+}
+
 void DrawSceneFaceOutline(ImDrawList *drawList, const EditorCameraBasis &cam,
                           const EditorScene &scene, int32_t surfaceIndex, int32_t faceIndex,
                           uint32_t color, float thickness)
@@ -8545,13 +5645,127 @@ void DrawSceneFaceOutline(ImDrawList *drawList, const EditorCameraBasis &cam,
     }
 
     const EditorSurface &surface = scene.surfaces[size_t(surfaceIndex)];
-
     if (faceIndex < 0 || size_t(faceIndex) >= surface.faces.size())
     {
         return;
     }
 
-    EmitClippedPolygonOutline(drawList, cam, surface.faces[size_t(faceIndex)], color, thickness);
+    const EditorSurfaceFace &face = surface.faces[size_t(faceIndex)];
+    if (face.aliasInstanceId != 0)
+    {
+        float boundsMin[3] = {};
+        float boundsMax[3] = {};
+        if (FindAliasInstanceBounds(scene, surface, face.aliasInstanceId, boundsMin, boundsMax))
+        {
+            EmitClippedAabbOutline(drawList, cam, boundsMin, boundsMax, color, thickness);
+            return;
+        }
+    }
+
+    EmitClippedPolygonOutline(drawList, cam, face, color, thickness);
+}
+
+bool ShouldDrawDtalLight(const EditorEmissiveLight &light, int32_t dtalDebug)
+{
+    if (dtalDebug == 1)
+    {
+        return !light.isAliasModel;
+    }
+    if (dtalDebug == 2)
+    {
+        return light.isAliasModel;
+    }
+    return dtalDebug == 3;
+}
+
+void DrawSingleDtalDebugPoly(ImDrawList *drawList, const EditorCameraBasis &cam,
+                             const EditorEmissiveLight &light)
+{
+    const QrTexturedAreaLightUploadInfo &info = light.info;
+    if (info.numVerts < 3 || info.numVerts > MAX_TEXTURED_AREA_LIGHT_VERTS)
+    {
+        return;
+    }
+
+    EditorSurfaceFace poly;
+    std::copy_n(info.normal.data, 3, poly.normal);
+    poly.positions.reserve(size_t(info.numVerts));
+    for (int k = 0; k < info.numVerts; k++)
+    {
+        const float u = info.uvVerts[k].data[0];
+        const float v = info.uvVerts[k].data[1];
+        poly.positions.push_back(QrFloat3D{ {
+            info.C.data[0] + info.A.data[0] * u + info.B.data[0] * v,
+            info.C.data[1] + info.A.data[1] * u + info.B.data[1] * v,
+            info.C.data[2] + info.A.data[2] * u + info.B.data[2] * v,
+        } });
+    }
+
+    const uint32_t color =
+        light.isAliasModel ? IM_COL32(96, 220, 255, 240) : IM_COL32(48, 164, 255, 240);
+    EmitClippedPolygonOutline(drawList, cam, poly, color, 2.0f);
+
+    const float tip[3] = {
+        light.center[0] + 8.0f * info.normal.data[0],
+        light.center[1] + 8.0f * info.normal.data[1],
+        light.center[2] + 8.0f * info.normal.data[2],
+    };
+    float seg[4] = {};
+    if (ProjectClippedEdge(cam, light.center, tip, seg))
+    {
+        drawList->AddLine(ImVec2(seg[0], seg[1]), ImVec2(seg[2], seg[3]),
+                          IM_COL32(135, 215, 255, 240), 1.8f);
+    }
+}
+
+void DrawDtalDebugOverlay(ImDrawList *drawList, const EditorCameraBasis &cam,
+                          const std::vector<EditorEmissiveLight> &lights, int32_t dtalDebug)
+{
+    if (drawList == nullptr || dtalDebug <= 0)
+    {
+        return;
+    }
+
+    for (const EditorEmissiveLight &light : lights)
+    {
+        if (ShouldDrawDtalLight(light, dtalDebug))
+        {
+            DrawSingleDtalDebugPoly(drawList, cam, light);
+        }
+    }
+}
+
+bool IsSurfaceOutlineVisible(const EditorScene &scene, const EditorMaterialTable &materials,
+                             int32_t surfaceIndex)
+{
+    return surfaceIndex >= 0 && size_t(surfaceIndex) < scene.surfaces.size() &&
+           materials.For(scene.surfaces[size_t(surfaceIndex)]).enabled;
+}
+
+struct MaterialPickOutlineState
+{
+    bool hasPickPoint = false;
+    bool showPanel = false;
+    int32_t selectedSurface = -1;
+    int32_t selectedFace = -1;
+    int32_t hoverSurface = -1;
+    int32_t hoverFace = -1;
+};
+
+void DrawMaterialPickOutlines(ImDrawList *drawList, const EditorCameraBasis &cam,
+                              const EditorScene &scene, const EditorMaterialTable &materials,
+                              const MaterialPickOutlineState &state)
+{
+    if (state.hasPickPoint && IsSurfaceOutlineVisible(scene, materials, state.selectedSurface))
+    {
+        DrawSceneFaceOutline(drawList, cam, scene, state.selectedSurface, state.selectedFace,
+                             IM_COL32(255, 170, 40, 255), 2.5f);
+    }
+    if (!state.showPanel && IsSurfaceOutlineVisible(scene, materials, state.hoverSurface))
+    {
+        DrawSceneFaceOutline(drawList, cam, scene, state.hoverSurface, state.hoverFace,
+                             IM_COL32(255, 214, 64, 255), 2.0f);
+    }
 }
 
 void DrawViewportCrosshair(ImDrawList *draw, float width, float height)
@@ -8682,18 +5896,19 @@ void EditorApp::DrawSelectionOverlay()
     }
 
     const EditorCameraBasis cam = CameraBasis();
-    if (!m_choosingMode && m_editorMode == EditorMode::Material && !IsModelPreviewActive())
+    const bool showWorldExtras = !m_choosingMode && !IsModelPreviewActive();
+    if (showWorldExtras && m_editorMode == EditorMode::Material)
     {
-        if (m_hasPickPoint && m_selectedSurface >= 0)
-        {
-            DrawSceneFaceOutline(drawList, cam, m_scene, m_selectedSurface, m_selectedFace,
-                                 IM_COL32(255, 170, 40, 255), 2.5f);
-        }
-        if (!m_showPanel && m_hoverSurface >= 0)
-        {
-            DrawSceneFaceOutline(drawList, cam, m_scene, m_hoverSurface, m_hoverFace,
-                                 IM_COL32(255, 214, 64, 255), 2.0f);
-        }
+        const MaterialPickOutlineState state{
+            m_hasPickPoint, m_showPanel, m_selectedSurface, m_selectedFace, m_hoverSurface,
+            m_hoverFace,
+        };
+        DrawMaterialPickOutlines(drawList, cam, m_scene, m_materials, state);
+    }
+
+    if (showWorldExtras && m_settings.dtalDebug > 0)
+    {
+        DrawDtalDebugOverlay(drawList, cam, m_emissiveLights, m_settings.dtalDebug);
     }
 
     DrawLightEditorViewportExtras();
@@ -9102,10 +6317,10 @@ bool EditorApp::BeginLightGrab()
 
 namespace
 {
-void PlaceLightAlongGrabRay(const EditorScene &scene, const float camOrigin[3],
-                            const float direction[3], EditorLight &light)
+void PlaceLightAlongGrabRay(const EditorScene &scene, const EditorMaterialTable &materials,
+                            const float camOrigin[3], const float direction[3], EditorLight &light)
 {
-    const EditorFacePick facePick = PickSceneFace(scene, camOrigin, direction);
+    const EditorFacePick facePick = PickSceneFace(scene, camOrigin, direction, &materials);
     const float distance = (facePick.surface >= 0) ? (facePick.distance - kGrabSurfaceOffsetUnits)
                                                    : kGrabAirDistanceUnits;
 
@@ -9166,7 +6381,7 @@ void EditorApp::UpdateLightGrab()
         return;
     }
 
-    PlaceLightAlongGrabRay(m_scene, m_cameraPosition, direction, *light);
+    PlaceLightAlongGrabRay(m_scene, m_materials, m_cameraPosition, direction, *light);
 
     // The drag lands on a new position every frame it moves; the log carries the ones that
     // changed, so a scripted drag can read where the light ended up.
@@ -11439,24 +8654,9 @@ void EditorApp::LoadMaterialsSession()
 
     size_t loaded = 0;
     size_t inherited = 0;
-
-    for (size_t i = 0; i < m_materials.Count(); i++)
-    {
-        const std::string &name = m_materials.NameAt(i);
-        EditorMaterialParams params = DefaultSceneMaterialParams(m_scene, name);
-
-        // Active mod entries take priority; untouched entries fall back to the base mod.
-        if (m_materialsDocument.ReadMaterial(name, params))
-        {
-            loaded++;
-        }
-        else if (m_baseMaterialsDocument.ReadMaterial(name, params))
-        {
-            inherited++;
-        }
-
-        m_materials.At(i) = params;
-    }
+    m_runtime.ApplyMaterialsDocuments(m_materialsDocument,
+                                      m_baseMaterialsPath.empty() ? nullptr : &m_baseMaterialsDocument,
+                                      &loaded, &inherited);
 
     const std::string message = "session: " + m_sessionPaths.materials +
                                 (m_materialsDocument.Exists() ? " read, " : " absent, new file on apply, ") +
@@ -11618,455 +8818,6 @@ EditorLevelSky RenderedSky(const EditorRenderSettings &settings, const EditorSun
     return sky;
 }
 
-bool ApplySkyColorText(const std::string &name, const std::string &text,
-                       EditorRenderSettings &settings)
-{
-    float *target = nullptr;
-
-    for (const SkyColorBinding &binding : kSkyColorBindings)
-    {
-        if (name == binding.name)
-        {
-            target = settings.*(binding.field);
-            break;
-        }
-    }
-
-    if (target == nullptr)
-    {
-        return false;
-    }
-
-    float color[3] = { 0.0f, 0.0f, 0.0f };
-
-    if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
-    {
-        return true;
-    }
-
-    // The block writes 0..255 and the renderer takes 0..1, so a hand-written file may state
-    // either; a channel above 1 can only be the byte form.
-    const float scale = color[0] > 1.0f || color[1] > 1.0f || color[2] > 1.0f ? 1.0f / 255.0f : 1.0f;
-
-    for (int axis = 0; axis < 3; axis++)
-    {
-        target[axis] = color[axis] * scale;
-    }
-
-    return true;
-}
-
-void ApplySkyScalarBindings(const std::string &name, float value, int32_t integer,
-                            EditorRenderSettings &settings)
-{
-    for (const SkyBoolBinding &binding : kSkyBoolBindings)
-    {
-        if (name == binding.name)
-        {
-            settings.*(binding.field) = integer != 0;
-            return;
-        }
-    }
-
-    for (const SkyFloatBinding &binding : kSkyFloatBindings)
-    {
-        if (name == binding.name)
-        {
-            settings.*(binding.field) = value;
-            return;
-        }
-    }
-}
-
-// The value of one `sky:` entry in the live state. A text the game's parser would reject leaves
-// the setting alone, which is what RT_SkySettings_ApplyParsed does with a zero-argument value too.
-void ApplySkyText(const std::string &name, const std::string &text, EditorRenderSettings &settings,
-                  EditorSunState &sun)
-{
-    if (ApplySkyColorText(name, text, settings))
-    {
-        return;
-    }
-
-    float value = 0.0f;
-
-    if (std::sscanf(text.c_str(), "%f", &value) != 1)
-    {
-        return;
-    }
-
-    const int32_t integer = int32_t(value);
-
-    if (name == "rt_sky_ambient_lod")
-    {
-        settings.skyAmbientLod = integer;
-    }
-    else if (name == "rt_physical_sky")
-    {
-        // A file that says 0 leaves the sky type alone instead of forcing the colour sky: the
-        // renderer's r_fastsky branch is not something a level can select here.
-        if (integer != 0)
-        {
-            settings.skyType = QR_SKY_TYPE_PROCEDURAL;
-        }
-        else if (settings.skyType == QR_SKY_TYPE_PROCEDURAL)
-        {
-            settings.skyType = QR_SKY_TYPE_RASTERIZED_GEOMETRY;
-        }
-    }
-    else if (name == "rt_sky_clouds_quality")
-    {
-        settings.cloudsQuality = integer;
-    }
-    else if (name == "rt_physical_sun")
-    {
-        sun.enabled = integer != 0;
-    }
-    else if (name == "rt_sky_sun")
-    {
-        sun.radiance = value * kEditorSkySunRadiance;
-    }
-    else if (name == "rt_sky_sun_pitch")
-    {
-        sun.pitch = value;
-    }
-    else if (name == "rt_sky_sun_yaw")
-    {
-        sun.yaw = value;
-    }
-    else
-    {
-        ApplySkyScalarBindings(name, value, integer, settings);
-    }
-}
-
-// Lays a scope's keys over the live state. `onlySet` is the level scope, where a key the block
-// does not carry follows the global value, so whatever the panel already holds stands.
-void ApplySkyScope(const EditorLevelSky &sky, bool onlySet, EditorRenderSettings &settings,
-                   EditorSunState &sun)
-{
-    for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
-    {
-        if (sky.values[i].empty() || (onlySet && !sky.set[i]))
-        {
-            continue;
-        }
-
-        ApplySkyText(kEditorSkyKeyNames[i], sky.values[i], settings, sun);
-    }
-}
-
-bool ApplyDtalGlobalText(const std::string &name, float value, int32_t integer,
-                         EditorRenderSettings &settings)
-{
-    if (name == "rt_dtal_proxy")
-    {
-        settings.dtalProxy = integer != 0;
-    }
-    else if (name == "rt_dtal_clearance")
-    {
-        settings.dtalClearance = value;
-    }
-    else if (name == "rt_dtal_maxpolys")
-    {
-        settings.dtalMaxPolys = integer;
-    }
-    else if (name == "rt_dtal_minarea")
-    {
-        settings.dtalMinArea = value;
-    }
-    else if (name == "rt_dtal_proxy_minarea")
-    {
-        settings.dtalProxyMinArea = value;
-    }
-    else if (name == "rt_dtal_proxy_model_minarea")
-    {
-        settings.dtalProxyModelMinArea = value;
-    }
-    else if (name == "rt_dtal_groups")
-    {
-        settings.dtalGroups = integer;
-    }
-    else if (name == "rt_dtal_spacing")
-    {
-        settings.dtalSpacing = value;
-    }
-    else if (name == "rt_dtal_maxgroups")
-    {
-        settings.dtalMaxGroups = integer;
-    }
-    else if (name == "rt_level_light_maxpolys")
-    {
-        settings.levelLightMaxPolys = integer;
-    }
-    else if (name == "rt_dtal_debug")
-    {
-        settings.dtalDebug = integer;
-    }
-    else if (name == "rt_dtal_model_minarea")
-    {
-        settings.dtalModelMinArea = value;
-    }
-    else if (name == "rt_dtal_model_maxpolys")
-    {
-        settings.dtalModelMaxPolys = integer;
-    }
-    else if (name == "rt_dtal_model_budget")
-    {
-        settings.dtalModelBudget = integer;
-    }
-    else
-    {
-        return false;
-    }
-
-    return true;
-}
-
-bool ApplyExtraGlobalText(const std::string &name, float value, int32_t integer,
-                          EditorRenderSettings &settings)
-{
-    if (name == "rt_shadowrays")
-    {
-        settings.shadowRays = std::clamp(integer, 0, 8);
-    }
-    else if (name == "rt_upscale_fsr31")
-    {
-        settings.upscaleFsr31 = std::clamp(integer, 0, 6);
-    }
-    else if (name == "rt_upscale_dlss")
-    {
-        settings.upscaleDlss = std::clamp(integer, 0, 5);
-    }
-    else if (name == "rt_sharpen")
-    {
-        settings.sharpenMode = std::clamp(integer, 0, 2);
-    }
-    else if (name == "sensitivity")
-    {
-        settings.mouseSensitivity = std::clamp(value, 0.1f, 50.0f);
-    }
-    else if (name == "m_yaw")
-    {
-        settings.mouseYaw = value;
-    }
-    else if (name == "m_pitch")
-    {
-        settings.mousePitch = value;
-    }
-    else if (name == "rt_globallight_mult")
-    {
-        settings.globalLightMult = value;
-    }
-    else if (name == "rt_light_shafts")
-    {
-        settings.lightShafts = integer != 0;
-    }
-    else if (name == "rt_light_shafts_intensity")
-    {
-        settings.lightShaftsIntensity = value;
-    }
-    else if (name == "rt_light_shafts_resolution")
-    {
-        settings.lightShaftsResolution = std::clamp(integer, 0, 2);
-    }
-    else
-    {
-        return ApplyDtalGlobalText(name, value, integer, settings);
-    }
-
-    return true;
-}
-
-struct FloatSettingBinding
-{
-    const char *name;
-    float EditorRenderSettings::*field;
-};
-
-bool ApplyWaterColorGlobalText(const std::string &name, const std::string &text,
-                               EditorRenderSettings &settings)
-{
-    if (name != "rt_water_color" && name != "rt_water_acidcolor")
-    {
-        return false;
-    }
-
-    float color[3] = { 0.0f, 0.0f, 0.0f };
-
-    if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
-    {
-        return true;
-    }
-
-    // The cvars are bytes and the frame block takes 0..1, unlike the sky colours whose
-    // block already states the renderer's own range.
-    float *target = name == "rt_water_color" ? settings.waterColor : settings.acidColor;
-
-    for (int axis = 0; axis < 3; axis++)
-    {
-        target[axis] = std::clamp(color[axis] * (1.0f / 255.0f), 0.0f, 1.0f);
-    }
-
-    return true;
-}
-
-bool ApplyFloatTableGlobalText(const std::string &name, float value, EditorRenderSettings &settings)
-{
-    static constexpr FloatSettingBinding kFloatBindings[] = {
-        { "rt_truelight", &EditorRenderSettings::truelight },
-        { "rt_brightness", &EditorRenderSettings::brightness },
-        { "rt_sky_sun_disc", &EditorRenderSettings::sunDiscScale },
-        { "rt_tonemap_white", &EditorRenderSettings::tonemapWhite },
-        { "rt_tonemap_chroma", &EditorRenderSettings::tonemapChroma },
-        { "rt_tonemap_desat", &EditorRenderSettings::tonemapDesat },
-        { "rt_tonemap_max_log", &EditorRenderSettings::tonemapMaxLog },
-        { "rt_tonemap_min_log", &EditorRenderSettings::tonemapMinLog },
-        { "rt_volume_scatter", &EditorRenderSettings::volumeScatter },
-        { "rt_volume_ambient", &EditorRenderSettings::volumeAmbient },
-        { "rt_volume_far", &EditorRenderSettings::volumeFar },
-        { "rt_volume_lintensity", &EditorRenderSettings::volumeLightIntensity },
-        { "rt_volume_lassymetry", &EditorRenderSettings::volumeAsymmetry },
-        { "rt_normalmap_stren", &EditorRenderSettings::normalMapStrength },
-        { "rt_emis_mapboost", &EditorRenderSettings::emissionMapBoost },
-        { "rt_emis_light_intensity", &EditorRenderSettings::emissionLightIntensity },
-        { "rt_emis_maxscrcolor", &EditorRenderSettings::emissionMaxScreenColor },
-        { "rt_emis_sharpmask", &EditorRenderSettings::emissionSharpMask },
-        { "rt_tal_selflit", &EditorRenderSettings::talSelfLitOffset },
-        { "rt_roughmin", &EditorRenderSettings::minRoughness },
-        { "rt_denoiser", &EditorRenderSettings::denoiser },
-        { "rt_restir", &EditorRenderSettings::restir },
-        { "rt_restir_candidates", &EditorRenderSettings::restirCandidates },
-        { "rt_gi_level", &EditorRenderSettings::giLevel },
-        { "rt_nee_samples", &EditorRenderSettings::neeSamples },
-        { "rt_sensit_dir", &EditorRenderSettings::sensitivityDirect },
-        { "rt_sensit_indir", &EditorRenderSettings::sensitivityIndirect },
-        { "rt_sensit_spec", &EditorRenderSettings::sensitivitySpecular },
-        { "rt_sky_sun_bounce_range", &EditorRenderSettings::sunBounceRange },
-        { "rt_sky_sun_bounce_scale", &EditorRenderSettings::sunBounceScale },
-        { "rt_no_textures", &EditorRenderSettings::noTextures },
-        { "rt_antifirefly", &EditorRenderSettings::antifirefly },
-        { "rt_renderscale", &EditorRenderSettings::renderScale },
-        { "rt_bloom_emis_mult", &EditorRenderSettings::bloomEmissionMultiplier },
-        { "rt_bloom_intensity", &EditorRenderSettings::bloomIntensity },
-        { "rt_bloom_threshold", &EditorRenderSettings::bloomThreshold },
-        { "rt_bloom_knee", &EditorRenderSettings::bloomKnee },
-        { "rt_bloom_scatter", &EditorRenderSettings::bloomScatter },
-        { "rt_bloom_radius", &EditorRenderSettings::bloomRadius },
-        { "rt_vignette", &EditorRenderSettings::vignetteIntensity },
-        { "rt_vignette_start", &EditorRenderSettings::vignetteStart },
-        { "rt_vignette_end", &EditorRenderSettings::vignetteEnd },
-        { "rt_vignette_roundness", &EditorRenderSettings::vignetteRoundness },
-        { "rt_filmgrain", &EditorRenderSettings::filmGrainIntensity },
-        { "rt_filmgrain_size", &EditorRenderSettings::filmGrainSize },
-        { "rt_sharpen_strength", &EditorRenderSettings::sharpenStrength },
-        { "rt_local_exposure", &EditorRenderSettings::localExposure },
-        { "fov", &EditorRenderSettings::fovDegrees },
-        { "rt_water_speed", &EditorRenderSettings::waterSpeed },
-        { "rt_water_normstren", &EditorRenderSettings::waterNormalStrength },
-        { "rt_water_normsharp", &EditorRenderSettings::waterNormalSharpness },
-        { "rt_water_scale", &EditorRenderSettings::waterScale },
-    };
-
-    for (const FloatSettingBinding &binding : kFloatBindings)
-    {
-        if (name == binding.name)
-        {
-            settings.*(binding.field) = value;
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool ApplyTypedGlobalText(const std::string &name, float value, int32_t integer,
-                          EditorRenderSettings &settings)
-{
-    if (name == "rt_level_lights")
-    {
-        settings.levelLights = value != 0.0f;
-    }
-    else if (name == "rt_model_lights")
-    {
-        settings.modelLights = value != 0.0f;
-    }
-    else if (name == "rt_tonemap")
-    {
-        settings.tonemapType = std::clamp(integer, 0, 4);
-    }
-    else if (name == "rt_volume_type")
-    {
-        settings.volumeType = std::clamp(integer, 0, 2);
-    }
-    else if (name == "rt_q2_depthgrad")
-    {
-        settings.q2DepthGrad = int32_t(value);
-    }
-    else if (name == "rt_q2_lightstats")
-    {
-        settings.q2LightStats = int32_t(value);
-    }
-    else if (name == "rt_reflrefr_earlyout")
-    {
-        settings.reflRefrEarlyOut = value > 0.0f;
-    }
-    else if (name == "rt_bloom_quality")
-    {
-        settings.bloomQuality = int32_t(value);
-    }
-    else if (name == "rt_ef_crt")
-    {
-        settings.crtEnabled = value != 0.0f;
-    }
-    else if (name == "fov_adapt")
-    {
-        settings.fovAdapt = value != 0.0f;
-    }
-    else
-    {
-        return false;
-    }
-
-    return true;
-}
-
-// One `name "value"` line of the game's config.cfg, which archives every cvar the Global tab
-// drives. The sky block owns its 40 keys and the rest are plain globals, so a name either lands
-// in the block's reader or in one of the fields beside it. Returns whether the line was one the
-// panel represents, which is what tells a caller the file was understood rather than skipped.
-bool ApplyGlobalText(const std::string &name, const std::string &text, EditorRenderSettings &settings,
-                     EditorSunState &sun)
-{
-    if (EditorSkyKeyIndex(name) >= 0)
-    {
-        ApplySkyText(name, text, settings, sun);
-        return true;
-    }
-
-    if (ApplyWaterColorGlobalText(name, text, settings))
-    {
-        return true;
-    }
-
-    float value = 0.0f;
-
-    if (std::sscanf(text.c_str(), "%f", &value) != 1)
-    {
-        return false;
-    }
-
-    const int32_t integer = int32_t(value);
-
-    if (ApplyFloatTableGlobalText(name, value, settings) ||
-        ApplyTypedGlobalText(name, value, integer, settings))
-    {
-        return true;
-    }
-
-    return ApplyExtraGlobalText(name, value, integer, settings);
-}
-
 } // namespace
 
 EditorLevelFog EditorApp::LevelFog() const
@@ -12217,12 +8968,12 @@ void EditorApp::SetSkyScope(bool global)
     {
         // Every key, because the global scope owns the whole block: the level's overrides do not
         // stand in for a config value the panel is editing.
-        ApplySkyScope(m_skyGlobals, false, m_settings, m_sun);
+        ApplyEditorSkyScope(m_skyGlobals, false, m_settings, m_sun);
     }
     else
     {
         // The panel already shows the global values, so only the level's own keys change.
-        ApplySkyScope(m_skyLevel, true, m_settings, m_sun);
+        ApplyEditorSkyScope(m_skyLevel, true, m_settings, m_sun);
     }
 
     m_skyRendered = RenderedSky(m_settings, m_sun);
@@ -12233,44 +8984,6 @@ void EditorApp::SetSkyScope(bool global)
     PrintMessage(message.c_str(), this);
     Notify(message);
 }
-
-namespace
-{
-EditorLight EditorLightFromLevelEntry(const EditorScene &scene, const EditorLevelLight &entry,
-                                      const std::string &defaultClassName)
-{
-    EditorLight light;
-
-    for (int axis = 0; axis < 3; axis++)
-    {
-        light.position[axis] = entry.origin[axis];
-        light.offset[axis] = entry.offset[axis];
-        light.direction[axis] = entry.direction[axis];
-    }
-
-    light.hasOffset = entry.hasOffset;
-    light.radius = entry.radius * kEditorUnitsPerMeter;
-    light.spot = entry.spot;
-    light.angleInner = entry.angleInner;
-    light.angleOuter = entry.angleOuter;
-    light.lightShafts = entry.lightShafts;
-    light.lightShaftsPower = entry.lightShaftsPower;
-    light.lightShaftsDistance = entry.lightShaftsDistance;
-    light.lightShaftsFalloff = entry.lightShaftsFalloff;
-    light.style = entry.style;
-    light.forceRasterize = entry.forceRasterize;
-    light.enabled = entry.enabled;
-    light.className = entry.className.empty() ? defaultClassName : entry.className;
-    light.hasColor = true;
-    ResolveLightClusterFromEffectivePos(scene, light);
-
-    const float tint[3] = { entry.color[0], entry.color[1], entry.color[2] };
-    SetEditorLightTint(light, tint);
-    SetEditorLightIntensity(light, entry.intensity * kEditorCustomLightIntensityUnits);
-    ClampEditorLightCone(light);
-    return light;
-}
-} // namespace
 
 std::string EditorApp::LevelFingerprint() const
 {
@@ -12299,47 +9012,19 @@ void EditorApp::LoadLightsSession()
         m_skyGlobals = RenderedSky(m_settings, m_sun);
     }
 
-    const EditorLevelDocument::ReadResult read = m_levelDocument.ReadLevel(m_sessionPaths.level);
-    AdoptSkyScope(read);
-    m_emitterLightOverrides = m_levelDocument.ReadEmitterLights();
+    const EditorLevelApplyResult applied =
+        m_runtime.ApplyLevelDocument(m_levelDocument, m_sessionPaths.level);
+    AdoptSkyScope(applied.read);
 
-    if (read.hasFog)
+    if (applied.hasLights)
     {
-        for (int axis = 0; axis < 3; axis++)
+        if (applied.replacedStandardLights)
         {
-            m_settings.fogColor[axis] = read.fog.color[axis];
-        }
-
-        m_settings.fogDensity = read.fog.enabled ? std::max(0.0f, read.fog.density) : 0.0f;
-    }
-
-    // A section that carries `lights:` owns the level's lights, so the read replaces whatever the
-    // editor holds. A section without the block leaves the panel's own lights alone, which is what
-    // makes a level the file does not know yet keep the lights added before its first save.
-    if (read.hasLights)
-    {
-        const bool hasStandardBlock = HasSavedStandardLightsBlock(read.lights);
-        if (hasStandardBlock)
-        {
-            m_scene.lights.clear();
             m_selectedLight = -1;
             m_selectedLights.clear();
         }
-        m_customLights.clear();
         m_selectedCustomLight = -1;
         m_selectedCustomLights.clear();
-
-        for (const EditorLevelLight &entry : read.lights)
-        {
-            if (hasStandardBlock && IsSavedStandardLightEntry(entry))
-            {
-                m_scene.lights.push_back(EditorLightFromLevelEntry(m_scene, entry, "light"));
-            }
-            else
-            {
-                m_customLights.push_back(EditorLightFromLevelEntry(m_scene, entry, "custom"));
-            }
-        }
     }
 
     m_levelTouched = false;
@@ -12356,8 +9041,44 @@ void EditorApp::LoadLightsSession()
 
 namespace
 {
-bool ParseConfigCvarLine(const std::string &line, std::string &name, std::string &value)
+
+void TrimLeadingSpaceAndSetPrefix(std::string &name, std::string *outSetPrefix = nullptr)
 {
+    auto trimFront = [](std::string &s) {
+        size_t first = 0;
+        while (first < s.size() && (s[first] == ' ' || s[first] == '\t' || s[first] == '\r'))
+        {
+            first++;
+        }
+        if (first > 0)
+        {
+            s.erase(0, first);
+        }
+    };
+    trimFront(name);
+    for (const char *prefix : { "seta ", "seta\t", "set ", "set\t" })
+    {
+        const size_t len = std::strlen(prefix);
+        if (name.compare(0, len, prefix) == 0)
+        {
+            if (outSetPrefix != nullptr)
+            {
+                *outSetPrefix = name.substr(0, len - 1) + " ";
+            }
+            name.erase(0, len);
+            trimFront(name);
+            break;
+        }
+    }
+}
+
+bool ParseConfigCvarLine(const std::string &line, std::string &name, std::string &value,
+                         std::string *outSetPrefix = nullptr)
+{
+    if (outSetPrefix != nullptr)
+    {
+        outSetPrefix->clear();
+    }
     const size_t open = line.find('"');
 
     if (open == std::string::npos || open == 0)
@@ -12379,9 +9100,162 @@ bool ParseConfigCvarLine(const std::string &line, std::string &name, std::string
     {
         name.pop_back();
     }
+    TrimLeadingSpaceAndSetPrefix(name, outSetPrefix);
 
     return !name.empty() && name[0] != '/' && name[0] != '#';
 }
+
+std::string FormatConfigFloat(float value)
+{
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.6g", double(value));
+    return buf;
+}
+
+using ConfigEntryList = std::vector<std::pair<std::string, std::string>>;
+
+void CollectDtalConfigEntries(const EditorRenderSettings &s, ConfigEntryList &out)
+{
+    out.emplace_back("rt_pause_world", s.pauseWorld ? "1" : "0");
+    out.emplace_back("rt_dtal_debug", std::to_string(s.dtalDebug));
+    out.emplace_back("rt_dtal_proxy", s.dtalProxy ? "1" : "0");
+    out.emplace_back("rt_dtal_clearance", FormatConfigFloat(s.dtalClearance));
+    out.emplace_back("rt_dtal_minarea", FormatConfigFloat(s.dtalMinArea));
+    out.emplace_back("rt_dtal_proxy_minarea", FormatConfigFloat(s.dtalProxyMinArea));
+    out.emplace_back("rt_dtal_proxy_model_minarea", FormatConfigFloat(s.dtalProxyModelMinArea));
+    out.emplace_back("rt_dtal_spacing", FormatConfigFloat(s.dtalSpacing));
+    out.emplace_back("rt_dtal_model_minarea", FormatConfigFloat(s.dtalModelMinArea));
+    out.emplace_back("rt_dtal_maxpolys", std::to_string(s.dtalMaxPolys));
+    out.emplace_back("rt_dtal_groups", std::to_string(s.dtalGroups));
+    out.emplace_back("rt_dtal_maxgroups", std::to_string(s.dtalMaxGroups));
+    out.emplace_back("rt_level_light_maxpolys", std::to_string(s.levelLightMaxPolys));
+    out.emplace_back("rt_dtal_model_maxpolys", std::to_string(s.dtalModelMaxPolys));
+    out.emplace_back("rt_dtal_model_budget", std::to_string(s.dtalModelBudget));
+}
+
+void CollectRenderAndGlobalConfigEntries(const EditorRenderSettings &s, ConfigEntryList &out)
+{
+    struct FPair
+    {
+        const char *name;
+        float value;
+    };
+    const FPair floats[] = {
+        { "rt_gi_level", s.giLevel },
+        { "rt_sky_sun_bounce_range", s.sunBounceRange },
+        { "rt_sky_sun_bounce_scale", s.sunBounceScale },
+        { "rt_restir", s.restir },
+        { "rt_restir_candidates", s.restirCandidates },
+        { "rt_antifirefly", s.antifirefly },
+        { "rt_sensit_indir", s.sensitivityIndirect },
+        { "rt_light_shafts_intensity", s.lightShaftsIntensity },
+        { "rt_renderscale", s.renderScale },
+        { "rt_denoiser", s.denoiser },
+        { "rt_nee_samples", s.neeSamples },
+        { "sensitivity", s.mouseSensitivity },
+        { "rt_normalmap_stren", s.normalMapStrength },
+        { "rt_filmgrain", s.filmGrainIntensity },
+        { "rt_truelight", s.truelight },
+        { "rt_brightness", s.brightness },
+        { "rt_globallight_mult", s.globalLightMult },
+        { "rt_emis_mapboost", s.emissionMapBoost },
+        { "rt_emis_light_intensity", s.emissionLightIntensity },
+        { "rt_tonemap_white", s.tonemapWhite },
+        { "rt_tonemap_chroma", s.tonemapChroma },
+        { "rt_tonemap_desat", s.tonemapDesat },
+        { "rt_tonemap_max_log", s.tonemapMaxLog },
+        { "rt_tonemap_min_log", s.tonemapMinLog },
+        { "rt_volume_scatter", s.volumeScatter },
+        { "rt_volume_ambient", s.volumeAmbient },
+        { "rt_volume_far", s.volumeFar },
+    };
+    for (const FPair &item : floats)
+    {
+        out.emplace_back(item.name, FormatConfigFloat(item.value));
+    }
+    out.emplace_back("rt_light_shafts", s.lightShafts ? "1" : "0");
+    out.emplace_back("rt_emissive_nee", s.emissiveNee ? "1" : "0");
+    out.emplace_back("rt_light_shafts_resolution", std::to_string(s.lightShaftsResolution));
+    out.emplace_back("rt_upscale_fsr31", std::to_string(s.upscaleFsr31));
+    out.emplace_back("rt_sharpen", std::to_string(s.sharpenMode));
+    out.emplace_back("rt_shadowrays", std::to_string(s.shadowRays));
+    out.emplace_back("rt_model_lights", s.modelLights ? "1" : "0");
+    out.emplace_back("rt_level_lights", s.levelLights ? "1" : "0");
+    out.emplace_back("rt_tonemap", std::to_string(s.tonemapType));
+    out.emplace_back("rt_volume_type", std::to_string(s.volumeType));
+}
+
+ConfigEntryList CollectSystemConfigEntries(const EditorRenderSettings &s,
+                                           const EditorSunState &sun, bool includeSky)
+{
+    ConfigEntryList out;
+    CollectDtalConfigEntries(s, out);
+    CollectRenderAndGlobalConfigEntries(s, out);
+    if (includeSky)
+    {
+        const EditorLevelSky sky = RenderedSky(s, sun);
+        for (int32_t i = 0; i < kEditorSkyKeyCount; i++)
+        {
+            if (!sky.values[i].empty())
+            {
+                out.emplace_back(kEditorSkyKeyNames[i], sky.values[i]);
+            }
+        }
+    }
+    return out;
+}
+
+std::string MergeConfigCvarText(const std::string &existing, const ConfigEntryList &entries)
+{
+    std::unordered_map<std::string, size_t> indexByName;
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+        indexByName[entries[i].first] = i;
+    }
+    std::vector<bool> written(entries.size(), false);
+    std::string result;
+    result.reserve(existing.size() + entries.size() * 32u);
+
+    size_t offset = 0;
+    std::string name;
+    std::string value;
+    std::string setPrefix;
+    while (offset < existing.size())
+    {
+        const size_t end = existing.find('\n', offset);
+        const bool hasNl = end != std::string::npos;
+        const size_t lineEnd = hasNl ? end : existing.size();
+        std::string line = existing.substr(offset, lineEnd - offset);
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+        offset = hasNl ? (end + 1u) : existing.size();
+
+        if (ParseConfigCvarLine(line, name, value, &setPrefix))
+        {
+            const auto it = indexByName.find(name);
+            if (it != indexByName.end())
+            {
+                result += setPrefix + name + " \"" + entries[it->second].second + "\"\n";
+                written[it->second] = true;
+                continue;
+            }
+        }
+        result += line;
+        result += '\n';
+    }
+
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+        if (!written[i])
+        {
+            result += entries[i].first + " \"" + entries[i].second + "\"\n";
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 void EditorApp::LoadGameConfigGlobals()
@@ -12392,8 +9266,46 @@ void EditorApp::LoadGameConfigGlobals()
     }
 
     std::vector<uint8_t> file;
+    bool loadedAny = m_assets.ReadFile("config.cfg", file);
+    if (!loadedAny)
+    {
+        if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter(); adapter != nullptr)
+        {
+            for (const std::string &cfg : adapter->extraModConfigFiles)
+            {
+                if (m_assets.ReadFile(cfg, file))
+                {
+                    loadedAny = true;
+                    break;
+                }
+            }
+        }
+    }
 
-    if (!m_assets.ReadFile("config.cfg", file))
+    int applied = 0;
+    if (loadedAny)
+    {
+        const std::string text(file.begin(), file.end());
+        applied += m_runtime.ApplyConfigText(text);
+    }
+
+    const std::string diskCfgPath = ResolveSystemConfigPath();
+    if (!diskCfgPath.empty())
+    {
+        std::ifstream diskFile(diskCfgPath, std::ios::binary);
+        if (diskFile)
+        {
+            const std::string diskText((std::istreambuf_iterator<char>(diskFile)),
+                                       std::istreambuf_iterator<char>());
+            if (!diskText.empty())
+            {
+                loadedAny = true;
+                applied += m_runtime.ApplyConfigText(diskText);
+            }
+        }
+    }
+
+    if (!loadedAny)
     {
         PrintMessage("config: no config.cfg found, the panel starts from the engine's own cvar "
                      "values rather than from the game's global set",
@@ -12402,31 +9314,6 @@ void EditorApp::LoadGameConfigGlobals()
     }
 
     m_gameConfigApplied = true;
-
-    const std::string text(file.begin(), file.end());
-    std::string name;
-    std::string value;
-    int applied = 0;
-
-    size_t offset = 0;
-
-    while (offset < text.size())
-    {
-        size_t end = text.find('\n', offset);
-
-        if (end == std::string::npos)
-        {
-            end = text.size();
-        }
-
-        const std::string line = text.substr(offset, end - offset);
-        offset = end + 1;
-
-        if (ParseConfigCvarLine(line, name, value) && ApplyGlobalText(name, value, m_settings, m_sun))
-        {
-            applied++;
-        }
-    }
 
     if (m_settings.skyBrightness <= 0.001f)
     {
@@ -12457,7 +9344,7 @@ void EditorApp::AdoptSkyScope(const EditorLevelDocument::ReadResult &read)
 
     // The level's keys go over the panel as it stands, which is the global baseline a key the
     // block does not carry falls back to.
-    ApplySkyScope(m_skyLevel, true, m_settings, m_sun);
+    ApplyEditorSkyScope(m_skyLevel, true, m_settings, m_sun);
     m_skyRendered = RenderedSky(m_settings, m_sun);
 }
 
@@ -12647,7 +9534,15 @@ bool EditorApp::SaveMaterialsSession()
         const int32_t index = m_materials.IndexOf(name);
         if (index >= 0)
         {
-            entries.push_back(EditorMaterialEntry{ name, m_materials.At(size_t(index)) });
+            const EditorMaterialParams sceneDefaults = m_runtime.DefaultMaterialParamsFor(name);
+            const EditorMaterialParams &params = m_materials.At(size_t(index));
+            EditorMaterialEntry entry;
+            entry.name = name;
+            entry.params = params;
+            entry.clearDefaultEmissive =
+                !sceneDefaults.emissiveTexture.empty() && params.emissiveTexture.empty();
+            entry.clearDefaultMirror = sceneDefaults.mirror && !params.mirror;
+            entries.push_back(std::move(entry));
         }
     }
 
@@ -12733,13 +9628,74 @@ bool EditorApp::SaveLevelLightsSession()
     return true;
 }
 
+bool EditorApp::HasUnsavedSystemSettings() const
+{
+    return m_settings != m_baselineSettings || (m_skyGlobal && m_sun != m_baselineSun);
+}
+
+std::string EditorApp::ResolveSystemConfigPath() const
+{
+    if (!m_gamePath.empty())
+    {
+        return (std::filesystem::path(m_gamePath) / "config.cfg").string();
+    }
+    if (!m_sessionPaths.materials.empty())
+    {
+        const std::filesystem::path parent =
+            std::filesystem::path(m_sessionPaths.materials).parent_path();
+        if (!parent.empty())
+        {
+            return (parent / "config.cfg").string();
+        }
+    }
+    return "config.cfg";
+}
+
+bool EditorApp::SaveSystemConfigSession()
+{
+    const std::string cfgPath = ResolveSystemConfigPath();
+    std::string existing;
+    bool hadFile = false;
+    {
+        std::ifstream inFile(cfgPath, std::ios::binary);
+        if (inFile)
+        {
+            hadFile = true;
+            existing.assign((std::istreambuf_iterator<char>(inFile)),
+                            std::istreambuf_iterator<char>());
+        }
+    }
+
+    const ConfigEntryList entries =
+        CollectSystemConfigEntries(m_settings, m_sun, m_skyGlobal);
+    const std::string merged = MergeConfigCvarText(existing, entries);
+    std::string error;
+    if (hadFile && !CopyEditorFile(cfgPath, cfgPath + ".bak", error))
+    {
+        PrintMessage(("config: " + error).c_str(), this);
+        Notify(error);
+        return false;
+    }
+    if (!WriteEditorFile(cfgPath, merged, error))
+    {
+        PrintMessage(("config: " + error).c_str(), this);
+        Notify(error);
+        return false;
+    }
+
+    PrintMessage(("config: saved " + cfgPath).c_str(), this);
+    Notify("saved " + cfgPath);
+    return true;
+}
+
 bool EditorApp::ApplySession()
 {
     // Rendering the section rather than trusting the latch also settles an edit that was taken
     // back: nothing differs from the file, so nothing is written for it.
     const bool levelChanged = LevelFingerprint() != m_levelFingerprint;
+    const bool systemChanged = HasUnsavedSystemSettings();
 
-    if (m_touchedMaterials.empty() && !levelChanged)
+    if (m_touchedMaterials.empty() && !levelChanged && !systemChanged)
     {
         PrintMessage("session: apply with nothing touched", this);
         Notify("nothing to save: no material or level was edited");
@@ -12756,6 +9712,11 @@ bool EditorApp::ApplySession()
     }
 
     if (levelChanged && !SaveLevelLightsSession())
+    {
+        return false;
+    }
+
+    if (systemChanged && !SaveSystemConfigSession())
     {
         return false;
     }
@@ -12777,12 +9738,12 @@ void EditorApp::DiscardSession()
     {
         m_scene.lights = m_scene.bspLights;
     }
+    m_settings = m_baselineSettings;
+    m_sun = m_baselineSun;
     if (!m_skyGlobals.Empty())
     {
-        ApplySkyScope(m_skyGlobals, false, m_settings, m_sun);
+        ApplyEditorSkyScope(m_skyGlobals, false, m_settings, m_sun);
     }
-    std::copy_n(m_baselineSettings.fogColor, 3, m_settings.fogColor);
-    m_settings.fogDensity = m_baselineSettings.fogDensity;
     LoadMaterialsSession();
     LoadLightsSession();
     if (m_sceneLoaded)
@@ -12849,9 +9810,9 @@ void EditorApp::ResetSession()
     // itself ever writes these.
     m_settings = EditorRenderSettings{};
     m_sun = EditorSunState{};
-    ApplySceneRenderDefaults(m_scene, m_sun, m_settings);
+    m_runtime.ApplySceneRenderDefaults();
     m_skyGlobals = EditorLevelSky{};
-    m_celestialClockSeconds = 0.0;
+    m_runtime.celestialClockSeconds = 0.0;
     m_emitterLightOverrides.clear();
     m_customLights.clear();
     m_selectedCustomLight = -1;
@@ -12894,6 +9855,8 @@ const char *PendingActionDescription(EditorApp::PendingSessionAction action)
         return "switching the mod";
     case EditorApp::PendingSessionAction::UnloadMod:
         return "unloading the mod";
+    case EditorApp::PendingSessionAction::PlayLevel:
+        return "launching the level in game";
     default:
         return "exiting";
     }
@@ -12912,7 +9875,8 @@ void EditorApp::RequestSessionAction(PendingSessionAction action, const std::str
     m_pendingActionPath = path;
     m_pendingActionFlag = flag;
 
-    if (m_sceneLoaded && m_touchedMaterials.empty() && LevelFingerprint() == m_levelFingerprint)
+    if (m_sceneLoaded && m_touchedMaterials.empty() && LevelFingerprint() == m_levelFingerprint &&
+        !HasUnsavedSystemSettings())
     {
         m_levelTouched = false;
         m_sessionDirty = false;
@@ -12981,9 +9945,246 @@ void EditorApp::ProcessDeferredSessionAction()
     case PendingSessionAction::UnloadMod:
         UnloadModNow();
         break;
+    case PendingSessionAction::PlayLevel:
+        PlayLevelNow();
+        break;
     default:
         break;
     }
+}
+
+namespace
+{
+
+std::string ToAbsoluteNormalizedPath(const std::string &path)
+{
+    if (path.empty())
+    {
+        return {};
+    }
+    std::error_code ec;
+    std::filesystem::path p(path);
+    if (p.is_relative())
+    {
+        p = std::filesystem::absolute(p, ec);
+    }
+    return p.lexically_normal().string();
+}
+
+bool IsPlayableExecutableFile(const std::filesystem::path &path)
+{
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec))
+    {
+        return false;
+    }
+#if !defined(_WIN32)
+    return access(path.c_str(), X_OK) == 0;
+#else
+    return true;
+#endif
+}
+
+std::string FindDefaultVkQuakeExecutable(const EditorPlayLevelRequest &request)
+{
+    if (!request.gameExecutable.empty())
+    {
+        return IsPlayableExecutableFile(request.gameExecutable) ? request.gameExecutable
+                                                              : std::string();
+    }
+    if (const char *envExe = std::getenv("QRAY_GAME_EXE");
+        envExe != nullptr && envExe[0] != '\0' && IsPlayableExecutableFile(envExe))
+    {
+        return envExe;
+    }
+
+    std::vector<std::filesystem::path> dirs;
+    if (!request.executableDir.empty())
+    {
+        const std::filesystem::path exeDir(request.executableDir);
+        dirs = { exeDir, exeDir.parent_path(), exeDir.parent_path().parent_path() };
+    }
+#if defined(_WIN32)
+    static constexpr const char *kNames[] = { "vkquake.exe", "quakespasm-rt.exe" };
+#else
+    static constexpr const char *kNames[] = { "vkquake", "quakespasm-rt" };
+#endif
+    for (const std::filesystem::path &dir : dirs)
+    {
+        if (dir.empty())
+        {
+            continue;
+        }
+        for (const char *name : kNames)
+        {
+            const std::filesystem::path cand = dir / name;
+            if (IsPlayableExecutableFile(cand))
+            {
+                return cand.string();
+            }
+        }
+    }
+    return {};
+}
+
+bool BuildDefaultPlayLevelCommand(const EditorPlayLevelRequest &request,
+                                  EditorLaunchCommand &outCommand, std::string &outError)
+{
+    const std::string exe = FindDefaultVkQuakeExecutable(request);
+    if (exe.empty())
+    {
+        outError = "game executable not found (pass --game-exe or set QRAY_GAME_EXE)";
+        return false;
+    }
+
+    outCommand.executable = exe;
+    outCommand.workingDirectory = std::filesystem::path(exe).parent_path().string();
+    if (!request.gameDir.empty())
+    {
+        std::filesystem::path gdir(request.gameDir);
+        if (gdir.filename().empty())
+        {
+            gdir = gdir.parent_path();
+        }
+        const std::string leaf = gdir.filename().string();
+        const std::string parent = gdir.parent_path().string();
+        if (!parent.empty())
+        {
+            outCommand.arguments.emplace_back("-basedir");
+            outCommand.arguments.push_back(parent);
+        }
+        if (!leaf.empty() && LowercaseName(leaf) != "id1")
+        {
+            outCommand.arguments.emplace_back("-game");
+            outCommand.arguments.push_back(leaf);
+        }
+    }
+    outCommand.arguments.emplace_back("+map");
+    outCommand.arguments.push_back(request.levelName);
+    return true;
+}
+
+std::string FormatLaunchLogLine(const EditorLaunchCommand &cmd)
+{
+    std::string line = "play level: launching " + cmd.executable;
+    for (const std::string &arg : cmd.arguments)
+    {
+        line += ' ';
+        line += arg;
+    }
+    return line;
+}
+
+} // namespace
+
+bool EditorApp::CanPlayCurrentLevel() const
+{
+    return m_sceneLoaded && !m_sessionPaths.level.empty();
+}
+
+void EditorApp::RequestPlayLevel()
+{
+    if (!CanPlayCurrentLevel() || m_playProcess.handle != 0)
+    {
+        return;
+    }
+    m_deferredAction = PendingSessionAction::PlayLevel;
+    m_deferredActionPath.clear();
+    m_deferredActionFlag = false;
+}
+
+bool EditorApp::PlayLevelNow()
+{
+    if (!CanPlayCurrentLevel() || m_playProcess.handle != 0)
+    {
+        return false;
+    }
+
+    if (m_touchedMaterials.empty() && LevelFingerprint() == m_levelFingerprint &&
+        !HasUnsavedSystemSettings())
+    {
+        m_levelTouched = false;
+        m_sessionDirty = false;
+    }
+
+    if (HasUnsavedEditorChanges() && !SaveSessionToDisk())
+    {
+        return false;
+    }
+
+    EditorPlayLevelRequest req;
+    req.executableDir = EditorExecutableDirectory();
+    req.gameExecutable = ToAbsoluteNormalizedPath(m_gameExecutableOverride);
+    req.gameDir = ToAbsoluteNormalizedPath(m_gamePath);
+    req.scenePath = ToAbsoluteNormalizedPath(m_scenePath);
+    req.levelName = m_sessionPaths.level;
+    req.shaderFolder = ToAbsoluteNormalizedPath(m_shaderFolder);
+    req.blueNoisePath = ToAbsoluteNormalizedPath(m_blueNoisePath);
+    req.waterNormalPath = ToAbsoluteNormalizedPath(m_waterNormalPath);
+    req.materialsPath = ToAbsoluteNormalizedPath(m_sessionPaths.materials);
+    req.lightsPath = ToAbsoluteNormalizedPath(m_sessionPaths.lights);
+    req.configPath = ToAbsoluteNormalizedPath(ResolveSystemConfigPath());
+    req.multiplayer = m_multiplayerMode;
+
+    const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+    EditorLaunchCommand cmd;
+    std::string error;
+    const bool built =
+        (adapter != nullptr && adapter->buildPlayLevelCommand != nullptr)
+            ? adapter->buildPlayLevelCommand(req, cmd, error)
+            : BuildDefaultPlayLevelCommand(req, cmd, error);
+    if (!built)
+    {
+        PrintMessage(("play level: " + error).c_str(), this);
+        Notify(error);
+        return false;
+    }
+
+    m_window.SetMouseCapture(false);
+    SetCursorMode(true);
+
+    const std::string logLine = FormatLaunchLogLine(cmd);
+    EditorProcessLaunch procLaunch;
+    procLaunch.executable = cmd.executable;
+    procLaunch.workingDirectory = cmd.workingDirectory;
+    procLaunch.arguments = std::move(cmd.arguments);
+    procLaunch.envOverrides = std::move(cmd.envOverrides);
+    if (!EditorSpawnProcess(procLaunch, m_playProcess, error))
+    {
+        PrintMessage(("play level: " + error).c_str(), this);
+        Notify(error);
+        return false;
+    }
+
+    PrintMessage(logLine.c_str(), this);
+    Notify("launching " + m_sessionPaths.level + " in game");
+    return true;
+}
+
+bool EditorApp::PollPlayProcess()
+{
+    if (m_playProcess.handle == 0)
+    {
+        return false;
+    }
+
+    int exitCode = 0;
+    if (EditorIsProcessRunning(m_playProcess, &exitCode))
+    {
+        return true;
+    }
+
+    PrintMessage(("play level: game exited (code " + std::to_string(exitCode) + ")").c_str(),
+                 this);
+    Notify(exitCode == 0 ? "returned from game"
+                         : ("game exited with code " + std::to_string(exitCode)));
+    std::fill(std::begin(m_keys), std::end(m_keys), false);
+    m_hasFocus = m_window.HasFocus();
+    EditorEvent focusEvent = {};
+    focusEvent.type = EditorEventType::Focus;
+    focusEvent.down = m_hasFocus;
+    m_ui.HandleEvent(focusEvent);
+    return false;
 }
 
 void EditorApp::RequestExit()
@@ -13158,6 +10359,10 @@ void EditorApp::DrawSessionPrompt()
         if (m_levelTouched || LevelFingerprint() != m_levelFingerprint)
         {
             ImGui::TextWrapped("%s", m_sessionPaths.lights.c_str());
+        }
+        if (HasUnsavedSystemSettings())
+        {
+            ImGui::TextWrapped("%s", ResolveSystemConfigPath().c_str());
         }
         ImGui::Spacing();
         answer = DrawSessionPromptButtons(buttonRects);
@@ -13619,6 +10824,7 @@ struct EditorLaunchConfig
     std::string shaderFolder = "shaders";
     std::string blueNoisePath = "textures/BlueNoise_LDR_RGBA_128.png";
     std::string gamePath;
+    std::string gameExecutable;
     std::string initialTab;
     std::string materialsOverride;
     std::string lightsOverride;
@@ -13644,6 +10850,7 @@ void ParseEditorCliArgs(const std::vector<std::string> &args, EditorLaunchConfig
         { "--shaders", &config.shaderFolder, &config.hasShaders },
         { "--blue-noise", &config.blueNoisePath, &config.hasBlueNoise },
         { "--gamedir", &config.gamePath, nullptr },
+        { "--game-exe", &config.gameExecutable, nullptr },
         { "--tab", &config.initialTab, nullptr },
         { "--materials", &config.materialsOverride, nullptr },
         { "--lights", &config.lightsOverride, nullptr },
@@ -13801,6 +11008,7 @@ int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
     m_waterNormalPath = ResolveDefaultAssetPath("textures/WaterNormal_n.png");
     m_gamePath = config.gamePath;
     m_initialGamePath = config.gamePath;
+    m_gameExecutableOverride = config.gameExecutable;
     m_initialTab = config.initialTab;
     m_materialsOverride = config.materialsOverride;
     m_lightsOverride = config.lightsOverride;
@@ -13851,6 +11059,13 @@ int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
             break;
         }
 
+        if (PollPlayProcess())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            m_lastFrameTime = std::chrono::steady_clock::now();
+            continue;
+        }
+
         Frame();
     }
 
@@ -13861,14 +11076,12 @@ int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
 
 void EditorApp::Shutdown()
 {
+    EditorDetachProcess(m_playProcess);
     m_window.SetMouseCapture(false);
     m_ui.SetCursorVisible(true);
     m_ui.Shutdown();
 
-    DestroyPoolMaterials();
-    DestroySkyMaterials();
-    DestroyOverlayMaterials();
-    m_materialBakes.Destroy(m_instance);
+    m_runtime.DestroyGpuResources(m_instance);
     m_previewMaterialBakes.Destroy(m_instance);
 
     if (m_material != QR_NO_MATERIAL && m_instance != nullptr)

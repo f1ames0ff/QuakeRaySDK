@@ -77,8 +77,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
          float(globalUniform.squareInputRoughness) + globalUniform.upscaledRenderWidth +
          globalUniform.worldUpVector.x + globalUniform.upscaledRenderHeight + globalUniform.jitterX +
          globalUniform.jitterY + globalUniform.primaryRayMinDist +
-         float(globalUniform.rayCullMaskWorld_Shadow) + float(globalUniform.__pad5) +
-         float(globalUniform.__pad6) + float(globalUniform.twirlPortalNormal) +
+         float(globalUniform.rayCullMaskWorld_Shadow) + globalUniform.jitterPrevX +
+         globalUniform.jitterPrevY + float(globalUniform.twirlPortalNormal) +
          float(globalUniform.lightIndexIgnoreFPVShadows) + globalUniform.gradientMultDiffuse +
          globalUniform.gradientMultIndirect + globalUniform.gradientMultSpecular +
          globalUniform.minRoughness + globalUniform.volumeCameraNear + globalUniform.volumeCameraFar +

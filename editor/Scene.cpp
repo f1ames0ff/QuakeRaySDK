@@ -3304,6 +3304,34 @@ float ComputeAliasModelLightSizeMeters(const ParsedAliasModel &mdl,
     return std::max(0.5f * diag / kEditorUnitsPerMeter, 0.001f);
 }
 
+bool ComputeAliasModelWorldBounds(const ParsedAliasModel &mdl,
+                                  const std::vector<AliasPoseVertex> &pose,
+                                  const EntityTransform &xf, float outMin[3], float outMax[3])
+{
+    if (pose.empty())
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < pose.size(); i++)
+    {
+        const AliasPoseVertex &pv = pose[i];
+        const float local[3] = {
+            float(pv.v[0]) * mdl.scale[0] + mdl.scaleOrigin[0],
+            float(pv.v[1]) * mdl.scale[1] + mdl.scaleOrigin[1],
+            float(pv.v[2]) * mdl.scale[2] + mdl.scaleOrigin[2],
+        };
+        float world[3] = {};
+        TransformEntityPoint(xf, local, world);
+        for (int axis = 0; axis < 3; axis++)
+        {
+            outMin[axis] = i == 0 ? world[axis] : std::min(outMin[axis], world[axis]);
+            outMax[axis] = i == 0 ? world[axis] : std::max(outMax[axis], world[axis]);
+        }
+    }
+    return true;
+}
+
 void AppendAliasModelInstance(const ParsedAliasModel &mdl, const EntityModelSpec &spec,
                               uint32_t aliasInstanceId, EditorScene &scene,
                               std::unordered_map<std::string, size_t> &surfaceByTexture,
@@ -3343,6 +3371,8 @@ void AppendAliasModelInstance(const ParsedAliasModel &mdl, const EntityModelSpec
     instance.modelSizeMeters = ComputeAliasModelLightSizeMeters(mdl, pose);
     instance.uniqueID = spec.uniqueID;
     instance.aliasInstanceId = aliasInstanceId;
+    instance.hasBounds =
+        ComputeAliasModelWorldBounds(mdl, pose, xf, instance.boundsMin, instance.boundsMax);
     scene.aliasInstances.push_back(std::move(instance));
 
     for (const AliasTriangle &tri : mdl.triangles)

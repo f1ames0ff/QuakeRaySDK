@@ -298,8 +298,8 @@ struct ShGlobalUniform
     float jitterY;
     float primaryRayMinDist;
     uint32_t rayCullMaskWorld_Shadow;
-    uint32_t __pad5;
-    uint32_t __pad6;
+    float jitterPrevX;
+    float jitterPrevY;
     uint32_t twirlPortalNormal;
     uint32_t lightIndexIgnoreFPVShadows;
     float gradientMultDiffuse;

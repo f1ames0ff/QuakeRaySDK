@@ -27,9 +27,12 @@ endif()
 set(QR_EDITOR_COMMON_SOURCES
     Main.cpp
     EditorApp.cpp
+    EditorDtalPipeline.cpp
     EditorGui.cpp
+    EditorOverlayPipeline.cpp
     EditorPanels.cpp
     EditorMaterial.cpp
+    EditorSceneRuntime.cpp
     EditorSettings.cpp
     EditorSession.cpp
     EditorLightSelection.cpp
@@ -75,7 +78,10 @@ set(QR_EDITOR_DEPLOY_COMMANDS
         "$<TARGET_FILE_DIR:quakerayeditor>/fonts"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${QR_EDITOR_IMGUI_DIR}/fonts/Roboto-Regular.ttf"
-        "$<TARGET_FILE_DIR:quakerayeditor>/fonts/Roboto-Regular.ttf")
+        "$<TARGET_FILE_DIR:quakerayeditor>/fonts/Roboto-Regular.ttf"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${QR_EDITOR_IMGUI_DIR}/fonts/fa-solid-900.ttf"
+        "$<TARGET_FILE_DIR:quakerayeditor>/fonts/fa-solid-900.ttf")
 
 if(WIN32)
     list(APPEND QR_EDITOR_DEPLOY_COMMANDS
@@ -104,6 +110,7 @@ if(QR_BUILD_TESTS)
         EditorSession.cpp
         EditorMaterial.cpp
         EditorUi.cpp
+        EditorViewport.cpp
         Scene.cpp
         Assets.cpp
         "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb/stb_image.cpp")

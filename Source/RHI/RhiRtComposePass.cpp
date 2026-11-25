@@ -432,7 +432,7 @@ constexpr ComposeBinding ATROUS_LF_BINDINGS[ATROUS_LF_BINDING_COUNT] =
 // fields through their storage images, so the measured item count is 23 instead of the pre-fix 30.
 // The iteration is the shader's specialization constant, so the module dispatches four
 // specialized pipelines.
-constexpr uint32_t ATROUS_BINDING_COUNT = 27;
+constexpr uint32_t ATROUS_BINDING_COUNT = 28;
 constexpr ComposeBinding ATROUS_BINDINGS[ATROUS_BINDING_COUNT] =
 {
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_H_F,          true, false }, //  95  framebufQ2HistColorHF
@@ -450,6 +450,7 @@ constexpr ComposeBinding ATROUS_BINDINGS[ATROUS_BINDING_COUNT] =
     { FB_IMAGE_INDEX_NORMAL_GEOMETRY,            false, false }, // 129  framebufNormalGeometry_Sampled
     { FB_IMAGE_INDEX_METALLIC_ROUGHNESS,         false, false }, // 131  framebufMetallicRoughness_Sampled
     { FB_IMAGE_INDEX_DEPTH_GRAD,                 false, false }, // 135  framebufDepthGrad_Sampled
+    { FB_IMAGE_INDEX_SURFACE_POSITION,           false, false }, // 143  framebufSurfacePosition_Sampled
     { FB_IMAGE_INDEX_VIEW_DIRECTION,             false, false }, // 147  framebufViewDirection_Sampled
     { FB_IMAGE_INDEX_THROUGHPUT,                 false, false }, // 150  framebufThroughput_Sampled
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH,              false, false }, // 205  framebufQ2ViewDepth_Sampled

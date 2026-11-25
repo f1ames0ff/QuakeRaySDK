@@ -17,7 +17,12 @@
 
 #pragma once
 
+#include <cstdint>
+#include <string>
+
 #include <qray/qray.h>
+
+struct EditorLevelSky;
 
 // The Global tab of the game editor, as a record. Every field mirrors one of the
 // `QRE_G_*` rows in Quake/qr_editor.c and defaults to the cvar value the game ships
@@ -185,8 +190,9 @@ struct EditorRenderSettings
     float denoiser = 1.0f;              // rt_denoiser
     float restir = 0.0f;                // rt_restir
     float restirCandidates = 8.0f;      // rt_restir_candidates
-    float giLevel = 1.0f;               // rt_gi_level
+    float giLevel = 2.0f;               // rt_gi_level
     float neeSamples = 2.0f;            // rt_nee_samples
+    bool emissiveNee = true;            // rt_emissive_nee
     uint32_t shadowRays = 2;            // rt_shadowrays
     float sensitivityDirect = 0.4f;     // rt_sensit_dir
     float sensitivityIndirect = 0.06f;  // rt_sensit_indir
@@ -236,7 +242,7 @@ struct EditorRenderSettings
 
     // System / DTAL (Direct Triangular Area Lights) cvars matching qr_editor.c.
     bool pauseWorld = false;
-    bool dtalProxy = true;                 // rt_dtal_proxy
+    bool dtalProxy = false;                // rt_dtal_proxy
     float dtalClearance = 1.0f;            // rt_dtal_clearance
     int32_t dtalMaxPolys = 64;             // rt_dtal_maxpolys
     float dtalMinArea = 0.0f;              // rt_dtal_minarea
@@ -352,3 +358,19 @@ float EditorFovYRadians(const EditorRenderSettings &settings, float width, float
 
 // Computes sun pitch/yaw matching RT_UpdateSunEditor from a unit view/ray direction towards the sun.
 void ApplySunDirectionFromRay(const float direction[3], EditorSunState &sun);
+
+// Parses and applies one `sky:` key or global `config.cfg` cvar text to `settings`/`sun`.
+void ApplyEditorSkyText(const std::string &name, const std::string &text,
+                        EditorRenderSettings &settings, EditorSunState &sun);
+void ApplyEditorSkyScope(const EditorLevelSky &sky, bool onlySet,
+                         EditorRenderSettings &settings, EditorSunState &sun);
+bool ApplyEditorGlobalSettingText(const std::string &name, const std::string &text,
+                                  EditorRenderSettings &settings, EditorSunState &sun);
+int ApplyEditorConfigText(const std::string &text, EditorRenderSettings &settings,
+                          EditorSunState &sun);
+
+// Unit direction vector pointing towards the authored sun from `sun.pitch`/`sun.yaw`.
+void EditorSunDirectionToSun(const EditorSunState &sun, float outDir[3]);
+
+// Evaluates Quake's 12 standard light style strings (0..11) at `timeSeconds` (10 Hz).
+float EvaluateEditorLightStyle(int32_t styleIndex, double timeSeconds);
