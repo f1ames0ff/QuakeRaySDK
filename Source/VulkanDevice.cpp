@@ -400,7 +400,7 @@ void PopulateGodRaysInputs(const QrDrawFrameInfo &drawInfo,
                            Scene &scene,
                            NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
 {
-    static constexpr float kGodRaysRadianceScale = 500.0f;
+    static constexpr float kGodRaysRadianceScale = 50.0f;
     static constexpr float kStepScales[5] = { 2.0f, 1.5f, 1.0f, 0.75f, 0.5f };
 
     const float godRaysIntensity =
@@ -847,7 +847,8 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
             memcpy( gu->skyColorDefault, sp.skyColorDefault.data, sizeof( float ) * 3 );
             gu->skyColorMultiplier = sp.skyColorMultiplier;
             gu->skyColorSaturation = std::max( sp.skyColorSaturation, 0.0f );
-            gu->skyAmbientLod      = std::clamp( sp.skyAmbientLod, 0.0f, 10.0f );
+            const float maxSkyLod      = static_cast<float>( qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1 );
+            gu->skyAmbientLod      = std::clamp( sp.skyAmbientLod, 0.0f, maxSkyLod );
             gu->skyLightMultiplier = std::max( sp.skyLightMultiplier, 0.0f );
             gu->skyNee             = sp.skyNee != 0 ? 1.0f : 0.0f;
 
@@ -868,7 +869,7 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
             gu->skyColorDefault[ 0 ] = gu->skyColorDefault[ 1 ] = gu->skyColorDefault[ 2 ] = gu->skyColorDefault[ 3 ] = 1.0f;
             gu->skyColorMultiplier                                                                                    = 1.0f;
             gu->skyColorSaturation                                                                                    = 1.0f;
-            gu->skyAmbientLod                                                                                         = 10.0f;
+            gu->skyAmbientLod                                                                                         = static_cast<float>( qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1 );
             gu->skyLightMultiplier                                                                                    = 1.0f;
             gu->skyNee                                                                                                = 0.0f;
             gu->skyType                                                                                               = SKY_TYPE_COLOR;

@@ -298,10 +298,10 @@ double CheckAaaZenithAndStars(nvrhi::IDevice *device,
     frames.BeginSlot(1);
     sky.Render(frames.GetCommandList(1), 1, aaa);
     frames.EndSlot(1);
-    const auto nightCube = ReadCube(device, sky.GetCubemapTexture(), 0, 256);
-    const size_t base = size_t(4) * 256 * 256 * 4;
+    const auto nightCube = ReadCube(device, sky.GetCubemapTexture(), 0, 512);
+    const size_t base = size_t(4) * 512 * 512 * 4;
     double starsOnPeak = 0.0;
-    for (size_t i = 0; i < 256 * 256; ++i)
+    for (size_t i = 0; i < 512 * 512; ++i)
     {
         const double luma = nightCube[base + i * 4] + nightCube[base + i * 4 + 1] + nightCube[base + i * 4 + 2];
         starsOnPeak = std::max(starsOnPeak, luma);
@@ -311,9 +311,9 @@ double CheckAaaZenithAndStars(nvrhi::IDevice *device,
     frames.BeginSlot(0);
     sky.Render(frames.GetCommandList(0), 0, aaa);
     frames.EndSlot(0);
-    const auto nightOffCube = ReadCube(device, sky.GetCubemapTexture(), 0, 256);
+    const auto nightOffCube = ReadCube(device, sky.GetCubemapTexture(), 0, 512);
     double starsOffPeak = 0.0;
-    for (size_t i = 0; i < 256 * 256; ++i)
+    for (size_t i = 0; i < 512 * 512; ++i)
     {
         const double luma = nightOffCube[base + i * 4] + nightOffCube[base + i * 4 + 1] + nightOffCube[base + i * 4 + 2];
         starsOffPeak = std::max(starsOffPeak, luma);
@@ -410,8 +410,11 @@ void CheckAaaSunsetAsymmetryAndNightMoon(nvrhi::IDevice *device,
     const auto sunsetEnv = ReadCube(device, sky.GetEnvironmentTexture(), 0, 16);
     const double sunSideLuma = LumaAtFaceCenter(sunsetEnv, 16, 0);
     const double oppSideLuma = LumaAtFaceCenter(sunsetEnv, 16, 1);
+    const size_t sunCenterIdx = (8 * 16 + 8) * 4;
     Require(sunSideLuma > oppSideLuma * 3.0,
             "AAA sunset sky lacked directional brightness asymmetry");
+    Require(sunsetEnv[sunCenterIdx + 1] > sunsetEnv[sunCenterIdx] * 0.30f,
+            "AAA dawn/sunset horizon stayed blood-red instead of warm golden-peach");
 
     // Midnight sky must stay dark (<5% of daytime zenith) while keeping moonward asymmetry.
     aaa.sunDirection[0] = 0.0f;
@@ -438,7 +441,8 @@ void CheckAaaSunsetAsymmetryAndNightMoon(nvrhi::IDevice *device,
     Require(moonSideLuma > moonOppLuma * 1.8,
             "AAA night sky lacked moonward directional asymmetry");
     std::cout << "AAA sunset asymmetry=" << (sunSideLuma / std::max(oppSideLuma, 1e-6))
-              << "x, night/day=" << (nightZenithLuma / std::max(dayZenithLuma, 1e-6))
+              << "x, horizon G/R=" << (sunsetEnv[sunCenterIdx + 1] / std::max(sunsetEnv[sunCenterIdx], 1e-6f))
+              << ", night/day=" << (nightZenithLuma / std::max(dayZenithLuma, 1e-6))
               << ", moon asymmetry=" << (moonSideLuma / std::max(moonOppLuma, 1e-6)) << "x\n";
 }
 
@@ -479,9 +483,10 @@ int main(int argc, char **argv)
             sky.Render(frames.GetCommandList(0), 0, p);
             frames.EndSlot(0);
             CheckClear(ReadCube(device, sky.GetCubemapTexture()), p.skyTint);
-            for (uint32_t mip = 0; mip <= 10; ++mip)
+            for (uint32_t mip = 0; mip < qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS; ++mip)
                 CheckClear(ReadCube(device, sky.GetEnvironmentTexture(), mip), p.skyTint);
-            std::cout << "Clear sky: all 6 faces and 11 mips passed\n";
+            std::cout << "Clear sky: all 6 faces and " << qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS
+                      << " mips passed\n";
 
             p.skyParams[1] = 1;
             p.skyParams[2] = 6;
@@ -703,19 +708,19 @@ int main(int argc, char **argv)
                 frames.BeginSlot(slot);
                 sky.Render(frames.GetCommandList(slot), slot, discParams);
                 frames.EndSlot(slot);
-                const auto discPixels = ReadCube(device, sky.GetCubemapTexture(), 0, 128);
+                const auto discPixels = ReadCube(device, sky.GetCubemapTexture(), 0, 256);
                 if (sizeIndex == 2)
                 {
                     auto discAt = [&](uint32_t x, uint32_t y)
                     {
-                        return discPixels[(size_t(4) * 128 * 128 + size_t(y) * 128 + x) * 4];
+                        return discPixels[(size_t(4) * 256 * 256 + size_t(y) * 256 + x) * 4];
                     };
-                    Require(discAt(74, 64) > 0.95f, "sun disc fades across its body instead of at the rim");
-                    Require(discAt(76, 64) > 0.05f && discAt(76, 64) < 0.95f,
+                    Require(discAt(150, 128) > 0.95f, "sun disc fades across its body instead of at the rim");
+                    Require(discAt(153, 128) > 0.05f && discAt(153, 128) < 0.95f,
                             "sun-disc rim lost its antialiasing transition");
-                    Require(discAt(80, 64) == 0.0f, "sun disc leaks beyond its angular outline");
-                    std::cout << "Sun-disc contrast: interior=" << discAt(74, 64)
-                              << ", rim=" << discAt(76, 64) << ", outside=" << discAt(80, 64) << '\n';
+                    Require(discAt(158, 128) == 0.0f, "sun disc leaks beyond its angular outline");
+                    std::cout << "Sun-disc contrast: interior=" << discAt(150, 128)
+                              << ", rim=" << discAt(153, 128) << ", outside=" << discAt(158, 128) << '\n';
                 }
                 for (size_t i = 0; i < discPixels.size(); i += 4)
                 {

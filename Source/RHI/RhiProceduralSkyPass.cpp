@@ -260,8 +260,8 @@ bool RhiProceduralSkyPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
-    cubemapTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass cubemap (RGBA16F 1024, 6x11)");
-    environmentTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass env cubemap (RGBA16F 1024, 6x11)");
+    cubemapTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass cubemap (RGBA16F 2048, 6x12)");
+    environmentTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass env cubemap (RGBA16F 2048, 6x12)");
 
     if (cubemapTexture == nullptr || environmentTexture == nullptr)
     {

@@ -471,20 +471,20 @@ void EvalEditorSunGroundTransmittance(const EditorRenderSettings &settings,
         skyPeak > 1e-5f ? settings.skyColor[2] * invPeak : 1.0f,
     };
 
-    const float earthExt[3] = { 5.8e-6f, 13.5e-6f, 33.1e-6f };
-    const float ozoneExt[3] = { 0.45e-6f * ozone * density, 2.35e-6f * ozone * density, 0.11e-6f * ozone * density };
+    const float earthExt[3] = { 5.8e-6f, 12.2e-6f, 30.0e-6f };
+    const float ozoneExt[3] = { 0.65e-6f * ozone * density, 1.88e-6f * ozone * density, 0.085e-6f * ozone * density };
     const float mieExt = 4.7e-6f * mie * density;
     float rayExt[3];
     for (int c = 0; c < 3; c++)
     {
-        const float custom = std::max(skyNorm[c], 0.08f) * 30.0e-6f;
-        rayExt[c] = (earthExt[c] + (custom - earthExt[c]) * 0.35f) * density;
+        const float custom = std::max(skyNorm[c], 0.08f) * 26.0e-6f;
+        rayExt[c] = (earthExt[c] + (custom - earthExt[c]) * 0.22f) * density;
     }
 
     constexpr float kPlanetR = 6360000.0f;
     constexpr float kTopR = 6440000.0f;
     const float roZ = kPlanetR + 10.0f;
-    const float rdZ = std::max(z, 0.004f);
+    const float rdZ = std::max(z, 0.022f);
     const float rdH = std::sqrt(std::max(0.0f, 1.0f - rdZ * rdZ));
     const float b = roZ * rdZ;
     const float cTerm = roZ * roZ - kTopR * kTopR;
@@ -503,9 +503,19 @@ void EvalEditorSunGroundTransmittance(const EditorRenderSettings &settings,
         odO += std::max(0.0f, 1.0f - std::abs(h - 25000.0f) / 15000.0f) * stepLen;
     }
 
+    float directT[3];
     for (int ch = 0; ch < 3; ch++)
     {
         const float tau = rayExt[ch] * odR + mieExt * odM + ozoneExt[ch] * odO;
-        outTrans[ch] = smoothHorizon * std::exp(-tau);
+        directT[ch] = std::exp(-tau);
+    }
+    const float peakT = std::max({ directT[0], directT[1], directT[2] });
+    const float grazingT = std::clamp(std::max(z, 0.0f) / 0.18f, 0.0f, 1.0f);
+    const float grazing = 1.0f - grazingT * grazingT * (3.0f - 2.0f * grazingT);
+    const float floorVal = peakT * 0.36f;
+    for (int ch = 0; ch < 3; ch++)
+    {
+        const float ms = std::max(directT[ch], floorVal);
+        outTrans[ch] = smoothHorizon * (directT[ch] + (ms - directT[ch]) * (grazing * 0.42f));
     }
 }

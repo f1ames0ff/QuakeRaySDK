@@ -95,7 +95,7 @@ float3 evalStarTier(float3 rotDir, float gridScale, float baseOccupancy, float m
     }
 
     float invGrid = 1.0 / gridScale;
-    float shellMargin = 1.85 * invGrid;
+    float shellMargin = 1.35 * invGrid;
     float3 accum = (float3)0.0;
 
     for (int dz = -1; dz <= 1; dz++)
@@ -124,17 +124,19 @@ float3 evalStarTier(float3 rotDir, float gridScale, float baseOccupancy, float m
 
                 float dist = length(rotDir - starDir);
                 float magRand = h0.y;
-                float sizeRad = max(texelRad * 0.9, minSizeRad * lerp(0.75, 1.55, magRand));
-                float aa = max(texelRad * 0.55, sizeRad * 0.45);
+                float idealRad = minSizeRad * lerp(0.72, 1.45, magRand);
+                float sizeRad = max(texelRad * 0.52, idealRad);
+                float aa = max(texelRad * 0.48, sizeRad * 0.42);
 
                 if (dist > max(haloRad, sizeRad + aa))
                 {
                     continue;
                 }
 
-                float core = 1.0 - smoothstep(max(sizeRad - aa, 0.0), sizeRad + aa, dist);
+                float areaScale = saturate((idealRad * idealRad) / max(sizeRad * sizeRad, 1.0e-12));
+                float core = (1.0 - smoothstep(max(sizeRad - aa, 0.0), sizeRad + aa, dist)) * areaScale;
                 float halo = haloRad > 0.0
-                    ? exp(-dist * dist / max(haloRad * haloRad * 0.14, 1.0e-8)) * 0.22 * magRand
+                    ? exp(-dist * dist / max(haloRad * haloRad * 0.14, 1.0e-8)) * 0.18 * magRand
                     : 0.0;
 
                 float mag = pow(magRand, magPower);
@@ -170,18 +172,23 @@ float3 evalStarfield(float3 dir, float skyLuma, float3 starParams, float celesti
 
     uint sizeX, sizeY, sizeZ;
     cubemapOut.GetDimensions(sizeX, sizeY, sizeZ);
+    if (sizeX < 1024)
+    {
+        return (float3)0.0;
+    }
+
     float texelRad = 1.5707963 / (float)max(sizeX, sizeY);
 
     float densityScale = clamp(starParams.y, 0.0, 4.0);
 
-    // Tier 1: Rare bright 1st/2nd magnitude stars with optical halo
-    float3 stars = evalStarTier(rotDir, 28.0, 0.06, 0.0021, 0.0085, 1.4, 1.8,
+    // Tier 1: Rare bright 1st/2nd magnitude stars with tight optical pinpoint halo
+    float3 stars = evalStarTier(rotDir, 34.0, 0.06, 0.00058, 0.0022, 1.5, 1.8,
                                 densityScale, twinkleClock, horizonScint, texelRad);
     // Tier 2: Medium constellation stars
-    stars += evalStarTier(rotDir, 64.0, 0.09, 0.0014, 0.0032, 0.55, 2.8,
+    stars += evalStarTier(rotDir, 76.0, 0.09, 0.00038, 0.0009, 0.65, 2.8,
                           densityScale, twinkleClock, horizonScint, texelRad);
     // Tier 3: Fine background star dust
-    stars += evalStarTier(rotDir, 130.0, 0.13, 0.0011, 0.0, 0.22, 3.8,
+    stars += evalStarTier(rotDir, 150.0, 0.13, 0.00028, 0.0, 0.28, 3.8,
                           densityScale, twinkleClock, horizonScint, texelRad);
 
     return stars * vis;

@@ -63,14 +63,14 @@ AtmosphereConfig makeAtmosphereConfig(float3 linearSkyColor, float3 atmospherePa
     float ozone   = clamp(atmosphereParams.z, 0.0, 4.0);
 
     float3 customScatter = max(lerp(float3(0.14, 0.14, 0.14), skyNorm, 0.88), float3(0.015, 0.015, 0.015)) * 28.0e-6;
-    float3 earthExt = float3(5.8e-6, 13.5e-6, 33.1e-6);
-    float3 extSpectrum = lerp(earthExt, max(skyNorm, float3(0.08, 0.08, 0.08)) * 30.0e-6, 0.35);
+    float3 earthExt = float3(5.8e-6, 12.2e-6, 30.0e-6);
+    float3 extSpectrum = lerp(earthExt, max(skyNorm, float3(0.08, 0.08, 0.08)) * 26.0e-6, 0.22);
 
     cfg.rayleighScatter = customScatter * density;
     cfg.rayleighExt     = extSpectrum * density;
     cfg.mieScatter      = 4.2e-6 * mie * density;
     cfg.mieExt          = 4.7e-6 * mie * density;
-    cfg.ozoneExt        = float3(0.45e-6, 2.35e-6, 0.11e-6) * ozone * density;
+    cfg.ozoneExt        = float3(0.65e-6, 1.88e-6, 0.085e-6) * ozone * density;
     cfg.scatterGain     = saturate(skyPeak) * (density > 0.0 ? 1.0 : 0.0);
     cfg.tint            = skyNorm;
     cfg.density         = density;
@@ -128,9 +128,10 @@ float3 evalLightTransmittance(float altitudeMeters, float cosZenith, AtmosphereC
 
     float h = max(altitudeMeters, 10.0);
     float r = ATMO_PLANET_RADIUS + h;
-    float sinDip = -sqrt(max(h * (2.0 * ATMO_PLANET_RADIUS + h), 0.0)) / r;
 
-    float safeZ = max(cosZenith, sinDip * 0.85 + 0.004);
+    // Clamp grazing transmittance rays slightly above tangent so dawn/dusk light shifts
+    // into golden-peach instead of over-attenuated blood red while horizon fades gently.
+    float safeZ = max(cosZenith, 0.022);
     float safeH = sqrt(max(0.0, 1.0 - safeZ * safeZ));
     float3 safeDir = float3(safeH, 0.0, safeZ);
 
@@ -140,7 +141,11 @@ float3 evalLightTransmittance(float altitudeMeters, float cosZenith, AtmosphereC
     float3 od = atmoOpticalDepth(ro, safeDir, rayLen, 4);
 
     float3 tau = cfg.rayleighExt * od.x + cfg.mieExt * od.y + cfg.ozoneExt * od.z;
-    return horizon * exp(-tau);
+    float3 directT = exp(-tau);
+    float peakT = max(directT.r, max(directT.g, directT.b));
+    float grazing = 1.0 - smoothstep(0.0, 0.18, max(cosZenith, 0.0));
+    float3 msFloor = max(directT, (float3)(peakT * 0.36));
+    return horizon * lerp(directT, msFloor, grazing * 0.42);
 }
 
 float3 evalSunTransmittanceAtAltitude(float altitudeMeters, float3 sunDir, AtmosphereConfig cfg)
@@ -173,12 +178,16 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
 {
     viewTransmittance = (float3)1.0;
 
-    float3 rd = viewDir;
-    if (rd.z < 0.0)
+    float3 trueDir = viewDir;
+    if (trueDir.z < 0.0)
     {
-        rd.z = 0.0;
-        rd = normalize(float3(rd.xy, 0.001));
+        trueDir = normalize(float3(trueDir.xy, 0.001));
     }
+
+    // Smooth hyperbolic tangent floor avoids 876 km ground-skimming optical paths at z ~ 0
+    // so dawn/sunset horizon scattering stays warm golden-peach rather than crushing to red.
+    float effZ = 0.5 * (trueDir.z + sqrt(trueDir.z * trueDir.z + 0.0049));
+    float3 rd = normalize(float3(trueDir.xy, effZ));
 
     float3 ro = float3(0.0, 0.0, ATMO_PLANET_RADIUS + 10.0);
     float2 topHit = atmoRaySphere(ro, rd, ATMO_TOP_RADIUS);
@@ -239,11 +248,11 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
 
     viewTransmittance = exp(-(cfg.rayleighExt * accumOd.x + cfg.mieExt * accumOd.y + cfg.ozoneExt * accumOd.z));
 
-    float muSun = dot(rd, sunDir);
+    float muSun = dot(trueDir, sunDir);
     float phaseRSun = atmoRayleighPhase(muSun);
     float phaseMSun = atmoMiePhase(muSun, 0.78);
 
-    float muMoon = dot(rd, moonDir);
+    float muMoon = dot(trueDir, moonDir);
     float phaseRMoon = atmoRayleighPhase(muMoon);
     float phaseMMoon = atmoMiePhase(muMoon, 0.76);
 
@@ -252,8 +261,8 @@ float3 evalAtmosphereRay(float3 viewDir, float3 sunDir, float sunEnabled, float3
     float lowSun = 1.0 - smoothstep(-0.04, 0.38, sunDir.z);
     float sunAzimuthBias = lerp(1.0, lerp(0.16, 1.35, smoothstep(-0.70, 0.85, muSun)), lowSun);
     float antiSunShadow = lerp(1.0, lerp(0.28, 1.0, smoothstep(-0.85, 0.35, muSun)),
-                               lowSun * (1.0 - smoothstep(0.0, 0.60, rd.z)));
-    float3 twilightAmbient = cfg.rayleighScatter * 8000.0 * (0.03 + 0.12 * saturate(rd.z + 0.25)) *
+                               lowSun * (1.0 - smoothstep(0.0, 0.60, trueDir.z)));
+    float3 twilightAmbient = cfg.rayleighScatter * 8000.0 * (0.03 + 0.12 * saturate(trueDir.z + 0.25)) *
                              sunIllum * (0.06 + 0.94 * smoothstep(-0.08, 0.30, sunDir.z)) *
                              twilightFactor * sunAzimuthBias;
 

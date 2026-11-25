@@ -173,10 +173,10 @@ class RhiProceduralSkyPass final
 public:
     using PrintFunction = std::function<void(const char *)>;
 
-    // The legacy image shape (RenderCubemap.cpp:34-37, :80): 1024x1024, 6 faces, 11 mips.
-    static constexpr uint32_t CUBEMAP_SIZE = 1024;
+    // Procedural sky cubemap shape: 2048x2048, 6 faces, 12 mips (crisp stars & moon).
+    static constexpr uint32_t CUBEMAP_SIZE = 2048;
     static constexpr uint32_t CUBEMAP_FACE_COUNT = 6;
-    static constexpr uint32_t CUBEMAP_MIP_LEVELS = 11;
+    static constexpr uint32_t CUBEMAP_MIP_LEVELS = 12;
 
     // The CPU mirror of the shader's `Params_BT` (CmProceduralSky.comp.hlsl:69-78), which is also
     // the legacy `RenderCubemap::ProceduralSkyParams` layout (RenderCubemap.h:38-50): a std140

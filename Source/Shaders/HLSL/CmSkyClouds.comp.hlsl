@@ -194,7 +194,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float3 legacySunColor = params.sunDiscColor.xyz * max(params.cloudLayer.z, 0.0) * (sunLight > 0.5 ? sunLight : 0.0);
     float3 legacySkyLight = max(params.skyColor.xyz, float3(0.0, 0.0, 0.0)) * max(params.cloudLayer.w, 0.0);
-    float3 aaaSunBase = max(params.sunTint.xyz, (float3)0.0) * max(params.sunTint.w, 0.0) * max(params.cloudLayer.z, 0.0) * 2.8;
+    float dawnDirectFade = smoothstep(-0.025, 0.06, sunDir.z);
+    float3 aaaSunBase = max(params.sunTint.xyz, (float3)0.0) * max(params.sunTint.w, 0.0) * max(params.cloudLayer.z, 0.0) * (2.8 * dawnDirectFade);
 
     float3 inscatter = float3(0.0, 0.0, 0.0);
     float transmittance = 1.0;
