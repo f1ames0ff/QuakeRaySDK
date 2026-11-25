@@ -5,8 +5,8 @@
 #include <string>
 
 // Layout constants ported from Quake/qr_gui.cpp for two-column QuakeRay inspector rows.
-inline constexpr float kEditorGuiPanelWidth = 440.0f;
-inline constexpr float kEditorGuiLabelWidth = 172.0f;
+inline constexpr float kEditorGuiPanelWidth = 484.0f;
+inline constexpr float kEditorGuiLabelWidth = 186.0f;
 inline constexpr float kEditorGuiResetSize = 24.0f;
 inline constexpr float kEditorGuiActionSize = 24.0f;
 inline constexpr float kEditorGuiBrowseWidth = 26.0f;
@@ -23,6 +23,9 @@ struct EditorGuiRowOpts
     std::function<void(const char *)> logRect;
     const char *rectName = nullptr;
     bool dimValue = false;
+    bool mixed = false;
+    uint8_t mixedAxisMask = 0;
+    uint8_t *editedAxisMask = nullptr;
 };
 
 // Action flags returned by EditorGuiBlockActions / EditorGuiHeaderActions.

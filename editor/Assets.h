@@ -28,6 +28,8 @@ public:
     void ListTextureAssets(std::vector<EditorAssetCatalogEntry> &out) const;
     void ListMapAssets(std::vector<EditorAssetCatalogEntry> &out) const;
     void ListModelAssets(std::vector<EditorAssetCatalogEntry> &out) const;
+    void ListFilesWithPrefixAndExtension(const std::string &prefix, const std::string &extension,
+                                         std::vector<EditorAssetCatalogEntry> &out) const;
 
     const std::vector<std::string> &Directories() const { return m_directories; }
     const std::vector<std::string> &Archives() const { return m_archives; }

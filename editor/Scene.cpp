@@ -1,8 +1,7 @@
 #include "Scene.h"
 
-#include "Assets.h"
-
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -1674,7 +1673,8 @@ uint32_t ResolveLightCluster(const EditorScene &scene, const float origin[3])
 
     auto usableLeaf = [&clusters](int32_t leaf) {
         return leaf > 0 && uint32_t(leaf) < clusters.numLeafs &&
-               clusters.contents[size_t(leaf)] != kBspContentsSolid;
+               (size_t(leaf) >= clusters.contents.size() ||
+                clusters.contents[size_t(leaf)] != kBspContentsSolid);
     };
 
     const int32_t centerLeaf = LeafAtPoint(scene, origin);
@@ -1734,7 +1734,8 @@ uint32_t ResolveSurfaceCluster(const EditorScene &scene, const float centroid[3]
         const int32_t leaf = LeafAtPoint(scene, point);
 
         if (leaf > 0 && uint32_t(leaf) < scene.worldClusters.numLeafs &&
-            scene.worldClusters.contents[size_t(leaf)] != kBspContentsSolid)
+            (size_t(leaf) >= scene.worldClusters.contents.size() ||
+             scene.worldClusters.contents[size_t(leaf)] != kBspContentsSolid))
         {
             return MapWorldCluster(scene.worldClusters, leaf);
         }
@@ -4086,11 +4087,241 @@ uint32_t ResolveEditorLightCluster(const EditorScene &scene, const float origin[
     return ResolveLightCluster(scene, origin);
 }
 
+namespace
+{
+
+struct EditorFormatAdapterRegistry
+{
+    bool registered = false;
+    EditorFormatAdapter adapter;
+};
+
+EditorFormatAdapterRegistry &FormatAdapterRegistry()
+{
+    static EditorFormatAdapterRegistry registry;
+    return registry;
+}
+
+} // namespace
+
+void RegisterEditorFormatAdapter(const EditorFormatAdapter &adapter)
+{
+    EditorFormatAdapterRegistry &registry = FormatAdapterRegistry();
+    registry.adapter = adapter;
+    registry.registered = true;
+}
+
+const EditorFormatAdapter *GetEditorFormatAdapter()
+{
+    const EditorFormatAdapterRegistry &registry = FormatAdapterRegistry();
+    return registry.registered ? &registry.adapter : nullptr;
+}
+
+std::string NormalizeEditorAssetPath(std::string_view raw)
+{
+    std::string out;
+    out.reserve(raw.size());
+
+    for (char ch : raw)
+    {
+        const char normalized = (ch == '\\') ? '/' : ch;
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(normalized))));
+    }
+
+    while (!out.empty() && out.front() == '/')
+    {
+        out.erase(out.begin());
+    }
+
+    while (out.size() >= 2 && out[0] == '.' && out[1] == '/')
+    {
+        out.erase(0, 2);
+    }
+
+    return out;
+}
+
+std::string StripEditorImageExtension(std::string_view path)
+{
+    static constexpr std::array<std::string_view, 6> kExts = {
+        ".tga", ".jpg", ".jpeg", ".png", ".pcx", ".bmp"
+    };
+
+    std::string normalized = NormalizeEditorAssetPath(path);
+    for (const std::string_view ext : kExts)
+    {
+        if (normalized.size() > ext.size() &&
+            normalized.compare(normalized.size() - ext.size(), ext.size(), ext) == 0)
+        {
+            return normalized.substr(0, normalized.size() - ext.size());
+        }
+    }
+
+    return normalized;
+}
+
+float EvaluateEditorWaveSigned(EditorWaveType type, float base, float amplitude, float phase,
+                               float frequency, float timeSeconds)
+{
+    if (type == EditorWaveType::None)
+    {
+        return 0.0f;
+    }
+
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const float argument = timeSeconds * frequency + phase;
+    float value = 0.0f;
+    switch (type)
+    {
+    case EditorWaveType::Sin:
+        value = std::sin(argument * kTwoPi);
+        break;
+    case EditorWaveType::Square:
+        value = std::sin(argument * kTwoPi) >= 0.0f ? 1.0f : -1.0f;
+        break;
+    case EditorWaveType::Triangle:
+    {
+        const float cycle = argument - std::floor(argument);
+        value = cycle < 0.5f ? (cycle * 4.0f - 1.0f) : (3.0f - cycle * 4.0f);
+        break;
+    }
+    case EditorWaveType::Sawtooth:
+        value = argument - std::floor(argument);
+        break;
+    case EditorWaveType::InverseSawtooth:
+        value = 1.0f - (argument - std::floor(argument));
+        break;
+    case EditorWaveType::Noise:
+    {
+        const uint32_t bits = static_cast<uint32_t>(argument * 4096.0f);
+        uint32_t hash = bits * 747796405u + 2891336453u;
+        hash = ((hash >> ((hash >> 28u) + 4u)) ^ hash) * 277803737u;
+        hash = (hash >> 22u) ^ hash;
+        value = float(hash & 0x00FFFFFFu) / 16777215.0f;
+        break;
+    }
+    case EditorWaveType::None:
+    default:
+        return 0.0f;
+    }
+    return base + amplitude * value;
+}
+
+float EvaluateEditorWave(EditorWaveType type, float base, float amplitude, float phase,
+                         float frequency, float timeSeconds)
+{
+    if (type == EditorWaveType::None)
+    {
+        return 1.0f;
+    }
+    return std::clamp(EvaluateEditorWaveSigned(type, base, amplitude, phase, frequency, timeSeconds),
+                      0.0f, 8.0f);
+}
+
+void OffsetEditorVerticesAlongSmoothNormals(std::vector<QrVertex> &vertices,
+                                            const std::vector<uint32_t> &indices, float distance)
+{
+    if (distance == 0.0f || vertices.empty())
+    {
+        return;
+    }
+
+    struct Int3Key
+    {
+        int32_t x = 0;
+        int32_t y = 0;
+        int32_t z = 0;
+        bool operator==(const Int3Key &o) const = default;
+    };
+    struct Int3Hash
+    {
+        size_t operator()(const Int3Key &k) const noexcept
+        {
+            size_t h = size_t(uint32_t(k.x)) * 73856093u;
+            h ^= size_t(uint32_t(k.y)) * 19349663u;
+            h ^= size_t(uint32_t(k.z)) * 83492791u;
+            return h;
+        }
+    };
+    const auto makeKey = [](const float p[3]) {
+        return Int3Key{
+            int32_t(std::llround(p[0] * 8.0f)),
+            int32_t(std::llround(p[1] * 8.0f)),
+            int32_t(std::llround(p[2] * 8.0f)),
+        };
+    };
+
+    std::unordered_map<Int3Key, std::array<float, 3>, Int3Hash> smooth;
+    smooth.reserve(vertices.size());
+    for (size_t i = 0; i + 2 < indices.size(); i += 3)
+    {
+        const uint32_t i0 = indices[i + 0];
+        const uint32_t i1 = indices[i + 1];
+        const uint32_t i2 = indices[i + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size())
+        {
+            continue;
+        }
+        const float *a = vertices[i0].position;
+        const float *b = vertices[i1].position;
+        const float *c = vertices[i2].position;
+        const float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+        const float e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+        float fn[3] = {
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        };
+        const float lenSq = fn[0] * fn[0] + fn[1] * fn[1] + fn[2] * fn[2];
+        if (!(lenSq > 1.0e-10f))
+        {
+            continue;
+        }
+        const float inv = 1.0f / std::sqrt(lenSq);
+        fn[0] *= inv;
+        fn[1] *= inv;
+        fn[2] *= inv;
+        for (uint32_t idx : { i0, i1, i2 })
+        {
+            auto &acc = smooth[makeKey(vertices[idx].position)];
+            acc[0] += fn[0];
+            acc[1] += fn[1];
+            acc[2] += fn[2];
+        }
+    }
+
+    for (QrVertex &v : vertices)
+    {
+        float n[3] = { v.normal[0], v.normal[1], v.normal[2] };
+        const auto it = smooth.find(makeKey(v.position));
+        if (it != smooth.end())
+        {
+            n[0] = it->second[0];
+            n[1] = it->second[1];
+            n[2] = it->second[2];
+        }
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (len > 1.0e-5f)
+        {
+            v.position[0] += (n[0] / len) * distance;
+            v.position[1] += (n[1] / len) * distance;
+            v.position[2] += (n[2] / len) * distance;
+        }
+    }
+}
+
 bool LoadEditorSceneBspMemory(const std::vector<uint8_t> &bytes, const std::string &sourceName,
                               const uint8_t *palette768, EditorScene &scene, std::string &error,
                               const EditorSceneLoadOptions &options)
 {
     scene = EditorScene{};
+
+    if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+        adapter != nullptr && adapter->canLoadBspMemory != nullptr &&
+        adapter->loadBspSceneMemory != nullptr && adapter->canLoadBspMemory(bytes))
+    {
+        return adapter->loadBspSceneMemory(bytes, sourceName, scene, error, options);
+    }
 
     BspLump lumps[15] = {};
     BspGeometryTables tables;
@@ -4231,4 +4462,18 @@ bool LoadEditorAliasModel(const std::string &modelPath, const EditorAssetSource 
     }
 
     return true;
+}
+
+bool LoadEditorPreviewModel(const std::string &modelPath, const EditorAssetSource &assets,
+                            const uint8_t *palette768, EditorPreviewModel &outModel,
+                            std::string &error)
+{
+    if (const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+        adapter != nullptr && adapter->canLoadPreviewModel != nullptr &&
+        adapter->loadPreviewModel != nullptr && adapter->canLoadPreviewModel(modelPath, assets))
+    {
+        return adapter->loadPreviewModel(modelPath, assets, outModel, error);
+    }
+
+    return LoadEditorAliasModel(modelPath, assets, palette768, outModel, error);
 }

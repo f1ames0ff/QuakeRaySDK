@@ -1,8 +1,11 @@
 #include "EditorUi.h"
 
+#include "EditorMaterial.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 
 #include <imgui.h>
 
@@ -533,23 +536,175 @@ EditorPreviewView WheelEditorPreviewView(EditorPreviewView view, const ImVec2 &o
     return view;
 }
 
-} // namespace
-
-bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
-                     float &outU, float &outV)
+struct PurpleOverlayBounds
 {
-    ImGui::PushID(id);
+    int minX = 0;
+    int maxX = 0;
+    int minY = 0;
+    int maxY = 0;
+    int gridW = 1;
+    int gridH = 1;
+};
 
-    float width = ImGui::GetContentRegionAvail().x;
+PurpleOverlayBounds ComputePurpleOverlayBounds(const EditorPreviewView &view, uint32_t texWidth,
+                                               uint32_t texHeight)
+{
+    const float span = 1.0f / view.zoom;
+    PurpleOverlayBounds b;
+    b.minX = std::clamp(int(std::floor(view.u0 * float(texWidth))), 0, int(texWidth) - 1);
+    b.maxX = std::clamp(int(std::ceil((view.u0 + span) * float(texWidth))) - 1, b.minX,
+                        int(texWidth) - 1);
+    b.minY = std::clamp(int(std::floor(view.v0 * float(texHeight))), 0, int(texHeight) - 1);
+    b.maxY = std::clamp(int(std::ceil((view.v0 + span) * float(texHeight))) - 1, b.minY,
+                        int(texHeight) - 1);
+    b.gridW = std::min(96, b.maxX - b.minX + 1);
+    b.gridH = std::min(96, b.maxY - b.minY + 1);
+    return b;
+}
 
-    if (width < 32.0f)
+int SampleOverlayCellAlpha(const std::vector<float> &mask, uint32_t texWidth, int tx0, int tx1,
+                           int ty0, int ty1)
+{
+    float sum = 0.0f;
+    int count = 0;
+    for (int y = ty0; y < ty1; y++)
     {
-        width = 32.0f;
+        const size_t row = size_t(y) * texWidth;
+        for (int x = tx0; x < tx1; x++)
+        {
+            const float w = mask[row + size_t(x)];
+            sum += (w > 0.0f) ? std::min(w, 1.0f) : 0.0f;
+            count++;
+        }
+    }
+    if (count <= 0)
+    {
+        return 0;
+    }
+    return int(std::clamp(std::lround((sum / float(count)) * 128.0f), 0l, 128l));
+}
+
+struct PurpleRunState
+{
+    int startAlpha = 0;
+    int alphaSum = 0;
+    int count = 0;
+    float x0 = 0.0f;
+};
+
+void FlushPurpleRun(ImDrawList *drawList, float py0, float py1, float x1, PurpleRunState &run)
+{
+    if (run.count <= 0)
+    {
+        return;
+    }
+    const int avgAlpha = std::clamp((run.alphaSum + run.count / 2) / run.count, 1, 128);
+    drawList->AddRectFilled(ImVec2(run.x0, py0), ImVec2(x1, py1), IM_COL32(216, 24, 255, avgAlpha));
+    run.count = 0;
+    run.alphaSum = 0;
+}
+
+struct PurpleOverlayRowCtx
+{
+    ImDrawList *drawList = nullptr;
+    ImVec2 origin;
+    ImVec2 size;
+    EditorPreviewView view;
+    uint32_t texWidth = 0;
+    uint32_t texHeight = 0;
+    const std::vector<float> &mask;
+    PurpleOverlayBounds bounds;
+};
+
+void DrawPurpleOverlayRow(const PurpleOverlayRowCtx &ctx, int gy)
+{
+    const PurpleOverlayBounds &b = ctx.bounds;
+    const int visW = b.maxX - b.minX + 1;
+    const int visH = b.maxY - b.minY + 1;
+    const float span = 1.0f / ctx.view.zoom;
+    const float scaleX = ctx.size.x / span;
+    const float scaleY = ctx.size.y / span;
+    const int ty0 = b.minY + (gy * visH) / b.gridH;
+    const int ty1 = std::min(b.maxY + 1, std::max(ty0 + 1, b.minY + ((gy + 1) * visH) / b.gridH));
+    const float py0 = ctx.origin.y + (float(ty0) / float(ctx.texHeight) - ctx.view.v0) * scaleY;
+    const float py1 = ctx.origin.y + (float(ty1) / float(ctx.texHeight) - ctx.view.v0) * scaleY;
+
+    PurpleRunState run;
+    for (int gx = 0; gx < b.gridW; gx++)
+    {
+        const int tx0 = b.minX + (gx * visW) / b.gridW;
+        const int tx1 =
+            std::min(b.maxX + 1, std::max(tx0 + 1, b.minX + ((gx + 1) * visW) / b.gridW));
+        const float px0 = ctx.origin.x + (float(tx0) / float(ctx.texWidth) - ctx.view.u0) * scaleX;
+        const int alpha = SampleOverlayCellAlpha(ctx.mask, ctx.texWidth, tx0, tx1, ty0, ty1);
+
+        if (alpha <= 0)
+        {
+            FlushPurpleRun(ctx.drawList, py0, py1, px0, run);
+            continue;
+        }
+        if (run.count > 0 && std::abs(alpha - run.startAlpha) <= 2)
+        {
+            run.alphaSum += alpha;
+            run.count++;
+            continue;
+        }
+        FlushPurpleRun(ctx.drawList, py0, py1, px0, run);
+        run.startAlpha = alpha;
+        run.alphaSum = alpha;
+        run.count = 1;
+        run.x0 = px0;
     }
 
-    const float height = (textureWidth > 0 && textureHeight > 0)
-                             ? width * float(textureHeight) / float(textureWidth)
-                             : width;
+    const float endX =
+        ctx.origin.x + (float(b.maxX + 1) / float(ctx.texWidth) - ctx.view.u0) * scaleX;
+    FlushPurpleRun(ctx.drawList, py0, py1, endX, run);
+}
+
+void DrawPreviewPurpleMaskOverlay(ImDrawList *drawList, const ImVec2 &origin, const ImVec2 &size,
+                                  const EditorPreviewView &view, uint32_t texWidth,
+                                  uint32_t texHeight, const std::vector<float> *overlayMask)
+{
+    if (drawList == nullptr || overlayMask == nullptr || texWidth == 0 || texHeight == 0 ||
+        overlayMask->size() != size_t(texWidth) * size_t(texHeight))
+    {
+        return;
+    }
+
+    const PurpleOverlayBounds bounds = ComputePurpleOverlayBounds(view, texWidth, texHeight);
+    const PurpleOverlayRowCtx ctx{ drawList, origin, size, view, texWidth, texHeight, *overlayMask,
+                                   bounds };
+
+    drawList->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
+    for (int gy = 0; gy < bounds.gridH; gy++)
+    {
+        DrawPurpleOverlayRow(ctx, gy);
+    }
+    drawList->PopClipRect();
+}
+
+void DrawPolygonConcaveFill(ImDrawList *drawList, const std::vector<ImVec2> &shape,
+                            const std::vector<float> *overlayMask)
+{
+    if (overlayMask == nullptr || overlayMask->empty())
+    {
+        drawList->AddConcavePolyFilled(shape.data(), int(shape.size()), IM_COL32(255, 255, 255, 128));
+    }
+}
+
+struct PreviewCanvasLayout
+{
+    ImVec2 origin;
+    ImVec2 size;
+    EditorPreviewView view;
+};
+
+PreviewCanvasLayout BeginPreviewCanvas(uint64_t texture, uint32_t texWidth, uint32_t texHeight,
+                                       const std::vector<float> *overlayMask)
+{
+    const float width = std::max(32.0f, ImGui::GetContentRegionAvail().x);
+    const float height =
+        (texWidth > 0 && texHeight > 0) ? width * float(texHeight) / float(texWidth) : width;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size(width, height);
     const ImGuiID viewId = ImGui::GetID("##preview_view");
@@ -564,7 +719,6 @@ bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, ui
     }
 
     const float span = 1.0f / view.zoom;
-
     if (texture != 0)
     {
         ImGui::Image(ImTextureRef(ImTextureID(uintptr_t(texture))), size, ImVec2(view.u0, view.v0),
@@ -575,8 +729,115 @@ bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, ui
         ImGui::Dummy(size);
     }
 
-    ImGui::SetCursorScreenPos(origin);
-    ImGui::InvisibleButton("##pick", size, ImGuiButtonFlags_MouseButtonLeft);
+    DrawPreviewPurpleMaskOverlay(ImGui::GetWindowDrawList(), origin, size, view, texWidth, texHeight,
+                                 overlayMask);
+    return PreviewCanvasLayout{ origin, size, view };
+}
+
+void DrawBrushCursorRings(ImDrawList *drawList, const ImVec2 &origin, const ImVec2 &size,
+                          float span, uint32_t texWidth, const EditorBrushToolSettings &tool)
+{
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const float outerR = std::max(1.5f, tool.radiusTexels / float(texWidth) / span * size.x);
+
+    drawList->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
+    drawList->AddCircle(mouse, outerR, IM_COL32(236, 140, 255, 240), 32, 1.5f);
+    if (tool.hardness < 0.99f)
+    {
+        const float innerR = outerR * std::clamp(tool.hardness, 0.0f, 1.0f);
+        if (innerR >= 1.0f)
+        {
+            drawList->AddCircle(mouse, innerR, IM_COL32(255, 255, 255, 175), 28, 1.0f);
+        }
+    }
+    drawList->PopClipRect();
+}
+
+struct BrushStrokeState
+{
+    bool active = false;
+    ImGuiID item = 0;
+    int button = ImGuiMouseButton_Left;
+    float lastU = 0.0f;
+    float lastV = 0.0f;
+    std::vector<uint8_t> baseMask;
+    std::vector<float> accum;
+};
+
+EditorBrushStrokeSpec MakeBrushSegmentSpec(float u0, float v0, float u1, float v1,
+                                           const EditorBrushToolSettings &tool, int button)
+{
+    return EditorBrushStrokeSpec{
+        u0,
+        v0,
+        u1,
+        v1,
+        tool.radiusTexels,
+        tool.hardness,
+        tool.opacity,
+        tool.erase || button == ImGuiMouseButton_Right,
+    };
+}
+
+bool UpdateBrushStrokeState(ImGuiID item, uint32_t texWidth, uint32_t texHeight,
+                            const ImVec2 &pointerUv, const EditorBrushToolSettings &tool,
+                            std::vector<uint8_t> &brushMask)
+{
+    static BrushStrokeState s_stroke;
+    bool changed = false;
+
+    if (ImGui::IsItemActivated())
+    {
+        const int btn =
+            ImGui::GetIO().MouseDown[ImGuiMouseButton_Right] ? ImGuiMouseButton_Right : ImGuiMouseButton_Left;
+        s_stroke.active = true;
+        s_stroke.item = item;
+        s_stroke.button = btn;
+        s_stroke.lastU = pointerUv.x;
+        s_stroke.lastV = pointerUv.y;
+        s_stroke.baseMask = brushMask;
+        s_stroke.accum.assign(brushMask.size(), 0.0f);
+        const EditorBrushStrokeSpec seg =
+            MakeBrushSegmentSpec(pointerUv.x, pointerUv.y, pointerUv.x, pointerUv.y, tool, btn);
+        changed |= ApplyEditorBrushSegment(seg, texWidth, texHeight, s_stroke.baseMask,
+                                           s_stroke.accum, brushMask);
+    }
+    else if (s_stroke.active && s_stroke.item == item)
+    {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(s_stroke.button))
+        {
+            if (pointerUv.x != s_stroke.lastU || pointerUv.y != s_stroke.lastV)
+            {
+                const EditorBrushStrokeSpec seg =
+                    MakeBrushSegmentSpec(s_stroke.lastU, s_stroke.lastV, pointerUv.x, pointerUv.y,
+                                         tool, s_stroke.button);
+                changed |= ApplyEditorBrushSegment(seg, texWidth, texHeight, s_stroke.baseMask,
+                                                   s_stroke.accum, brushMask);
+                s_stroke.lastU = pointerUv.x;
+                s_stroke.lastV = pointerUv.y;
+            }
+        }
+        else
+        {
+            s_stroke.active = false;
+            s_stroke.item = 0;
+        }
+    }
+
+    return changed;
+}
+
+} // namespace
+
+bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
+                     float &outU, float &outV, const std::vector<float> *overlayMask)
+{
+    ImGui::PushID(id);
+
+    const PreviewCanvasLayout layout =
+        BeginPreviewCanvas(texture, textureWidth, textureHeight, overlayMask);
+    ImGui::SetCursorScreenPos(layout.origin);
+    ImGui::InvisibleButton("##pick", layout.size, ImGuiButtonFlags_MouseButtonLeft);
 
     // While the pointer is on the image and Ctrl is down the wheel is the zoom's, not the panel's
     // scroll, so the picker claims it before the scroll does.
@@ -585,27 +846,26 @@ bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, ui
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
     }
 
-    const bool hovered = ImGui::IsItemHovered();
     bool picked = false;
-
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
     {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
+        const float span = 1.0f / layout.view.zoom;
+        const float w = layout.size.x > 1.0f ? layout.size.x : 1.0f;
+        const float h = layout.size.y > 1.0f ? layout.size.y : 1.0f;
 
-        outU = std::clamp(
-            view.u0 + (mouse.x - origin.x) / (width > 1.0f ? width : 1.0f) * span, 0.0f, 1.0f);
-        outV = std::clamp(
-            view.v0 + (mouse.y - origin.y) / (height > 1.0f ? height : 1.0f) * span, 0.0f, 1.0f);
+        outU = std::clamp(layout.view.u0 + (mouse.x - layout.origin.x) / w * span, 0.0f, 1.0f);
+        outV = std::clamp(layout.view.v0 + (mouse.y - layout.origin.y) / h * span, 0.0f, 1.0f);
         picked = true;
     }
 
     ImGui::PopID();
-
     return picked;
 }
 
 bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth,
-                       uint32_t textureHeight, std::vector<float> &uv, int32_t maxPoints)
+                       uint32_t textureHeight, std::vector<float> &uv, int32_t maxPoints,
+                       const std::vector<float> *overlayMask)
 {
     ImGui::PushID(id);
 
@@ -667,6 +927,8 @@ bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth,
 
     ImGui::Image(ImTextureRef(ImTextureID(uintptr_t(texture))), size, ImVec2(view.u0, view.v0),
                  ImVec2(view.u0 + span, view.v0 + span));
+    DrawPreviewPurpleMaskOverlay(ImGui::GetWindowDrawList(), origin, size, view, textureWidth,
+                                 textureHeight, overlayMask);
     ImGui::SetCursorScreenPos(origin);
     ImGui::InvisibleButton("##mask", size,
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
@@ -990,7 +1252,7 @@ bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth,
 
     // A zoomed view may carry points outside the preview, so the mask and its handles are clipped.
     drawList->PushClipRect(origin, ImVec2(origin.x + width, origin.y + height), true);
-    drawList->AddConcavePolyFilled(shape.data(), points, IM_COL32(255, 255, 255, 128));
+    DrawPolygonConcaveFill(drawList, shape, overlayMask);
     drawList->AddPolyline(shape.data(), points, IM_COL32(255, 255, 255, 220), ImDrawFlags_Closed,
                           1.5f);
 
@@ -1021,5 +1283,58 @@ bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth,
 
     ImGui::PopID();
 
+    return changed;
+}
+
+bool EditorBrushEdit(const char *id, uint64_t texture, uint32_t textureWidth,
+                     uint32_t textureHeight, std::vector<uint8_t> &brushMask,
+                     const EditorBrushToolSettings &tool, const std::vector<float> *overlayMask)
+{
+    ImGui::PushID(id);
+
+    if (textureWidth == 0 || textureHeight == 0)
+    {
+        ImGui::PopID();
+        return false;
+    }
+
+    const size_t expectedPixels = size_t(textureWidth) * size_t(textureHeight);
+    if (brushMask.size() != expectedPixels)
+    {
+        brushMask.assign(expectedPixels, 0);
+    }
+
+    const PreviewCanvasLayout layout =
+        BeginPreviewCanvas(texture, textureWidth, textureHeight, overlayMask);
+    ImGui::SetCursorScreenPos(layout.origin);
+    ImGui::InvisibleButton("##brush", layout.size,
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+
+    if (ImGui::IsItemHovered() && ImGui::GetIO().KeyCtrl)
+    {
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+    }
+
+    const float span = 1.0f / layout.view.zoom;
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const float w = layout.size.x > 1.0f ? layout.size.x : 1.0f;
+    const float h = layout.size.y > 1.0f ? layout.size.y : 1.0f;
+    const ImVec2 pointerUv(
+        std::clamp(layout.view.u0 + (mouse.x - layout.origin.x) / w * span, 0.0f, 1.0f),
+        std::clamp(layout.view.v0 + (mouse.y - layout.origin.y) / h * span, 0.0f, 1.0f));
+
+    const bool changed = UpdateBrushStrokeState(ImGui::GetItemID(), textureWidth, textureHeight,
+                                                pointerUv, tool, brushMask);
+
+    ImDrawList *drawList = ImGui::GetWindowDrawList();
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+    {
+        DrawBrushCursorRings(drawList, layout.origin, layout.size, span, textureWidth, tool);
+    }
+    drawList->AddRect(layout.origin,
+                      ImVec2(layout.origin.x + layout.size.x, layout.origin.y + layout.size.y),
+                      IM_COL32(150, 160, 185, 255));
+
+    ImGui::PopID();
     return changed;
 }
