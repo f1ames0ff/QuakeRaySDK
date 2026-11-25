@@ -110,6 +110,10 @@ namespace qray
         VkDeviceSize GetIndexBufferSize() const;
         VkDeviceSize GetParticlePointBufferSize() const;
 
+        uint64_t GetCurrentVertexCount() const { return curVertexCount; }
+        uint64_t GetCurrentIndexCount() const { return curIndexCount; }
+        uint64_t GetCurrentParticlePointCount() const { return curParticlePointCount; }
+
         static uint32_t GetVertexStride();
         static void     GetVertexLayout( VkVertexInputAttributeDescription* outAttrs,
                                          uint32_t*                          outAttrsCount );

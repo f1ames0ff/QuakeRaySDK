@@ -269,7 +269,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                     float marchTau = -1.0;
                     if (blend < 1.0)
                     {
-                        marchTau = cloudSunDepth(layer, p, sunDir, CLOUD_SHADOW_STEPS, sunSlices);
+                        marchTau = cloudSunDepth(layer, p, sunDir, min(CLOUD_SHADOW_STEPS, 8), sunSlices);
                     }
                     float sunTau = (marchTau >= 0.0 && blend > 0.0 && mapTau >= 0.0)
                         ? lerp(marchTau, mapTau, blend)

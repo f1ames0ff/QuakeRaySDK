@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <cstddef>
@@ -43,6 +60,11 @@ struct EditorEmissiveBlock
     // The colour and threshold are then unused, which is what the game's polygon form does.
     std::vector<float> polyUv;
 
+    // Non-empty with non-zero dimensions selects by a painted grayscale texel mask [0..255].
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    std::vector<uint8_t> brushMask;
+
     bool operator==(const EditorEmissiveBlock &) const = default;
 };
 
@@ -60,13 +82,63 @@ struct EditorGlossBlock
     float roughness = 0.25f;
     float metalness = 0.0f;
     std::vector<float> polyUv;
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    std::vector<uint8_t> brushMask;
 
     bool operator==(const EditorGlossBlock &) const = default;
 };
 
 inline constexpr size_t kEditorGlossBlockMax = 10;
 
-// Colour-key or polygon region driving per-pixel subsurface scattering mask in Normal.a.
+template <typename Block>
+bool IsBrushBlock(const Block &block)
+{
+    return block.brushWidth > 0 && block.brushHeight > 0 &&
+           block.brushMask.size() == size_t(block.brushWidth) * size_t(block.brushHeight);
+}
+
+template <typename Block>
+bool IsPolygonBlock(const Block &block)
+{
+    return !IsBrushBlock(block) && block.polyUv.size() >= 6;
+}
+
+struct EditorMaskEvalSpec
+{
+    const float *color = nullptr;
+    float threshold = 0.02f;
+    float feather = 0.0f;
+    float scale = 1.0f;
+    const std::vector<float> *polyUv = nullptr;
+    const std::vector<uint8_t> *brushMask = nullptr;
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    bool isGloss = false;
+};
+
+void ComputeEditorMask(const EditorMaskEvalSpec &spec, const uint8_t *rgba, uint32_t width,
+                       uint32_t height, std::vector<float> &outMask,
+                       std::vector<float> *outDist = nullptr);
+
+struct EditorBrushStrokeSpec
+{
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+    float u1 = 0.0f;
+    float v1 = 0.0f;
+    float radiusTexels = 8.0f;
+    float hardness = 0.5f;
+    float opacity = 1.0f;
+    bool erase = false;
+};
+
+bool ApplyEditorBrushSegment(const EditorBrushStrokeSpec &stroke, uint32_t width,
+                             uint32_t height, const std::vector<uint8_t> &baseMask,
+                             std::vector<float> &strokeAccum,
+                             std::vector<uint8_t> &outMask);
+
+// Colour-key, polygon, or painted brush region driving per-pixel subsurface scattering mask in Normal.a.
 struct EditorSssBlock
 {
     float color[3] = { 1.0f, 1.0f, 1.0f };
@@ -74,6 +146,9 @@ struct EditorSssBlock
     float feather = 0.0f;
     float factor = 1.0f;
     std::vector<float> polyUv;
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    std::vector<uint8_t> brushMask;
 
     bool operator==(const EditorSssBlock &) const = default;
 };

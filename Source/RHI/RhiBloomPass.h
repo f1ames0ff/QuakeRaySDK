@@ -95,6 +95,7 @@ private:
         uint32_t width = 0;
         uint32_t height = 0;
         bool quarterBase = false;
+        uint32_t maxLevels = 0;
         uint32_t downCount = 0;
         Level down[MAX_LEVELS];
         Level up[MAX_LEVELS];
@@ -107,8 +108,22 @@ private:
     bool PrepareTonemappingSet(uint32_t frameIndex);
     bool PrepareSourceSet(Target &target, nvrhi::ITexture *pSource);
 
-    bool CreateTarget(Target &target, uint32_t width, uint32_t height, bool quarterBase);
+    bool CreateTarget(Target &target, uint32_t width, uint32_t height, bool quarterBase, uint32_t maxLevels);
     bool CreateLevel(Level &level, uint32_t width, uint32_t height, const std::string &name);
+
+    void RecordDownsamplePyramid(nvrhi::ICommandList *pCommandList,
+                                 uint32_t frameIndex,
+                                 const Target &target,
+                                 uint32_t levelCount,
+                                 float threshold,
+                                 float knee);
+
+    void RecordUpsamplePyramid(nvrhi::ICommandList *pCommandList,
+                               uint32_t frameIndex,
+                               const Target &target,
+                               uint32_t levelCount,
+                               float decay,
+                               float normalization);
 
     void DispatchDownsample(nvrhi::ICommandList *pCommandList,
                             uint32_t frameIndex,

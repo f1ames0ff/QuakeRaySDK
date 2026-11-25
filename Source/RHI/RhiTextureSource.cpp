@@ -1,7 +1,25 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "RhiTextureSource.h"
 
 #include <nvrhi/vulkan.h>
 
+#include <array>
 #include <string>
 
 namespace qray::rhi
@@ -10,20 +28,35 @@ namespace qray::rhi
 namespace
 {
 
-// The pinned NVRHI converts formats in one direction only: nvrhi::vulkan::convertFormat maps
-// nvrhi::Format -> VkFormat (declared in vulkan.h:90, implemented over the c_FormatMap table in
-// vulkan-constants.cpp:39-119) and the pinned tree has no reverse helper - the only other
-// convertFormat overloads are the D3D11/D3D12 ones (d3d11.h:49, d3d12.h:146). So the bridge
-// inverts that exact table by search, which also means the result cannot drift from the mapping
-// the Vulkan backend itself uses to make image views (vulkan-texture.cpp:317-332).
-//
-// Consequences of the inverse search, both harmless for sampled engine textures:
-//  - VK_FORMAT_UNDEFINED matches Format::UNKNOWN at index 0 (vulkan-constants.cpp:40), so an
-//    undefined engine format is reported as "cannot wrap".
-//  - Formats that NVRHI maps only for depth/stencil share one VkFormat with a sibling
-//    (D24S8/X24G8_UINT and D32S8/X32G8_UINT, vulkan-constants.cpp:91-95); the first entry wins.
+constexpr uint32_t kVkFormatLookupCapacity = 256u;
+
+std::array<nvrhi::Format, kVkFormatLookupCapacity> BuildVkFormatTable()
+{
+    std::array<nvrhi::Format, kVkFormatLookupCapacity> table{};
+    table.fill(nvrhi::Format::UNKNOWN);
+
+    for (uint32_t i = 0; i < uint32_t(nvrhi::Format::COUNT); i++)
+    {
+        const VkFormat vk = nvrhi::vulkan::convertFormat(nvrhi::Format(i));
+        const uint32_t idx = uint32_t(vk);
+        if (vk != VK_FORMAT_UNDEFINED && idx < kVkFormatLookupCapacity && table[idx] == nvrhi::Format::UNKNOWN)
+        {
+            table[idx] = nvrhi::Format(i);
+        }
+    }
+
+    return table;
+}
+
 nvrhi::Format convertVkFormat(VkFormat format)
 {
+    static const std::array<nvrhi::Format, kVkFormatLookupCapacity> kTable = BuildVkFormatTable();
+    const uint32_t idx = uint32_t(format);
+    if (idx < kVkFormatLookupCapacity)
+    {
+        return kTable[idx];
+    }
+
     for (uint32_t i = 0; i < uint32_t(nvrhi::Format::COUNT); i++)
     {
         if (nvrhi::vulkan::convertFormat(nvrhi::Format(i)) == format)
@@ -40,12 +73,11 @@ nvrhi::Format convertVkFormat(VkFormat format)
 nvrhi::TextureHandle wrapEngineTexture(nvrhi::IDevice *device,
                                        uint64_t vkImage,
                                        uint32_t vkFormat,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint32_t mipLevels,
-                                       std::string_view debugName)
+                                       const EngineTextureExtent &extent,
+                                       std::string_view debugName,
+                                       nvrhi::ComponentMapping componentMapping)
 {
-    if (device == nullptr || vkImage == 0 || width == 0 || height == 0)
+    if (device == nullptr || vkImage == 0 || extent.width == 0 || extent.height == 0)
     {
         return nullptr;
     }
@@ -59,13 +91,14 @@ nvrhi::TextureHandle wrapEngineTexture(nvrhi::IDevice *device,
     nvrhi::TextureDesc desc;
     desc.dimension = nvrhi::TextureDimension::Texture2D;
     desc.format = format;
-    desc.width = width;
-    desc.height = height;
+    desc.width = extent.width;
+    desc.height = extent.height;
     // The caller passes the image's level count; arraySize still exposes a single layer only (the
     // header documents both).
-    desc.mipLevels = mipLevels;
+    desc.mipLevels = extent.mipLevels;
     desc.arraySize = 1;
     desc.sampleCount = 1;
+    desc.defaultComponentMapping = componentMapping;
 
     desc.isShaderResource = true;
     desc.isRenderTarget = false;

@@ -130,7 +130,7 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
     , surface( VK_NULL_HANDLE )
     , currentFrameState()
     , frameId( 1 )
-    , waitForOutOfFrameFence( false )
+    , waitForOutOfFrameFence{}
     , libconfig( LibraryConfig::Read( info->pConfigPath ) )
     , debugMessenger( VK_NULL_HANDLE )
     , userPrint{ std::make_unique< UserPrint >( info->pfnPrint, info->pUserPrintData ) }
@@ -977,6 +977,7 @@ void VulkanDevice::CreateDevice(const QrayGpuRequirements &gpuRequirements)
 
     ApplyNvrhiRequirements(nvrhiRequirements, vulkan12Features);
     timelineSemaphoreEnabled = nvrhiRequirements.timelineSemaphore;
+    nvrhiUniformBufferUpdateAfterBind = nvrhiRequirements.descriptorBindingUniformBufferUpdateAfterBind;
 
     if (!unsupportedNvrhiFeatures.empty())
     {
@@ -1236,8 +1237,6 @@ void VulkanDevice::CreateDevice(const QrayGpuRequirements &gpuRequirements)
 
 void VulkanDevice::CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements)
 {
-    const NvrhiRequirements requirements = QueryNvrhiRequirements(physDevice->Get());
-
     std::vector<const char *> instanceExtensions;
     instanceExtensions.reserve(enabledInstanceExtensions.size());
     for (const std::string &name : enabledInstanceExtensions)
@@ -1270,7 +1269,7 @@ void VulkanDevice::CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements)
     info.deviceExtensionCount = deviceExtensions.size();
 
     info.bufferDeviceAddressSupported = true;
-    info.uniformBufferUpdateAfterBindSupported = requirements.descriptorBindingUniformBufferUpdateAfterBind;
+    info.uniformBufferUpdateAfterBindSupported = nvrhiUniformBufferUpdateAfterBind;
 
     nvrhi = std::make_unique<NvrhiContext>();
 
@@ -1300,10 +1299,6 @@ void VulkanDevice::CreateSyncPrimitives()
     VkSemaphoreCreateInfo semaphoreInfo = {};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
-    VkFenceCreateInfo fenceInfo = {};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
     VkFenceCreateInfo nonSignaledFenceInfo = {};
     nonSignaledFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 
@@ -1314,7 +1309,7 @@ void VulkanDevice::CreateSyncPrimitives()
         r = vkCreateSemaphore(device, &semaphoreInfo, nullptr, &inFrameSemaphores[i]);
         VK_CHECKERROR(r);
 
-        r = vkCreateFence(device, &fenceInfo, nullptr, &frameFences[i]);
+        r = vkCreateFence(device, &nonSignaledFenceInfo, nullptr, &frameFences[i]);
         VK_CHECKERROR(r);
         r = vkCreateFence(device, &nonSignaledFenceInfo, nullptr, &outOfFrameFences[i]);
         VK_CHECKERROR(r);

@@ -214,6 +214,11 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
 
     query.TraceRayInline(topLevelAS, RAY_FLAG_NONE, INSTANCE_MASK_PARTICLE, ray);
 
+    float bestT = tMax;
+    float3 bestBary = (float3)0.0;
+    float2 bestUv = (float2)0.0;
+    bool hasBest = false;
+
     while (query.Proceed())
     {
         if (query.CandidateType() != CANDIDATE_PROCEDURAL_PRIMITIVE)
@@ -230,6 +235,12 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
             if (intersectParticleTriangle(candidate, origin, dir, tMin, tMax, tHit, bary))
             {
                 query.CommitProceduralPrimitiveHit(tHit);
+                if (tHit < bestT)
+                {
+                    bestT = tHit;
+                    bestBary = bary;
+                    hasBest = true;
+                }
             }
         }
         else
@@ -238,11 +249,17 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
             if (intersectParticleBillboard(candidate, origin, dir, tMin, tMax, tHit, uv))
             {
                 query.CommitProceduralPrimitiveHit(tHit);
+                if (tHit < bestT)
+                {
+                    bestT = tHit;
+                    bestUv = uv;
+                    hasBest = true;
+                }
             }
         }
     }
 
-    if (query.CommittedStatus() != COMMITTED_PROCEDURAL_PRIMITIVE_HIT)
+    if (query.CommittedStatus() != COMMITTED_PROCEDURAL_PRIMITIVE_HIT || !hasBest)
     {
         return result;
     }
@@ -255,26 +272,14 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
 
     if (proxy.kind == PARTICLE_PROXY_KIND_TRIANGLE)
     {
-        float3 bary;
-        float tHit;
-        if (!intersectParticleTriangle(proxy, origin, dir, tMin, tMax, tHit, bary))
-        {
-            return result;
-        }
-
-        uv = proxy.uv0 * bary.x + proxy.uv1 * bary.y + proxy.uv2 * bary.z;
-        vertexColor = unpackParticleColor(proxy.packedColor) * bary.x +
-                      unpackParticleColor(proxy.colorB) * bary.y +
-                      unpackParticleColor(proxy.colorC) * bary.z;
+        uv = proxy.uv0 * bestBary.x + proxy.uv1 * bestBary.y + proxy.uv2 * bestBary.z;
+        vertexColor = unpackParticleColor(proxy.packedColor) * bestBary.x +
+                      unpackParticleColor(proxy.colorB) * bestBary.y +
+                      unpackParticleColor(proxy.colorC) * bestBary.z;
     }
     else
     {
-        float tHit;
-        if (!intersectParticleBillboard(proxy, origin, dir, tMin, tMax, tHit, uv))
-        {
-            return result;
-        }
-
+        uv = bestUv;
         vertexColor = unpackParticleColor(proxy.packedColor);
     }
 
@@ -295,7 +300,8 @@ ShParticleHit traceParticleProxy(const float3 origin, const float3 dir, const fl
     }
     else
     {
-        const float3 lighting = smokeLightAt(origin + t * normalize(dir), proxy.cluster, 0.0,
+        const float3 normDir = normalize(dir);
+        const float3 lighting = smokeLightAt(origin + t * normDir, proxy.cluster, 0.0,
                                              proxy.direct, 0.0);
         const float3 factor = proxy.gain * max(lighting + particleProxyAmbient(cbPix), (float3)proxy.lightFloor);
         rgb = texel.rgb * vertexColor.rgb * factor;

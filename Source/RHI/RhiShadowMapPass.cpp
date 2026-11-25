@@ -280,6 +280,7 @@ void RhiShadowMapPass::MakeDrawItems(const VertexCollector *pCollector, std::vec
         item.baseVertex = info.baseVertex;
         item.firstIndex = info.firstIndex;
         item.indexCount = info.indexCount;
+        item.vertexCount = info.vertexCount;
         outItems.push_back(item);
     }
 }
@@ -493,8 +494,8 @@ bool RhiShadowMapPass::Render(nvrhi::ICommandList *pCommandList,
 
     // The two lists of the legacy loops (ShadowMap.cpp:548-549). Both are host-side data - the
     // collector builds them from its CPU-side transforms - so they are valid under `rhiframe`.
-    std::vector<DrawItem> staticDraws;
-    std::vector<DrawItem> dynamicDraws;
+    staticDraws.clear();
+    dynamicDraws.clear();
     MakeDrawItems(pStaticCollector, staticDraws);
     MakeDrawItems(pDynamicCollector, dynamicDraws);
 
@@ -618,34 +619,28 @@ void RhiShadowMapPass::RecordDrawList(nvrhi::ICommandList *pCommandList, const s
     const nvrhi::Viewport viewport(0.0f, mapSize, mapSize, 0.0f, 0.0f, 1.0f);
     const nvrhi::Rect scissor(0, int(SHADOW_MAP_SIZE), 0, int(SHADOW_MAP_SIZE));
 
+    nvrhi::GraphicsState state;
+    state.pipeline = pipeline;
+    state.framebuffer = framebuffer;
+    state.viewport.addViewport(viewport);
+    state.viewport.addScissorRect(scissor);
+    // The draws bind the list's buffers at offset 0, the legacy's binding offsets
+    // (ShadowMap.cpp:671-676): all of a list's GeometryDrawInfos address that list's own buffers,
+    // and their baseVertex/firstIndex are absolute into them.
+    state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(pVertexBuffer).setSlot(0).setOffset(0));
+    state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                             .setBuffer(pIndexBuffer)
+                             .setFormat(nvrhi::Format::R32_UINT)
+                             .setOffset(0));
+
+    pCommandList->setGraphicsState(state);
+
+    ShadowMapPushConstants push = {};
+    memcpy(push.viewProjection, lastViewProjection, sizeof(push.viewProjection));
+
     for (const DrawItem &draw : draws)
     {
-        // The push constant block of ShadowMap.cpp:620 and :669: the view-projection is constant for
-        // the pass and the model matrix is the draw's own. The model matrix is the collector's
-        // column-major 4x4 (Matrix::ToMat4Transposed of the CPU-side transform,
-        // VertexCollector.cpp:931-933), so it is copied as-is.
-        ShadowMapPushConstants push = {};
-        memcpy(push.viewProjection, lastViewProjection, sizeof(push.viewProjection));
         memcpy(push.model, draw.model, sizeof(push.model));
-
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = framebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(scissor);
-        // The draws bind the list's buffers at offset 0, the legacy's binding offsets
-        // (ShadowMap.cpp:671-676): all of a list's GeometryDrawInfos address that list's own buffers,
-        // and their baseVertex/firstIndex are absolute into them.
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(pVertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(pIndexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
-
-        pCommandList->setGraphicsState(state);
-
-        // After the state: changing the state invalidates push constants (nvrhi.h:3430-3432), and
-        // the block is rebuilt per draw exactly as the legacy pushes it (ShadowMap.cpp:667-669).
         pCommandList->setPushConstants(&push, sizeof(push));
 
         nvrhi::DrawArguments args;
@@ -664,7 +659,7 @@ void RhiShadowMapPass::RecordDrawList(nvrhi::ICommandList *pCommandList, const s
         {
             // The legacy's non-indexed branch (ShadowMap.cpp:681), which draws the geometry's vertex
             // count (indexCount is zero there) starting at its base vertex.
-            args.vertexCount = draw.indexCount;
+            args.vertexCount = draw.vertexCount;
             args.startVertexLocation = draw.baseVertex;
             pCommandList->draw(args);
         }

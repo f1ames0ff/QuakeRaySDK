@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "RhiTextureTable.h"
 
 #include "RhiDescriptors.h"
@@ -28,6 +45,40 @@ nvrhi::ISampler *resolveSampler(const std::vector<nvrhi::SamplerHandle> &sampler
     }
 
     return samplers[samplerIndex];
+}
+
+nvrhi::ComponentMapping convertSwizzling(std::optional<QrTextureSwizzling> swizzling)
+{
+    if (!swizzling.has_value())
+    {
+        return {};
+    }
+
+    switch (*swizzling)
+    {
+        case QR_TEXTURE_SWIZZLING_ROUGHNESS_METALLIC_EMISSIVE:
+            return { nvrhi::ComponentSwizzle::R, nvrhi::ComponentSwizzle::G,
+                     nvrhi::ComponentSwizzle::B, nvrhi::ComponentSwizzle::A };
+
+        case QR_TEXTURE_SWIZZLING_ROUGHNESS_METALLIC:
+            return { nvrhi::ComponentSwizzle::R, nvrhi::ComponentSwizzle::G,
+                     nvrhi::ComponentSwizzle::Zero, nvrhi::ComponentSwizzle::A };
+
+        case QR_TEXTURE_SWIZZLING_METALLIC_ROUGHNESS_EMISSIVE:
+            return { nvrhi::ComponentSwizzle::G, nvrhi::ComponentSwizzle::R,
+                     nvrhi::ComponentSwizzle::B, nvrhi::ComponentSwizzle::A };
+
+        case QR_TEXTURE_SWIZZLING_METALLIC_ROUGHNESS:
+            return { nvrhi::ComponentSwizzle::G, nvrhi::ComponentSwizzle::R,
+                     nvrhi::ComponentSwizzle::Zero, nvrhi::ComponentSwizzle::A };
+
+        case QR_TEXTURE_SWIZZLING_NULL_ROUGHNESS_METALLIC:
+            return { nvrhi::ComponentSwizzle::G, nvrhi::ComponentSwizzle::B,
+                     nvrhi::ComponentSwizzle::Zero, nvrhi::ComponentSwizzle::A };
+
+        default:
+            return {};
+    }
 }
 
 }
@@ -155,46 +206,43 @@ bool RhiTextureTable::Create(nvrhi::IDevice *pDevice, uint32_t capacity, rhi::Rh
     return true;
 }
 
-void RhiTextureTable::SetSlot(uint32_t slot, VkImage image, VkFormat format, uint32_t width, uint32_t height,
-                              uint32_t mipLevels, uint32_t samplerIndex)
+void RhiTextureTable::SetSlot(const SlotDesc &desc)
 {
     // A slot past the capacity cannot be written anyway (writeDescriptorTable returns false, and a
     // bindless table has no PARTIALLY_BOUND), and a null image is the engine's "no texture" state,
     // which ResetSlot has already described.
-    if (!IsCreated() || slot >= slots.size() || image == VK_NULL_HANDLE)
+    if (!IsCreated() || desc.slot >= slots.size() || desc.image == VK_NULL_HANDLE)
     {
         return;
     }
 
-    Slot &s = slots[slot];
+    Slot &s = slots[desc.slot];
+    bool textureDirty = !s.descriptorWritten;
+    const bool samplerDirty = !s.descriptorWritten || s.samplerIndex != desc.samplerIndex;
 
     // The engine's updateable textures re-copy into the same VkImage, so the wrapped texture of a
-    // repeated call is still valid and only the descriptor is written again below. What can change
-    // across repeated calls is the sampler index (the dynamic filter), which is why the sampler
-    // element is rewritten even when the texture is not.
-    if (s.image != image)
+    // repeated call is still valid. Re-wrap only when the image or its component swizzle changes.
+    if (s.image != desc.image || s.swizzling != desc.swizzling)
     {
         // The wrap the slot holds now is about to be replaced. A recorded list can still sample it,
         // so it stays referenced by this local until the new texture is in place and then goes to
         // the tracker; the table's own fallback is never retired (class comment).
         nvrhi::TextureHandle previousTexture = s.texture;
 
-        // The bridge keeps the image's level count (RhiTextureSource.h) but still exposes a single
-        // 2D layer; NVRHI cannot see the engine's cubemap layers.
+        // The bridge keeps the image's level count (RhiTextureSource.h) and optional PBR swizzle,
+        // while still exposing a single 2D layer; NVRHI cannot see the engine's cubemap layers.
         nvrhi::TextureHandle texture = rhi::wrapEngineTexture(
             device,
-            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(image)),
-            uint32_t(format),
-            width,
-            height,
-            mipLevels,
-            "Engine texture slot " + std::to_string(slot) + " (RhiTextureTable)");
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(desc.image)),
+            uint32_t(desc.format),
+            rhi::EngineTextureExtent{ desc.width, desc.height, desc.mipLevels },
+            "Engine texture slot " + std::to_string(desc.slot) + " (RhiTextureTable)",
+            convertSwizzling(desc.swizzling));
 
         if (texture == nullptr)
         {
-            // A format missing from NVRHI's map or an engine PBR view swizzle cannot be wrapped
-            // (RhiTextureSource.h): the slot holds the white fallback instead, and the count reports
-            // the fidelity gap to the caller.
+            // A format missing from NVRHI's map cannot be wrapped (RhiTextureSource.h): the slot
+            // holds the white fallback instead, and the count reports the gap to the caller.
             texture = fallbackTexture;
 
             if (!s.fallback)
@@ -220,12 +268,14 @@ void RhiTextureTable::SetSlot(uint32_t slot, VkImage image, VkFormat format, uin
             pendingTracking.push_back(texture);
         }
 
-        s.image = image;
-        s.format = format;
-        s.width = width;
-        s.height = height;
-        s.mipLevels = mipLevels;
+        s.image = desc.image;
+        s.format = desc.format;
+        s.width = desc.width;
+        s.height = desc.height;
+        s.mipLevels = desc.mipLevels;
+        s.swizzling = desc.swizzling;
         s.texture = texture;
+        textureDirty = true;
 
         // The slot no longer references the previous wrap; hand it to the tracker so the queue, not
         // this assignment, drops the last reference.
@@ -236,13 +286,17 @@ void RhiTextureTable::SetSlot(uint32_t slot, VkImage image, VkFormat format, uin
         }
     }
 
-    s.samplerIndex = samplerIndex;
+    s.samplerIndex = desc.samplerIndex;
 
-    // Both elements of the slot, one vkUpdateDescriptorSets call each (the backend does not batch,
-    // RhiDescriptors.h). The writes can only fail on a null argument or a slot past the capacity,
-    // and neither can reach this point, so their results need no handling.
-    rhi::setTexture(device, table, slot, s.texture);
-    rhi::setSampler(device, table, slot, resolveSampler(samplers, samplerIndex, fallbackSampler));
+    if (textureDirty)
+    {
+        rhi::setTexture(device, table, desc.slot, s.texture);
+    }
+    if (samplerDirty)
+    {
+        rhi::setSampler(device, table, desc.slot, resolveSampler(samplers, desc.samplerIndex, fallbackSampler));
+    }
+    s.descriptorWritten = true;
 }
 
 void RhiTextureTable::ResetSlot(uint32_t slot)
@@ -274,6 +328,8 @@ void RhiTextureTable::ResetSlot(uint32_t slot)
     s.height = 0;
     s.mipLevels = 1;
     s.samplerIndex = 0;
+    s.swizzling = std::nullopt;
+    s.descriptorWritten = false;
 
     // The image is going away: a wrap that has not reached a command list yet must not be tracked
     // later.

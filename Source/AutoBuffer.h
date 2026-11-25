@@ -60,6 +60,7 @@ private:
     Buffer deviceLocal;
 
     void *mapped[MAX_FRAMES_IN_FLIGHT];
+    uint32_t activeFrameCount = 0;
 };
 
 }

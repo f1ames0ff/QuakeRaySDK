@@ -116,16 +116,29 @@ uint64_t MapSignature(const WorldLights &worldLights)
    anything else carries eight leaf bits. Mod_DecompressVis expands it into the host's rotating
    buffer, but the rows here belong to the map and outlive the call, so each decodes into storage
    of its own. */
-void DecompressVis(const uint8_t *pIn, uint8_t *pOut, uint32_t rowBytes)
+void DecompressVis(const uint8_t *pIn, size_t inBytes, uint8_t *pOut, uint32_t rowBytes)
 {
+    const uint8_t *const pEnd = pIn + inBytes;
     uint32_t written = 0;
 
     while (written < rowBytes)
     {
+        if (pIn >= pEnd)
+        {
+            memset(pOut + written, 0, rowBytes - written);
+            break;
+        }
+
         if (*pIn != 0)
         {
             pOut[written++] = *pIn++;
             continue;
+        }
+
+        if (pIn + 1 >= pEnd)
+        {
+            memset(pOut + written, 0, rowBytes - written);
+            break;
         }
 
         uint32_t run = pIn[1];
@@ -218,6 +231,15 @@ void ClusterLightLists::Reset()
     tailSuppressed = false;
     tailInternalValid = true;
     tailEntryCount = 0;
+    sourceClusters.clear();
+    clusterGridOffsets.clear();
+    clusterGridEntries.clear();
+    unboundedClusters.clear();
+    for (int i = 0; i < 3; i++)
+    {
+        clusterGridMins[i] = 0.0f;
+        clusterGridInvCell[i] = 0.0f;
+    }
 
     stats = QrClusterLightStats{};
     statsResets.clear();
@@ -446,6 +468,7 @@ void ClusterLightLists::BeginSources(const WorldLights &worldLightsRef,
             topUpSlices[s].tailDirty.clear();
             topUpSlices[s].appendedSlots.clear();
             topUpSlices[s].statsResets.clear();
+            topUpSlices[s].sourceClusterAdds.clear();
             topUpSlices[s].reachGated = 0;
             topUpSlices[s].topUpGrants = 0;
             topUpSlices[s].violations = 0;
@@ -472,6 +495,46 @@ void ClusterLightLists::RunTopUpSlice(uint32_t slice, uint32_t sliceCount)
     activeSliceTls = nullptr;
 }
 
+void ClusterLightLists::MergeTopUpSlices()
+{
+    uint32_t violations = 0;
+
+    for (uint32_t s = 0; s < pendingSliceCount; s++)
+    {
+        TopUpSlice &slice = topUpSlices[s];
+
+        for (const auto &delta : slice.grantedDelta)
+            CountGranted(delta.first, delta.second);
+
+        for (const auto &delta : slice.deniedDelta)
+            CountDenied(delta.first);
+
+        for (uint32_t cluster : slice.tailDirty)
+            tailDirtyClusters.push_back(cluster);
+
+        for (uint32_t slot : slice.statsResets)
+            statsResets.push_back(slot);
+
+        for (const auto &entry : slice.sourceClusterAdds)
+        {
+            const uint32_t si = entry.first;
+            const uint32_t c = entry.second;
+            if (si >= sourceClusters.size())
+                sourceClusters.resize(size_t(si) + 1);
+            auto &clustersForSource = sourceClusters[si];
+            if (clustersForSource.empty() || clustersForSource.back() != c)
+                clustersForSource.push_back(c);
+        }
+
+        stats.reachGated += slice.reachGated;
+        stats.topUpGrants += slice.topUpGrants;
+        violations += slice.violations;
+    }
+
+    if (violations > 0 && pendingPrint != nullptr)
+        pendingPrint->Print("RT: cluster top-up evicted a slot appended in the same phase\n");
+}
+
 void ClusterLightLists::FinishSources()
 {
     activeSliceTls = nullptr;
@@ -483,31 +546,7 @@ void ClusterLightLists::FinishSources()
 
     if (pendingShape == kShapeIncremental || pendingShape == kShapeCompose)
     {
-        uint32_t violations = 0;
-
-        for (uint32_t s = 0; s < pendingSliceCount; s++)
-        {
-            TopUpSlice &slice = topUpSlices[s];
-
-            for (const auto &delta : slice.grantedDelta)
-                CountGranted(delta.first, delta.second);
-
-            for (const auto &delta : slice.deniedDelta)
-                CountDenied(delta.first);
-
-            for (uint32_t cluster : slice.tailDirty)
-                tailDirtyClusters.push_back(cluster);
-
-            for (uint32_t slot : slice.statsResets)
-                statsResets.push_back(slot);
-
-            stats.reachGated += slice.reachGated;
-            stats.topUpGrants += slice.topUpGrants;
-            violations += slice.violations;
-        }
-
-        if (violations > 0 && pendingPrint != nullptr)
-            pendingPrint->Print("RT: cluster top-up evicted a slot appended in the same phase\n");
+        MergeTopUpSlices();
     }
 
     if (pendingShape == kShapeIncremental)
@@ -756,10 +795,191 @@ void ClusterLightLists::PrepareTables(const WorldLights &worldLightsRef)
 
     // The composition that follows must run even when the new map registers the same lights.
     sources.clear();
+    sourceClusters.clear();
     listsValid = false;
     topUpReach = 0.0f;
     warnedAboutFullList = false;
     warnedAboutClusterClamp = false;
+
+    // Build a coarse static spatial index of cluster AABBs (clusters 1..numClusters-1) so
+    // incremental updates only test clusters overlapping each changed light's reach box.
+    BuildClusterSpatialGrid(worldLightsRef);
+}
+
+static constexpr int kClusterGridDims[3] = { 16, 16, 8 };
+
+static size_t ClusterGridCellIndex(int x, int y, int z)
+{
+    return (static_cast<size_t>(z) * static_cast<size_t>(kClusterGridDims[1]) + static_cast<size_t>(y)) *
+               static_cast<size_t>(kClusterGridDims[0]) +
+           static_cast<size_t>(x);
+}
+
+static bool IsFiniteClusterBox(const QrFloat3D &mins, const QrFloat3D &maxs)
+{
+    for (int a = 0; a < 3; a++)
+    {
+        if (!std::isfinite(mins.data[a]) || !std::isfinite(maxs.data[a]) ||
+            mins.data[a] > maxs.data[a])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint32_t ComputeClusterCellRange(const QrFloat3D &mins, const QrFloat3D &maxs,
+                                        const float gridMins[3], const float gridInvCell[3],
+                                        int lo[3], int hi[3])
+{
+    for (int a = 0; a < 3; a++)
+    {
+        const int dim = kClusterGridDims[a];
+        const float inv = gridInvCell[a];
+        if (inv <= 0.0f)
+        {
+            lo[a] = 0;
+            hi[a] = dim - 1;
+        }
+        else
+        {
+            lo[a] = std::clamp(int(std::floor((mins.data[a] - gridMins[a]) * inv)), 0, dim - 1);
+            hi[a] = std::clamp(int(std::floor((maxs.data[a] - gridMins[a]) * inv)), 0, dim - 1);
+        }
+    }
+    return uint32_t(hi[0] - lo[0] + 1) * uint32_t(hi[1] - lo[1] + 1) * uint32_t(hi[2] - lo[2] + 1);
+}
+
+void ClusterLightLists::ComputeFiniteClusterBounds(const WorldLights &worldLightsRef,
+                                                   float outMins[3],
+                                                   float outMaxs[3],
+                                                   bool &outAnyFinite) const
+{
+    for (int a = 0; a < 3; a++)
+    {
+        outMins[a] = std::numeric_limits<float>::max();
+        outMaxs[a] = -std::numeric_limits<float>::max();
+    }
+    outAnyFinite = false;
+
+    for (uint32_t c = 1; c < numClusters; c++)
+    {
+        const QrFloat3D &mins = worldLightsRef.GetClusterMin(c);
+        const QrFloat3D &maxs = worldLightsRef.GetClusterMax(c);
+        if (!IsFiniteClusterBox(mins, maxs))
+            continue;
+        outAnyFinite = true;
+        for (int a = 0; a < 3; a++)
+        {
+            outMins[a] = std::min(outMins[a], mins.data[a]);
+            outMaxs[a] = std::max(outMaxs[a], maxs.data[a]);
+        }
+    }
+}
+
+void ClusterLightLists::CollectUnboundedAndGridCounts(const WorldLights &worldLightsRef,
+                                                      std::vector<uint32_t> &counts)
+{
+    for (uint32_t c = 1; c < numClusters; c++)
+    {
+        const QrFloat3D &mins = worldLightsRef.GetClusterMin(c);
+        const QrFloat3D &maxs = worldLightsRef.GetClusterMax(c);
+        if (!IsFiniteClusterBox(mins, maxs))
+        {
+            unboundedClusters.push_back(c);
+            continue;
+        }
+        int lo[3], hi[3];
+        if (ComputeClusterCellRange(mins, maxs, clusterGridMins, clusterGridInvCell, lo, hi) > 512u)
+        {
+            unboundedClusters.push_back(c);
+            continue;
+        }
+        for (int z = lo[2]; z <= hi[2]; z++)
+            for (int y = lo[1]; y <= hi[1]; y++)
+                for (int x = lo[0]; x <= hi[0]; x++)
+                    counts[ClusterGridCellIndex(x, y, z)]++;
+    }
+}
+
+void ClusterLightLists::FillClusterGridEntries(const WorldLights &worldLightsRef,
+                                               std::vector<uint32_t> &cursor)
+{
+    for (uint32_t c = 1; c < numClusters; c++)
+    {
+        const QrFloat3D &mins = worldLightsRef.GetClusterMin(c);
+        const QrFloat3D &maxs = worldLightsRef.GetClusterMax(c);
+        if (!IsFiniteClusterBox(mins, maxs))
+            continue;
+        int lo[3], hi[3];
+        if (ComputeClusterCellRange(mins, maxs, clusterGridMins, clusterGridInvCell, lo, hi) > 512u)
+            continue;
+        for (int z = lo[2]; z <= hi[2]; z++)
+            for (int y = lo[1]; y <= hi[1]; y++)
+                for (int x = lo[0]; x <= hi[0]; x++)
+                {
+                    const size_t cell = ClusterGridCellIndex(x, y, z);
+                    clusterGridEntries[cursor[cell]++] = c;
+                }
+    }
+}
+
+void ClusterLightLists::PopulateClusterSpatialGrid(const WorldLights &worldLightsRef)
+{
+    constexpr uint32_t kTotalCells = uint32_t(kClusterGridDims[0] * kClusterGridDims[1] * kClusterGridDims[2]);
+    std::vector<uint32_t> counts(kTotalCells, 0);
+    CollectUnboundedAndGridCounts(worldLightsRef, counts);
+
+    clusterGridOffsets.assign(kTotalCells + 1, 0);
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < kTotalCells; i++)
+    {
+        clusterGridOffsets[i] = total;
+        total += counts[i];
+        counts[i] = clusterGridOffsets[i];
+    }
+    clusterGridOffsets[kTotalCells] = total;
+    clusterGridEntries.resize(total);
+
+    FillClusterGridEntries(worldLightsRef, counts);
+}
+
+void ClusterLightLists::BuildClusterSpatialGrid(const WorldLights &worldLightsRef)
+{
+    clusterGridOffsets.clear();
+    clusterGridEntries.clear();
+    unboundedClusters.clear();
+    for (int a = 0; a < 3; a++)
+    {
+        clusterGridMins[a] = 0.0f;
+        clusterGridInvCell[a] = 0.0f;
+    }
+
+    if (numClusters <= 1)
+    {
+        return;
+    }
+
+    float finiteMins[3];
+    float finiteMaxs[3];
+    bool anyFinite = false;
+    ComputeFiniteClusterBounds(worldLightsRef, finiteMins, finiteMaxs, anyFinite);
+
+    if (!anyFinite)
+    {
+        for (uint32_t c = 1; c < numClusters; c++)
+            unboundedClusters.push_back(c);
+        return;
+    }
+
+    for (int a = 0; a < 3; a++)
+    {
+        clusterGridMins[a] = finiteMins[a];
+        const float span = finiteMaxs[a] - finiteMins[a];
+        clusterGridInvCell[a] = span > 1e-4f ? (float(kClusterGridDims[a]) / span) : 0.0f;
+    }
+
+    PopulateClusterSpatialGrid(worldLightsRef);
 }
 
 void ClusterLightLists::ComposeBegin(const WorldLights &worldLightsRef, UserPrint *pUserPrint)
@@ -804,6 +1024,11 @@ void ClusterLightLists::ComposeBegin(const WorldLights &worldLightsRef, UserPrin
 
     bitsWords = std::max(1u, (numSources + 63) / 64);
     slotBits.assign(size_t(numClusters) * bitsWords, 0);
+
+    if (sourceClusters.size() < numSources)
+        sourceClusters.resize(numSources);
+    for (uint32_t li = 0; li < uint32_t(sourceClusters.size()); li++)
+        sourceClusters[li].clear();
 
     if (overflowEnabled)
     {
@@ -1325,13 +1550,44 @@ void ClusterLightLists::HoleSlot(uint32_t cluster, uint32_t slot)
    is then found by walking the fill of the clusters that hold it: a light holds a few hundred
    slots, and this is the only way to find them without keeping a list of them that every
    eviction would have to keep in step. */
+void ClusterLightLists::RecordSourceCluster(uint32_t sourceIndex, uint32_t cluster)
+{
+    if (activeSliceTls != nullptr)
+    {
+        activeSliceTls->sourceClusterAdds.emplace_back(sourceIndex, cluster);
+        return;
+    }
+
+    if (sourceIndex >= sourceClusters.size())
+    {
+        sourceClusters.resize(size_t(sourceIndex) + 1);
+    }
+
+    auto &clustersForSource = sourceClusters[sourceIndex];
+    if (clustersForSource.empty() || clustersForSource.back() != cluster)
+    {
+        clustersForSource.push_back(cluster);
+    }
+}
+
 void ClusterLightLists::VacateSource(uint32_t sourceIndex)
 {
+    if (sourceIndex >= sourceClusters.size() || sourceClusters[sourceIndex].empty())
+    {
+        return;
+    }
+
     const uint32_t word = sourceIndex >> 6;
     const uint64_t bit = 1ull << (sourceIndex & 63);
+    std::vector<uint32_t> &clustersForSource = sourceClusters[sourceIndex];
 
-    for (uint32_t c = 0; c < numClusters; c++)
+    for (uint32_t c : clustersForSource)
     {
+        if (c >= numClusters)
+        {
+            continue;
+        }
+
         if (overflowEnabled)
         {
             UnrecordCandidate(c, sourceIndex);
@@ -1354,13 +1610,7 @@ void ClusterLightLists::VacateSource(uint32_t sourceIndex)
                 continue;
             }
 
-            /* The slot is left holding no light instead of being closed with the last slot of
-               the cluster: every slot of a cluster is an index the shaders sample and read the
-               statistics by, so closing the hole would move another light of the cluster to a
-               different index and re-sample every pixel that reads it. It is filled again by
-               the next light the cluster takes in. */
             HoleSlot(c, s);
-
             break;
         }
 
@@ -1370,6 +1620,8 @@ void ClusterLightLists::VacateSource(uint32_t sourceIndex)
         // the clusters that have to choose again.
         MarkDirty(c);
     }
+
+    clustersForSource.clear();
 }
 
 /* Queues a cluster whose top-up set has to be looked at again on this frame. */
@@ -1503,12 +1755,8 @@ bool ClusterLightLists::UpdateSourceRecords()
 
    Returns false for a frame this cannot be done for, which is a frame the caller composes: one
    the places and the records of the sources do not line up with the lights of the frame for. */
-bool ClusterLightLists::UpdateSourceSetBegin(const WorldLights &worldLightsRef)
+bool ClusterLightLists::ValidateSourceSetIncrementalState(uint32_t added, uint32_t removed, uint32_t changed) const
 {
-    const uint32_t added = stats.addedSources;
-    const uint32_t removed = stats.removedSources;
-    const uint32_t moved = uint32_t(movedIndices.size());
-    const uint32_t changed = added + removed + moved;
     const uint32_t liveSources = uint32_t(prevUidIndex.size());
 
     if (granted.size() != sources.size() || frameToSource.size() != incoming.size() ||
@@ -1528,7 +1776,101 @@ bool ClusterLightLists::UpdateSourceSetBegin(const WorldLights &worldLightsRef)
        it and the ones it brought past them, which is what the comparison above and the two lists
        of places say: a frame that comes out anywhere else is not one the places below can be
        handed on for. */
-    if (liveSources + added != uint32_t(incoming.size()) + removed || changed == 0)
+    return liveSources + added == uint32_t(incoming.size()) + removed && changed != 0;
+}
+
+void ClusterLightLists::MarkClusterGridCellsDirty(const float *origin, float gate, float gateSquared)
+{
+    int lo[3], hi[3];
+    for (int a = 0; a < 3; a++)
+    {
+        const int dim = kClusterGridDims[a];
+        const float inv = clusterGridInvCell[a];
+        if (inv <= 0.0f)
+        {
+            lo[a] = 0;
+            hi[a] = dim - 1;
+        }
+        else
+        {
+            lo[a] = std::clamp(int(std::floor((origin[a] - gate - clusterGridMins[a]) * inv)), 0, dim - 1);
+            hi[a] = std::clamp(int(std::floor((origin[a] + gate - clusterGridMins[a]) * inv)), 0, dim - 1);
+        }
+    }
+
+    for (int z = lo[2]; z <= hi[2]; z++)
+        for (int y = lo[1]; y <= hi[1]; y++)
+            for (int x = lo[0]; x <= hi[0]; x++)
+            {
+                const size_t cell = ClusterGridCellIndex(x, y, z);
+                const uint32_t begin = clusterGridOffsets[cell];
+                const uint32_t end = clusterGridOffsets[cell + 1];
+                for (uint32_t idx = begin; idx < end; idx++)
+                {
+                    const uint32_t c = clusterGridEntries[idx];
+                    if (clusterDirty[c] == 0 && WithinReach(origin, c, gateSquared))
+                    {
+                        MarkDirty(c);
+                    }
+                }
+            }
+
+    for (uint32_t c : unboundedClusters)
+    {
+        if (clusterDirty[c] == 0 && WithinReach(origin, c, gateSquared))
+        {
+            MarkDirty(c);
+        }
+    }
+}
+
+void ClusterLightLists::MarkChangedSourcesDirty(float reach)
+{
+    for (uint32_t i = 0; i < uint32_t(changedIndices.size()); i++)
+    {
+        const uint32_t li = changedIndices[i];
+
+        if (sources[li].cluster == QR_CLUSTER_LIGHT_NO_CLUSTER || sources[li].cluster >= numClusters)
+        {
+            continue; // a light that resolved into no leaf takes part in neither pass
+        }
+
+        const float lightReach = sources[li].reach;
+        const float gate = ((lightReach > 0.0f) ? lightReach : reach) + kSourceMargin;
+        const float gateSquared = gate * gate;
+
+        const float *origin = sources[li].origin;
+        if (!std::isfinite(origin[0]) || !std::isfinite(origin[1]) || !std::isfinite(origin[2]) ||
+            !std::isfinite(gate))
+        {
+            continue;
+        }
+
+        if (!clusterGridOffsets.empty())
+        {
+            MarkClusterGridCellsDirty(origin, gate, gateSquared);
+        }
+        else
+        {
+            for (uint32_t c = 1; c < numClusters; c++)
+            {
+                if (clusterDirty[c] == 0 && WithinReach(origin, c, gateSquared))
+                {
+                    MarkDirty(c);
+                }
+            }
+        }
+    }
+}
+
+bool ClusterLightLists::UpdateSourceSetBegin(const WorldLights &worldLightsRef)
+{
+    const uint32_t added = stats.addedSources;
+    const uint32_t removed = stats.removedSources;
+    const uint32_t moved = uint32_t(movedIndices.size());
+    const uint32_t changed = added + removed + moved;
+
+    if (!ValidateSourceSetIncrementalState(added, removed, changed))
     {
         return false;
     }
@@ -1606,6 +1948,11 @@ bool ClusterLightLists::UpdateSourceSetBegin(const WorldLights &worldLightsRef)
         frameToSource[frameLight] = place;
     }
 
+    if (sourceClusters.size() < sources.size())
+    {
+        sourceClusters.resize(sources.size());
+    }
+
     /* A record is only moved forward by a grant, and only the lights that moved are granted
        again here, so this comes before the grants below and leaves the records of the lights
        that appeared as they were just taken: there is nothing to move forward on a place that
@@ -1668,27 +2015,7 @@ bool ClusterLightLists::UpdateSourceSetBegin(const WorldLights &worldLightsRef)
 
     const double tMark = NowMs();
 
-    for (uint32_t i = 0; i < uint32_t(changedIndices.size()); i++)
-    {
-        const uint32_t li = changedIndices[i];
-
-        if (sources[li].cluster == QR_CLUSTER_LIGHT_NO_CLUSTER || sources[li].cluster >= numClusters)
-        {
-            continue; // a light that resolved into no leaf takes part in neither pass
-        }
-
-        const float lightReach = sources[li].reach;
-        const float gate = ((lightReach > 0.0f) ? lightReach : reach) + kSourceMargin;
-        const float gateSquared = gate * gate;
-
-        for (uint32_t c = 1; c < numClusters; c++)
-        {
-            if (WithinReach(sources[li].origin, c, gateSquared))
-            {
-                MarkDirty(c);
-            }
-        }
-    }
+    MarkChangedSourcesDirty(reach);
 
     stats.markMs = float(NowMs() - tMark);
 
@@ -1785,6 +2112,7 @@ bool ClusterLightLists::AppendSlot(uint32_t cluster, uint32_t sourceIndex, float
                 pSource[s] = sourceIndex;
                 pTopUp[s] = fromTopUp ? 1 : 0;
                 pBits[sourceIndex >> 6] |= 1ull << (sourceIndex & 63);
+                RecordSourceCluster(sourceIndex, cluster);
                 slotHoles[cluster]--;
 
                 if (collectStatsResets)
@@ -1806,6 +2134,7 @@ bool ClusterLightLists::AppendSlot(uint32_t cluster, uint32_t sourceIndex, float
         pSource[fill] = sourceIndex;
         pTopUp[fill] = fromTopUp ? 1 : 0;
         pBits[sourceIndex >> 6] |= 1ull << (sourceIndex & 63);
+        RecordSourceCluster(sourceIndex, cluster);
         slotFill[cluster] = fill + 1;
 
         if (collectStatsResets)
@@ -1860,6 +2189,7 @@ bool ClusterLightLists::AppendSlot(uint32_t cluster, uint32_t sourceIndex, float
 
     pBits[evicted >> 6] &= ~(1ull << (evicted & 63));
     pBits[sourceIndex >> 6] |= 1ull << (sourceIndex & 63);
+    RecordSourceCluster(sourceIndex, cluster);
 
     pUids[farthest] = sources[sourceIndex].uid;
     pDist2[farthest] = dist2;
@@ -1886,6 +2216,7 @@ void ClusterLightLists::RecordCandidate(uint32_t cluster, uint32_t sourceIndex, 
         return;
 
     word |= mask;
+    RecordSourceCluster(sourceIndex, cluster);
 
     const Source &source = sources[sourceIndex];
     const double power = source.power > 0.0f ? double(source.power) : 0.0;
@@ -2007,8 +2338,14 @@ bool ClusterLightLists::BuildTailBlock(uint32_t cluster, float &outBeta)
     tailBlockMarginal.resize(base + tailCandidates.size());
     tailBlockAlias.resize(base + tailCandidates.size());
 
-    if (!RT_Alias_Build(overflowWeights.data(), (int)tailCandidates.size(), tailBlockProb.data() + base,
-                        tailBlockAlias.data() + base))
+    const size_t candidateCount = tailCandidates.size();
+    aliasScaledScratch.resize(candidateCount);
+    aliasSmallScratch.resize(candidateCount);
+    aliasLargeScratch.resize(candidateCount);
+
+    if (!RT_Alias_BuildWithScratch(overflowWeights.data(), (int)candidateCount, tailBlockProb.data() + base,
+                                   tailBlockAlias.data() + base, aliasScaledScratch.data(),
+                                   aliasSmallScratch.data(), aliasLargeScratch.data()))
     {
         tailBlockUids.resize(base);
         tailBlockProb.resize(base);
@@ -2369,7 +2706,8 @@ const uint8_t *ClusterLightLists::GetClusterVis(uint32_t cluster)
 
     if (visState[cluster] == kVisUnknown)
     {
-        const uint8_t *pCompressed = worldLights->GetClusterVis(cluster);
+        size_t remainingBytes = 0;
+        const uint8_t *pCompressed = worldLights->GetClusterVis(cluster, &remainingBytes);
 
         if (pCompressed == nullptr)
         {
@@ -2383,7 +2721,7 @@ const uint8_t *ClusterLightLists::GetClusterVis(uint32_t cluster)
             }
             else
             {
-                DecompressVis(pCompressed, &visRows[size_t(cluster) * rowBytes], rowBytes);
+                DecompressVis(pCompressed, remainingBytes, &visRows[size_t(cluster) * rowBytes], rowBytes);
             }
 
             visState[cluster] = kVisDecoded;

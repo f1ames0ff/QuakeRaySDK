@@ -1,12 +1,34 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <qray/qray.h>
 
-class EditorAssetSource;
+#include "Assets.h"
 
 // How a BSP surface behaves in the renderer, derived from its texture name the
 // same way gl_model.c classifies TEX_SPECIAL surfaces.
@@ -30,6 +52,16 @@ struct EditorTexture
     // Per-texel fullbright mask extracted from Quake palette indices 224..255 (0 or 255).
     std::vector<uint8_t> fullbright;
     bool isExternal = false;
+    bool isEmissiveShader = false;
+    bool isMirrorShader = false;
+    bool isCutoutUnderlay = false;
+    bool isMetallicEnv = false;
+    bool isWetGloss = false;
+    std::vector<uint8_t> roughnessMask;
+    std::vector<uint8_t> metallicMask;
+    float surfaceLightValue = 0.0f;
+    bool hasSurfaceLightColor = false;
+    float surfaceLightColor[3] = { 1.0f, 1.0f, 1.0f };
 };
 
 // One BSP polygon of a surface, kept because a textured area light is built from a face's own
@@ -54,10 +86,119 @@ struct EditorSurface
     int32_t texture = -1;
     std::vector<int32_t> animationFrames;
     EditorSurfaceKind kind = EditorSurfaceKind::Opaque;
+    bool hasAuthoredNormals = false;
+    bool isCutoutUnderlay = false;
     std::vector<QrVertex> vertices;
     std::vector<uint32_t> indices;
     // The polygons the vertices above fan out of, in the order Scene.cpp met them.
     std::vector<EditorSurfaceFace> faces;
+};
+
+enum class EditorWaveType : uint8_t
+{
+    None = 0,
+    Sin,
+    Square,
+    Triangle,
+    Sawtooth,
+    InverseSawtooth,
+    Noise,
+};
+
+enum class EditorTcModType : uint8_t
+{
+    Scale = 0,
+    Scroll,
+    Rotate,
+    Stretch,
+    Turb,
+};
+
+struct EditorTcMod
+{
+    EditorTcModType type = EditorTcModType::Scale;
+    EditorWaveType wave = EditorWaveType::None;
+    float params[4] = {};
+};
+
+enum class EditorColorGen : uint8_t
+{
+    Default = 0,
+    Identity,
+    Vertex,
+    Wave,
+    Entity,
+};
+
+enum class EditorAlphaGen : uint8_t
+{
+    Default = 0,
+    Identity,
+    Vertex,
+    Wave,
+    Entity,
+    LightingSpecular,
+};
+
+struct EditorOverlayStage
+{
+    std::string map;
+    std::vector<std::string> animationMaps;
+    float animationFps = 0.0f;
+    bool clampMap = false;
+    bool isLightmap = false;
+    bool isWhite = false;
+    bool isEnvironment = false;
+    bool alphaTested = false;
+    bool blended = false;
+    bool additive = false;
+    bool filter = false;
+    bool alphaBlend = false;
+    bool invertedAlphaBlend = false;
+    bool darkenDecal = false;
+    QrBlendFactor blendSrc = QR_BLEND_FACTOR_ONE;
+    QrBlendFactor blendDst = QR_BLEND_FACTOR_ZERO;
+    bool hasScale = false;
+    float scale[2] = { 1.0f, 1.0f };
+    std::vector<EditorTcMod> tcMods;
+    EditorColorGen rgbGen = EditorColorGen::Default;
+    EditorWaveType rgbWave = EditorWaveType::None;
+    float rgbWaveBase = 1.0f;
+    float rgbWaveAmplitude = 0.0f;
+    float rgbWavePhase = 0.0f;
+    float rgbWaveFrequency = 0.0f;
+    EditorAlphaGen alphaGen = EditorAlphaGen::Default;
+    EditorWaveType alphaWave = EditorWaveType::None;
+    float alphaWaveBase = 1.0f;
+    float alphaWaveAmplitude = 0.0f;
+    float alphaWavePhase = 0.0f;
+    float alphaWaveFrequency = 0.0f;
+    bool animated = false;
+    bool dynamic = false;
+};
+
+struct EditorOverlaySurface
+{
+    std::string shaderName;
+    bool tracedBase = false;
+    bool cutoutUnderlay = false;
+    bool metallicEnvBase = false;
+    bool twoSided = false;
+    bool autoSprite = false;
+    bool autoSprite2 = false;
+    EditorWaveType deformWave = EditorWaveType::None;
+    float deformSpread = 0.0f;
+    float deformBase = 0.0f;
+    float deformAmplitude = 0.0f;
+    float deformPhase = 0.0f;
+    float deformFrequency = 0.0f;
+    float surfaceLight = 0.0f;
+    size_t baseStageIndex = (std::numeric_limits<size_t>::max)();
+    size_t firstOverlayStage = 0;
+    size_t endOverlayStage = 0;
+    std::vector<EditorOverlayStage> stages;
+    std::vector<QrVertex> vertices;
+    std::vector<uint32_t> indices;
 };
 
 struct EditorLight
@@ -94,6 +235,7 @@ struct EditorLight
     // none of the server's lightstyle strings, and an empty string leaves d_lightstylevalue[]
     // at 256 - which is exactly what a map light without a style renders as.
     int32_t style = 0;
+    bool hasStyle = true;
     std::string className;
     uint64_t emitterUniqueID = 0;
     float modelSizeMeters = 0.0f;
@@ -165,6 +307,7 @@ struct EditorWorldClusters
     std::vector<uint32_t> leafCluster;
     std::vector<uint8_t> visData;
     std::vector<int32_t> visOffsets;
+    std::vector<uint8_t> skyVis;
     uint32_t pvsRowBytes = 0;
     uint32_t numLeafs = 0;
 };
@@ -175,6 +318,7 @@ struct EditorScene
     std::vector<uint32_t> indices;
     std::vector<EditorTexture> textures;
     std::vector<EditorSurface> surfaces;
+    std::vector<EditorOverlaySurface> overlaySurfaces;
     std::vector<EditorLight> lights;
     std::vector<EditorLight> bspLights;
     std::vector<EditorAliasInstance> aliasInstances;
@@ -196,12 +340,20 @@ struct EditorScene
     uint32_t skyLayerHeight = 0;
     bool hasScrollingSky = false;
     std::string skyboxName;
+    std::array<std::vector<uint8_t>, 6> generatedSkyboxFaces;
+    uint32_t generatedSkyboxSize = 0;
     float boundsMin[3] = {};
     float boundsMax[3] = {};
     float cameraPosition[3] = {};
     float cameraYawDegrees = 0.0f;
     bool hasBounds = false;
     bool hasCamera = false;
+    bool usesExternalLightingModel = false;
+    bool hasSun = false;
+    float sunColor[3] = { 1.0f, 0.95f, 0.85f };
+    float sunIntensity = 0.0f;
+    float sunDegrees = 0.0f;
+    float sunElevation = 45.0f;
 };
 
 struct EditorSceneLoadOptions
@@ -225,11 +377,46 @@ bool LoadEditorScene(const std::string &path, const uint8_t *palette768, EditorS
 // moving a light in the panel keeps its world cluster light list correct.
 uint32_t ResolveEditorLightCluster(const EditorScene &scene, const float origin[3]);
 
+struct EditorPreviewModelSection
+{
+    std::string surfaceName;
+    std::string materialName;
+    std::string shaderName;
+    bool alphaTested = false;
+    bool twoSided = false;
+    bool hasAuthoredNormals = true;
+    bool isNonTracedOverlay = false;
+    bool cutoutFrameUnderlay = false;
+    bool usesOverlay = false;
+    bool tracedBase = false;
+    bool metallicEnvBase = false;
+    bool autoSprite = false;
+    bool autoSprite2 = false;
+    EditorWaveType deformWave = EditorWaveType::None;
+    float deformSpread = 0.0f;
+    float deformBase = 0.0f;
+    float deformAmplitude = 0.0f;
+    float deformPhase = 0.0f;
+    float deformFrequency = 0.0f;
+    float surfaceLight = 0.0f;
+    size_t baseStageIndex = (std::numeric_limits<size_t>::max)();
+    std::vector<EditorOverlayStage> stages;
+    std::vector<QrVertex> vertices;
+    std::vector<uint32_t> indices;
+};
+
+struct EditorPreviewModelSkinPreset
+{
+    std::string name;
+    std::unordered_map<std::string, std::string> surfaceMaterials;
+};
+
 struct EditorPreviewModelFrame
 {
     std::string name;
     std::vector<QrVertex> vertices;
     std::vector<uint32_t> indices;
+    std::vector<EditorPreviewModelSection> sections;
     float center[3] = {};
     float radius = 16.0f;
 };
@@ -238,11 +425,64 @@ struct EditorPreviewModel
 {
     std::string path;
     bool holey = false;
+    bool hasMultiSections = false;
     std::vector<EditorTexture> skins;
+    std::vector<EditorPreviewModelSkinPreset> skinPresets;
+    std::vector<EditorTexture> surfaceTextures;
+    std::unordered_set<std::string> hiddenMaterials;
     std::vector<EditorPreviewModelFrame> frames;
 };
+
+struct EditorFormatAdapter
+{
+    std::vector<std::string> extraArchiveExtensions;
+    std::vector<std::string> extraModelExtensions;
+    std::vector<std::string> extraBaseGameDirs;
+    std::vector<std::string> extraModConfigFiles;
+    std::vector<std::string> extraModSubdirs;
+    std::string modDirectoryDescription;
+
+    bool (*canLoadBspMemory)(const std::vector<uint8_t> &bytes) = nullptr;
+    bool (*loadBspSceneMemory)(const std::vector<uint8_t> &bytes, const std::string &sourceName,
+                               EditorScene &scene, std::string &error,
+                               const EditorSceneLoadOptions &options) = nullptr;
+
+    bool (*canLoadPreviewModel)(const std::string &modelPath,
+                                const EditorAssetSource &assets) = nullptr;
+    bool (*loadPreviewModel)(const std::string &modelPath, const EditorAssetSource &assets,
+                             EditorPreviewModel &outModel, std::string &error) = nullptr;
+
+    bool (*shouldHideModelCatalogEntry)(const std::string &lowerPath) = nullptr;
+    void (*postProcessModelCatalog)(std::vector<EditorAssetCatalogEntry> &entries) = nullptr;
+
+    bool (*resolveModelMaterialPrefix)(const std::string &lowerModelPath,
+                                       std::string &outMaterialPrefix) = nullptr;
+    int32_t (*findDefaultPreviewModelIndex)(
+        const std::vector<EditorAssetCatalogEntry> &catalog) = nullptr;
+
+    bool (*loadExternalImageRgba)(const EditorAssetSource *assets, const std::string &requestedPath,
+                                  std::vector<uint8_t> &outRgba, uint32_t &outWidth,
+                                  uint32_t &outHeight, std::string &outResolvedPath) = nullptr;
+};
+
+void RegisterEditorFormatAdapter(const EditorFormatAdapter &adapter);
+const EditorFormatAdapter *GetEditorFormatAdapter();
+
+float EvaluateEditorWaveSigned(EditorWaveType type, float base, float amplitude, float phase,
+                               float frequency, float timeSeconds);
+float EvaluateEditorWave(EditorWaveType type, float base, float amplitude, float phase,
+                         float frequency, float timeSeconds);
+void OffsetEditorVerticesAlongSmoothNormals(std::vector<QrVertex> &vertices,
+                                            const std::vector<uint32_t> &indices, float distance);
+std::string NormalizeEditorAssetPath(std::string_view raw);
+std::string StripEditorImageExtension(std::string_view path);
 
 // Loads an IDPO v6 .mdl alias model from mounted archives into centered local-space preview frames.
 bool LoadEditorAliasModel(const std::string &modelPath, const EditorAssetSource &assets,
                           const uint8_t *palette768, EditorPreviewModel &outModel,
                           std::string &error);
+
+// Loads either an .mdl alias model or an adapter-supported preview model into preview frames.
+bool LoadEditorPreviewModel(const std::string &modelPath, const EditorAssetSource &assets,
+                            const uint8_t *palette768, EditorPreviewModel &outModel,
+                            std::string &error);

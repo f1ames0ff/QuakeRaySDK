@@ -59,39 +59,51 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     origin.xy += sunDir.xy * (params.cloudMarch.w / max(sunDir.z, 1.0e-3));
 
     float dt = layer.thickness / max(sunDir.z, 0.06) / (float)steps;
-    float stepColumn[CLOUD_SHADOW_STEPS];
-    float stepSuffix[CLOUD_SHADOW_STEPS + 1];
     float3 tangent;
     float3 bitangent;
     float sampleStep;
     cloudSunSampleBasis(sunDir, dt, tangent, bitangent, sampleStep);
 
-    for (int i = 0; i < steps; i++)
-    {
-        float at = ((float)i + 0.5) * dt;
-        stepColumn[i] = cloudDensity(
-            layer, cloudSunSample(origin, sunDir, at, tangent, bitangent, sampleStep, i),
-            false) * dt;
-    }
-
-    stepSuffix[steps] = 0.0;
-    for (int i = steps - 1; i >= 0; i--)
-    {
-        stepSuffix[i] = stepSuffix[i + 1] + stepColumn[i];
-    }
-
     uint sizeX, sizeY, slices;
     cloudShadowOut.GetDimensions(sizeX, sizeY, slices);
 
-    for (int k = 0; k < (int)slices; k++)
-    {
-        float height = (float)k / (float)max((int)slices - 1, 1);
-        float partial = clamp(height * (float)steps, 0.0, (float)steps);
-        int first = min((int)floor(partial), steps);
-        float above = first < steps
-            ? stepSuffix[first + 1] + stepColumn[first] * ((float)(first + 1) - partial)
-            : 0.0;
+    int k = (int)slices - 1;
+    const float invSliceSpan = 1.0 / (float)max((int)slices - 1, 1);
 
-        cloudShadowOut[int3(ipos, k)] = cloudOpticalDepth(layer, above);
+    while (k >= 0)
+    {
+        const float partial = ((float)k * invSliceSpan) * (float)steps;
+        const int first = min((int)floor(partial), steps);
+        if (first < steps)
+        {
+            break;
+        }
+        cloudShadowOut[int3(ipos, k)] = 0.0;
+        k--;
+    }
+
+    // Stream top-down with one scalar accumulator to avoid holding 65 prefix/suffix floats in VGPRs.
+    float suffix = 0.0;
+    for (int i = steps - 1; i >= 0; i--)
+    {
+        const float at = ((float)i + 0.5) * dt;
+        const float col = cloudDensity(
+            layer, cloudSunSample(origin, sunDir, at, tangent, bitangent, sampleStep, i),
+            false) * dt;
+
+        while (k >= 0)
+        {
+            const float partial = ((float)k * invSliceSpan) * (float)steps;
+            const int first = min((int)floor(partial), steps);
+            if (first != i)
+            {
+                break;
+            }
+            const float above = suffix + col * ((float)(i + 1) - partial);
+            cloudShadowOut[int3(ipos, k)] = cloudOpticalDepth(layer, above);
+            k--;
+        }
+
+        suffix += col;
     }
 }

@@ -1,12 +1,31 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "EditorGui.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace
 {
@@ -468,7 +487,22 @@ bool EditorGuiCheckbox(const char *label, bool *value, const EditorGuiRowOpts &o
     ImGui::PushID(label);
     BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
-    const bool edited = ImGui::Checkbox("##chk", value);
+    bool editVal = opts.mixed ? false : *value;
+    const bool edited = ImGui::Checkbox("##chk", &editVal);
+    if (opts.mixed && !edited)
+    {
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const ImVec2 qSz = ImGui::CalcTextSize("?");
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(std::round(0.5f * (rMin.x + rMax.x - qSz.x)),
+                   std::round(0.5f * (rMin.y + rMax.y - qSz.y))),
+            ColorImU32(148, 156, 168, 255), "?");
+    }
+    if (edited)
+    {
+        *value = editVal;
+    }
     ImGui::EndDisabled();
     EndTwoColumnRow("##rst_chk", opts);
     ImGui::PopID();
@@ -481,8 +515,25 @@ bool EditorGuiSliderFloat(const char *label, float *value, float minVal, float m
     ImGui::PushID(label);
     BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
-    const char *fmt = opts.format != nullptr ? opts.format : "%.3g";
-    const bool edited = ImGui::SliderFloat("##slf", value, minVal, maxVal, fmt);
+    const char *fmt = opts.mixed ? "?" : (opts.format != nullptr ? opts.format : "%.3g");
+    float editVal = *value;
+    if (opts.mixed)
+    {
+        const float span = std::max(1.0f, std::fabs(maxVal - minVal));
+        editVal = minVal - span * 0.01f;
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorU8(148, 156, 168));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ColorU8(96, 104, 116, 180));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ColorU8(120, 130, 145, 220));
+    }
+    const bool edited = ImGui::SliderFloat("##slf", &editVal, minVal, maxVal, fmt);
+    if (opts.mixed)
+    {
+        ImGui::PopStyleColor(3);
+    }
+    if (edited)
+    {
+        *value = editVal;
+    }
     ImGui::EndDisabled();
     EndTwoColumnRow("##rst_slf", opts);
     ImGui::PopID();
@@ -495,8 +546,25 @@ bool EditorGuiSliderInt(const char *label, int32_t *value, int32_t minVal, int32
     ImGui::PushID(label);
     BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
-    const char *fmt = opts.format != nullptr ? opts.format : "%d";
-    const bool edited = ImGui::SliderInt("##sli", value, minVal, maxVal, fmt);
+    const char *fmt = opts.mixed ? "?" : (opts.format != nullptr ? opts.format : "%d");
+    const int32_t sentinel =
+        (minVal > (std::numeric_limits<int32_t>::min)() / 2) ? (minVal - 1) : (maxVal + 1);
+    int32_t editVal = opts.mixed ? sentinel : *value;
+    if (opts.mixed)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorU8(148, 156, 168));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ColorU8(96, 104, 116, 180));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ColorU8(120, 130, 145, 220));
+    }
+    const bool edited = ImGui::SliderInt("##sli", &editVal, minVal, maxVal, fmt);
+    if (opts.mixed)
+    {
+        ImGui::PopStyleColor(3);
+    }
+    if (edited)
+    {
+        *value = editVal;
+    }
     ImGui::EndDisabled();
     EndTwoColumnRow("##rst_sli", opts);
     ImGui::PopID();
@@ -510,14 +578,24 @@ bool EditorGuiCombo(const char *label, int32_t *selected, const char *const *ite
     BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
     const int32_t cur = (*selected >= 0 && *selected < itemCount) ? *selected : 0;
-    const char *preview = itemCount > 0 ? items[cur] : "";
+    const char *preview = opts.mixed ? "?" : (itemCount > 0 ? items[cur] : "");
     bool edited = false;
 
-    if (ImGui::BeginCombo("##cmb", preview))
+    if (opts.mixed)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorU8(148, 156, 168));
+    }
+    const bool opened = ImGui::BeginCombo("##cmb", preview);
+    if (opts.mixed)
+    {
+        ImGui::PopStyleColor();
+    }
+
+    if (opened)
     {
         for (int32_t i = 0; i < itemCount; ++i)
         {
-            const bool isSelected = (*selected == i);
+            const bool isSelected = !opts.mixed && (*selected == i);
             if (ImGui::Selectable(items[i], isSelected))
             {
                 *selected = i;
@@ -649,15 +727,57 @@ bool EditorGuiColorRow(const char *id, float rgb[3], const EditorGuiRowOpts &opt
 {
     ImGui::PushID(id);
     ImGui::BeginDisabled(!opts.enabled);
-    bool edited = ImGui::ColorEdit3("##swatch", rgb, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_Float);
+    float swatchRgb[3] = { rgb[0], rgb[1], rgb[2] };
+    if (opts.mixed)
+    {
+        swatchRgb[0] = 0.24f;
+        swatchRgb[1] = 0.26f;
+        swatchRgb[2] = 0.30f;
+    }
+    bool edited = ImGui::ColorEdit3("##swatch", swatchRgb,
+                                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_Float);
+    if (opts.mixed && !edited)
+    {
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const ImVec2 qSz = ImGui::CalcTextSize("?");
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(std::round(0.5f * (rMin.x + rMax.x - qSz.x)),
+                   std::round(0.5f * (rMin.y + rMax.y - qSz.y))),
+            ColorImU32(170, 178, 190, 255), "?");
+    }
+    if (edited)
+    {
+        rgb[0] = swatchRgb[0];
+        rgb[1] = swatchRgb[1];
+        rgb[2] = swatchRgb[2];
+    }
 
     char hex[8] = {};
-    ColorToHex(rgb, hex);
+    if (!opts.mixed)
+    {
+        ColorToHex(rgb, hex);
+    }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(Scaled(84.0f));
-    if (ImGui::InputText("##hex", hex, sizeof(hex),
-                         ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase |
-                             ImGuiInputTextFlags_EnterReturnsTrue))
+    bool hexEdited = false;
+    if (opts.mixed)
+    {
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, ColorU8(148, 156, 168));
+        hexEdited = ImGui::InputTextWithHint(
+            "##hex", "?", hex, sizeof(hex),
+            ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase |
+                ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopStyleColor();
+    }
+    else
+    {
+        hexEdited = ImGui::InputText("##hex", hex, sizeof(hex),
+                                     ImGuiInputTextFlags_CharsHexadecimal |
+                                         ImGuiInputTextFlags_CharsUppercase |
+                                         ImGuiInputTextFlags_EnterReturnsTrue);
+    }
+    if (hexEdited)
     {
         float parsed[3] = {};
         if (HexToColor(hex, parsed))
@@ -673,7 +793,33 @@ bool EditorGuiColorRow(const char *id, float rgb[3], const EditorGuiRowOpts &opt
     return edited;
 }
 
-bool EditorGuiVec3Input(const char *label, float vec[3], float step, const EditorGuiRowOpts &opts)
+namespace
+{
+
+void UpdateMixedAxisTempCommit(ImGuiID dragId, bool axisMixed, ImGuiID &tempDragId,
+                               bool &axisEdited)
+{
+    const bool wasMixedTemp = (tempDragId == dragId);
+    const bool isTempNow = ImGui::TempInputIsActive(dragId);
+    if (axisMixed && isTempNow)
+    {
+        tempDragId = dragId;
+        return;
+    }
+    if (wasMixedTemp && !isTempNow)
+    {
+        tempDragId = 0;
+        const bool enterPressed = ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                                  ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+        if (axisMixed && !axisEdited && ImGui::IsItemDeactivated() && enterPressed)
+        {
+            axisEdited = true;
+        }
+    }
+}
+
+bool DrawVec3AxisInput(int axis, float &value, float step, float itemW,
+                       const EditorGuiRowOpts &opts)
 {
     static constexpr const char *kAxisNames[3] = { "X", "Y", "Z" };
     static constexpr ImU32 kAxisColors[3] = {
@@ -681,6 +827,52 @@ bool EditorGuiVec3Input(const char *label, float vec[3], float step, const Edito
         IM_COL32(104, 212, 114, 255),
         IM_COL32(98, 162, 240, 255),
     };
+
+    const bool axisMixed = opts.mixedAxisMask != 0
+                               ? ((opts.mixedAxisMask & uint8_t(1u << axis)) != 0)
+                               : opts.mixed;
+    ImGui::PushID(axis);
+    ImGui::PushStyleColor(ImGuiCol_Text, kAxisColors[axis]);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(kAxisNames[axis]);
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0.0f, Scaled(3.0f));
+    ImGui::SetNextItemWidth(itemW);
+
+    const ImGuiID dragId = ImGui::GetID("##v");
+    static ImGuiID s_mixedTempDragId = 0;
+    float editVal = value;
+    if (axisMixed)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorU8(148, 156, 168));
+    }
+    bool axisEdited =
+        ImGui::DragFloat("##v", &editVal, step, 0.0f, 0.0f, axisMixed ? "?" : "%.2f");
+    if (axisMixed)
+    {
+        ImGui::PopStyleColor();
+    }
+    UpdateMixedAxisTempCommit(dragId, axisMixed, s_mixedTempDragId, axisEdited);
+    if (axisEdited)
+    {
+        value = editVal;
+        if (opts.editedAxisMask != nullptr)
+        {
+            *opts.editedAxisMask |= uint8_t(1u << axis);
+        }
+    }
+    ImGui::PopID();
+    return axisEdited;
+}
+
+} // namespace
+
+bool EditorGuiVec3Input(const char *label, float vec[3], float step, const EditorGuiRowOpts &opts)
+{
+    if (opts.editedAxisMask != nullptr)
+    {
+        *opts.editedAxisMask = 0;
+    }
 
     ImGui::PushID(label);
     BeginTwoColumnRow(label, opts, 0.0f);
@@ -697,15 +889,7 @@ bool EditorGuiVec3Input(const char *label, float vec[3], float step, const Edito
         {
             ImGui::SameLine();
         }
-        ImGui::PushID(axis);
-        ImGui::PushStyleColor(ImGuiCol_Text, kAxisColors[axis]);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(kAxisNames[axis]);
-        ImGui::PopStyleColor();
-        ImGui::SameLine(0.0f, Scaled(3.0f));
-        ImGui::SetNextItemWidth(itemW);
-        edited |= ImGui::DragFloat("##v", &vec[axis], step, 0.0f, 0.0f, "%.2f");
-        ImGui::PopID();
+        edited |= DrawVec3AxisInput(axis, vec[axis], step, itemW, opts);
     }
     ImGui::EndDisabled();
 

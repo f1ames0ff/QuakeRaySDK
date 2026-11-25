@@ -51,8 +51,13 @@ public:
     void PreprocessVertices(VkCommandBuffer cmd, uint32_t frameIndex,
                             const std::shared_ptr<GlobalUniform> &uniform,
                             const ShVertPreprocessing &push);
+    uint32_t GetVertexPreprocessingMode() const;
+    void ConsumeStaticSubmittedFlag() { submittedStaticInCurrentFrame = false; }
 
     bool Upload(uint32_t frameIndex, const QrGeometryUploadInfo &uploadInfo);
+    bool UploadWithBounds(uint32_t frameIndex, const QrGeometryUploadInfo &uploadInfo,
+                          bool localAabbInitialized, const float localMin[3], const float localMax[3]);
+    void RecordBoundsScan(uint64_t durationNs, uint32_t vertexCount);
     bool UpdateTransform(const QrUpdateTransformInfo &updateInfo);
     bool UpdateTexCoords(const QrUpdateTexCoordsInfo &texCoordsInfo);
 
@@ -87,8 +92,6 @@ void FlushDeferredLightUploads();
 private:
     bool TryGetStaticSimpleIndex(uint64_t uniqueID, uint32_t *result) const;
 
-    uint32_t GetVertexPreprocessingMode() const;
-
 private:
     std::shared_ptr<ASManager> asManager;
     std::shared_ptr<LightManager> lightManager;
@@ -102,8 +105,7 @@ private:
     std::atomic<uint64_t> boundsScanCalls{0};
     std::atomic<uint64_t> boundsScanVerts{0};
 
-    std::vector<uint32_t> movableGeomIndices;
-    bool toResubmitMovable;
+    std::vector<uint8_t> isMovableSimpleIndex;
 
     bool isRecordingStatic;
     bool submittedStaticInCurrentFrame;

@@ -436,12 +436,14 @@ void RhiBloomPass::Render(nvrhi::ICommandList *pCommandList,
 
     Target &target = targets[frameIndex];
     const bool quarterBase = settings.quality == 0;
+    const uint32_t maxLevels = QualityToMaxLevels(settings.quality);
 
-    if (target.width != width || target.height != height || target.quarterBase != quarterBase)
+    if (target.width != width || target.height != height ||
+        target.quarterBase != quarterBase || target.maxLevels != maxLevels)
     {
         ReleaseTarget(target);
 
-        if (!CreateTarget(target, width, height, quarterBase))
+        if (!CreateTarget(target, width, height, quarterBase, maxLevels))
         {
             LogMessage(print, "Warning: RHI: failed to create the bloom pass targets");
             return;
@@ -453,10 +455,13 @@ void RhiBloomPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
-    const uint32_t maxLevels = QualityToMaxLevels(settings.quality);
-    const uint32_t requestedLevels = ComputeLevelCount(settings.radius, width, height, maxLevels);
+    const float safeRadius = std::isfinite(settings.radius) ? settings.radius : 1.0f;
+    const float safeScatter = std::isfinite(settings.scatter) ? settings.scatter : 0.7f;
+    const float safeThreshold = std::isfinite(settings.threshold) ? std::max(settings.threshold, 0.0f) : 1.0f;
+    const float safeKnee = std::isfinite(settings.knee) ? std::max(settings.knee, 0.0f) : 0.5f;
+    const uint32_t requestedLevels = ComputeLevelCount(safeRadius, width, height, maxLevels);
     const uint32_t levelCount = std::min(std::max(requestedLevels, 1u), target.downCount);
-    const float decay = std::clamp(settings.scatter, 0.0f, 1.0f);
+    const float decay = std::clamp(safeScatter, 0.0f, 1.0f);
     const float normalization = decay >= 1.0f
         ? 1.0f / static_cast<float>(levelCount)
         : (1.0f - decay) / (1.0f - std::pow(decay, static_cast<float>(levelCount)));
@@ -464,89 +469,86 @@ void RhiBloomPass::Render(nvrhi::ICommandList *pCommandList,
     pCommandList->beginTrackingTextureState(pHdrSource, nvrhi::AllSubresources,
                                             nvrhi::ResourceStates::UnorderedAccess);
 
-    if (quarterBase)
+    RecordDownsamplePyramid(pCommandList, frameIndex, target, levelCount, safeThreshold, safeKnee);
+    RecordUpsamplePyramid(pCommandList, frameIndex, target, levelCount, decay, normalization);
+
+    pCommandList->setTextureState(pHdrSource, nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::UnorderedAccess);
+}
+
+void RhiBloomPass::RecordDownsamplePyramid(nvrhi::ICommandList *pCommandList,
+                                           uint32_t frameIndex,
+                                           const Target &target,
+                                           uint32_t levelCount,
+                                           float threshold,
+                                           float knee)
+{
+    if (target.quarterBase)
     {
         DispatchDownsample(pCommandList, frameIndex, target.sourceSet, target.scratch.uavSet,
                            target.scratch.texture->getDesc().width, target.scratch.texture->getDesc().height,
-                           true, settings.threshold, settings.knee);
+                           true, threshold, knee);
         DispatchDownsample(pCommandList, frameIndex, target.scratch.srvSet, target.down[0].uavSet,
                            target.down[0].texture->getDesc().width, target.down[0].texture->getDesc().height,
-                           false, settings.threshold, settings.knee);
+                           false, threshold, knee);
     }
     else
     {
         DispatchDownsample(pCommandList, frameIndex, target.sourceSet, target.down[0].uavSet,
                            target.down[0].texture->getDesc().width, target.down[0].texture->getDesc().height,
-                           true, settings.threshold, settings.knee);
+                           true, threshold, knee);
     }
 
     for (uint32_t i = 1; i < levelCount; i++)
     {
         DispatchDownsample(pCommandList, frameIndex, target.down[i - 1].srvSet, target.down[i].uavSet,
                            target.down[i].texture->getDesc().width, target.down[i].texture->getDesc().height,
-                           false, settings.threshold, settings.knee);
+                           false, threshold, knee);
     }
+}
 
+void RhiBloomPass::RecordUpsamplePyramid(nvrhi::ICommandList *pCommandList,
+                                         uint32_t frameIndex,
+                                         const Target &target,
+                                         uint32_t levelCount,
+                                         float decay,
+                                         float normalization)
+{
     if (levelCount == 1)
     {
         DispatchUpsample(pCommandList, frameIndex, target.down[0].srvSet, target.down[0].srvSet,
                          target.result.uavSet, target.result.texture->getDesc().width,
-                         target.result.texture->getDesc().height, !quarterBase, 0.0f, normalization);
+                         target.result.texture->getDesc().height, !target.quarterBase, 0.0f, normalization);
+        return;
     }
-    else
+
+    for (int32_t i = static_cast<int32_t>(levelCount) - 2; i >= 0; i--)
     {
-        for (int32_t i = static_cast<int32_t>(levelCount) - 2; i >= 0; i--)
-        {
-            nvrhi::IBindingSet *pCoarseSet = i == static_cast<int32_t>(levelCount) - 2
-                ? target.down[levelCount - 1].srvSet
-                : target.up[i + 1].srvSet;
+        nvrhi::IBindingSet *pCoarseSet = i == static_cast<int32_t>(levelCount) - 2
+            ? target.down[levelCount - 1].srvSet
+            : target.up[i + 1].srvSet;
 
-            nvrhi::IBindingSet *pDestinationSet = nullptr;
-            uint32_t destinationWidth = 0;
-            uint32_t destinationHeight = 0;
+        const bool writeFinal = (i == 0 && !target.quarterBase);
+        const Level &dstLevel = writeFinal ? target.result : target.up[i];
+        const float stepNormalization = writeFinal ? normalization : 1.0f;
 
-            if (i == 0)
-            {
-                if (quarterBase)
-                {
-                    pDestinationSet = target.up[0].uavSet;
-                    destinationWidth = target.up[0].texture->getDesc().width;
-                    destinationHeight = target.up[0].texture->getDesc().height;
-                }
-                else
-                {
-                    pDestinationSet = target.result.uavSet;
-                    destinationWidth = target.result.texture->getDesc().width;
-                    destinationHeight = target.result.texture->getDesc().height;
-                }
-            }
-            else
-            {
-                pDestinationSet = target.up[i].uavSet;
-                destinationWidth = target.up[i].texture->getDesc().width;
-                destinationHeight = target.up[i].texture->getDesc().height;
-            }
-
-            const float stepNormalization = (i == 0 && !quarterBase) ? normalization : 1.0f;
-
-            DispatchUpsample(pCommandList, frameIndex, target.down[i].srvSet, pCoarseSet, pDestinationSet,
-                             destinationWidth, destinationHeight, true, decay, stepNormalization);
-        }
-
-        if (quarterBase)
-        {
-            DispatchUpsample(pCommandList, frameIndex, target.down[0].srvSet, target.up[0].srvSet,
-                             target.result.uavSet, target.result.texture->getDesc().width,
-                             target.result.texture->getDesc().height, false, 0.0f, normalization);
-        }
+        DispatchUpsample(pCommandList, frameIndex, target.down[i].srvSet, pCoarseSet, dstLevel.uavSet,
+                         dstLevel.texture->getDesc().width, dstLevel.texture->getDesc().height,
+                         true, decay, stepNormalization);
     }
 
-    pCommandList->setTextureState(pHdrSource, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::UnorderedAccess);
+    if (target.quarterBase)
+    {
+        DispatchUpsample(pCommandList, frameIndex, target.down[0].srvSet, target.up[0].srvSet,
+                         target.result.uavSet, target.result.texture->getDesc().width,
+                         target.result.texture->getDesc().height, false, 0.0f, normalization);
+    }
 }
 
-bool RhiBloomPass::CreateTarget(Target &target, uint32_t width, uint32_t height, bool quarterBase)
+bool RhiBloomPass::CreateTarget(Target &target, uint32_t width, uint32_t height, bool quarterBase,
+                                uint32_t maxLevels)
 {
+    const uint32_t cappedLevels = std::min(std::max(maxLevels, 1u), MAX_LEVELS);
     const uint32_t halfWidth = std::max(1u, (width + 1) / 2);
     const uint32_t halfHeight = std::max(1u, (height + 1) / 2);
     const uint32_t baseWidth = quarterBase ? std::max(1u, (halfWidth + 1) / 2) : halfWidth;
@@ -558,7 +560,7 @@ bool RhiBloomPass::CreateTarget(Target &target, uint32_t width, uint32_t height,
     uint32_t levelWidth = baseWidth;
     uint32_t levelHeight = baseHeight;
 
-    while (count < MAX_LEVELS)
+    while (count < cappedLevels)
     {
         sizesX[count] = levelWidth;
         sizesY[count] = levelHeight;
@@ -612,6 +614,7 @@ bool RhiBloomPass::CreateTarget(Target &target, uint32_t width, uint32_t height,
     target.width = width;
     target.height = height;
     target.quarterBase = quarterBase;
+    target.maxLevels = maxLevels;
 
     return true;
 }
@@ -786,6 +789,7 @@ void RhiBloomPass::ReleaseTarget(Target &target)
     target.width = 0;
     target.height = 0;
     target.quarterBase = false;
+    target.maxLevels = 0;
     target.downCount = 0;
 }
 
@@ -817,5 +821,6 @@ void RhiBloomPass::ClearTarget(Target &target)
     target.width = 0;
     target.height = 0;
     target.quarterBase = false;
+    target.maxLevels = 0;
     target.downCount = 0;
 }

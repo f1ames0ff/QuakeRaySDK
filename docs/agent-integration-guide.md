@@ -6,50 +6,139 @@ This document is the end-to-end engineering playbook distilled from integrating 
 
 ---
 
-## Architecture & Strict Responsibility Boundaries
+## Architecture, Strict Responsibility Boundaries & Single Shared Scene Pipeline
 
-`QuakeRaySDK` is a source-level Vulkan/NVRHI ray-tracing renderer plus a generic scene/material/light authoring shell (`quakerayeditor`). It intentionally excludes game-specific map/model/shader parsers, filesystem VFS glue, and game logic.
+`QuakeRaySDK` is a source-level Vulkan/NVRHI ray-tracing renderer plus a reusable, engine-neutral scene runtime and authoring shell (`editor/`). It intentionally excludes game-specific map/model/shader parsers, engine VFS implementations, and gameplay simulation.
+
+Crucially, **both `quakerayeditor` and the host game runtime renderer (`renderer_qray`) MUST run through one single shared static scene pipeline (`EditorSceneRuntime`) and one single host format adapter (`EditorFormatAdapter`)**. Never implement parallel BSP loaders, material bakers, DTAL builders, light-cluster uploaders, YAML session readers, or sky/overlay pipelines separately for the editor and the game!
 
 ```text
-+-------------------------------------------------------------------+
-| Host Engine Repository (e.g. ioq3-rt)                             |
-|                                                                   |
-|  1. Runtime Renderer Bridge (e.g. code/rendererqray/qray_host.cpp)|
-|     - CMake links qray::renderer                                  |
-|     - Converts Quake units -> meters, maps BSP clusters (+1),     |
-|       uploads world geometry, brush submodels, overlays, HUD,     |
-|       sky, entities & dlights                                     |
-|                                                                   |
-|  2. Game-Specific Editor Adapter (code/rendererqray/editor/)      |
-|     - Q3EditorAdapter.*, Q3Bsp.*, Q3Shader.*, Q3Model.*           |
-|     - Injected into quakerayeditor via CMake variables:           |
-|       QR_EDITOR_ADAPTER_SOURCES & QR_EDITOR_ADAPTER_INCLUDE_DIRS  |
-+---------------------------------+---------------------------------+
-                                  |  Links qray::renderer / compiles against editor/Scene.h
-                                  v
-+-------------------------------------------------------------------+
-| QuakeRaySDK (submodule at e.g. code/quakeraysdk)                  |
-|                                                                   |
-|  - Include/qray/qray.h          (normative C ABI)                 |
-|  - Include/qray/host_contract.h (C++20 contracts)                 |
-|  - Include/qray/gpu_context.h   (shared NVRHI/Vulkan device API)  |
-|  - Source/                      (Vulkan/NVRHI RT backend + FFX)   |
-|  - editor/                      (generic UI, viewport, picking,   |
-|                                  gizmos, YAML session, bakes,     |
-|                                  baseline BSP29/OBJ/MDL loader,   |
-|                                  EditorFormatAdapter hook slot)   |
-+-------------------------------------------------------------------+
++-------------------------------------------------------------------------+
+| Host Engine Repository (e.g. ioq3-rt)                                   |
+|                                                                         |
+|  1. Single Game Format Adapter (code/rendererqray/editor/)              |
+|     - Q3EditorAdapter.*, Q3Bsp.*, Q3Shader.*, Q3Model.*                 |
+|     - Compiled into quakerayeditor (QR_EDITOR_ADAPTER_SOURCES)          |
+|       AND compiled into renderer_qray (identical static parsing)        |
+|                                                                         |
+|  2. Thin Runtime Dynamics Layer (code/rendererqray/qray_host.cpp)       |
+|     - Hooks live engine VFS via EditorAssetSource::SetVfsCallbacks      |
+|     - Calls EditorSceneRuntime for ALL static world / authored state    |
+|     - Layers ONLY runtime dynamics on top:                              |
+|       * Dynamic MD3 / character entities + ResolveDynamicMaterial       |
+|       * Moving inline brush submodels (*1..*N via qrUpdateGeometryTransform)|
+|       * Dynamic mesh DTAL via BuildEditorDynamicMeshAreaLights          |
+|       * Sprites, beams, decals, smoke, dlights (EditorClusterLightUploadExtras)|
+|       * 2D HUD / console / menu quads (SWAPCHAIN)                       |
++------------------------------------+------------------------------------+
+                                     |  Calls EditorSceneRuntime & links qray::renderer
+                                     v
++-------------------------------------------------------------------------+
+| QuakeRaySDK (submodule at e.g. code/quakeraysdk)                        |
+|                                                                         |
+|  - editor/ Shared Scene Pipeline Layer (NO UI dependencies):            |
+|      EditorSceneRuntime.{h,cpp}  | EditorDtalPipeline.{h,cpp}           |
+|      EditorOverlayPipeline.{h,cpp} | EditorSession.{h,cpp}              |
+|      EditorMaterial.{h,cpp}      | EditorSettings.{h,cpp}               |
+|      EditorSpatial.{h,cpp}       | EditorLightSelection.{h,cpp}         |
+|      Scene.{h,cpp}               | Assets.{h,cpp} (+ EditorAssetVfsCallbacks)|
+|  - editor/ UI Shell: EditorApp, EditorPanels, EditorGui, EditorViewport |
+|      (uses the exact same EditorSceneRuntime via m_runtime)             |
+|  - Include/qray/{qray.h,host_contract.h,gpu_context.h} + Source/ RT core|
++-------------------------------------------------------------------------+
 ```
 
 ### Decision Matrix: Where Does a Change Belong?
 
 | Change Description | Target Repository | Why |
 |---|---|---|
-| Ray-tracing pipeline, denoiser, NVRHI pass, public `qray.h` C ABI | **QuakeRaySDK** | Core SDK responsibility. |
-| Generic `quakerayeditor` UI, marquee selection, viewport gizmos, YAML session read/write rules, `EditorMaterialBakes`, AI texture generation button, `EditorFormatAdapter` hook fields | **QuakeRaySDK** | Shared across all engines using `quakerayeditor`. |
-| Runtime conversion (`qray_host.cpp`, window integration, entity/submodel transforms, game PVS/light style bridge) | **Host Engine Repo** | Specific to host engine structs, cvars, and client/server state. |
-| `IBSP` v46 / `.shader` / `.md3` / `.skin` / `.pk3` or `IBSP` v38 / `.wal` / `.md2` loaders and `EditorFormatAdapter` registration (`Q3EditorAdapter.*`, `Q3Bsp.*`, etc.) | **Host Engine Repo** | Game format knowledge must never leak into `QuakeRaySDK`. |
-| Hardcoded game model filters (e.g. `flame.mdl flame2.mdl`) or Quake 3 paths inside `QuakeRaySDK/editor/` | **Rejected everywhere** | Violates engine neutrality and breaks user light management. |
+| Ray-tracing pipeline, denoiser, NVRHI pass, public `qray.h` C ABI | **QuakeRaySDK** (`Source/`, `Include/`) | Core SDK responsibility. |
+| Static world upload, material overrides/bakes, DTAL clipping/building, light cluster uploads, world overlays, sky/sun upload, `qray.materials.yaml`/`qray.lights.yaml` semantics, meter conversion (`EditorDrawFrame`), generic `quakerayeditor` UI/gizmos | **QuakeRaySDK** (`editor/` shared runtime or UI shell) | Shared once by BOTH `quakerayeditor` and the runtime host renderer so visual output is 1-to-1 by construction. |
+| `IBSP` v46 / `.shader` / `.md3` / `.skin` / `.pk3` or `IBSP` v38 / `.wal` / `.md2` loaders and `EditorFormatAdapter` registration (`Q3EditorAdapter.*`, `Q3Bsp.*`, etc.) | **Host Engine Repo** (single adapter) | Game format knowledge never leaks into `QuakeRaySDK`, and sharing one adapter prevents editor/runtime drift. |
+| Host VFS callbacks (`SetVfsCallbacks`), live entity/MD3 transforms, moving brush submodels (`*1..*N`), weapon/explosion `dlights`, particles, decals, 2D HUD | **Host Engine Repo** (`qray_host.cpp`) | Specific to runtime game simulation and client frames. |
+| Parallel host-side static BSP/material/DTAL/light/sky pipeline duplicating `EditorSceneRuntime`, or hardcoded game filters (`flame.mdl flame2.mdl`) in `QuakeRaySDK/editor/` | **Rejected everywhere** | Causes silent visual divergence between editor and game and doubles maintenance cost. |
+
+---
+
+## Single Shared Static Scene Pipeline (Mandatory Zero-Duplication Pattern)
+
+Before writing host runtime code (`qray_host.cpp`), understand the exact split introduced to keep `quakerayeditor` and the game renderer **100% identical on every static map element, material, light, DTAL emitter, overlay, and sky**:
+
+### 1. Compile the Exact Same Shared Core into Both Targets
+In the host CMake (reference: `ioq3-rt/cmake/renderer_qray.cmake`), compile the UI-free shared modules from `QuakeRaySDK/editor/` **and** your host format adapter sources into BOTH:
+1. `quakerayeditor` (via `QR_EDITOR_ADAPTER_SOURCES` / `QR_EDITOR_ADAPTER_INCLUDE_DIRS` — `QuakeRaySDK/editor/CMakeLists.txt` already includes all shared modules), AND
+2. Your runtime renderer target (`renderer_qray`) and parity test target (`qray_authored_tests`):
+   - `Q3EditorAdapter.cpp`, `Q3Bsp.cpp`, `Q3Model.cpp`, `Q3Shader.cpp` (host adapter)
+   - `EditorSession.cpp`, `EditorMaterial.cpp`, `EditorSettings.cpp`, `EditorSpatial.cpp`
+   - `EditorOverlayPipeline.cpp`, `EditorDtalPipeline.cpp`, `EditorSceneRuntime.cpp`
+   - `EditorLightSelection.cpp`, `Scene.cpp`, `Assets.cpp`
+
+Notice that none of those shared runtime files include Dear ImGui, X11, or Win32 windowing — only `EditorApp` / `EditorPanels` / `EditorGui` / `EditorUi` / `EditorPlatform*` depend on GUI libraries.
+
+### 2. Hook Live Engine VFS Instead of Writing a Second Asset Loader
+At map init, mount game/mod directories into `EditorAssetSource` **and** bind the host engine's VFS via `EditorAssetSource::SetVfsCallbacks(EditorAssetVfsCallbacks)` (`exists`, `readFile`, `listFiles`):
+- `quakerayeditor` resolves assets from loose directories + `.pak`/`.pk3` archives.
+- The game runtime (`renderer_qray`) automatically falls back to the active engine VFS (`FS_ReadFile` / pack order / pure checks) through the exact same `EditorAssetSource` API without duplicating any loader logic.
+
+### 3. Call Sequence Shared by Editor & Runtime (`EditorSceneRuntime`)
+
+Both `EditorApp` (`m_runtime`) and `qray_host.cpp` (`sceneRuntime`) drive map loading and per-frame scene uploads through the same methods on `EditorSceneRuntime`:
+
+```cpp
+// --- Map Load (Identical sequence in EditorApp and qray_host.cpp) ---
+sceneRuntime.DestroyGpuResources(qrayInstance);
+
+EditorSceneLoadOptions loadOpts;
+loadOpts.assets = &gameAssets;
+// Editor uses default (true) to bake doors/platforms statically;
+// Runtime sets false because the server updates *1..*N brush submodels dynamically.
+loadOpts.includeInlineSubmodels = false;
+sceneRuntime.LoadBspSceneMemory(bspBytes, mapName, nullptr, loadOpts, error);
+
+sceneRuntime.materials.Rebuild(sceneRuntime.scene);
+sceneRuntime.settings = EditorRenderSettings{};
+sceneRuntime.sun = EditorSunState{};
+sceneRuntime.ApplySceneRenderDefaults();
+
+// Authored qray.materials.yaml / *.cfg / qray.lights.yaml overrides:
+sceneRuntime.ApplyMaterialsDocuments(activeMaterialsDoc, &baseMaterialsDoc);
+sceneRuntime.ApplyConfigText(cfgText);
+sceneRuntime.ApplyLevelDocument(activeLevelDoc, levelKey);
+
+sceneRuntime.CreateTextureMaterials(qrayInstance, gameAssets, logFn);
+sceneRuntime.UploadStaticGeometry(qrayInstance, gameAssets, fallbackMaterial, logFn);
+// Note: UploadStaticGeometry triggers BuildEmissiveLights(...) cleanly inside EditorSceneRuntime.
+sceneRuntime.UploadWorldClusters(qrayInstance, logFn);
+sceneRuntime.CreateSkyboxMaterials(qrayInstance, gameAssets, logFn);
+sceneRuntime.CreateScrollingSkyMaterials(qrayInstance, gameAssets, logFn);
+```
+
+```cpp
+// --- Per-Frame (Static + Sky/Overlays shared; Runtime layers dynamics on top) ---
+sceneRuntime.UploadSun(qrayInstance, logFn);
+sceneRuntime.UploadLights(qrayInstance, timeSeconds, /*animateLightStyles=*/true, logFn);
+sceneRuntime.UploadEmissiveLights(qrayInstance, timeSecondsF, &frameDynamicEmissiveLights, logFn);
+
+EditorClusterLightUploadExtras extras;
+extras.extraQuakeUnitSources = &dynamicDlightClusterSources;
+extras.extraDynamicEmissiveLights = &frameDynamicEmissiveLights;
+sceneRuntime.UploadClusterLightSources(qrayInstance, &extras, logFn);
+
+sceneRuntime.UploadWorldOverlays(qrayInstance, gameAssets, camBasis, timeSecondsF);
+// ... host uploads moving *1..*N submodels, MD3 models, sprites, beams, decals, smoke ...
+sceneRuntime.UploadSky(qrayInstance, viewerPos, timeSeconds, skyDistance);
+
+sceneRuntime.PopulateDrawFrame(qrayInstance, viewerPos, width, height, frameParams, drawInfo);
+EditorDrawFrame(qrayInstance, &drawInfo); // One unified Quake-unit -> meters boundary
+```
+
+### 4. What Stays Exclusive to the Game Runtime Layer
+The host renderer (`qray_host.cpp`) must **only** own runtime-specific dynamics that do not exist in a static map preview:
+- Moving inline brush submodels (`*1..*N` doors, platforms, trains, rotators updated via `qrUpdateGeometryTransform`).
+- Live animated entities (`RT_MODEL` `.md3` characters/weapons/projectiles): resolve authored material overrides through `sceneRuntime.ResolveDynamicMaterial(...)` and build optional dynamic DTAL emitters through `BuildEditorDynamicMeshAreaLights(...)` so even dynamic models honor `qray.materials.yaml` identically to static brushes!
+- Entities without static presence: sprites (`RT_SPRITE`), beams (`RT_BEAM` / `RT_RAIL_CORE` / `RT_LIGHTNING`), bullet marks/decals, procedural smoke, dynamic weapon/explosion `dlights` passed via `EditorClusterLightUploadExtras`, and 2D `SWAPCHAIN` HUD/console/menus.
+
+> **Hard Rule for Future Agents:** If you fix a bug or add a feature in BSP loading, material baking (`EditorMaterial`), DTAL generation (`EditorDtalPipeline`), shader overlays (`EditorOverlayPipeline`), light persistence (`EditorSession`), sky/sun, or render settings (`EditorSettings`), **put it in the shared layer in `QuakeRaySDK/editor/` or the single host adapter**. Never patch it only in `EditorApp` or only in `qray_host.cpp`.
 
 ---
 
@@ -234,42 +323,47 @@ For complex engines like Quake 3 where a player character is composed of `lower.
 
 Every item below happened in real debugging sessions during the Quake III (`ioq3-rt`) integration. Treat each as a hard invariant.
 
-### Pitfall 1: Mixing Adapter Code into `QuakeRaySDK`
+### Pitfall 1: Duplicating Static Scene, Material, DTAL, or Lighting Pipelines Between Editor and Runtime
+- **Symptom:** The editor (`quakerayeditor`) and the live game (`renderer_qray`) diverge on the exact same map: different DTAL area lights, missing material bakes, missing overlays/cutouts, different sky/sun defaults, or a bug fixed in one target while still broken in the other.
+- **Root Cause:** Building a separate host-side loader/pipeline (e.g. parallel `qray_authored.{h,cpp}` logic parsing `qray.materials.yaml` / `qray.lights.yaml`, building DTAL, or uploading static BSP geometry separately) instead of reusing the editor's pipeline in one shared layer.
+- **Fix:** Never duplicate static world pipelines. Extract UI-free shared logic into `QuakeRaySDK/editor/` (`EditorSceneRuntime`, `EditorDtalPipeline`, `EditorOverlayPipeline`, `EditorSession`, `EditorMaterial`, `EditorSettings`, `EditorSpatial`), compile that shared core + the single host `EditorFormatAdapter` into **both** executables, bridge live game VFS with `EditorAssetSource::SetVfsCallbacks`, set `includeInlineSubmodels = false` for runtime moving brush submodels, and enforce 1-to-1 parity via an automated test (`qray_authored_tests` / `TestSteamQ3Tourney1Parity`).
+
+### Pitfall 2: Mixing Adapter Code into `QuakeRaySDK`
 - **Symptom:** Game-specific loaders (`Q3Bsp.cpp`, `Q3Shader.cpp`, `Q3Model.cpp`, `Q3EditorAdapter.cpp`) get committed inside `QuakeRaySDK/editor/`, polluting SDK PRs with Quake 3 internals.
 - **Root Cause:** Treating `QuakeRaySDK/editor/` as the owner of every game's asset format instead of keeping only the generic adapter hook (`EditorFormatAdapter`) in SDK.
-- **Fix:** Keep all game-specific loaders in the host repo (`ioq3-rt/code/rendererqray/editor/`), build them via `QR_EDITOR_ADAPTER_SOURCES` / `QR_EDITOR_ADAPTER_INCLUDE_DIRS`, and put only generic SDK/UI features in `QuakeRaySDK` PRs.
+- **Fix:** Keep all game-specific loaders in the host repo (`ioq3-rt/code/rendererqray/editor/`), build them via `QR_EDITOR_ADAPTER_SOURCES` / `QR_EDITOR_ADAPTER_INCLUDE_DIRS`, and put only generic SDK/UI features and UI-free shared scene runtime code in `QuakeRaySDK` PRs.
 
-### Pitfall 2: Predefined Surface Lights Without Selection Circles in `Light Editor`
+### Pitfall 3: Predefined Surface Lights Without Selection Circles in `Light Editor`
 - **Symptom:** Lamps, ceiling panels, torches, and jump pads cast real-time ray-traced light in `QuakeRay`, yet have **no cyan selection circle**, do not appear under `Light Editor -> Entity`, and cannot be turned off or deleted.
 - **Root Cause:** Adapter ignored `q3map_surfacelight` brushes or excluded traced surfaces from `scene.lights`, leaving them to DTAL / `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` (`BuildEmissiveLights`). DTAL area lights generated purely from textures do not create `EditorLight` gizmos/entities.
 - **Fix:** Extract **all** predefined map emitters (map entities **and** all `q3map_surfacelight > 0` surfaces/fixtures, clustered per fixture) into `scene.lights` and `scene.bspLights` with valid `className` and cluster, and avoid auto-emitting hidden DTAL/ray-only surface light duplicates when `usesExternalLightingModel` is true.
 
-### Pitfall 3: Hardcoded Model Filters & Deleted Standard Lights Returning on Reload
+### Pitfall 4: Hardcoded Model Filters & Deleted Standard Lights Returning on Reload
 - **Symptom:** Standard map lights were filtered via hardcoded strings like `"flame.mdl flame2.mdl"` into `qray.materials.yaml`, OR deleting all standard lights in `Light Editor` caused every light to reappear on the next map load.
 - **Root Cause:** Filtering by engine-specific model names breaks general engines (Quake 2/Quake 3), and omitting the `lights:` YAML block when `m_scene.lights` is empty makes the loader fall back to BSP defaults instead of honoring user deletions.
 - **Fix:** Never hardcode game model names in `QuakeRaySDK/editor/`. Store all predefined map lights in `scene.lights` / `scene.bspLights`, serialize empty standard lights explicitly as `lights: []` in `qray.lights.yaml`, and reserve BSP reset strictly for explicit `Regenerate from map`.
 
-### Pitfall 4: Multi-Stage Shaders Rendering Black, Double-Dark, or Leaking Sky
+### Pitfall 5: Multi-Stage Shaders Rendering Black, Double-Dark, or Leaking Sky
 - **Symptom:** Launch pads, teleporters, animated monitors, grates, banners, or flames appear black, show opaque black rectangles instead of glow, or show sky through cutout holes.
 - **Root Cause:** Flattening multi-stage shaders to stage 0, keeping lightmap `GL_DST_COLOR GL_ZERO` multiply stages after RT replaced lightmaps, failing to clean black fringes on additive maps (`CleanAdditiveBlackBackground`), or tracing binary alpha cutouts without a backing layer.
 - **Fix:** Separate traced base (`EditorSurface`) from animated/blended overlay stages (`EditorOverlaySurface`), strip lightmap/redundant `DST_COLOR ZERO` stages, offset cutout-underlay backing meshes inward with `OffsetEditorVerticesAlongSmoothNormals`, and use `autoSprite`/`autoSprite2` quads where appropriate.
 
-### Pitfall 5: `std::__ios_failure: Is a directory` Crash on Bare Texture Names
+### Pitfall 6: `std::__ios_failure: Is a directory` Crash on Bare Texture Names
 - **Symptom:** Crash with `basic_filebuf::underflow error reading the file: Is a directory` when resolving a shader/material named e.g. `default` or a directory stem.
 - **Root Cause:** On Linux/POSIX, `std::ifstream` succeeds in *opening* a directory path (such as `./textures/default/`), and only throws when attempting to read bytes from it!
 - **Fix:** Always verify `std::error_code ec; std::filesystem::is_regular_file(candidate, ec)` before opening or reading any candidate path on disk (in `Assets.cpp`, `EditorApp.cpp`, and any host adapter helper).
 
-### Pitfall 6: Stale `EditorMaterialBakes` GPU Cache After In-Place Texture Edits
+### Pitfall 7: Stale `EditorMaterialBakes` GPU Cache After In-Place Texture Edits
 - **Symptom:** Clicking `Generate with AI` or painting procedural masks updates `scene.textures` on CPU (and writes TGA to disk), yet the viewport shows the old flat surface until restarting the editor.
-- **Root Cause:** `EditorMaterialBakes` (`m_materialBakes`, `m_previewMaterialBakes`) caches baked `QrMaterial` handles keyed by texture index (`int32_t albedo/normal/gloss/emissive`) and scalar keys. Mutating an existing `EditorTexture`'s `rgba` bytes in place does not change its index, so `m_materialBakes.Get(...)` returns the stale GPU handle.
-- **Fix:** When replacing or creating a texture in place (`RegisterOrUpdateGeneratedTexture`), destroy the old pool `QrMaterial`, recreate it from the updated pixels, and call `m_materialBakes.Destroy(m_instance)` and `m_previewMaterialBakes.Destroy(m_instance)` before re-uploading static geometry / refreshing preview.
+- **Root Cause:** `EditorMaterialBakes` (`materialBakes` in `EditorSceneRuntime`, `m_previewMaterialBakes` in `EditorApp`) caches baked `QrMaterial` handles keyed by texture index (`int32_t albedo/normal/gloss/emissive`) and scalar keys. Mutating an existing `EditorTexture`'s `rgba` bytes in place does not change its index, so `Get(...)` returns the stale GPU handle.
+- **Fix:** When replacing or creating a texture in place (`RegisterOrUpdateGeneratedTexture`), destroy the old pool `QrMaterial`, recreate it from the updated pixels via `EditorSceneRuntime::CreatePoolMaterial`, and call `m_runtime.materialBakes.Destroy(m_instance)` and `m_previewMaterialBakes.Destroy(m_instance)` before re-uploading static geometry / refreshing preview.
 
-### Pitfall 7: Broken Multi-Part Models & `./` Path Mismatches in `Models` Tab
+### Pitfall 8: Broken Multi-Part Models & `./` Path Mismatches in `Models` Tab
 - **Symptom:** Quake 3 characters show detached torsos/heads, missing skins, or fail to show up in the `Models` browser.
 - **Root Cause:** Zip/PK3 entries or loose filesystem scans with `./models/players/...`, backslash separators, or mixed case miss exact string comparisons, and hiding all `.md3` entries breaks standalone weapon/prop previews.
 - **Fix:** Run `NormalizeEditorAssetPath` consistently on catalog paths and `.skin`/shader lookups; synthesize `<dir>.character` entries only for multi-part directories (`lower.md3`/`upper.md3`/`head.md3`) inside `postProcessModelCatalog`.
 
-### Pitfall 8: Quality Gate Rejections (`check_quality.py --strict-tools`)
+### Pitfall 9: Quality Gate Rejections (`check_quality.py --strict-tools`)
 - **Symptom:** CI fails with `clang-tidy`, `cppcheck`, `lizard`, or `ruff` errors even when the code compiles cleanly.
 - **Fix:** Follow `QuakeRaySDK`'s strict static-analysis rules from the start:
   - **`lizard` limits:** Every modified/added C++ function must stay within `CCN <= 15`, `NLOC <= 120`, `params <= 7`. Split complex parsers/UI panels into small single-purpose helpers and factor test helpers cleanly.
@@ -303,16 +397,17 @@ python3 -B tools/check_quality.py --strict-tools --base origin/main \
     --compile-commands build/local-quality/compile_commands.json
 ```
 
-### 2. Host Engine Build & External Adapter Tests (e.g. `ioq3-rt`)
+### 2. Host Engine Build, Adapter Tests & Editor-vs-Runtime Parity Tests (e.g. `ioq3-rt`)
 ```bash
-# Build host renderer + quakerayeditor + host adapter tests (e.g. qray_q3_editor_adapter_tests)
-cmake --build /path/to/host-build --target renderer_qray quakerayeditor qray_q3_editor_adapter_tests --parallel
+# Build host renderer + quakerayeditor + host adapter & parity tests
+cmake --build /path/to/host-build --target renderer_qray quakerayeditor qray_q3_editor_adapter_tests qray_authored_tests --parallel
 ctest --test-dir /path/to/host-build --output-on-failure -LE gpu
 ```
+Verify that your parity suite (e.g. `qray_authored_tests` / `TestSteamQ3Tourney1Parity`) confirms identical `surfaces`, `worldClusters`, `emissiveLights` (DTAL), `overlaySurfaces`, `lights`, and `skybox` state between the editor and runtime `EditorSceneRuntime` instances on real game maps.
 
-### 3. Live Visual & Session Persistence Smoke Test
-Before declaring an adapter or editor integration finished:
-1. Launch `quakerayeditor --scene <map> --shaders <shaders>` against real game data (`pak0.pk3`, custom maps like `q3dm17`, `q3dm1`).
+### 3. Live Paired Smoke Test (`quakerayeditor` vs Runtime Game Executable)
+Before declaring an adapter or pipeline integration finished:
+1. Launch **both** `quakerayeditor --scene <map> --shaders <shaders>` and the runtime engine on the same real map (`q3tourney1`, `q3dm2`, etc.) and compare startup logs to verify **1-to-1 match** in static BLAS triangles/vertices, surfaces, DTAL area lights, material bakes, cluster count, and skybox faces (with the runtime only adding dynamic BLAS instances for moving submodels/entities).
 2. Verify multi-stage animated surfaces (jump pads, teleporters, banners, grates, flames, chrome) render cleanly with zero black/void cutouts.
-3. Verify predefined lights (`q3map_surfacelight` fixtures and entity lights) show cyan selection circles, can be edited/disabled/deleted, survive **Apply** -> map reload (without resurrecting deleted lights), and restore on **Regenerate from map**.
+3. Verify predefined lights (`q3map_surfacelight` fixtures and entity lights) show cyan selection circles in the editor, can be edited/disabled/deleted, survive **Apply** -> map reload (without resurrecting deleted lights) in **both** editor and runtime, and restore on **Regenerate from map**.
 4. Verify the **Models** tab shows assembled characters with `.skin` switching alongside standalone props.

@@ -82,7 +82,7 @@ float3 decode(int2 pix)
         float3(luma_filter[TAPS], chroma_filter[TAPS], chroma_filter[TAPS]);
 
     float3 rgb = yiq2rgb(signal);
-    return pow(rgb, (float3)(NTSC_CRT_GAMMA / NTSC_MONITOR_GAMMA));
+    return pow(max(rgb, (float3)0.0), (float3)(NTSC_CRT_GAMMA / NTSC_MONITOR_GAMMA));
 }
 
 [numthreads(COMPUTE_EFFECT_GROUP_SIZE_X, COMPUTE_EFFECT_GROUP_SIZE_Y, 1)]

@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <nvrhi/nvrhi.h>
@@ -60,9 +77,15 @@ public:
 
     bool IsCreated() const { return !slots.empty(); }
 
-    // Waits until the queue finished the slot's previous submission, releases everything retired in that
-    // slot, runs NVRHI's garbage collection and opens the slot's command list. Call it where the engine
-    // waits its frame fence - inside the frame's recording, before the first RHI command.
+    // Waits until the queue finished the slot's previous submission and releases everything retired
+    // in that slot. Safe to call before BeginSlot (e.g. in BeginFrame before overwriting per-slot
+    // staging or reading RayStats); BeginSlot then finds the slot already drained and only opens
+    // its command list.
+    void WaitForSlot(uint32_t slot, CpuFrameProfiler *cpuProfiler = nullptr);
+
+    // Waits until the queue finished the slot's previous submission (if not already waited by
+    // WaitForSlot), releases everything retired in that slot, runs NVRHI's garbage collection and
+    // opens the slot's command list.
     void BeginSlot(uint32_t slot, CpuFrameProfiler *cpuProfiler = nullptr);
 
     // The slot's open command list; null unless the slot is between BeginSlot and EndSlot.
@@ -75,6 +98,11 @@ public:
                  VkSemaphore semaphoreToWait = VK_NULL_HANDLE,
                  VkSemaphore semaphoreToSignal = VK_NULL_HANDLE,
                  nvrhi::CommandQueue queue = nvrhi::CommandQueue::Graphics);
+
+    // Closes and submits an open slot without swapchain semaphores when frame rendering aborts after
+    // BeginSlot (so NVRHI runs CommandList::executed(), clears state tracking and retires resources).
+    void AbortSlot(uint32_t slot,
+                   nvrhi::CommandQueue queue = nvrhi::CommandQueue::Graphics);
 
     // Defers the release of a resource until the queue has finished the submission it was used in. The
     // queue takes a reference immediately, so the caller may drop its own handle right after. Before the
@@ -95,8 +123,9 @@ private:
     struct Slot
     {
         nvrhi::CommandListHandle commandList;
-        uint64_t lastSubmissionInstance = 0;
+        nvrhi::EventQueryHandle frameDoneQuery;
         bool hasSubmission = false;
+        bool isOpen = false;
         std::vector<std::function<void()>> retireQueue;
     };
 

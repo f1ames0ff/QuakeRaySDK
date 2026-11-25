@@ -145,12 +145,13 @@ constexpr std::array<FbEntry, 29> kReprojectBindings = {{
     { FB_IMAGE_INDEX_Q2_CLUSTER_PREV, false },
 }};
 
-constexpr std::array<FbEntry, 20> kAdapterBindings = {{
+constexpr std::array<FbEntry, 22> kAdapterBindings = {{
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_S_H, true },
     { FB_IMAGE_INDEX_Q2_COLOR_L_F_C_O_C_G, true },
     { FB_IMAGE_INDEX_Q2_COLOR_H_F, true },
     { FB_IMAGE_INDEX_Q2_COLOR_SPEC, true },
     { FB_IMAGE_INDEX_Q2_COLOR, true },
+    { FB_IMAGE_INDEX_Q2_SSS_DIFFUSE, true },
     { FB_IMAGE_INDEX_ALBEDO, false },
     { FB_IMAGE_INDEX_IS_SKY, false },
     { FB_IMAGE_INDEX_NORMAL, false },
@@ -166,6 +167,7 @@ constexpr std::array<FbEntry, 20> kAdapterBindings = {{
     { FB_IMAGE_INDEX_Q2_TRANSPARENT, false },
     { FB_IMAGE_INDEX_Q2_FOG_ACCUM, false },
     { FB_IMAGE_INDEX_Q2_GRAD_SMPL_POS, false },
+    { FB_IMAGE_INDEX_Q2_SUBSURFACE, false },
 }};
 
 constexpr std::array<FbEntry, 16> kGradImgBindings = {{
@@ -244,7 +246,7 @@ constexpr std::array<FbEntry, 7> kAtrousLfBindings = {{
     { FB_IMAGE_INDEX_Q2_VIEW_DEPTH, false },
 }};
 
-constexpr std::array<FbEntry, 25> kAtrousBindings = {{
+constexpr std::array<FbEntry, 27> kAtrousBindings = {{
     { FB_IMAGE_INDEX_Q2_HIST_COLOR_H_F, true },
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_H_F, true },
     { FB_IMAGE_INDEX_Q2_ATROUS_PONG_H_F, true },
@@ -253,6 +255,7 @@ constexpr std::array<FbEntry, 25> kAtrousBindings = {{
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_MOMENTS, true },
     { FB_IMAGE_INDEX_Q2_ATROUS_PONG_MOMENTS, true },
     { FB_IMAGE_INDEX_Q2_COLOR, true },
+    { FB_IMAGE_INDEX_Q2_SSS_DIFFUSE, true },
     { FB_IMAGE_INDEX_ALBEDO, false },
     { FB_IMAGE_INDEX_IS_SKY, false },
     { FB_IMAGE_INDEX_NORMAL, false },
@@ -270,6 +273,7 @@ constexpr std::array<FbEntry, 25> kAtrousBindings = {{
     { FB_IMAGE_INDEX_Q2_FILTERED_SPEC, false },
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_S_H, false },
     { FB_IMAGE_INDEX_Q2_ATROUS_PING_L_F_C_O_C_G, false },
+    { FB_IMAGE_INDEX_Q2_SUBSURFACE, false },
 }};
 
 constexpr std::array<FbEntry, 21> kPrepareFinalBindings = {{
@@ -915,10 +919,10 @@ PassBundle SynthHarness::BuildPrepareFinalPass(const std::string &spvPath)
         sdesc.addItem(e.isUav ? nvrhi::BindingSetItem::Texture_UAV(slot, fb[e.image])
                               : nvrhi::BindingSetItem::Texture_SRV(slot, fb[e.image]));
     }
-    ldesc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(400));
-    ldesc.addItem(nvrhi::BindingLayoutItem::Sampler(402));
-    sdesc.addItem(nvrhi::BindingSetItem::Texture_SRV(400, bloomDummyTex));
-    sdesc.addItem(nvrhi::BindingSetItem::Sampler(402, clampSampler));
+    ldesc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(500));
+    ldesc.addItem(nvrhi::BindingLayoutItem::Sampler(502));
+    sdesc.addItem(nvrhi::BindingSetItem::Texture_SRV(500, bloomDummyTex));
+    sdesc.addItem(nvrhi::BindingSetItem::Sampler(502, clampSampler));
 
     PassBundle out;
     out.fbLayout = device->createBindingLayout(ldesc);

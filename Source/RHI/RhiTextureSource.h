@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <nvrhi/vulkan.h>
@@ -45,13 +62,19 @@ namespace qray::rhi
 //
 // Returns a null handle if 'device' or the image is null, or if 'width'/'height' is zero, or if
 // 'vkFormat' is one the pinned NVRHI cannot map (including VK_FORMAT_UNDEFINED).
+struct EngineTextureExtent
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t mipLevels = 1;
+};
+
 nvrhi::TextureHandle wrapEngineTexture(nvrhi::IDevice *device,
                                        uint64_t vkImage,
                                        uint32_t vkFormat,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint32_t mipLevels = 1,
-                                       std::string_view debugName = {});
+                                       const EngineTextureExtent &extent,
+                                       std::string_view debugName = {},
+                                       nvrhi::ComponentMapping componentMapping = {});
 
 // Wraps an engine image that is a texture array, i.e. one whose layers a shader addresses as
 // Texture2DArray. The blue-noise image is the first instance: the indirect raygen's set 5 binding 0

@@ -71,7 +71,7 @@ public:
     void ClearStaging(uint32_t frameIndex);
 
     virtual UploadResult UploadImage(const UploadInfo &info);
-    void UpdateImage(VkCommandBuffer cmd, VkImage targetImage, const void *data);
+    void UpdateImage(VkCommandBuffer cmd, uint32_t frameIndex, VkImage targetImage, const void *data);
     void DestroyImage(VkImage image, VkImageView view);
 
     bool CanUpdateImageFromHostData(VkImage image) const;
@@ -94,12 +94,14 @@ protected:
         uint32_t baseWidth, uint32_t baseHeight, uint32_t mipmapCount, uint32_t layerCount);
 
     static void CopyStagingToImage(
-        VkCommandBuffer cmd, VkBuffer staging, VkImage image, const QrExtent2D &size, uint32_t baseLayer, uint32_t layerCount);
+        VkCommandBuffer cmd, VkBuffer staging, VkImage image, const QrExtent2D &size, uint32_t baseLayer, uint32_t layerCount,
+        VkDeviceSize bufferOffset = 0);
     void CopyStagingToImageMipmaps(
         VkCommandBuffer cmd, VkBuffer staging, VkImage image, uint32_t layerIndex, const UploadInfo &info);
 
     bool CreateImage(const UploadInfo &info, VkImage *result);
-    void PrepareImage(VkImage image, VkBuffer staging[], const UploadInfo &info, ImagePrepareType prepareType);
+    void PrepareImage(VkImage image, VkBuffer staging[], const UploadInfo &info, ImagePrepareType prepareType,
+                      const VkDeviceSize *stagingOffsets = nullptr);
     VkImageView CreateImageView( VkImage                             image,
                                  VkFormat                            format,
                                  bool                                isCubemap,
@@ -109,13 +111,13 @@ protected:
 private:
     struct UpdateableImageInfo
     {
-        VkBuffer    stagingBuffer;
-        void        *mappedData;
-        uint32_t    dataSize;
-        QrExtent2D  imageSize;
-        bool        generateMipmaps;
-        VkFormat    format;
-        bool        pregenerated;
+        VkBuffer    stagingBuffers[MAX_FRAMES_IN_FLIGHT] = {};
+        void        *mappedData[MAX_FRAMES_IN_FLIGHT] = {};
+        uint32_t    dataSize = 0;
+        QrExtent2D  imageSize = {};
+        bool        generateMipmaps = false;
+        VkFormat    format = VK_FORMAT_UNDEFINED;
+        bool        pregenerated = false;
     };
 
 protected:

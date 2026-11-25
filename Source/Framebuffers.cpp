@@ -36,6 +36,11 @@ namespace
 
         return 1;
     }
+
+    bool IsDeadFramebufferIndex(uint32_t i)
+    {
+        return (i >= 32u && i <= 36u) || (i >= 42u && i <= 58u) || (i >= 66u && i <= 71u) || i == 118u;
+    }
 }
 
 FramebufferImageIndex Framebuffers::FrameIndexToFBIndex(FramebufferImageIndex framebufferImageIndex, uint32_t frameIndex)
@@ -67,7 +72,6 @@ Framebuffers::Framebuffers( VkDevice                                _device,
     , currentResolution{}
 {
     images.resize( ShFramebuffers_Count );
-    imageMemories.resize( ShFramebuffers_Count );
     imageViews.resize( ShFramebuffers_Count );
 }
 
@@ -76,14 +80,17 @@ Framebuffers::~Framebuffers()
     DestroyImages();
 }
 
-bool Framebuffers::PrepareForSize(ResolutionState resolutionState)
+bool Framebuffers::PrepareForSize(ResolutionState resolutionState, bool waitIdle)
 {
     if (currentResolution == resolutionState)
     {
         return false;
     }
 
-    vkDeviceWaitIdle(device);
+    if (waitIdle)
+    {
+        vkDeviceWaitIdle(device);
+    }
 
     DestroyImages();
     CreateImages(resolutionState);
@@ -151,8 +158,8 @@ VkExtent2D Framebuffers::GetFramebufSize( const ResolutionState& resolutionState
     }
 
     return {
-        std::max(1u, (resolutionState.renderWidth + 1) / downscale),
-        std::max(1u, (resolutionState.renderHeight + 1) / downscale)
+        std::max(1u, (resolutionState.renderWidth + static_cast<uint32_t>(downscale) - 1u) / static_cast<uint32_t>(downscale)),
+        std::max(1u, (resolutionState.renderHeight + static_cast<uint32_t>(downscale) - 1u) / static_cast<uint32_t>(downscale))
     };
 }
 
@@ -160,8 +167,16 @@ void Framebuffers::CreateImages(ResolutionState resolutionState)
 {
     VkCommandBuffer cmd = cmdManager->StartGraphicsCmd();
 
+    std::vector<VkImageMemoryBarrier> barriers;
+    barriers.reserve(ShFramebuffers_Count);
+
     for (uint32_t i = 0; i < ShFramebuffers_Count; i++)
     {
+        if (IsDeadFramebufferIndex(i))
+        {
+            continue;
+        }
+
         const VkFormat format = ShFramebuffers_Formats[i];
         const FramebufferImageFlags flags = ShFramebuffers_Flags[i];
 
@@ -193,16 +208,7 @@ void Framebuffers::CreateImages(ResolutionState resolutionState)
             imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         }
 
-        VkResult r = vkCreateImage(device, &imageInfo, nullptr, &images[i]);
-        VK_CHECKERROR(r);
-
-        VkMemoryRequirements memoryRequirements;
-        vkGetImageMemoryRequirements(device, images[i], &memoryRequirements);
-
-        imageMemories[i] = allocator->AllocDedicated(memoryRequirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, MemoryAllocator::AllocType::DEFAULT, ShFramebuffers_DebugNames[i]);
-
-        r = vkBindImageMemory(device, images[i], imageMemories[i], 0);
-        VK_CHECKERROR(r);
+        images[i] = allocator->CreateFramebufferImage(&imageInfo, ShFramebuffers_DebugNames[i]);
 
         VkImageViewCreateInfo viewInfo = {};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -216,16 +222,35 @@ void Framebuffers::CreateImages(ResolutionState resolutionState)
         viewInfo.subresourceRange.layerCount = 1;
         viewInfo.image = images[i];
 
-        r = vkCreateImageView(device, &viewInfo, nullptr, &imageViews[i]);
+        const VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &imageViews[i]);
         VK_CHECKERROR(r);
 
         SET_DEBUG_NAME(device, images[i], VK_OBJECT_TYPE_IMAGE, ShFramebuffers_DebugNames[i]);
         SET_DEBUG_NAME(device, imageViews[i], VK_OBJECT_TYPE_IMAGE_VIEW, ShFramebuffers_DebugNames[i]);
 
-        Utils::BarrierImage(
-            cmd, images[i],
-            0, VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = images[i];
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        barriers.push_back(barrier);
+    }
+
+    if (!barriers.empty())
+    {
+        vkCmdPipelineBarrier(
+            cmd,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0,
+            0, nullptr,
+            0, nullptr,
+            static_cast<uint32_t>(barriers.size()), barriers.data());
     }
 
     cmdManager->Submit(cmd);
@@ -238,30 +263,21 @@ void Framebuffers::CreateImages(ResolutionState resolutionState)
 
 void Framebuffers::DestroyImages()
 {
-    for (VkImage &image : images)
-    {
-        if (image != VK_NULL_HANDLE)
-        {
-            vkDestroyImage(device, image, nullptr);
-            image = VK_NULL_HANDLE;
-        }
-    }
-
-    for (VkDeviceMemory &memory : imageMemories)
-    {
-        if (memory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(device, memory, nullptr);
-            memory = VK_NULL_HANDLE;
-        }
-    }
-
     for (VkImageView &view : imageViews)
     {
         if (view != VK_NULL_HANDLE)
         {
             vkDestroyImageView(device, view, nullptr);
             view = VK_NULL_HANDLE;
+        }
+    }
+
+    for (VkImage &image : images)
+    {
+        if (image != VK_NULL_HANDLE)
+        {
+            allocator->DestroyFramebufferImage(image);
+            image = VK_NULL_HANDLE;
         }
     }
 }

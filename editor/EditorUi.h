@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <cstdint>
@@ -12,14 +29,29 @@
 // texture's aspect, with Ctrl+wheel zoom. Returns true when the author clicked it, with outU/outV
 // carrying the position in [0,1] as it is drawn on screen.
 bool EditorImagePick(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
-                     float &outU, float &outV);
+                     float &outU, float &outV, const std::vector<float> *overlayMask = nullptr);
 
 // The game's QR_GUI_PolygonEdit: a uv polygon painted over the image it selects. Dragging a point
 // moves it, dragging a side slides that side (Shift keeps its direction), dragging inside moves the
 // whole outline, Ctrl+click inserts a point on the nearest side, right-click removes one and
 // Ctrl+wheel zooms. Returns true when the polygon changed.
 bool EditorPolygonEdit(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
-                       std::vector<float> &uv, int32_t maxPoints);
+                       std::vector<float> &uv, int32_t maxPoints,
+                       const std::vector<float> *overlayMask = nullptr);
+
+struct EditorBrushToolSettings
+{
+    float radiusTexels = 8.0f;
+    float hardness = 0.5f;
+    float opacity = 1.0f;
+    bool erase = false;
+};
+
+// Interactive texel-space brush mask canvas over the preview texture. LMB paints (or erases when
+// tool.erase is set), RMB always erases, Ctrl+wheel zooms. Returns true when brushMask changed.
+bool EditorBrushEdit(const char *id, uint64_t texture, uint32_t textureWidth, uint32_t textureHeight,
+                     std::vector<uint8_t> &brushMask, const EditorBrushToolSettings &tool,
+                     const std::vector<float> *overlayMask = nullptr);
 
 // Dear ImGui host used by the editor. The draw lists are rasterized through the
 // renderer's rasterized-geometry path, so ImGui's own Vulkan backend and

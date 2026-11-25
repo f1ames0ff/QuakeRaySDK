@@ -232,13 +232,15 @@ bool RasterizedDataCollector::AddGeometry(uint32_t frameIndex,
         }
     }
 
-    if (curVertexCount + info.vertexCount >= vertexBuffer->GetSize() / sizeof(QrVertex))
+    const bool useIndices = info.indexCount != 0 && info.pIndices != nullptr;
+
+    if (uint64_t(curVertexCount) + info.vertexCount > vertexBuffer->GetSize() / sizeof(ShVertex))
     {
         droppedUploadBatches++;
         return false;
     }
 
-    if (curIndexCount + info.indexCount >= indexBuffer->GetSize() / sizeof(uint32_t))
+    if (useIndices && uint64_t(curIndexCount) + info.indexCount > indexBuffer->GetSize() / sizeof(uint32_t))
     {
         droppedUploadBatches++;
         return false;
@@ -273,14 +275,8 @@ bool RasterizedDataCollector::AddGeometry(uint32_t frameIndex,
     drawInfo.firstVertex  = static_cast< uint32_t >( curVertexCount );
     curVertexCount += info.vertexCount;
 
-    if( info.indexCount != 0 && info.pIndices != nullptr )
+    if( useIndices )
     {
-        if( curIndexCount + info.indexCount >= indexBuffer->GetSize() / sizeof( uint32_t ) )
-        {
-            droppedUploadBatches++;
-            return false;
-        }
-
         memcpy( &indicesBase[ curIndexCount ], info.pIndices, info.indexCount * sizeof( uint32_t ) );
 
         uploadedBytes += static_cast< uint64_t >( info.indexCount ) * sizeof( uint32_t );

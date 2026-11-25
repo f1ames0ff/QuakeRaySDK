@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "EditorMaterial.h"
 
 #include <algorithm>
@@ -80,8 +97,8 @@ bool NeedsFullbrightBake(const EditorTexture *texture, const EditorMaterialParam
 // The falloff of a colour block's threshold mask, gl_texmgr.c RT_COLOR_EMISSIVE_FALLOFF.
 constexpr float kColorEmissiveFalloff = 2.0f;
 
-void FeatherMaskHorizontal(const std::vector<float> &mask, uint32_t width, uint32_t height,
-                           int radius, std::vector<float> &tmp)
+void FeatherMaskHorizontal(const std::vector<float> &src, uint32_t width, uint32_t height,
+                           int radius, std::vector<float> &dst)
 {
     const int w = int(width);
     const int h = int(height);
@@ -94,20 +111,20 @@ void FeatherMaskHorizontal(const std::vector<float> &mask, uint32_t width, uint3
 
         for (int i = -radius; i <= radius; i++)
         {
-            sum += mask[row + size_t(std::clamp(i, 0, w - 1))];
+            sum += src[row + size_t(std::clamp(i, 0, w - 1))];
         }
 
         for (int x = 0; x < w; x++)
         {
-            tmp[row + size_t(x)] = sum / window;
-            sum += mask[row + size_t(std::min(x + radius + 1, w - 1))];
-            sum -= mask[row + size_t(std::max(x - radius, 0))];
+            dst[row + size_t(x)] = sum / window;
+            sum += src[row + size_t(std::min(x + radius + 1, w - 1))];
+            sum -= src[row + size_t(std::max(x - radius, 0))];
         }
     }
 }
 
-void FeatherMaskVertical(const std::vector<float> &tmp, uint32_t width, uint32_t height, int radius,
-                         std::vector<float> &mask)
+void FeatherMaskVertical(const std::vector<float> &src, uint32_t width, uint32_t height, int radius,
+                         std::vector<float> &dst)
 {
     const int w = int(width);
     const int h = int(height);
@@ -119,39 +136,84 @@ void FeatherMaskVertical(const std::vector<float> &tmp, uint32_t width, uint32_t
 
         for (int i = -radius; i <= radius; i++)
         {
-            sum += tmp[size_t(std::clamp(i, 0, h - 1)) * width + size_t(x)];
+            sum += src[size_t(std::clamp(i, 0, h - 1)) * width + size_t(x)];
         }
 
         for (int y = 0; y < h; y++)
         {
-            const float blurred = sum / window;
             const size_t index = size_t(y) * width + size_t(x);
-
-            if (blurred > mask[index])
-            {
-                mask[index] = blurred;
-            }
-
-            sum += tmp[size_t(std::min(y + radius + 1, h - 1)) * width + size_t(x)];
-            sum -= tmp[size_t(std::max(y - radius, 0)) * width + size_t(x)];
+            dst[index] = sum / window;
+            sum += src[size_t(std::min(y + radius + 1, h - 1)) * width + size_t(x)];
+            sum -= src[size_t(std::max(y - radius, 0)) * width + size_t(x)];
         }
     }
 }
 
-// Softens a scalar mask: a box blur of the given radius, so the mask's edge fades outward from
-// what the threshold selected while those pixels keep their value. Two separable passes over a
-// running sum, matching TexMgr_FeatherEmissive, including its clamped edges and its rule that the
-// blur may only raise a value.
-void FeatherMask(std::vector<float> &mask, uint32_t width, uint32_t height, int radius)
+void ApplyBoxBlurPass(std::vector<float> &mask, std::vector<float> &tmp, uint32_t width,
+                      uint32_t height, int radius)
 {
-    if (radius <= 0 || width == 0 || height == 0)
+    FeatherMaskHorizontal(mask, width, height, radius, tmp);
+    FeatherMaskVertical(tmp, width, height, radius, mask);
+}
+
+float PeakMaskValue(const std::vector<float> &mask)
+{
+    float peak = 0.0f;
+    for (float value : mask)
+    {
+        peak = std::max(peak, value);
+    }
+    return peak;
+}
+
+// Softens a scalar mask: outward dilation pre-pass so thin highlights survive, followed by
+// symmetric 3-pass Gaussian-like smoothing and peak preservation.
+void FeatherMask(std::vector<float> &mask, uint32_t width, uint32_t height, float feather,
+                 float maxScale)
+{
+    if (feather < 0.5f || width == 0 || height == 0 || mask.empty())
     {
         return;
     }
 
+    const float peakBefore = PeakMaskValue(mask);
+    if (peakBefore <= 1e-6f)
+    {
+        return;
+    }
+
+    const int radius = std::clamp(int(std::lround(feather)), 1, 16);
+    const int dilateR = std::max(1, radius / 2);
     std::vector<float> tmp(mask.size(), 0.0f);
-    FeatherMaskHorizontal(mask, width, height, radius, tmp);
-    FeatherMaskVertical(tmp, width, height, radius, mask);
+    std::vector<float> dilated(mask.size(), 0.0f);
+
+    FeatherMaskHorizontal(mask, width, height, dilateR, tmp);
+    FeatherMaskVertical(tmp, width, height, dilateR, dilated);
+    for (size_t i = 0; i < mask.size(); i++)
+    {
+        mask[i] = std::max(mask[i], dilated[i]);
+    }
+
+    const int budget = std::max(2, radius * 2 - 1);
+    const int passes[3] = { (budget + 2) / 3, (budget + 1) / 3, budget / 3 };
+    for (int passRadius : passes)
+    {
+        if (passRadius > 0)
+        {
+            ApplyBoxBlurPass(mask, tmp, width, height, passRadius);
+        }
+    }
+
+    const float peakAfter = PeakMaskValue(mask);
+    if (peakAfter > 1e-5f && peakAfter < peakBefore)
+    {
+        const float gain = std::min(2.0f, peakBefore / peakAfter);
+        const float ceiling = std::max(0.0f, maxScale);
+        for (float &value : mask)
+        {
+            value = std::clamp(value * gain, 0.0f, ceiling);
+        }
+    }
 }
 
 // Whether a uv point falls inside a block's polygon, by the even-odd rule the synthesis uses.
@@ -176,93 +238,164 @@ bool InsidePolygon(const std::vector<float> &polyUv, float u, float v)
     return inside;
 }
 
-struct ColorMaskSpec
+float SampleBrushMaskBilinear(const EditorMaskEvalSpec &spec, uint32_t x, uint32_t y,
+                              uint32_t width, uint32_t height)
 {
-    const float *color = nullptr;
-    float threshold = 0.02f;
-    float feather = 0.0f;
-    float scale = 1.0f;
-    const std::vector<float> *polyUv = nullptr;
-    bool flatWithinThreshold = false;
-};
+    const uint8_t *brush = spec.brushMask->data();
+    const float sx = std::clamp(
+        ((float(x) + 0.5f) / float(width)) * float(spec.brushWidth) - 0.5f, 0.0f,
+        float(spec.brushWidth - 1));
+    const float sy = std::clamp(
+        ((float(y) + 0.5f) / float(height)) * float(spec.brushHeight) - 0.5f, 0.0f,
+        float(spec.brushHeight - 1));
+    const int x0 = int(std::floor(sx));
+    const int y0 = int(std::floor(sy));
+    const int x1 = std::min(x0 + 1, int(spec.brushWidth) - 1);
+    const int y1 = std::min(y0 + 1, int(spec.brushHeight) - 1);
+    const float fx = sx - float(x0);
+    const float fy = sy - float(y0);
 
-void ComputeColorMask(const ColorMaskSpec &spec, const SourceImage &albedo,
-                      std::vector<float> &mask, std::vector<float> &dist)
+    const auto at = [&](int bx, int by) {
+        return float(brush[size_t(by) * spec.brushWidth + size_t(bx)]) / 255.0f;
+    };
+    const float top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * fx;
+    const float bot = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * fx;
+    return top + (bot - top) * fy;
+}
+
+void EvaluateBrushMask(const EditorMaskEvalSpec &spec, uint32_t width, uint32_t height,
+                       std::vector<float> &outMask)
 {
-    const size_t pixels = size_t(albedo.width) * size_t(albedo.height);
-    const bool polygon = spec.polyUv != nullptr && spec.polyUv->size() / 2 >= 3;
-    const float threshold = spec.threshold;
-
-    mask.assign(pixels, 0.0f);
-    dist.assign(pixels, 0.0f);
-
-    for (uint32_t y = 0; y < albedo.height; y++)
+    if (spec.brushWidth == width && spec.brushHeight == height)
     {
-        for (uint32_t x = 0; x < albedo.width; x++)
+        const uint8_t *brush = spec.brushMask->data();
+        const size_t pixels = size_t(width) * size_t(height);
+        for (size_t i = 0; i < pixels; i++)
         {
-            const size_t index = size_t(y) * albedo.width + x;
-            const uint8_t *src = albedo.rgba + index * 4;
-            const float dr = src[0] / 255.0f - spec.color[0];
-            const float dg = src[1] / 255.0f - spec.color[1];
-            const float db = src[2] / 255.0f - spec.color[2];
-            const float d2 = dr * dr + dg * dg + db * db;
-            dist[index] = d2;
+            outMask[i] = (float(brush[i]) / 255.0f) * spec.scale;
+        }
+        return;
+    }
 
-            if (polygon)
-            {
-                const float u = (float(x) + 0.5f) / float(albedo.width);
-                const float v = (float(y) + 0.5f) / float(albedo.height);
+    for (uint32_t y = 0; y < height; y++)
+    {
+        for (uint32_t x = 0; x < width; x++)
+        {
+            outMask[size_t(y) * width + x] =
+                SampleBrushMaskBilinear(spec, x, y, width, height) * spec.scale;
+        }
+    }
+}
 
-                if (InsidePolygon(*spec.polyUv, u, v))
-                {
-                    mask[index] = spec.scale;
-                    dist[index] = 0.0f;
-                }
-            }
-            else if (d2 <= 3.0f * threshold * threshold)
+void EvaluatePolygonMask(const std::vector<float> &polyUv, float scale, uint32_t width,
+                         uint32_t height, std::vector<float> &outMask)
+{
+    for (uint32_t y = 0; y < height; y++)
+    {
+        const float v = (float(y) + 0.5f) / float(height);
+        for (uint32_t x = 0; x < width; x++)
+        {
+            const float u = (float(x) + 0.5f) / float(width);
+            if (InsidePolygon(polyUv, u, v))
             {
-                if (spec.flatWithinThreshold)
-                {
-                    mask[index] = spec.scale;
-                }
-                else
-                {
-                    const float dnorm =
-                        threshold > 0.0f ? std::sqrt(d2 / 3.0f) / threshold : 0.0f;
-                    const float tail = std::exp(-kColorEmissiveFalloff);
-                    const float value =
-                        (std::exp(-kColorEmissiveFalloff * dnorm) - tail) / (1.0f - tail);
-                    mask[index] = value * spec.scale;
-                }
+                outMask[size_t(y) * width + x] = scale;
             }
         }
     }
-
-    const int feather = spec.feather >= 1.0f ? int(std::lround(spec.feather)) : 0;
-    FeatherMask(mask, albedo.width, albedo.height, feather);
 }
 
-void AppendSerializedMaskGeometry(const std::vector<float> &polyUv, const float color[3],
-                                  std::string &text)
+float EvaluateColorMaskValue(const EditorMaskEvalSpec &spec, float d2)
+{
+    if (spec.isGloss)
+    {
+        const float feather = std::max(0.0f, spec.feather);
+        const float dnorm = std::sqrt(d2 / 3.0f) / std::max(spec.threshold, 1e-4f);
+        const float innerEnd = std::max(0.15f, 0.72f - 0.03f * feather);
+        const float outerEnd = 1.0f + 0.06f * feather;
+        if (dnorm <= innerEnd)
+        {
+            return spec.scale;
+        }
+        if (dnorm < outerEnd)
+        {
+            const float t = (dnorm - innerEnd) / std::max(1e-4f, outerEnd - innerEnd);
+            const float w = 1.0f - t * t * (3.0f - 2.0f * t);
+            return w * spec.scale;
+        }
+        return 0.0f;
+    }
+
+    const float threshold = std::max(0.0f, spec.threshold);
+    if (d2 <= 3.0f * threshold * threshold)
+    {
+        const float dnorm = threshold > 0.0f ? std::sqrt(d2 / 3.0f) / threshold : 0.0f;
+        const float tail = std::exp(-kColorEmissiveFalloff);
+        const float value = (std::exp(-kColorEmissiveFalloff * dnorm) - tail) / (1.0f - tail);
+        return value * spec.scale;
+    }
+    return 0.0f;
+}
+
+void EvaluateColorMask(const EditorMaskEvalSpec &spec, const uint8_t *rgba, uint32_t width,
+                       uint32_t height, std::vector<float> &outMask, std::vector<float> *outDist)
+{
+    const size_t pixels = size_t(width) * size_t(height);
+    for (size_t index = 0; index < pixels; index++)
+    {
+        const uint8_t *src = rgba + index * 4;
+        const float dr = float(src[0]) / 255.0f - spec.color[0];
+        const float dg = float(src[1]) / 255.0f - spec.color[1];
+        const float db = float(src[2]) / 255.0f - spec.color[2];
+        const float d2 = dr * dr + dg * dg + db * db;
+        if (outDist != nullptr)
+        {
+            (*outDist)[index] = d2;
+        }
+        outMask[index] = EvaluateColorMaskValue(spec, d2);
+    }
+}
+
+uint64_t HashBrushBytes(const std::vector<uint8_t> &bytes)
+{
+    uint64_t hash = 14695981039346656037ull;
+    for (uint8_t b : bytes)
+    {
+        hash ^= uint64_t(b);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+template <typename Block>
+void AppendSerializedBlockGeometry(const Block &block, std::string &text)
 {
     char buffer[64];
-    const size_t points = polyUv.size() / 2;
 
-    if (points >= 3)
+    if (IsBrushBlock(block))
     {
+        std::snprintf(buffer, sizeof(buffer), "brush %ux%u #%016llx", block.brushWidth,
+                      block.brushHeight,
+                      static_cast<unsigned long long>(HashBrushBytes(block.brushMask)));
+        text += buffer;
+        return;
+    }
+
+    if (IsPolygonBlock(block))
+    {
+        const size_t points = block.polyUv.size() / 2;
         text += "poly";
         for (size_t p = 0; p < points * 2; p++)
         {
-            std::snprintf(buffer, sizeof(buffer), ",%.6g", polyUv[p]);
+            std::snprintf(buffer, sizeof(buffer), ",%.6g", double(block.polyUv[p]));
             text += buffer;
         }
         return;
     }
 
     std::snprintf(buffer, sizeof(buffer), "color %02x%02x%02x",
-                  int(std::lround(std::clamp(color[0], 0.0f, 1.0f) * 255.0f)) & 0xff,
-                  int(std::lround(std::clamp(color[1], 0.0f, 1.0f) * 255.0f)) & 0xff,
-                  int(std::lround(std::clamp(color[2], 0.0f, 1.0f) * 255.0f)) & 0xff);
+                  int(std::lround(std::clamp(block.color[0], 0.0f, 1.0f) * 255.0f)) & 0xff,
+                  int(std::lround(std::clamp(block.color[1], 0.0f, 1.0f) * 255.0f)) & 0xff,
+                  int(std::lround(std::clamp(block.color[2], 0.0f, 1.0f) * 255.0f)) & 0xff);
     text += buffer;
 }
 
@@ -288,9 +421,10 @@ void BuildColorEmissive(const EditorMaterialParams &params, const SourceImage &a
 
         std::vector<float> mask;
         std::vector<float> dist;
-        const ColorMaskSpec spec{ block.color, block.threshold, block.feather, block.factor,
-                                  &block.polyUv };
-        ComputeColorMask(spec, albedo, mask, dist);
+        const EditorMaskEvalSpec spec{ block.color,      block.threshold,  block.feather,
+                                       block.factor,     &block.polyUv,    &block.brushMask,
+                                       block.brushWidth, block.brushHeight, false };
+        ComputeEditorMask(spec, albedo.rgba, albedo.width, albedo.height, mask, &dist);
 
         for (size_t index = 0; index < pixels; index++)
         {
@@ -299,9 +433,9 @@ void BuildColorEmissive(const EditorMaterialParams &params, const SourceImage &a
                 continue;
             }
 
-            // A pixel with a nearer block already keeps that one, and the nearest match wins
-            // even when it selected the pixel with a smaller mask.
-            if (emission[index] > 0.0f && !(dist[index] < distance[index]))
+            if (emission[index] > 0.0f &&
+                (dist[index] > distance[index] ||
+                 (dist[index] == distance[index] && !(mask[index] > emission[index]))))
             {
                 continue;
             }
@@ -324,38 +458,48 @@ void BuildColorGloss(const EditorMaterialParams &params, const SourceImage &albe
                      ColorGlossBuffers &out)
 {
     const size_t pixels = size_t(albedo.width) * size_t(albedo.height);
-    std::vector<float> distance(pixels, 0.0f);
-    out.weight.assign(pixels, 0.0f);
-    out.roughness.assign(pixels, 0.0f);
-    out.metalness.assign(pixels, 0.0f);
+    std::vector<float> weightSum(pixels, 0.0f);
+    std::vector<float> roughnessAcc(pixels, 0.0f);
+    std::vector<float> metalnessAcc(pixels, 0.0f);
+    std::vector<float> maxWeight(pixels, 0.0f);
 
     for (const EditorGlossBlock &block : params.glossBlocks)
     {
         std::vector<float> mask;
-        std::vector<float> dist;
-        const ColorMaskSpec spec{ block.color, block.threshold, block.feather, 1.0f, &block.polyUv,
-                                  true };
-        ComputeColorMask(spec, albedo, mask, dist);
+        const EditorMaskEvalSpec spec{ block.color,      block.threshold,  block.feather,
+                                       1.0f,             &block.polyUv,    &block.brushMask,
+                                       block.brushWidth, block.brushHeight, true };
+        ComputeEditorMask(spec, albedo.rgba, albedo.width, albedo.height, mask, nullptr);
 
         const float blkRough = std::clamp(block.roughness, 0.0f, 1.0f);
         const float blkMetal = std::clamp(block.metalness, 0.0f, 1.0f);
 
         for (size_t index = 0; index < pixels; index++)
         {
-            if (!(mask[index] > 0.0f))
+            const float w = std::clamp(mask[index], 0.0f, 1.0f);
+            if (!(w > 0.0f))
             {
                 continue;
             }
 
-            if (out.weight[index] > 0.0f && !(dist[index] < distance[index]))
-            {
-                continue;
-            }
+            weightSum[index] += w;
+            roughnessAcc[index] += w * blkRough;
+            metalnessAcc[index] += w * blkMetal;
+            maxWeight[index] = std::max(maxWeight[index], w);
+        }
+    }
 
-            out.weight[index] = std::min(1.0f, mask[index]);
-            out.roughness[index] = blkRough;
-            out.metalness[index] = blkMetal;
-            distance[index] = dist[index];
+    out.weight.assign(pixels, 0.0f);
+    out.roughness.assign(pixels, 0.0f);
+    out.metalness.assign(pixels, 0.0f);
+
+    for (size_t index = 0; index < pixels; index++)
+    {
+        if (weightSum[index] > 1e-6f)
+        {
+            out.weight[index] = std::clamp(maxWeight[index], 0.0f, 1.0f);
+            out.roughness[index] = roughnessAcc[index] / weightSum[index];
+            out.metalness[index] = metalnessAcc[index] / weightSum[index];
         }
     }
 }
@@ -369,9 +513,9 @@ std::string EmissiveMaskOf(const std::vector<EditorEmissiveBlock> &blocks)
 
     for (const EditorEmissiveBlock &block : blocks)
     {
-        AppendSerializedMaskGeometry(block.polyUv, block.color, text);
-        std::snprintf(buffer, sizeof(buffer), " t%.6g f%.6g x%.6g b%d;", block.threshold,
-                      block.feather, block.factor, block.blend);
+        AppendSerializedBlockGeometry(block, text);
+        std::snprintf(buffer, sizeof(buffer), " t%.6g f%.6g x%.6g b%d;", double(block.threshold),
+                      double(block.feather), double(block.factor), block.blend);
         text += buffer;
     }
 
@@ -385,9 +529,10 @@ std::string GlossMaskOf(const std::vector<EditorGlossBlock> &blocks)
 
     for (const EditorGlossBlock &block : blocks)
     {
-        AppendSerializedMaskGeometry(block.polyUv, block.color, text);
-        std::snprintf(buffer, sizeof(buffer), " t%.6g f%.6g r%.6g m%.6g;", block.threshold,
-                      block.feather, block.roughness, block.metalness);
+        AppendSerializedBlockGeometry(block, text);
+        std::snprintf(buffer, sizeof(buffer), " t%.6g f%.6g r%.6g m%.6g;",
+                      double(block.threshold), double(block.feather), double(block.roughness),
+                      double(block.metalness));
         text += buffer;
     }
 
@@ -404,13 +549,13 @@ void EvaluateSssBlocksMask(const std::vector<EditorSssBlock> &blocks, const Sour
 
     const size_t pixels = size_t(albedo.width) * size_t(albedo.height);
     std::vector<float> mask;
-    std::vector<float> dist;
 
     for (const EditorSssBlock &block : blocks)
     {
-        const ColorMaskSpec spec{ block.color, block.threshold, block.feather, block.factor,
-                                  &block.polyUv, false };
-        ComputeColorMask(spec, albedo, mask, dist);
+        const EditorMaskEvalSpec spec{ block.color,      block.threshold,  block.feather,
+                                       block.factor,     &block.polyUv,    &block.brushMask,
+                                       block.brushWidth, block.brushHeight, false };
+        ComputeEditorMask(spec, albedo.rgba, albedo.width, albedo.height, mask, nullptr);
 
         for (size_t index = 0; index < pixels; index++)
         {
@@ -426,9 +571,9 @@ std::string SssMaskOf(const std::vector<EditorSssBlock> &blocks)
 
     for (const EditorSssBlock &block : blocks)
     {
-        AppendSerializedMaskGeometry(block.polyUv, block.color, text);
-        std::snprintf(buffer, sizeof(buffer), " t%.6g f%.6g x%.6g;", block.threshold,
-                      block.feather, block.factor);
+        AppendSerializedBlockGeometry(block, text);
+        std::snprintf(buffer, sizeof(buffer), " t%.6g f%.6g x%.6g;", double(block.threshold),
+                      double(block.feather), double(block.factor));
         text += buffer;
     }
 
@@ -590,7 +735,196 @@ void ApplyMaterialPassThroughAndRoughness(const EditorMaterialParams &material,
     upload.defaultMetallicity = material.metalnessFactor;
 }
 
+float DistanceToSegmentTexel(float px, float py, float x0, float y0, float x1, float y1)
+{
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+    const float lenSq = dx * dx + dy * dy;
+    const float t =
+        lenSq > 1e-8f ? std::clamp(((px - x0) * dx + (py - y0) * dy) / lenSq, 0.0f, 1.0f) : 0.0f;
+    return std::hypot(px - (x0 + dx * t), py - (y0 + dy * t));
+}
+
+float ComputeBrushFalloff(float dist, float radiusTexels, float hardness)
+{
+    const float rNorm = dist / std::max(radiusTexels, 0.5f);
+    if (rNorm <= hardness)
+    {
+        return 1.0f;
+    }
+    const float t = std::clamp((rNorm - hardness) / std::max(1e-4f, 1.0f - hardness), 0.0f, 1.0f);
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
+struct BrushSegmentBox
+{
+    float x0 = 0.0f;
+    float y0 = 0.0f;
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    int minX = 0;
+    int maxX = -1;
+    int minY = 0;
+    int maxY = -1;
+    float hardness = 0.5f;
+    float opacity = 1.0f;
+};
+
+int ClampCoordToInt(double value, int lo, int hi)
+{
+    if (value <= double(lo))
+    {
+        return lo;
+    }
+    if (value >= double(hi))
+    {
+        return hi;
+    }
+    return int(value);
+}
+
+BrushSegmentBox BuildBrushSegmentBox(const EditorBrushStrokeSpec &stroke, uint32_t width,
+                                     uint32_t height)
+{
+    BrushSegmentBox box;
+    box.x0 = stroke.u0 * float(width);
+    box.y0 = stroke.v0 * float(height);
+    box.x1 = stroke.u1 * float(width);
+    box.y1 = stroke.v1 * float(height);
+    const double r = double(stroke.radiusTexels);
+    box.minX = ClampCoordToInt(std::floor(double(std::min(box.x0, box.x1)) - r), 0, int(width));
+    box.maxX = ClampCoordToInt(std::ceil(double(std::max(box.x0, box.x1)) + r), -1, int(width) - 1);
+    box.minY = ClampCoordToInt(std::floor(double(std::min(box.y0, box.y1)) - r), 0, int(height));
+    box.maxY = ClampCoordToInt(std::ceil(double(std::max(box.y0, box.y1)) + r), -1, int(height) - 1);
+    box.hardness = std::clamp(stroke.hardness, 0.0f, 1.0f);
+    box.opacity = std::clamp(stroke.opacity, 0.0f, 1.0f);
+    return box;
+}
+
+bool IsValidBrushStroke(const EditorBrushStrokeSpec &stroke)
+{
+    return std::isfinite(stroke.u0) && std::isfinite(stroke.v0) && std::isfinite(stroke.u1) &&
+           std::isfinite(stroke.v1) && std::isfinite(stroke.radiusTexels) &&
+           std::isfinite(stroke.hardness) && std::isfinite(stroke.opacity) &&
+           stroke.radiusTexels > 0.0f && stroke.opacity > 0.0f;
+}
+
+uint8_t BlendBrushTexel(uint8_t baseByte, float dab, bool erase)
+{
+    const float baseVal = float(baseByte) / 255.0f;
+    const float target = erase ? baseVal * (1.0f - dab) : baseVal + (1.0f - baseVal) * dab;
+    return uint8_t(std::clamp(std::lround(target * 255.0f), 0l, 255l));
+}
+
+bool HasValidBrushSpec(const EditorMaskEvalSpec &spec)
+{
+    return spec.brushMask != nullptr && spec.brushWidth > 0 && spec.brushHeight > 0 &&
+           spec.brushMask->size() == size_t(spec.brushWidth) * size_t(spec.brushHeight);
+}
+
+bool HasValidPolySpec(const EditorMaskEvalSpec &spec)
+{
+    return spec.polyUv != nullptr && spec.polyUv->size() / 2 >= 3;
+}
+
+bool StampBrushSegmentRow(const BrushSegmentBox &box, const EditorBrushStrokeSpec &stroke,
+                          uint32_t width, int y, const std::vector<uint8_t> &baseMask,
+                          std::vector<float> &strokeAccum, std::vector<uint8_t> &outMask)
+{
+    bool changed = false;
+    for (int x = box.minX; x <= box.maxX; x++)
+    {
+        const float d = DistanceToSegmentTexel(float(x) + 0.5f, float(y) + 0.5f, box.x0, box.y0,
+                                               box.x1, box.y1);
+        if (!(d < stroke.radiusTexels))
+        {
+            continue;
+        }
+        const float dab = std::clamp(
+            box.opacity * ComputeBrushFalloff(d, stroke.radiusTexels, box.hardness), 0.0f, 1.0f);
+        const size_t idx = size_t(y) * width + size_t(x);
+        if (dab <= strokeAccum[idx])
+        {
+            continue;
+        }
+        strokeAccum[idx] = dab;
+        const uint8_t nextVal = BlendBrushTexel(baseMask[idx], dab, stroke.erase);
+        if (outMask[idx] != nextVal)
+        {
+            outMask[idx] = nextVal;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 } // namespace
+
+void ComputeEditorMask(const EditorMaskEvalSpec &spec, const uint8_t *rgba, uint32_t width,
+                       uint32_t height, std::vector<float> &outMask, std::vector<float> *outDist)
+{
+    if (width == 0 || height == 0)
+    {
+        outMask.clear();
+        if (outDist != nullptr)
+        {
+            outDist->clear();
+        }
+        return;
+    }
+
+    const size_t pixels = size_t(width) * size_t(height);
+    outMask.assign(pixels, 0.0f);
+    if (outDist != nullptr)
+    {
+        outDist->assign(pixels, 0.0f);
+    }
+
+    if (HasValidBrushSpec(spec))
+    {
+        EvaluateBrushMask(spec, width, height, outMask);
+    }
+    else if (HasValidPolySpec(spec))
+    {
+        EvaluatePolygonMask(*spec.polyUv, spec.scale, width, height, outMask);
+    }
+    else if (rgba != nullptr && spec.color != nullptr)
+    {
+        EvaluateColorMask(spec, rgba, width, height, outMask, outDist);
+    }
+
+    FeatherMask(outMask, width, height, spec.feather, spec.scale);
+}
+
+bool ApplyEditorBrushSegment(const EditorBrushStrokeSpec &stroke, uint32_t width, uint32_t height,
+                             const std::vector<uint8_t> &baseMask,
+                             std::vector<float> &strokeAccum, std::vector<uint8_t> &outMask)
+{
+    const size_t pixels = size_t(width) * size_t(height);
+    if (width == 0 || height == 0 || !IsValidBrushStroke(stroke) || baseMask.size() != pixels)
+    {
+        return false;
+    }
+
+    if (strokeAccum.size() != pixels)
+    {
+        strokeAccum.assign(pixels, 0.0f);
+    }
+    if (outMask.size() != pixels)
+    {
+        outMask = baseMask;
+    }
+
+    const BrushSegmentBox box = BuildBrushSegmentBox(stroke, width, height);
+    bool changed = false;
+
+    for (int y = box.minY; y <= box.maxY; y++)
+    {
+        changed |= StampBrushSegmentRow(box, stroke, width, y, baseMask, strokeAccum, outMask);
+    }
+
+    return changed;
+}
 
 void FinalizeEditorGlowExtents(int minX, int minY, int maxX, int maxY, uint32_t width,
                                uint32_t height, EditorMaterialEmission &out)

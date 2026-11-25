@@ -368,6 +368,13 @@ private:
 
     bool LoadShader(const char *pFileName, nvrhi::ShaderType type, nvrhi::ShaderHandle &result);
 
+    bool ValidateCreateBaseInputs();
+    bool ValidateCreatePassDependencies();
+    bool ValidateRenderInputs(nvrhi::rt::IAccelStruct *pTopLevel,
+                              const Framebuffers *pFramebuffers,
+                              nvrhi::IBuffer *pUniformBuffer,
+                              const RhiRtPrimaryPass::VertexData &vertexData);
+
     // Retires the slot's image wraps and the framebuffer set over them (the framebuffer re-create
     // path), and the slot's TLAS/uniform/vertex-data sets (ReleaseTargets).
     void ReleaseFramebufferTarget(Target &target);
@@ -409,6 +416,7 @@ private:
     nvrhi::ShaderHandle shadowMissShader;
     nvrhi::ShaderHandle closestHitShader;
     nvrhi::ShaderHandle anyHitShader;
+    nvrhi::ShaderHandle shadowAnyHitShader;
 
     // The three layouts this module owns: set 1 (the exact 14 items above), set 5 (the blue-noise
     // array) and set 8 (the four render-cubemap items). Set 7 also needs its own bindless layout,

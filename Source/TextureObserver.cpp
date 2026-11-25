@@ -17,6 +17,9 @@
 
 #include "TextureObserver.h"
 
+#include <algorithm>
+#include <iterator>
+
 #include "TextureManager.h"
 #include "Generated/ShaderCommonC.h"
 
@@ -26,7 +29,12 @@ bool qray::TextureObserver::HaveChanged(std::vector<DependentFile> &files)
 
     for (DependentFile &file : files)
     {
-        const auto lastWriteTime = std::filesystem::last_write_time(file.path);
+        std::error_code ec;
+        const auto lastWriteTime = std::filesystem::last_write_time(file.path, ec);
+        if (ec)
+        {
+            continue;
+        }
 
         if (lastWriteTime > file.lastWriteTime)
         {
@@ -38,9 +46,57 @@ bool qray::TextureObserver::HaveChanged(std::vector<DependentFile> &files)
     return changed;
 }
 
-void qray::TextureObserver::CheckPathsAndReupload(VkCommandBuffer cmd, uint32_t frameIndex, TextureManager &manager, ImageLoaderDev *loader)
+void qray::TextureObserver::ReuploadChangedFiles(const std::function<VkCommandBuffer()> &getCmd,
+                                                  uint32_t frameIndex,
+                                                  TextureManager &manager,
+                                                  ImageLoaderDev *loader,
+                                                  QrMaterial materialIndex,
+                                                  const std::vector<DependentFile> &files)
 {
-    if (loader == nullptr)
+    for (const DependentFile &file : files)
+    {
+        auto newImage = loader->Load(file.path);
+
+        if (!newImage)
+        {
+            continue;
+        }
+
+        if (newImage->dataSize != file.dataSize)
+        {
+            assert(0 &&
+                "Trying to hot-reload the image, but the data size is mismatching with what originally was specified."
+                "A new texture file must have the same image size.");
+            continue;
+        }
+
+        QrMaterialUpdateInfo info =
+        {
+            .target = materialIndex,
+            .textures =
+            {
+                .pDataAlbedoAlpha               = file.textureType == MATERIAL_ALBEDO_ALPHA_INDEX                 ? newImage->pData : nullptr,
+                .pDataRoughnessMetallicEmission = file.textureType == MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX  ? newImage->pData : nullptr,
+                .pDataNormal                    = file.textureType == MATERIAL_NORMAL_INDEX                       ? newImage->pData : nullptr,
+            },
+        };
+
+        const VkCommandBuffer cmd = getCmd ? getCmd() : VK_NULL_HANDLE;
+        if (cmd != VK_NULL_HANDLE)
+        {
+            manager.UpdateMaterial(cmd, frameIndex, info);
+        }
+
+        loader->FreeLoaded();
+    }
+}
+
+void qray::TextureObserver::CheckPathsAndReupload(const std::function<VkCommandBuffer()> &getCmd,
+                                                  uint32_t frameIndex,
+                                                  TextureManager &manager,
+                                                  ImageLoaderDev *loader)
+{
+    if (loader == nullptr || materials.empty())
     {
         return;
     }
@@ -50,7 +106,7 @@ void qray::TextureObserver::CheckPathsAndReupload(VkCommandBuffer cmd, uint32_t 
 
         constexpr auto frequency = 0.05s;
 
-        const auto now = std::chrono::system_clock::now();
+        const auto now = std::chrono::steady_clock::now();
         if (now - lastCheck < frequency)
         {
             return;
@@ -59,45 +115,31 @@ void qray::TextureObserver::CheckPathsAndReupload(VkCommandBuffer cmd, uint32_t 
         lastCheck = now;
     }
 
-    for (auto &[materialIndex, files] : materials)
+    const size_t total = materials.size();
+    const size_t checkCount = std::min(total, kMaxMaterialsPerTick);
+    if (nextMaterialOffset >= total)
     {
+        nextMaterialOffset = 0;
+    }
+
+    auto it = materials.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(nextMaterialOffset));
+    nextMaterialOffset = (nextMaterialOffset + checkCount) % total;
+
+    for (size_t checked = 0; checked < checkCount; checked++, ++it)
+    {
+        if (it == materials.end())
+        {
+            it = materials.begin();
+        }
+
+        auto &[materialIndex, files] = *it;
         if (!HaveChanged(files))
         {
             continue;
         }
 
-        for (const DependentFile &file : files)
-        {
-            auto newImage = loader->Load(file.path);
-
-            if (!newImage)
-            {
-                continue;
-            }
-
-            if (newImage->dataSize != file.dataSize)
-            {
-                assert(0 &&
-                    "Trying to hot-reload the image, but the data size is mismatching with what originally was specified."
-                    "A new texture file must have the same image size.");
-                continue;
-            }
-
-            QrMaterialUpdateInfo info =
-            {
-                .target = materialIndex,
-                .textures =
-                {
-                    .pDataAlbedoAlpha               = file.textureType == MATERIAL_ALBEDO_ALPHA_INDEX                 ? newImage->pData : nullptr,
-                    .pDataRoughnessMetallicEmission = file.textureType == MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX  ? newImage->pData : nullptr,
-                    .pDataNormal                    = file.textureType == MATERIAL_NORMAL_INDEX                       ? newImage->pData : nullptr,
-                },
-            };
-
-            manager.UpdateMaterial(cmd, frameIndex, info);
-
-            loader->FreeLoaded();
-        }
+        ReuploadChangedFiles(getCmd, frameIndex, manager, loader, materialIndex, files);
     }
 }
 
@@ -123,12 +165,18 @@ void qray::TextureObserver::RegisterPath(QrMaterial index, std::optional<std::fi
         materials[index] = {};
     }
 
-    if (!std::filesystem::exists(path.value()))
+    std::error_code existsEc;
+    if (!std::filesystem::exists(path.value(), existsEc) || existsEc)
     {
         return;
     }
 
-    const auto lastWriteTime = std::filesystem::last_write_time(path.value());
+    std::error_code timeEc;
+    const auto lastWriteTime = std::filesystem::last_write_time(path.value(), timeEc);
+    if (timeEc)
+    {
+        return;
+    }
 
     materials[index].emplace_back(
         DependentFile

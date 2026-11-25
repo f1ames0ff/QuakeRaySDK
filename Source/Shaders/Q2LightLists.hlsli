@@ -199,6 +199,13 @@ void q2AccumulateLightStats(const uint cluster, const uint slot, const float3 n,
     {
         q2LightStats[addr] += 1u;
     }
+    else if (WaveActiveAllEqual(addr))
+    {
+        if (WaveIsFirstLane())
+        {
+            InterlockedAdd(q2LightStats[addr], WaveActiveCountBits(true));
+        }
+    }
     else
     {
         InterlockedAdd(q2LightStats[addr], 1u);

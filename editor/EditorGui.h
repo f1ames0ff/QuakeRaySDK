@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <cstdint>
@@ -5,8 +22,8 @@
 #include <string>
 
 // Layout constants ported from Quake/qr_gui.cpp for two-column QuakeRay inspector rows.
-inline constexpr float kEditorGuiPanelWidth = 440.0f;
-inline constexpr float kEditorGuiLabelWidth = 172.0f;
+inline constexpr float kEditorGuiPanelWidth = 484.0f;
+inline constexpr float kEditorGuiLabelWidth = 186.0f;
 inline constexpr float kEditorGuiResetSize = 24.0f;
 inline constexpr float kEditorGuiActionSize = 24.0f;
 inline constexpr float kEditorGuiBrowseWidth = 26.0f;
@@ -23,6 +40,9 @@ struct EditorGuiRowOpts
     std::function<void(const char *)> logRect;
     const char *rectName = nullptr;
     bool dimValue = false;
+    bool mixed = false;
+    uint8_t mixedAxisMask = 0;
+    uint8_t *editedAxisMask = nullptr;
 };
 
 // Action flags returned by EditorGuiBlockActions / EditorGuiHeaderActions.

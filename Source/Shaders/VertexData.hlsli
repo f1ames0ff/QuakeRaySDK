@@ -154,10 +154,17 @@ float4 getTangent(const float3x3 localPos, const float3 normal, const float2x3 t
     const float2 u1 = tc[1] - tc[0];
     const float2 u2 = tc[2] - tc[0];
 
-    const float invDet = 1.0 / (u1.x * u2.y - u2.x * u1.y);
+    const float uvDet = u1.x * u2.y - u2.x * u1.y;
+    if (!(abs(uvDet) > 1e-12))
+    {
+        const float3 fallbackAxis = abs(normal.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+        return float4(safeNormalize(cross(fallbackAxis, normal)), 1.0);
+    }
 
-    const float3 tangent   = normalize((e1 * u2.y - e2 * u1.y) * invDet);
-    const float3 bitangent = normalize((e2 * u1.x - e1 * u2.x) * invDet);
+    const float invDet = 1.0 / uvDet;
+
+    const float3 tangent   = safeNormalize((e1 * u2.y - e2 * u1.y) * invDet);
+    const float3 bitangent = safeNormalize((e2 * u1.x - e1 * u2.x) * invDet);
 
     float handedness = float(dot(cross(normal, tangent), bitangent) > 0.0);
     handedness = handedness * 2.0 - 1.0;
@@ -229,6 +236,11 @@ ShTriangle getTriangle(int instanceID, int instanceCustomIndex, int localGeometr
                 g_dynamicVertices[vertIndices[2]]);
         }
 
+        if (inst.clusterOverride != 0u)
+        {
+            tr.cluster = inst.clusterOverride;
+        }
+
         tr.positions = transpose(float3x3(
             mul(inst.model, float4(transpose(tr.positions)[0], 1.0)).xyz,
             mul(inst.model, float4(transpose(tr.positions)[1], 1.0)).xyz,
@@ -266,6 +278,11 @@ ShTriangle getTriangle(int instanceID, int instanceCustomIndex, int localGeometr
                 g_staticVertices[vertIndices[0]],
                 g_staticVertices[vertIndices[1]],
                 g_staticVertices[vertIndices[2]]);
+        }
+
+        if (inst.clusterOverride != 0u)
+        {
+            tr.cluster = inst.clusterOverride;
         }
 
         const float4 prevLocalPos[3] =
@@ -307,7 +324,6 @@ ShTriangle getTriangle(int instanceID, int instanceCustomIndex, int localGeometr
 
 
     const float3x3 model3 = (float3x3)inst.model;
-    const float modelDeterminant = determinant(model3);
     const float3 transformedNormal0 = safeNormalize(
         transformNormalInverseTranspose(model3, transpose(tr.normals)[0]));
     const float3 transformedNormal1 = safeNormalize(

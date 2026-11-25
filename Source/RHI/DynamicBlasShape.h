@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <algorithm>
@@ -19,6 +36,56 @@ inline bool DynamicShapeFits(const std::vector<uint32_t> &envelope, const std::v
         if (current[i] > envelope[i] || current[i + 1] > envelope[i + 1] ||
             current[i + 2] != envelope[i + 2] || current[i + 3] != envelope[i + 3] ||
             current[i + 4] != envelope[i + 4])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+inline void BuildSortedShapeCounts(const std::vector<uint32_t> &shape, std::vector<uint32_t> &outSortedCounts)
+{
+    const size_t count = shape.size() / 5;
+    outSortedCounts.resize(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        outSortedCounts[i] = shape[i * 5];
+    }
+    std::sort(outSortedCounts.begin(), outSortedCounts.end(), [](uint32_t a, uint32_t b) { return a > b; });
+}
+
+inline bool DynamicShapeSortedFitsCached(const std::vector<uint32_t> &sortedEnvelopeCounts,
+                                         const std::vector<uint32_t> &current,
+                                         std::vector<uint32_t> &currentScratch)
+{
+    if (current.size() % 5 != 0)
+    {
+        return false;
+    }
+
+    const size_t geometryCount = current.size() / 5;
+    if (geometryCount > sortedEnvelopeCounts.size())
+    {
+        return false;
+    }
+
+    if (geometryCount == 0)
+    {
+        return true;
+    }
+
+    currentScratch.resize(geometryCount);
+    for (size_t i = 0; i < geometryCount; i++)
+    {
+        currentScratch[i] = current[i * 5];
+    }
+
+    std::sort(currentScratch.begin(), currentScratch.end(), [](uint32_t a, uint32_t b) { return a > b; });
+
+    for (size_t i = 0; i < geometryCount; i++)
+    {
+        if (currentScratch[i] > sortedEnvelopeCounts[i])
         {
             return false;
         }

@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block set 0 binding 0
 
 [0] offset 0 m3(v3(float32)) matrixstride 16
@@ -17,6 +17,7 @@
 [12] offset 364 uint32
 [13] offset 368 uint32
 [14] offset 372 uint32
+[15] offset 376 uint32
 === block set 0 binding 1
 
 [0] offset 0 v3(float32)
@@ -33,6 +34,7 @@
 [11] offset 76 float32
 [12] offset 80 v2(float32)
 [13] offset 96 v3(float32)
+[14] offset 112 v4(float32)
 === block set 0 binding 2
 
 [0] offset 0 v2(float32)

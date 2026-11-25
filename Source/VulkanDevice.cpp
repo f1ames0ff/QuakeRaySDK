@@ -32,9 +32,11 @@
 #include "Utils.h"
 #include "Const.h"
 #include "Generated/ShaderCommonC.h"
+#include "GeometryBounds.h"
 #include "RHI/NvrhiContext.h"
 #include "RHI/NvrhiFrameSkeleton.h"
 #include "RHI/RhiAccelStructs.h"
+#include "RHI/RhiFrameContext.h"
 
 using namespace qray;
 
@@ -575,7 +577,7 @@ void VulkanDevice::SetSpatialConvention(const QrSpatialConvention *pConvention)
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
-    if (spatialFrameLocked)
+    if (spatialFrameLocked.load(std::memory_order_acquire))
     {
         throw QrException(QR_WRONG_FUNCTION_CALL, "The spatial convention must be set before spatial uploads");
     }
@@ -626,7 +628,7 @@ void VulkanDevice::GetSmokeWindDirection(QrFloat3D *pDirection) const
 
 void VulkanDevice::LockSpatialFrame()
 {
-    spatialFrameLocked = true;
+    spatialFrameLocked.store(true, std::memory_order_release);
 }
 
 VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
@@ -637,14 +639,23 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     const uint32_t previousFrameIndex = currentFrameState.GetFrameIndex();
     uint32_t frameIndex = currentFrameState.IncrementFrameIndexAndGet();
 
+    const bool rhiActive = nvrhiFrameSkeleton != nullptr && !nvrhiFrameSkeleton->IsUnavailable() &&
+                           rhiFrameContext != nullptr && rhiFrameContext->IsCreated();
+
     const Clock::time_point fenceWaitStart = Clock::now();
-    if (!waitForOutOfFrameFence)
+    if (rhiActive)
+    {
+        rhiFrameContext->WaitForSlot(frameIndex);
+    }
+    if (frameFenceSubmitted[frameIndex])
     {
         Utils::WaitAndResetFence(device, frameFences[frameIndex]);
+        frameFenceSubmitted[frameIndex] = false;
     }
-    else
+    if (waitForOutOfFrameFence[frameIndex])
     {
-        Utils::WaitAndResetFences(device, frameFences[frameIndex], outOfFrameFences[frameIndex]);
+        Utils::WaitAndResetFence(device, outOfFrameFences[frameIndex]);
+        waitForOutOfFrameFence[frameIndex] = false;
     }
     const Clock::time_point fenceWaitEnd = Clock::now();
 
@@ -653,7 +664,29 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     swapchain->SetFullscreenExclusive(startInfo.wantFullscreenExclusive != 0, startInfo.hasFocus != 0);
     swapchain->PrepareForFrame();
 
-    assert(pendingPreFrameCmd == VK_NULL_HANDLE);
+    if (pendingPreFrameCmd != VK_NULL_HANDLE)
+    {
+        const uint32_t leftoverSlot = pendingPreFrameCmdFrameIndex;
+        if (waitForOutOfFrameFence[leftoverSlot])
+        {
+            Utils::WaitAndResetFence(device, outOfFrameFences[leftoverSlot]);
+            waitForOutOfFrameFence[leftoverSlot] = false;
+        }
+        cmdManager->SubmitForFrame(leftoverSlot,
+                                   pendingPreFrameCmd,
+                                   VK_NULL_HANDLE, 0,
+                                   VK_NULL_HANDLE,
+                                   outOfFrameFences[leftoverSlot]);
+        pendingPreFrameCmd = VK_NULL_HANDLE;
+        if (leftoverSlot == frameIndex)
+        {
+            Utils::WaitAndResetFence(device, outOfFrameFences[leftoverSlot]);
+        }
+        else
+        {
+            waitForOutOfFrameFence[leftoverSlot] = true;
+        }
+    }
     pendingPreFrameCmd = currentFrameState.GetPreFrameCmdAndRemove(previousFrameIndex);
     pendingPreFrameCmdFrameIndex = previousFrameIndex;
 
@@ -671,9 +704,12 @@ VkCommandBuffer VulkanDevice::BeginFrame(const QrStartFrameInfo &startInfo)
     rasterizedDataCollector->Clear(frameIndex);
     decalManager->PrepareForFrame(frameIndex);
 
-    VkCommandBuffer cmd = cmdManager->StartGraphicsCmd();
-
-    BeginCmdLabel(cmd, "Prepare for frame");
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (!rhiActive)
+    {
+        cmd = cmdManager->StartGraphicsCmd();
+        BeginCmdLabel(cmd, "Prepare for frame");
+    }
 
     scene->PrepareForFrame(cmd, frameIndex);
 
@@ -726,20 +762,25 @@ void VulkanDevice::AcquireFrameImage(bool allowRecreate)
 
     VkSemaphore semaphoreToWaitOnSubmit = imageAvailableSemaphores[frameIndex];
     VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    waitForOutOfFrameFence = false;
 
     if (pendingPreFrameCmd != VK_NULL_HANDLE)
     {
-        cmdManager->SubmitForFrame(pendingPreFrameCmdFrameIndex,
+        const uint32_t preFrameSlot = pendingPreFrameCmdFrameIndex;
+        if (waitForOutOfFrameFence[preFrameSlot])
+        {
+            Utils::WaitAndResetFence(device, outOfFrameFences[preFrameSlot]);
+            waitForOutOfFrameFence[preFrameSlot] = false;
+        }
+        cmdManager->SubmitForFrame(preFrameSlot,
                                    pendingPreFrameCmd,
                                    semaphoreToWaitOnSubmit, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                    inFrameSemaphores[frameIndex],
-                                   outOfFrameFences[(frameIndex + 1) % MAX_FRAMES_IN_FLIGHT]);
+                                   outOfFrameFences[preFrameSlot]);
 
         pendingPreFrameCmd = VK_NULL_HANDLE;
         semaphoreToWaitOnSubmit = inFrameSemaphores[frameIndex];
         semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        waitForOutOfFrameFence = true;
+        waitForOutOfFrameFence[preFrameSlot] = true;
     }
 
     currentFrameState.SetSemaphore(semaphoreToWaitOnSubmit, semaphoreWaitStage);
@@ -753,6 +794,75 @@ void VulkanDevice::CompleteAcquireForPresent()
     }
 
     AcquireFrameImage(true);
+}
+
+static void FillUniformTonemappingAndSky(ShGlobalUniform *gu,
+                                         const QrDrawFrameInfo &drawInfo,
+                                         CubemapManager *cubemapManager,
+                                         const float (&identityMat4x4)[16])
+{
+    gu->stopEyeAdaptation = drawInfo.disableEyeAdaptation;
+
+    if (drawInfo.pTonemappingParams != nullptr)
+    {
+        gu->minLogLuminance = drawInfo.pTonemappingParams->minLogLuminance;
+        gu->maxLogLuminance = drawInfo.pTonemappingParams->maxLogLuminance;
+        gu->luminanceWhitePoint = drawInfo.pTonemappingParams->luminanceWhitePoint;
+    }
+    else
+    {
+        gu->minLogLuminance = -3.9f;
+        gu->maxLogLuminance = -2.8f;
+        gu->luminanceWhitePoint = 10.0f;
+    }
+
+    static_assert(sizeof(gu->skyCubemapRotationTransform) == sizeof(identityMat4x4) &&
+                  sizeof(identityMat4x4) == 16 * sizeof(float), "Recheck skyCubemapRotationTransform sizes");
+    memcpy(gu->skyCubemapRotationTransform, identityMat4x4, 16 * sizeof(float));
+
+    if (drawInfo.pSkyParams != nullptr)
+    {
+        const auto &sp = *drawInfo.pSkyParams;
+
+        memcpy(gu->skyColorDefault, sp.skyColorDefault.data, sizeof(float) * 3);
+        gu->skyColorMultiplier = sp.skyColorMultiplier;
+        gu->skyColorSaturation = std::max(sp.skyColorSaturation, 0.0f);
+        const float maxSkyLod = static_cast<float>(qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1);
+        gu->skyAmbientLod = std::clamp(sp.skyAmbientLod, 0.0f, maxSkyLod);
+        gu->skyLightMultiplier = std::max(sp.skyLightMultiplier, 0.0f);
+        gu->skyNee = sp.skyNee != 0 ? 1.0f : 0.0f;
+
+        gu->skyType = sp.skyType == QR_SKY_TYPE_CUBEMAP ? SKY_TYPE_CUBEMAP :
+                      sp.skyType == QR_SKY_TYPE_RASTERIZED_GEOMETRY ? SKY_TYPE_RASTERIZED_GEOMETRY :
+                      sp.skyType == QR_SKY_TYPE_PROCEDURAL ? SKY_TYPE_PROCEDURAL :
+                      SKY_TYPE_COLOR;
+
+        gu->skyCubemapIndex = cubemapManager->IsCubemapValid(sp.skyCubemap) ? sp.skyCubemap : QR_EMPTY_CUBEMAP;
+
+        if (!Utils::IsAlmostZero(drawInfo.pSkyParams->skyCubemapRotationTransform))
+        {
+            Utils::SetMatrix3ToGLSLMat4(gu->skyCubemapRotationTransform, drawInfo.pSkyParams->skyCubemapRotationTransform);
+        }
+    }
+    else
+    {
+        gu->skyColorDefault[0] = gu->skyColorDefault[1] = gu->skyColorDefault[2] = gu->skyColorDefault[3] = 1.0f;
+        gu->skyColorMultiplier = 1.0f;
+        gu->skyColorSaturation = 1.0f;
+        gu->skyAmbientLod = static_cast<float>(qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1);
+        gu->skyLightMultiplier = 1.0f;
+        gu->skyNee = 0.0f;
+        gu->skyType = SKY_TYPE_COLOR;
+        gu->skyCubemapIndex = QR_EMPTY_CUBEMAP;
+    }
+
+    QrFloat3D skyViewerPosition = drawInfo.pSkyParams ? drawInfo.pSkyParams->skyViewerPosition : QrFloat3D{ 0, 0, 0 };
+
+    for (uint32_t i = 0; i < 6; i++)
+    {
+        float *viewProjDst = &gu->viewProjCubemap[16 * i];
+        Matrix::GetCubemapViewProjMat(viewProjDst, i, skyViewerPosition.data, drawInfo.cameraNear, drawInfo.cameraFar);
+    }
 }
 
 void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const
@@ -811,80 +921,11 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->jitterY = 0.0f;
     }
 
-    {
-        gu->stopEyeAdaptation = drawInfo.disableEyeAdaptation;
+    gu->lightCount     = scene->GetLightManager()->GetLightCount();
+    gu->lightCountPrev = scene->GetLightManager()->GetLightCountPrev();
+    gu->directionalLightExists = scene->GetLightManager()->DoesDirectionalLightExist();
 
-        if( drawInfo.pTonemappingParams != nullptr )
-        {
-            gu->minLogLuminance     = drawInfo.pTonemappingParams->minLogLuminance;
-            gu->maxLogLuminance     = drawInfo.pTonemappingParams->maxLogLuminance;
-            gu->luminanceWhitePoint = drawInfo.pTonemappingParams->luminanceWhitePoint;
-        }
-        else
-        {
-            gu->minLogLuminance     = -3.9f;
-            gu->maxLogLuminance     = -2.8f;
-            gu->luminanceWhitePoint = 10.0f;
-        }
-    }
-
-    {
-        gu->lightCount     = scene->GetLightManager()->GetLightCount();
-        gu->lightCountPrev = scene->GetLightManager()->GetLightCountPrev();
-
-        gu->directionalLightExists = scene->GetLightManager()->DoesDirectionalLightExist();
-    }
-
-    {
-        static_assert( sizeof( gu->skyCubemapRotationTransform ) == sizeof( IdentityMat4x4 ) &&
-                       sizeof( IdentityMat4x4 ) == 16 * sizeof( float ), "Recheck skyCubemapRotationTransform sizes" );
-        memcpy( gu->skyCubemapRotationTransform, IdentityMat4x4, 16 * sizeof( float ) );
-
-        if( drawInfo.pSkyParams != nullptr )
-        {
-            const auto& sp = *drawInfo.pSkyParams;
-
-            memcpy( gu->skyColorDefault, sp.skyColorDefault.data, sizeof( float ) * 3 );
-            gu->skyColorMultiplier = sp.skyColorMultiplier;
-            gu->skyColorSaturation = std::max( sp.skyColorSaturation, 0.0f );
-            const float maxSkyLod      = static_cast<float>( qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1 );
-            gu->skyAmbientLod      = std::clamp( sp.skyAmbientLod, 0.0f, maxSkyLod );
-            gu->skyLightMultiplier = std::max( sp.skyLightMultiplier, 0.0f );
-            gu->skyNee             = sp.skyNee != 0 ? 1.0f : 0.0f;
-
-            gu->skyType = sp.skyType == QR_SKY_TYPE_CUBEMAP ? SKY_TYPE_CUBEMAP :
-                          sp.skyType == QR_SKY_TYPE_RASTERIZED_GEOMETRY ? SKY_TYPE_RASTERIZED_GEOMETRY :
-                          sp.skyType == QR_SKY_TYPE_PROCEDURAL ? SKY_TYPE_PROCEDURAL :
-                          SKY_TYPE_COLOR;
-
-            gu->skyCubemapIndex = cubemapManager->IsCubemapValid( sp.skyCubemap ) ? sp.skyCubemap : QR_EMPTY_CUBEMAP;
-
-            if( !Utils::IsAlmostZero( drawInfo.pSkyParams->skyCubemapRotationTransform ) )
-            {
-                Utils::SetMatrix3ToGLSLMat4( gu->skyCubemapRotationTransform, drawInfo.pSkyParams->skyCubemapRotationTransform );
-            }
-        }
-        else
-        {
-            gu->skyColorDefault[ 0 ] = gu->skyColorDefault[ 1 ] = gu->skyColorDefault[ 2 ] = gu->skyColorDefault[ 3 ] = 1.0f;
-            gu->skyColorMultiplier                                                                                    = 1.0f;
-            gu->skyColorSaturation                                                                                    = 1.0f;
-            gu->skyAmbientLod                                                                                         = static_cast<float>( qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1 );
-            gu->skyLightMultiplier                                                                                    = 1.0f;
-            gu->skyNee                                                                                                = 0.0f;
-            gu->skyType                                                                                               = SKY_TYPE_COLOR;
-            gu->skyCubemapIndex                                                                                       = QR_EMPTY_CUBEMAP;
-        }
-
-        QrFloat3D skyViewerPosition = drawInfo.pSkyParams ? drawInfo.pSkyParams->skyViewerPosition : QrFloat3D{ 0, 0, 0 };
-
-        for( uint32_t i = 0; i < 6; i++ )
-        {
-            float* viewProjDst = &gu->viewProjCubemap[ 16 * i ];
-
-            Matrix::GetCubemapViewProjMat( viewProjDst, i, skyViewerPosition.data, drawInfo.cameraNear, drawInfo.cameraFar );
-        }
-    }
+    FillUniformTonemappingAndSky(gu, drawInfo, cubemapManager.get(), IdentityMat4x4);
 
     gu->debugShowFlags = 0;
 
@@ -999,7 +1040,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[0]            = drawInfo.pIlluminationParams->restirEnabled != 0 ? 1u : 0u;
         gu->restirParams[1]            = std::clamp( drawInfo.pIlluminationParams->restirCandidates, 1u, 64u );
         gu->restirParams[2]            = 0u;
-        gu->restirParams[3]            = renderResolution.IsUpscaleEnabled() ? 0u : 1u;
+        const bool externalUpscaler    = (nvrhiFrameSkeleton != nullptr)
+            ? renderResolution.IsAmdFsr3Enabled()
+            : renderResolution.IsActiveUpscaleEnabled();
+        gu->restirParams[3]            = externalUpscaler ? 0u : 1u;
         gu->giBounceRays[0]            = std::clamp( drawInfo.pIlluminationParams->giBounceRays, 0.0f, 2.0f );
         gu->fltEnable[0]               = drawInfo.pIlluminationParams->denoiserEnabled != 0 ? 1.0f : 0.0f;
         gu->fixedAlbedo[0]             = std::max( drawInfo.pIlluminationParams->fixedAlbedo, 0.0f );
@@ -1022,7 +1066,10 @@ void VulkanDevice::FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawI
         gu->restirParams[0]            = 0u;
         gu->restirParams[1]            = 8u;
         gu->restirParams[2]            = 0u;
-        gu->restirParams[3]            = renderResolution.IsUpscaleEnabled() ? 0u : 1u;
+        const bool externalUpscaler    = (nvrhiFrameSkeleton != nullptr)
+            ? renderResolution.IsAmdFsr3Enabled()
+            : renderResolution.IsActiveUpscaleEnabled();
+        gu->restirParams[3]            = externalUpscaler ? 0u : 1u;
         gu->giBounceRays[0]            = 1.0f;
         gu->fltEnable[0]               = 1.0f;
         gu->fixedAlbedo[0]             = 0.0f;
@@ -1408,11 +1455,12 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     const ResolutionState resolutionState = renderResolution.GetResolutionState();
     if (framebuffers->NeedsPrepareForSize(resolutionState))
     {
+        const bool needWait = (nvrhiFrameSkeleton == nullptr);
         if (nvrhiFrameSkeleton != nullptr)
         {
             nvrhiFrameSkeleton->ReleaseFramebufferTargets();
         }
-        framebuffers->PrepareForSize(resolutionState);
+        framebuffers->PrepareForSize(resolutionState, needWait);
     }
 
     const ShGlobalUniform *globalUniform = uniform->GetData();
@@ -1426,17 +1474,13 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         rasterizedDataCollector->GetRasterDrawInfos();
 
     smokeDraws.clear();
+    particleDraws.clear();
     for (const RasterizedDataCollector::DrawInfo &info : worldDraws)
     {
         if ((info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
         {
             smokeDraws.push_back(info);
         }
-    }
-
-    particleDraws.clear();
-    for (const RasterizedDataCollector::DrawInfo &info : worldDraws)
-    {
         if ((info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_PARTICLE) != 0)
         {
             particleDraws.push_back(info);
@@ -1449,17 +1493,7 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     const std::vector<RasterizedDataCollector::DrawInfo> &swapchainDraws =
         rasterizedDataCollector->GetSwapchainDrawInfos();
 
-    const std::shared_ptr<ASManager> &asManager = scene->GetASManager();
-    ShVertPreprocessing preprocessing = {};
     prepareInputs.Finish();
-    if (!drawInfo.renderUiOnly)
-    {
-        CpuProfileScope legacyAs(cpuProfiler, QR_CPU_PASS_LEGACY_AS);
-        const auto prepare = asManager->PrepareForBuildingTLAS(
-            frameIndex, *uniform->GetData(), uniform->GetData()->rayCullMaskWorld,
-            allowGeometryWithSkyFlag, drawInfo.disableRayTracedGeometry);
-        preprocessing = prepare.second;
-    }
 
     CpuProfileScope fillInputs(cpuProfiler, QR_CPU_PASS_PREPARE);
 
@@ -1490,6 +1524,11 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     sky.particlePointDrawCount = static_cast<uint32_t>(particlePointDraws.size());
     sky.particlePointGeometry = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
         rasterizedDataCollector->GetParticlePointStagingBuffer(frameIndex)));
+    sky.particlePointStagingSize = rasterizedDataCollector->GetParticlePointBufferSize();
+    sky.rasterParticlePointDevice = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+        rasterizedDataCollector->GetParticlePointBuffer()));
+    sky.rasterParticlePointCopyBytes =
+        rasterizedDataCollector->GetCurrentParticlePointCount() * sizeof(QrParticlePoint);
 
     const std::vector<ParticleProxy> &particleProxies =
         rasterizedDataCollector->GetParticleProxies();
@@ -1504,6 +1543,12 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         rasterizedDataCollector->GetIndexStagingBuffer(frameIndex)));
     sky.swapchainVertexStagingSize = rasterizedDataCollector->GetVertexBufferSize();
     sky.swapchainIndexStagingSize = rasterizedDataCollector->GetIndexBufferSize();
+    sky.rasterVertexDevice = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+        rasterizedDataCollector->GetVertexBuffer()));
+    sky.rasterIndexDevice = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+        rasterizedDataCollector->GetIndexBuffer()));
+    sky.rasterVertexCopyBytes = rasterizedDataCollector->GetCurrentVertexCount() * sizeof(QrVertex);
+    sky.rasterIndexCopyBytes = rasterizedDataCollector->GetCurrentIndexCount() * sizeof(uint32_t);
     sky.disableRasterization = drawInfo.disableRasterization;
     sky.uniform = uniform;
     sky.tonemapping = tonemapping.get();
@@ -1518,6 +1563,9 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     sky.rayCullMaskWorld = uniform->GetData()->rayCullMaskWorld;
     sky.allowGeometryWithSkyFlag = allowGeometryWithSkyFlag;
     sky.disableRayTracedGeometry = drawInfo.disableRayTracedGeometry;
+    sky.preprocessStatic = !drawInfo.renderUiOnly &&
+                           !drawInfo.disableRayTracedGeometry &&
+                           scene->GetVertexPreprocessingMode() == VERT_PREPROC_MODE_ALL;
 
     if (!drawInfo.renderUiOnly)
     {
@@ -1743,15 +1791,9 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         return false;
     }
 
-    if (!drawInfo.renderUiOnly)
+    if (sky.preprocessStatic)
     {
-        CpuProfileScope legacyAs(cpuProfiler, QR_CPU_PASS_LEGACY_AS);
-        scene->PreprocessVertices(currentFrameState.GetCmdBuffer(), frameIndex, uniform, preprocessing);
-    }
-
-    {
-        CpuProfileScope submit(cpuProfiler, QR_CPU_PASS_LEGACY_SUBMIT);
-        cmdManager->Submit(currentFrameState.GetCmdBuffer(), frameFences[frameIndex]);
+        scene->ConsumeStaticSubmittedFlag();
     }
 
     {
@@ -1781,6 +1823,11 @@ void VulkanDevice::EndFrame(VkCommandBuffer cmd)
     const VkSemaphore renderFinishedSemaphore =
         swapchain->GetRenderFinishedSemaphore(swapchain->GetCurrentImageIndex());
 
+    if (cmd == VK_NULL_HANDLE)
+    {
+        cmd = cmdManager->StartGraphicsCmd();
+    }
+
     {
         CpuProfileScope submit(cpuProfiler, QR_CPU_PASS_LEGACY_SUBMIT);
         cmdManager->Submit(
@@ -1789,6 +1836,7 @@ void VulkanDevice::EndFrame(VkCommandBuffer cmd)
             semaphoreWaitStage,
             renderFinishedSemaphore,
             frameFences[frameIndex]);
+        frameFenceSubmitted[frameIndex] = true;
     }
 
     {
@@ -1826,6 +1874,49 @@ void VulkanDevice::StartFrame(const QrStartFrameInfo *startInfo)
     currentFrameState.OnBeginFrame(newFrameCmd);
 }
 
+void VulkanDevice::UpdateFrameStatsAndResolution(const QrDrawFrameInfo &drawInfo, uint32_t frameIndex)
+{
+    statsCpuTimingValid = false;
+    statsRenderedUiOnly = drawInfo.renderUiOnly != 0;
+    statsGpuTimingValid = false;
+    statsGpuFrameMs = 0.0f;
+    std::fill_n(statsGpuPassMs, QR_GPU_PASS_COUNT, 0.0f);
+
+    if (rhiAccelStructs != nullptr)
+    {
+        rhiAccelStructs->ResetDynamicFrameCounters();
+    }
+
+    previousFrameTime = currentFrameTime;
+    currentFrameTime = drawInfo.currentTime;
+
+    if (rayStats)
+    {
+        statsRays = rayStats->GetRays(frameIndex);
+        rayStats->GetRaysPerCategory(frameIndex, statsRaysPerCategory);
+        lastReflRefrTraced = statsRaysPerCategory[RAY_STATS_CATEGORY_REFLECTION_REFRACTION] != 0;
+        rayStats->Reset(frameIndex);
+    }
+
+    statsRasterUploadBytes = rasterizedDataCollector->GetUploadedBytes();
+    statsRasterUploadDroppedBatches = rasterizedDataCollector->GetDroppedUploadBatches();
+
+    const double dt = std::max(currentFrameTime - previousFrameTime, 0.0001);
+    const float fps = static_cast<float>(1.0 / dt);
+    statsSmoothedFps = statsSmoothedFps <= 0.0f ? fps : statsSmoothedFps * 0.92f + fps * 0.08f;
+    statsFpsX10 = static_cast<uint32_t>(std::clamp(statsSmoothedFps * 10.0f, 0.0f, 99999.0f));
+
+    renderResolution.Setup(drawInfo.pRenderResolutionParams,
+                           swapchain->GetWidth(), swapchain->GetHeight(), nvDlss);
+
+    if (!lastUpscaleTechnique.has_value() ||
+        *lastUpscaleTechnique != renderResolution.GetUpscaleTechnique())
+    {
+        lastUpscaleTechnique = renderResolution.GetUpscaleTechnique();
+        amdFsr->SetUpscaleVersion(*lastUpscaleTechnique);
+    }
+}
+
 void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
 {
     if (!currentFrameState.WasFrameStarted())
@@ -1851,72 +1942,44 @@ void VulkanDevice::DrawFrame(const QrDrawFrameInfo *drawInfo)
     cpuFrameProfiler.Reset(drawInfo->enableCpuProfiling != 0);
     CpuFrameProfiler *cpuProfiler = cpuFrameProfiler.IsEnabled() ? &cpuFrameProfiler : nullptr;
     CpuProfileScope prepare(cpuProfiler, QR_CPU_PASS_PREPARE);
-    statsCpuTimingValid = false;
-    statsRenderedUiOnly = drawInfo->renderUiOnly != 0;
-    statsGpuTimingValid = false;
-    statsGpuFrameMs = 0.0f;
-    std::fill_n(statsGpuPassMs, QR_GPU_PASS_COUNT, 0.0f);
-
-    if (rhiAccelStructs != nullptr)
-    {
-        rhiAccelStructs->ResetDynamicFrameCounters();
-    }
 
     VkCommandBuffer cmd = currentFrameState.GetCmdBuffer();
     const uint32_t frameIndex = currentFrameState.GetFrameIndex();
 
-    previousFrameTime = currentFrameTime;
-    currentFrameTime = drawInfo->currentTime;
-
-    if (rayStats)
-    {
-        statsRays = rayStats->GetRays(frameIndex);
-        rayStats->GetRaysPerCategory(frameIndex, statsRaysPerCategory);
-        lastReflRefrTraced = statsRaysPerCategory[RAY_STATS_CATEGORY_REFLECTION_REFRACTION] != 0;
-        rayStats->Reset(frameIndex);
-    }
-
-    statsRasterUploadBytes = rasterizedDataCollector->GetUploadedBytes();
-    statsRasterUploadDroppedBatches = rasterizedDataCollector->GetDroppedUploadBatches();
-
-    const double dt = std::max(currentFrameTime - previousFrameTime, 0.0001);
-    const float fps = static_cast<float>(1.0 / dt);
-    statsSmoothedFps = statsSmoothedFps <= 0.0f ? fps : statsSmoothedFps * 0.92f + fps * 0.08f;
-    statsFpsX10 = static_cast<uint32_t>(std::clamp(statsSmoothedFps * 10.0f, 0.0f, 99999.0f));
-
-    renderResolution.Setup(drawInfo->pRenderResolutionParams,
-                           swapchain->GetWidth(), swapchain->GetHeight(), nvDlss);
-
-    if (!lastUpscaleTechnique.has_value() ||
-        *lastUpscaleTechnique != renderResolution.GetUpscaleTechnique())
-    {
-        lastUpscaleTechnique = renderResolution.GetUpscaleTechnique();
-        amdFsr->SetUpscaleVersion(*lastUpscaleTechnique);
-    }
+    UpdateFrameStatsAndResolution(*drawInfo, frameIndex);
 
     prepare.Finish();
     {
         CpuProfileScope hotReload(cpuProfiler, QR_CPU_PASS_HOT_RELOAD);
-        textureManager->CheckForHotReload(cmd, frameIndex);
+        textureManager->CheckForHotReload(
+            [this]() { return currentFrameState.GetCmdBufferForMaterials(cmdManager); },
+            frameIndex);
+    }
+
+    if (VkCommandBuffer materialCmd = currentFrameState.GetInFrameMaterialCmdAndRemove();
+        materialCmd != VK_NULL_HANDLE)
+    {
+        cmdManager->Submit(materialCmd);
     }
 
     const bool canRender = renderResolution.Width() > 0 && renderResolution.Height() > 0;
 
     if (canRender)
     {
-        CpuProfileScope fillUniform(cpuProfiler, QR_CPU_PASS_PREPARE);
-        FillUniform(uniform->GetData(), *drawInfo);
-    }
+        {
+            CpuProfileScope fillUniform(cpuProfiler, QR_CPU_PASS_PREPARE);
+            FillUniform(uniform->GetData(), *drawInfo);
+        }
 
-    if (canRender)
-    {
         {
             CpuProfileScope descriptors(cpuProfiler, QR_CPU_PASS_DESCRIPTORS);
             const bool samplersUpdated = UpdateWorldSamplers(frameIndex, drawInfo->pTexturesParams);
             textureManager->SubmitDescriptors(frameIndex, drawInfo->pTexturesParams, samplersUpdated);
         }
 
-        if (!drawInfo->renderUiOnly)
+        const bool rhiActive = nvrhiFrameSkeleton != nullptr && !nvrhiFrameSkeleton->IsUnavailable() &&
+                               rhiFrameContext != nullptr && rhiFrameContext->IsCreated();
+        if (!rhiActive && !drawInfo->renderUiOnly && cmd != VK_NULL_HANDLE)
         {
             CpuProfileScope staging(cpuProfiler, QR_CPU_PASS_STAGING);
             rasterizedDataCollector->CopyFromStaging(cmd, frameIndex);
@@ -2220,12 +2283,12 @@ static thread_local uint32_t g_uploadLane = QR_UPLOAD_LANE_UNATTRIBUTED;
 static thread_local uint32_t g_uploadLaneStack[8];
 static thread_local uint32_t g_uploadLaneDepth = 0;
 
-VulkanDevice::UploadLockScope::UploadLockScope(VulkanDevice &device_, uint32_t lane_)
+VulkanDevice::UploadLockScope::UploadLockScope(VulkanDevice &device_, std::mutex &mutex_, uint32_t lane_)
     : device(device_)
     , lane(lane_)
     , enabled(device_.uploadLockTracing.load(std::memory_order_relaxed) && lane_ < QR_UPLOAD_LANE_COUNT)
     , waitNs(enabled ? UploadNowNs() : 0)
-    , lock(device_.geometryUploadMutex)
+    , lock(mutex_)
     , holdStartNs(enabled ? UploadNowNs() : 0)
 {
     if (enabled)
@@ -2331,9 +2394,76 @@ void VulkanDevice::GetUploadLockStats(QrUploadLockStats *pStats) const
     }
 }
 
+static bool IsValidGeometryType(QrGeometryType geomType)
+{
+    return geomType == QR_GEOMETRY_TYPE_STATIC ||
+           geomType == QR_GEOMETRY_TYPE_STATIC_MOVABLE ||
+           geomType == QR_GEOMETRY_TYPE_DYNAMIC;
+}
+
+static bool IsValidPassThroughType(QrGeometryPassThroughType type)
+{
+    return type == QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_MIRROR ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_PORTAL ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_ONLY_REFLECT ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_REFLECT_REFRACT ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT ||
+           type == QR_GEOMETRY_PASS_THROUGH_TYPE_ACID_REFLECT_REFRACT;
+}
+
+static bool IsValidVisibilityType(QrGeometryPrimaryVisibilityType type)
+{
+    return type == QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0 ||
+           type == QR_GEOMETRY_VISIBILITY_TYPE_WORLD_1 ||
+           type == QR_GEOMETRY_VISIBILITY_TYPE_WORLD_2 ||
+           type == QR_GEOMETRY_VISIBILITY_TYPE_FIRST_PERSON ||
+           type == QR_GEOMETRY_VISIBILITY_TYPE_FIRST_PERSON_VIEWER ||
+           type == QR_GEOMETRY_VISIBILITY_TYPE_SKY;
+}
+
+static void ValidateGeometryFlagsAndPortal(const QrGeometryUploadInfo &info, bool allowGeometryWithSkyFlag)
+{
+    if (allowGeometryWithSkyFlag)
+    {
+        if (info.visibilityType == QR_GEOMETRY_VISIBILITY_TYPE_WORLD_2)
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Geometry with QR_GEOMETRY_VISIBILITY_TYPE_WORLD_2 cannot be used, as QrInstanceCreateInfo::allowGeometryWithSkyFlag was true");
+        }
+    }
+    else
+    {
+        if (info.visibilityType == QR_GEOMETRY_VISIBILITY_TYPE_SKY)
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Geometry with QR_GEOMETRY_VISIBILITY_TYPE_SKY cannot be used, as QrInstanceCreateInfo::allowGeometryWithSkyFlag was false");
+        }
+    }
+
+    if ((info.flags & QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_MULTIPLY_BIT) != 0 &&
+        (info.flags & QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_ADD_BIT) != 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_MULTIPLY_BIT and QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_ADD_BIT must be set separately");
+    }
+
+    if (info.pPortalIndex != nullptr && info.passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_PORTAL)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Geometry's pPortalIndex is non-null, but geometry is not marked as portal");
+    }
+
+    if (info.pPortalIndex == nullptr && info.passThroughType == QR_GEOMETRY_PASS_THROUGH_TYPE_PORTAL)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Geometry is marked as portal, but pPortalIndex is null");
+    }
+
+    if (info.pPortalIndex && *(info.pPortalIndex) >= PORTAL_MAX_COUNT)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Geometry's portal index must be in [0, 62]");
+    }
+}
+
 void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
 {
-    UploadLockScope geometryLock(*this, g_uploadLane);
     statsApiCallsGeometry.fetch_add(1, std::memory_order_relaxed);
 
     using namespace std::string_literals;
@@ -2354,80 +2484,18 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         throw QrException(QR_WRONG_ARGUMENT, "Incorrect index data");
     }
 
-    if (uploadInfo->geomType != QR_GEOMETRY_TYPE_STATIC &&
-        uploadInfo->geomType != QR_GEOMETRY_TYPE_STATIC_MOVABLE &&
-        uploadInfo->geomType != QR_GEOMETRY_TYPE_DYNAMIC &&
-
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_MIRROR &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_PORTAL &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_ONLY_REFLECT &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_REFLECT_REFRACT &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT &&
-        uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_ACID_REFLECT_REFRACT &&
-
-        uploadInfo->visibilityType != QR_GEOMETRY_VISIBILITY_TYPE_WORLD_0 &&
-        uploadInfo->visibilityType != QR_GEOMETRY_VISIBILITY_TYPE_WORLD_1 &&
-        uploadInfo->visibilityType != QR_GEOMETRY_VISIBILITY_TYPE_WORLD_2 &&
-        uploadInfo->visibilityType != QR_GEOMETRY_VISIBILITY_TYPE_FIRST_PERSON &&
-        uploadInfo->visibilityType != QR_GEOMETRY_VISIBILITY_TYPE_FIRST_PERSON_VIEWER &&
-        uploadInfo->visibilityType != QR_GEOMETRY_VISIBILITY_TYPE_SKY)
+    if (!IsValidGeometryType(uploadInfo->geomType) ||
+        !IsValidPassThroughType(uploadInfo->passThroughType) ||
+        !IsValidVisibilityType(uploadInfo->visibilityType))
     {
         throw QrException(QR_WRONG_ARGUMENT, "Incorrect type of ray traced geometry");
     }
 
-    if (allowGeometryWithSkyFlag)
-    {
-        if (uploadInfo->visibilityType == QR_GEOMETRY_VISIBILITY_TYPE_WORLD_2)
-        {
-            throw QrException(QR_WRONG_ARGUMENT, "Geometry with QR_GEOMETRY_VISIBILITY_TYPE_WORLD_2 cannot be used, as QrInstanceCreateInfo::allowGeometryWithSkyFlag was true");
-        }
-    }
-    else
-    {
-        if (uploadInfo->visibilityType == QR_GEOMETRY_VISIBILITY_TYPE_SKY)
-        {
-            throw QrException(QR_WRONG_ARGUMENT, "Geometry with QR_GEOMETRY_VISIBILITY_TYPE_SKY cannot be used, as QrInstanceCreateInfo::allowGeometryWithSkyFlag was false");
-        }
-    }
-
-    if ((uploadInfo->flags & QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_MULTIPLY_BIT) != 0 &&
-        (uploadInfo->flags & QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_ADD_BIT) != 0)
-    {
-        throw QrException(QR_WRONG_ARGUMENT, "QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_MULTIPLY_BIT and QR_GEOMETRY_UPLOAD_REFL_REFR_ALBEDO_ADD_BIT must be set separately");
-    }
-
-    if (scene->DoesUniqueIDExist(uploadInfo->uniqueID))
-    {
-        if (uploadInfo->geomType == QR_GEOMETRY_TYPE_DYNAMIC && scene->DoesDynamicUniqueIDExist(uploadInfo->uniqueID))
-        {
-            return;
-        }
-
-        throw QrException(QR_WRONG_ARGUMENT, "Geometry with ID="s + std::to_string(uploadInfo->uniqueID) + " already exists");
-    }
-
-    if (uploadInfo->pPortalIndex != nullptr && uploadInfo->passThroughType != QR_GEOMETRY_PASS_THROUGH_TYPE_PORTAL)
-    {
-        throw QrException(QR_WRONG_ARGUMENT, "Geometry's pPortalIndex is non-null, but geometry is not marked as portal");
-    }
-
-    if (uploadInfo->pPortalIndex == nullptr && uploadInfo->passThroughType == QR_GEOMETRY_PASS_THROUGH_TYPE_PORTAL)
-    {
-        throw QrException(QR_WRONG_ARGUMENT, "Geometry is marked as portal, but pPortalIndex is null");
-    }
-
-    if (uploadInfo->pPortalIndex && *(uploadInfo->pPortalIndex) >= PORTAL_MAX_COUNT)
-    {
-        throw QrException(QR_WRONG_ARGUMENT, "Geometry's portal index must be in [0, 62]");
-    }
-
-    LockSpatialFrame();
+    ValidateGeometryFlagsAndPortal(*uploadInfo, allowGeometryWithSkyFlag);
 
     QrGeometryUploadInfo converted = *uploadInfo;
-    std::vector<uint32_t> convertedIndices;
-    std::vector<QrVertex> convertedVertices;
+    thread_local std::vector<uint32_t> convertedIndices;
+    thread_local std::vector<QrVertex> convertedVertices;
 
     if (!spatialFrame.IsIdentity())
     {
@@ -2467,9 +2535,35 @@ void VulkanDevice::UploadGeometry(const QrGeometryUploadInfo *uploadInfo)
         uploadInfo = &converted;
     }
 
-    geometryWindingFlips[uploadInfo->uniqueID] = reversesWinding;
+    const auto boundsStart = std::chrono::steady_clock::now();
+    bool  localInit = false;
+    float localMin[3] = {};
+    float localMax[3] = {};
+    AccumulateGeometryBounds(*uploadInfo, localInit, localMin, localMax);
+    const uint64_t boundsNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - boundsStart).count());
+    scene->RecordBoundsScan(boundsNs, uploadInfo->vertexCount);
 
-    scene->Upload(currentFrameState.GetFrameIndex(), *uploadInfo);
+    UploadLockScope geometryLock(*this, geometryUploadMutex, g_uploadLane);
+
+    if (scene->DoesUniqueIDExist(uploadInfo->uniqueID))
+    {
+        if (uploadInfo->geomType == QR_GEOMETRY_TYPE_DYNAMIC && scene->DoesDynamicUniqueIDExist(uploadInfo->uniqueID))
+        {
+            return;
+        }
+
+        throw QrException(QR_WRONG_ARGUMENT, "Geometry with ID="s + std::to_string(uploadInfo->uniqueID) + " already exists");
+    }
+
+    LockSpatialFrame();
+
+    if (uploadInfo->geomType == QR_GEOMETRY_TYPE_STATIC_MOVABLE)
+    {
+        geometryWindingFlips[uploadInfo->uniqueID] = reversesWinding;
+    }
+
+    scene->UploadWithBounds(currentFrameState.GetFrameIndex(), *uploadInfo, localInit, localMin, localMax);
 }
 
 void VulkanDevice::UpdateGeometryTransform(const QrUpdateTransformInfo *updateInfo)
@@ -2514,7 +2608,7 @@ void VulkanDevice::UpdateGeometryTexCoords(const QrUpdateTexCoordsInfo *updateIn
 void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo *pUploadInfo,
                                                 const float *pViewProjection, const QrViewport *pViewport)
 {
-    UploadLockScope geometryLock(*this, g_uploadLane);
+    UploadLockScope rasterLock(*this, rasterUploadMutex, g_uploadLane);
     statsApiCallsRasterized.fetch_add(1, std::memory_order_relaxed);
 
     if (pUploadInfo == nullptr)
@@ -2586,8 +2680,8 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
     QrRasterizedGeometryUploadInfo converted = *pUploadInfo;
     float convertedViewProjection[16] = {};
-    std::vector<QrVertex> convertedVertices;
-    std::vector<uint32_t> convertedIndices;
+    thread_local std::vector<QrVertex> convertedVertices;
+    thread_local std::vector<uint32_t> convertedIndices;
 
     const bool spatialRenderType =
         pUploadInfo->renderType != QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN;
@@ -2675,7 +2769,7 @@ void VulkanDevice::UploadRasterizedGeometry(const QrRasterizedGeometryUploadInfo
 
 QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 {
-    UploadLockScope geometryLock(*this, g_uploadLane);
+    UploadLockScope rasterLock(*this, rasterUploadMutex, g_uploadLane);
     statsApiCallsRasterized++;
 
     if (pUploadInfo == nullptr)
@@ -2701,7 +2795,7 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
     LockSpatialFrame();
 
     QrParticleUploadInfo converted = *pUploadInfo;
-    std::vector<QrParticlePoint> convertedPoints;
+    thread_local std::vector<QrParticlePoint> convertedPoints;
 
     if (!spatialFrame.IsIdentity())
     {
@@ -2735,7 +2829,7 @@ QrResult VulkanDevice::UploadParticles(const QrParticleUploadInfo *pUploadInfo)
 
 void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
 {
-    std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+    std::lock_guard<std::mutex> decalLock(decalUploadMutex);
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
@@ -2755,7 +2849,7 @@ void VulkanDevice::UploadDecal(const QrDecalUploadInfo *pUploadInfo)
 
 void VulkanDevice::UploadPortal(const QrPortalUploadInfo *pUploadInfo)
 {
-    std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+    std::lock_guard<std::mutex> portalLock(portalUploadMutex);
     if (pUploadInfo == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
@@ -2782,6 +2876,7 @@ void VulkanDevice::SubmitStaticGeometries()
 void VulkanDevice::StartNewStaticScene()
 {
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+    geometryWindingFlips.clear();
     scene->StartNewStatic();
 }
 
@@ -2832,7 +2927,7 @@ void VulkanDevice::FlushDeferredLightUploads()
 
 void VulkanDevice::SetParticleProxyGate(uint32_t gate, uint32_t glassParticles)
 {
-    std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
+    std::lock_guard<std::mutex> rasterLock(rasterUploadMutex);
 
     const bool hasGlass = rhiAccelStructs != nullptr && rhiAccelStructs->HasGlassInstances();
     const bool enabled = gate == 0u ? true : (gate == 2u ? false : (glassParticles != 0u && (lastReflRefrTraced || hasGlass)));
@@ -3210,7 +3305,7 @@ void VulkanDevice::SetFogVolumes(uint32_t count, const QrFogVolume *pVolumes)
 
 void VulkanDevice::CreateMaterial(const QrMaterialCreateInfo *createInfo, QrMaterial *result)
 {
-    if (createInfo == nullptr)
+    if (createInfo == nullptr || result == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
@@ -3225,7 +3320,7 @@ void VulkanDevice::CreateMaterial(const QrMaterialCreateInfo *createInfo, QrMate
 
 void VulkanDevice::CreateAnimatedMaterial(const QrAnimatedMaterialCreateInfo *createInfo, QrMaterial *result)
 {
-    if (createInfo == nullptr)
+    if (createInfo == nullptr || result == nullptr)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
@@ -3233,6 +3328,11 @@ void VulkanDevice::CreateAnimatedMaterial(const QrAnimatedMaterialCreateInfo *cr
     if (createInfo->frameCount == 0)
     {
         throw QrException(QR_WRONG_ARGUMENT, "Animated materials must have non-zero amount of frames");
+    }
+
+    if (createInfo->pFrames == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
     }
 
     *result = textureManager->CreateAnimatedMaterial
@@ -3279,6 +3379,11 @@ void VulkanDevice::DestroyMaterial(QrMaterial material)
 
 void VulkanDevice::CreateSkyboxCubemap(const QrCubemapCreateInfo *createInfo, QrCubemap *result)
 {
+    if (createInfo == nullptr || result == nullptr)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Argument is null");
+    }
+
     *result = cubemapManager->CreateCubemap(currentFrameState.GetCmdBufferForMaterials(cmdManager), currentFrameState.GetFrameIndex(), *createInfo);
 }
 

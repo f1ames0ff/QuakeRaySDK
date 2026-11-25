@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "RhiRtDirectPass.h"
 
 #include "RhiFrameContext.h"
@@ -32,6 +49,7 @@ const char *const MISS_SHADER_FILE_NAME = "RtMiss.rmiss.spv";
 const char *const SHADOW_MISS_SHADER_FILE_NAME = "RtMissShadowCheck.rmiss.spv";
 const char *const CLOSEST_HIT_SHADER_FILE_NAME = "RtClsOpaque.rchit.spv";
 const char *const ANY_HIT_SHADER_FILE_NAME = "RtAlphaTest.rahit.spv";
+const char *const ANY_HIT_SHADOW_SHADER_FILE_NAME = "RtAlphaTestShadow.rahit.spv";
 
 // Distinct export names are mandatory on Vulkan at this pin: the backend keys the pipeline's
 // shader groups by PipelineShaderDesc::exportName, falling back to the shader entry name
@@ -47,6 +65,8 @@ const char *const MISS_EXPORT_NAME = "RhiRtDirectRMiss";
 const char *const SHADOW_MISS_EXPORT_NAME = "RhiRtDirectRMissShadow";
 const char *const HIT_GROUP_OPAQUE_EXPORT_NAME = "RhiRtDirectRClsOpaque";
 const char *const HIT_GROUP_ALPHA_TESTED_EXPORT_NAME = "RhiRtDirectRClsOpaqueAlphaTested";
+const char *const HIT_GROUP_SHADOW_OPAQUE_EXPORT_NAME = "RhiRtDirectRClsShadowOpaque";
+const char *const HIT_GROUP_SHADOW_ALPHA_TESTED_EXPORT_NAME = "RhiRtDirectRClsShadowAlphaTested";
 
 // The engine's RT set order (RayTracingPipeline.cpp:62-86), the same numbers every RT shader
 // transcribes as DESC_SET_*. The order is NOT the raster passes' order and is what the pipeline's
@@ -378,11 +398,65 @@ RhiRtDirectPass::~RhiRtDirectPass()
 
     lightLayout = nullptr;
     framebufferLayout = nullptr;
+    shadowAnyHitShader = nullptr;
     anyHitShader = nullptr;
     closestHitShader = nullptr;
     shadowMissShader = nullptr;
     missShader = nullptr;
     raygenShader = nullptr;
+}
+
+bool RhiRtDirectPass::ValidateCreateBaseInputs()
+{
+    if (device == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the direct RT pass needs an RHI device");
+        return false;
+    }
+
+    if (frameContext == nullptr || !frameContext->IsCreated())
+    {
+        LogMessage(print, "Warning: RHI: the direct RT pass needs the frame context of the RHI layer");
+        return false;
+    }
+
+    if (textureTable == nullptr || !textureTable->IsCreated() ||
+        textureTable->GetLayout() == nullptr || textureTable->GetTable() == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the direct RT pass needs the shared RHI texture table (set 4)");
+        return false;
+    }
+
+    if constexpr (nvrhi::c_MaxBindingLayouts < PIPELINE_SET_COUNT)
+    {
+        LogMessage(print, "Warning: RHI: the direct RT pass needs c_MaxBindingLayouts >= " +
+                          std::to_string(PIPELINE_SET_COUNT) +
+                          " (apply third_party/nvrhi-max-binding-layouts.patch)");
+        return false;
+    }
+
+    return true;
+}
+
+bool RhiRtDirectPass::ValidateCreatePassDependencies()
+{
+    if (lightManager == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the direct RT pass needs the engine's light manager (set 6)");
+        return false;
+    }
+
+    if (primaryPass == nullptr || !primaryPass->IsCreated() ||
+        primaryPass->GetTlasLayout() == nullptr || primaryPass->GetUniformLayout() == nullptr ||
+        primaryPass->GetVertexDataLayout() == nullptr || primaryPass->GetHoleLayout() == nullptr ||
+        primaryPass->GetHoleSet() == nullptr || primaryPass->GetRayStatsLayout() == nullptr ||
+        primaryPass->GetRayStatsSet(0) == nullptr)
+    {
+        LogMessage(print, "Warning: RHI: the direct RT pass needs the created primary RT pass for its shared set layouts");
+        return false;
+    }
+
+    return true;
 }
 
 bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
@@ -406,56 +480,8 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     lightManager = pLightManager;
     primaryPass = pPrimaryPass;
 
-    if (device == nullptr)
+    if (!ValidateCreateBaseInputs() || !ValidateCreatePassDependencies())
     {
-        LogMessage(print, "Warning: RHI: the direct RT pass needs an RHI device");
-        return false;
-    }
-
-    if (frameContext == nullptr || !frameContext->IsCreated())
-    {
-        LogMessage(print, "Warning: RHI: the direct RT pass needs the frame context of the RHI layer");
-        return false;
-    }
-
-    if (textureTable == nullptr || !textureTable->IsCreated() ||
-        textureTable->GetLayout() == nullptr || textureTable->GetTable() == nullptr)
-    {
-        LogMessage(print, "Warning: RHI: the direct RT pass needs the shared RHI texture table (set 4)");
-        return false;
-    }
-
-    if (lightManager == nullptr)
-    {
-        LogMessage(print, "Warning: RHI: the direct RT pass needs the engine's light manager (set 6)");
-        return false;
-    }
-
-    // The shared layouts, the empty set of 5/7/8/9/10 and the ray-stats set of 11 come from the
-    // primary pass: NVRHI accepts a state's set only when it was created over the very layout
-    // handle the pipeline declared (validation-commandlist.cpp:509-520), so this module can share
-    // those positions but not re-create them. The primary pass therefore has to be created first
-    // and has to outlive this object.
-    if (primaryPass == nullptr || !primaryPass->IsCreated() ||
-        primaryPass->GetTlasLayout() == nullptr || primaryPass->GetUniformLayout() == nullptr ||
-        primaryPass->GetVertexDataLayout() == nullptr || primaryPass->GetHoleLayout() == nullptr ||
-        primaryPass->GetHoleSet() == nullptr || primaryPass->GetRayStatsLayout() == nullptr ||
-        primaryPass->GetRayStatsSet(0) == nullptr)
-    {
-        LogMessage(print, "Warning: RHI: the direct RT pass needs the created primary RT pass for its shared set layouts");
-        return false;
-    }
-
-    // The pipeline declares twelve binding layouts, so the pinned NVRHI's cap has to be the raised
-    // one: the module is written against `c_MaxBindingLayouts == 16` (the patch build_win.ps1
-    // applies for the duration of a build, third_party/nvrhi-max-binding-layouts.patch), exactly as
-    // RhiRtPrimaryPass is. 'if constexpr' keeps the check out of the compiled path of a patched
-    // build.
-    if constexpr (nvrhi::c_MaxBindingLayouts < PIPELINE_SET_COUNT)
-    {
-        LogMessage(print, "Warning: RHI: the direct RT pass needs c_MaxBindingLayouts >= " +
-                          std::to_string(PIPELINE_SET_COUNT) +
-                          " (apply third_party/nvrhi-max-binding-layouts.patch)");
         return false;
     }
 
@@ -463,7 +489,8 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         !LoadShader(MISS_SHADER_FILE_NAME, nvrhi::ShaderType::Miss, missShader) ||
         !LoadShader(SHADOW_MISS_SHADER_FILE_NAME, nvrhi::ShaderType::Miss, shadowMissShader) ||
         !LoadShader(CLOSEST_HIT_SHADER_FILE_NAME, nvrhi::ShaderType::ClosestHit, closestHitShader) ||
-        !LoadShader(ANY_HIT_SHADER_FILE_NAME, nvrhi::ShaderType::AnyHit, anyHitShader))
+        !LoadShader(ANY_HIT_SHADER_FILE_NAME, nvrhi::ShaderType::AnyHit, anyHitShader) ||
+        !LoadShader(ANY_HIT_SHADOW_SHADER_FILE_NAME, nvrhi::ShaderType::AnyHit, shadowAnyHitShader))
     {
         return false;
     }
@@ -559,6 +586,11 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
                              .setExportName(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME)
                              .setClosestHitShader(closestHitShader)
                              .setAnyHitShader(anyHitShader));
+        desc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                             .setExportName(HIT_GROUP_SHADOW_OPAQUE_EXPORT_NAME));
+        desc.addHitGroup(nvrhi::rt::PipelineHitGroupDesc()
+                             .setExportName(HIT_GROUP_SHADOW_ALPHA_TESTED_EXPORT_NAME)
+                             .setAnyHitShader(shadowAnyHitShader));
 
         desc.addBindingLayout(primaryPass->GetTlasLayout());           // 0
         desc.addBindingLayout(framebufferLayout);                      // 1
@@ -587,7 +619,7 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
-    // The table: one raygen, two misses and two hit groups, at the engine's own SBT indices. The
+    // The table: one raygen, two misses and four hit groups, at the engine's own SBT indices. The
     // returned indices are verified against the SBT_INDEX_* contract, so a shader-table shape
     // regression cannot pass silently - the shadow rays address miss 1, so the order is load
     // bearing. Uncached (the ShaderTableDesc default): with five entries the per-list bake of the
@@ -605,7 +637,9 @@ bool RhiRtDirectPass::Create(nvrhi::IDevice *pDevice,
     if (shaderTable->addMissShader(MISS_EXPORT_NAME) != SBT_INDEX_MISS_DEFAULT ||
         shaderTable->addMissShader(SHADOW_MISS_EXPORT_NAME) != SBT_INDEX_MISS_SHADOW ||
         shaderTable->addHitGroup(HIT_GROUP_OPAQUE_EXPORT_NAME) != SBT_INDEX_HITGROUP_FULLY_OPAQUE ||
-        shaderTable->addHitGroup(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME) != SBT_INDEX_HITGROUP_ALPHA_TESTED)
+        shaderTable->addHitGroup(HIT_GROUP_ALPHA_TESTED_EXPORT_NAME) != SBT_INDEX_HITGROUP_ALPHA_TESTED ||
+        shaderTable->addHitGroup(HIT_GROUP_SHADOW_OPAQUE_EXPORT_NAME) != SBT_INDEX_HITGROUP_SHADOW_FULLY_OPAQUE ||
+        shaderTable->addHitGroup(HIT_GROUP_SHADOW_ALPHA_TESTED_EXPORT_NAME) != SBT_INDEX_HITGROUP_SHADOW_ALPHA_TESTED)
     {
         // findShaderGroup already logged the missing export name through the device's message
         // callback; the pass only records that its table is unusable.

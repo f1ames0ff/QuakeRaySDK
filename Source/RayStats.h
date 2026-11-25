@@ -53,19 +53,13 @@ public:
     uint32_t GetRays(uint32_t frameIndex) const;
     void GetRaysPerCategory(uint32_t frameIndex, uint32_t *pOutCounts) const;
 
-    VkDescriptorSetLayout GetDescSetLayout() const;
-    VkDescriptorSet GetDescSet(uint32_t frameIndex) const;
-
-    // The slot's raw buffer. Additive accessor for consumers that bind the buffer through their own
-    // API instead of this class's descriptor set: the RHI layer wraps each slot's buffer as the
-    // ray-stats structured UAV of the RT passes, so the counters the raygens accumulate are the
-    // very ones GetRays/GetRaysPerCategory read back and Reset clears.
+    // The slot's raw buffer. The RHI layer wraps each slot's buffer as the ray-stats structured UAV
+    // of the RT passes, so the counters the raygens accumulate are the very ones
+    // GetRays/GetRaysPerCategory read back and Reset clears.
     VkBuffer GetBuffer(uint32_t frameIndex) const;
 
 private:
     void CreateBuffers(std::shared_ptr<MemoryAllocator> &allocator);
-    void CreateDescSetLayout();
-    void CreateDescSet();
 
 private:
     VkDevice device;
@@ -73,10 +67,6 @@ private:
 
     std::array<Buffer, MAX_FRAMES_IN_FLIGHT> buffers;
     std::array<void *, MAX_FRAMES_IN_FLIGHT> mapped;
-
-    VkDescriptorSetLayout descSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool descPool = VK_NULL_HANDLE;
-    VkDescriptorSet descSets[MAX_FRAMES_IN_FLIGHT] = {};
 };
 
 }

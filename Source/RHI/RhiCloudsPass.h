@@ -145,12 +145,13 @@ private:
     LayerParams lastLayerParams = {};
     ShadowParams lastShadowParams = {};
     float shadowPlacement[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float renderedShadowPlacement[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
     bool created = false;
     bool layerValid = false;
     bool shadowValid = false;
     uint32_t quality = 2;
-    uint32_t nextLayerFaceOffset = 0;
+    uint32_t nextLayerFacePhase = 0;
 };
 
 static_assert(sizeof(RhiCloudsPass::LayerParams) == 528,

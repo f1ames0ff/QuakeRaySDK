@@ -282,15 +282,10 @@ private:
     // engine's own depth descriptor declares.
     nvrhi::TextureHandle depthTexture;
 
-    // One framebuffer per (mip, face), indexed `mip * CUBEMAP_FACE_COUNT + face`: the cube's
-    // `TextureSubresourceSet(mip, 1, face, 1)` as the colour attachment and the same subresource of
-    // the depth as the depth attachment. NVRHI builds a 2D colour view over that one cube slice
-    // (vulkan-graphics.cpp:28-54, :56-84; vulkan-texture.cpp:287-349) - a cube image may be viewed
-    // as a per-slice 2D view, which is what makes the six-per-face draws of the A5.4 seam note
-    // (RhiProceduralSkyPass.h:158-164) possible without a second image or view of the cube. All
-    // 66 are created once in Create and the cube never changes, so nothing is re-created or retired
-    // per frame.
-    nvrhi::FramebufferHandle framebuffers[CUBEMAP_MIP_LEVELS * CUBEMAP_FACE_COUNT];
+    // One framebuffer per face at mip 0: the cube's `TextureSubresourceSet(0, 1, face, 1)` as the
+    // colour attachment and the same subresource of the mip-0 depth attachment. Mips 1..10 are
+    // generated via native vkCmdBlitImage (VK_FILTER_LINEAR) after rendering all 6 faces.
+    nvrhi::FramebufferHandle framebuffers[CUBEMAP_FACE_COUNT];
 
     // The format of the borrowed cube the pipelines and the framebuffer info are built with: the
     // A5.4 cube reports RGBA16_FLOAT, the legacy CUBEMAP_FORMAT

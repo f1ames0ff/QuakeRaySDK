@@ -468,6 +468,20 @@ private:
     // volumetric sets where the pass declares them. 'pPushConstant' is the iterative passes' 4-byte
     // iteration index: when it is non-null it is written between the state and the dispatch, the
     // order `setPushConstants` requires (nvrhi.h:3430-3440).
+    struct ComposeDispatchDims
+    {
+        uint32_t groupsX = 0;
+        uint32_t groupsY = 0;
+        uint32_t temporalGroupsX = 0;
+        uint32_t temporalGroupsY = 0;
+        uint32_t gradientGroupsX = 0;
+        uint32_t gradientGroupsY = 0;
+    };
+
+    void RecordAsvgfDenoiser(nvrhi::ICommandList *pCommandList,
+                             Target &target,
+                             const ComposeDispatchDims &dims);
+
     void RecordDispatch(nvrhi::ICommandList *pCommandList,
                         nvrhi::IComputePipeline *pPipeline,
                         std::initializer_list<nvrhi::IBindingSet *> sets,

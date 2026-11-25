@@ -427,6 +427,7 @@ bool ClusterSourcesValid(const QrClusterLightSourcesUploadInfo &sources) noexcep
     if (sources.numLights > QR_CLUSTER_MAX_REGISTERED_LIGHTS)
         return false;
     std::unordered_set<uint64_t> ids;
+    ids.reserve(sources.numLights);
     for (uint32_t i = 0; i < sources.numLights; ++i)
     {
         const QrClusterLightSource &light = sources.pLights[i];
@@ -493,9 +494,10 @@ QrResult ApplyOwnedLight(QrInstance instance, const OwnedLight &light) noexcept
 }
 
 QrResult ApplyDtal(QrInstance instance, const QraySceneDtalBatch &dtal,
-                   const std::unordered_map<QrayStableKey, QrMaterial, KeyHash> &materials) noexcept
+                   const std::unordered_map<QrayStableKey, QrMaterial, KeyHash> &materials,
+                   std::vector<QrDtalGroupUploadInfo> &groups) noexcept
 {
-    std::vector<QrDtalGroupUploadInfo> groups(dtal.pGroups, dtal.pGroups + dtal.groupCount);
+    groups.assign(dtal.pGroups, dtal.pGroups + dtal.groupCount);
     for (uint32_t i = 0; i < dtal.groupCount; ++i)
     {
         const QrayStableKey &key = dtal.groupMaterialKeys.pData[i];
@@ -875,6 +877,94 @@ struct QraySceneBinding::Impl
     std::unordered_map<QrayStableKey, uint64_t, KeyHash> lights;
     std::vector<OwnedLight> sceneLights;
     std::vector<OwnedDtal> sceneDtal;
+    std::unordered_set<QrayStableKey, KeyHash> scratchDynamicKeys;
+    std::unordered_set<uint64_t> scratchDynamicIds;
+    std::vector<uint64_t> scratchTransformIds;
+    std::vector<uint64_t> scratchTexCoordIds;
+    std::vector<QrMaterial> scratchMaterialContentHandles;
+    std::vector<QrDtalGroupUploadInfo> scratchDtalGroups;
+
+    bool IsMaterialBound(const QrayStableKey &key) const
+    {
+        return key.value == 0 || materials.find(key) != materials.end();
+    }
+
+    bool ResolveFrameRefs(const QrayFrameUpdates &updates)
+    {
+        scratchTransformIds.clear();
+        scratchTransformIds.reserve(updates.transforms.count);
+        for (uint32_t i = 0; i < updates.transforms.count; ++i)
+        {
+            const auto it = surfaces.find(updates.transforms.pData[i].geometry);
+            if (it == surfaces.end())
+                return false;
+            scratchTransformIds.push_back(it->second.runtimeId);
+        }
+        scratchTexCoordIds.clear();
+        scratchTexCoordIds.reserve(updates.texCoords.count);
+        for (uint32_t i = 0; i < updates.texCoords.count; ++i)
+        {
+            const auto it = surfaces.find(updates.texCoords.pData[i].geometry);
+            const QrayTexCoordUpdate &update = updates.texCoords.pData[i];
+            if (it == surfaces.end() ||
+                update.vertexOffset > it->second.vertexCount ||
+                update.vertexCount > it->second.vertexCount - update.vertexOffset)
+                return false;
+            scratchTexCoordIds.push_back(it->second.runtimeId);
+        }
+        scratchMaterialContentHandles.clear();
+        scratchMaterialContentHandles.reserve(updates.materialContents.count);
+        for (uint32_t i = 0; i < updates.materialContents.count; ++i)
+        {
+            const auto it = materials.find(updates.materialContents.pData[i].material);
+            if (it == materials.end())
+                return false;
+            scratchMaterialContentHandles.push_back(it->second);
+        }
+        return true;
+    }
+
+    bool ValidateDynamicGeometry(const QrayFrameUpdates &updates)
+    {
+        scratchDynamicKeys.clear();
+        scratchDynamicKeys.reserve(updates.dynamicGeometry.count);
+        scratchDynamicIds.clear();
+        scratchDynamicIds.reserve(updates.dynamicGeometry.count);
+        for (uint32_t i = 0; i < updates.dynamicGeometry.count; ++i)
+        {
+            const QraySceneGeometry &geometry = updates.dynamicGeometry.pData[i];
+            if (!scratchDynamicKeys.insert(geometry.key).second ||
+                !scratchDynamicIds.insert(geometry.geometry.uniqueID).second ||
+                surfaces.find(geometry.key) != surfaces.end() ||
+                surfaceRuntimeIds.find(geometry.geometry.uniqueID) != surfaceRuntimeIds.end())
+                return false;
+            for (const QrayStableKey &key : geometry.materialKeys)
+                if (!IsMaterialBound(key))
+                    return false;
+        }
+        return true;
+    }
+
+    bool ValidateFrameUpdateMaterials(const QrayFrameUpdates &updates) const
+    {
+        for (const QrayRasterizedUpdate &update : updates.rasterized)
+            if (!IsMaterialBound(update.material))
+                return false;
+        for (const QrayParticleUpdate &update : updates.particles)
+            if (!IsMaterialBound(update.material))
+                return false;
+        for (const QrayDecalUpdate &update : updates.decals)
+            if (!IsMaterialBound(update.material))
+                return false;
+        for (const QraySceneLight &light : updates.lights)
+            if (!IsMaterialBound(light.areaMaterial))
+                return false;
+        for (const QraySceneDtalBatch &dtal : updates.dtalBatches)
+            for (uint32_t i = 0; i < dtal.groupCount; ++i)
+                if (!IsMaterialBound(dtal.groupMaterialKeys.pData[i]))
+                    return false;
+        return true;
+    }
 
     ~Impl()
     {
@@ -1057,59 +1147,10 @@ QrResult QraySceneBinding::RenderFrame(const QrayFrameView &view,
     if (result != QR_SUCCESS)
         return result;
 
-    for (uint32_t i = 0; i < updates.transforms.count; ++i)
-        if (m_impl->surfaces.find(updates.transforms.pData[i].geometry) == m_impl->surfaces.end())
-            return QR_WRONG_ARGUMENT;
-    for (uint32_t i = 0; i < updates.texCoords.count; ++i)
-    {
-        const auto it = m_impl->surfaces.find(updates.texCoords.pData[i].geometry);
-        const QrayTexCoordUpdate &update = updates.texCoords.pData[i];
-        if (it == m_impl->surfaces.end() ||
-            update.vertexOffset > it->second.vertexCount ||
-            update.vertexCount > it->second.vertexCount - update.vertexOffset)
-            return QR_WRONG_ARGUMENT;
-    }
-    for (uint32_t i = 0; i < updates.materialContents.count; ++i)
-        if (m_impl->materials.find(updates.materialContents.pData[i].material) == m_impl->materials.end())
-            return QR_WRONG_ARGUMENT;
-
-    const auto materialBound = [&](const QrayStableKey &key) {
-        return key.value == 0 || m_impl->materials.find(key) != m_impl->materials.end();
-    };
-
-    std::unordered_set<QrayStableKey, KeyHash> dynamicKeys;
-    std::unordered_set<uint64_t> dynamicIds;
-    for (uint32_t i = 0; i < updates.dynamicGeometry.count; ++i)
-    {
-        const QraySceneGeometry &geometry = updates.dynamicGeometry.pData[i];
-        if (!dynamicKeys.insert(geometry.key).second ||
-            !dynamicIds.insert(geometry.geometry.uniqueID).second ||
-            m_impl->surfaces.find(geometry.key) != m_impl->surfaces.end() ||
-            m_impl->surfaceRuntimeIds.find(geometry.geometry.uniqueID) !=
-                m_impl->surfaceRuntimeIds.end())
-            return QR_WRONG_ARGUMENT;
-        for (const QrayStableKey &key : geometry.materialKeys)
-            if (!materialBound(key))
-                return QR_WRONG_ARGUMENT;
-    }
-    for (const QrayRasterizedUpdate &update : updates.rasterized)
-        if (!materialBound(update.material))
-            return QR_WRONG_ARGUMENT;
-    for (const QrayParticleUpdate &update : updates.particles)
-        if (!materialBound(update.material))
-            return QR_WRONG_ARGUMENT;
-    for (const QrayDecalUpdate &update : updates.decals)
-        if (!materialBound(update.material))
-            return QR_WRONG_ARGUMENT;
-    for (const QraySceneLight &light : updates.lights)
-        if (!materialBound(light.areaMaterial))
-            return QR_WRONG_ARGUMENT;
-    for (const QraySceneDtalBatch &dtal : updates.dtalBatches)
-    {
-        for (uint32_t i = 0; i < dtal.groupCount; ++i)
-            if (!materialBound(dtal.groupMaterialKeys.pData[i]))
-                return QR_WRONG_ARGUMENT;
-    }
+    if (!m_impl->ResolveFrameRefs(updates) ||
+        !m_impl->ValidateDynamicGeometry(updates) ||
+        !m_impl->ValidateFrameUpdateMaterials(updates))
+        return QR_WRONG_ARGUMENT;
 
     result = qrStartFrame(m_impl->instance, view.pStartInfo);
     if (result != QR_SUCCESS)
@@ -1133,7 +1174,7 @@ QrResult QraySceneBinding::RenderFrame(const QrayFrameView &view,
     {
         const QrayTransformUpdate &update = updates.transforms.pData[i];
         const QrUpdateTransformInfo info = {
-            m_impl->surfaces.at(update.geometry).runtimeId,
+            m_impl->scratchTransformIds[i],
             update.transform,
         };
         apply(qrUpdateGeometryTransform(m_impl->instance, &info));
@@ -1142,7 +1183,7 @@ QrResult QraySceneBinding::RenderFrame(const QrayFrameView &view,
     {
         const QrayTexCoordUpdate &update = updates.texCoords.pData[i];
         const QrUpdateTexCoordsInfo info = {
-            m_impl->surfaces.at(update.geometry).runtimeId,
+            m_impl->scratchTexCoordIds[i],
             update.vertexOffset,
             update.vertexCount,
             { update.pTexCoordLayerData[0], update.pTexCoordLayerData[1], update.pTexCoordLayerData[2] },
@@ -1153,7 +1194,7 @@ QrResult QraySceneBinding::RenderFrame(const QrayFrameView &view,
     {
         const QrayMaterialContentUpdate &update = updates.materialContents.pData[i];
         const QrMaterialUpdateInfo info = {
-            m_impl->materials.at(update.material),
+            m_impl->scratchMaterialContentHandles[i],
             update.textures,
         };
         apply(qrUpdateMaterialContents(m_impl->instance, &info));
@@ -1193,7 +1234,7 @@ QrResult QraySceneBinding::RenderFrame(const QrayFrameView &view,
     for (const QraySceneLight &light : updates.lights)
         apply(ApplyLight(m_impl->instance, light, m_impl->materials));
     for (const QraySceneDtalBatch &dtal : updates.dtalBatches)
-        apply(ApplyDtal(m_impl->instance, dtal, m_impl->materials));
+        apply(ApplyDtal(m_impl->instance, dtal, m_impl->materials, m_impl->scratchDtalGroups));
     if (updates.pClusterSources != nullptr)
         apply(qrUploadClusterLightSources(m_impl->instance, updates.pClusterSources));
     if (updates.fogVolumes.count != 0)

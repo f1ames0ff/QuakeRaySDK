@@ -118,18 +118,43 @@ void WorldLights::Upload(const QrWorldLightsUploadInfo &uploadInfo, UserPrint *p
     }
 }
 
-const uint8_t *WorldLights::GetClusterVis(uint32_t cluster) const
+const uint8_t *WorldLights::GetClusterVis(uint32_t cluster, size_t *pOutRemainingBytes) const
 {
+    if (pOutRemainingBytes != nullptr)
+    {
+        *pOutRemainingBytes = 0;
+    }
+
     if (cluster >= visOffsets.size() || visOffsets[cluster] < 0)
     {
         return nullptr;
     }
 
-    const uint32_t offset = uint32_t(visOffsets[cluster]);
+    const size_t offset = static_cast<size_t>(visOffsets[cluster]);
 
-    if (offset + pvsRowBytes > visData.size())
+    if (visUncompressed)
+    {
+        if (offset > visData.size() || pvsRowBytes > visData.size() - offset)
+        {
+            return nullptr;
+        }
+
+        if (pOutRemainingBytes != nullptr)
+        {
+            *pOutRemainingBytes = pvsRowBytes;
+        }
+
+        return visData.data() + offset;
+    }
+
+    if (offset >= visData.size())
     {
         return nullptr;
+    }
+
+    if (pOutRemainingBytes != nullptr)
+    {
+        *pOutRemainingBytes = visData.size() - offset;
     }
 
     return visData.data() + offset;

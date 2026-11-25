@@ -85,7 +85,7 @@ namespace
         return FFX_API_SURFACE_FORMAT_UNKNOWN;
     }
 
-    constexpr qray::FramebufferImageIndex OUTPUT_IMAGE_INDEX = qray::FB_IMAGE_INDEX_UPSCALED_PONG;
+    constexpr qray::FramebufferImageIndex OUTPUT_IMAGE_INDEX = qray::FB_IMAGE_INDEX_UPSCALED_PING;
 
     FfxApiResource ToFfxApiResource(
         qray::FramebufferImageIndex fbImage, uint32_t frameIndex,

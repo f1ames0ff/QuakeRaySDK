@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #pragma once
 
 #include <nvrhi/nvrhi.h>
@@ -35,5 +52,14 @@ void writeBuffer(nvrhi::ICommandList *commandList, nvrhi::IBuffer *buffer, const
 // A 1x1 opaque white texture, filled through the given command list; the skeleton samples it so
 // that the texture+sampler path is exercised while the image stays what it was.
 nvrhi::TextureHandle createWhiteTexture(nvrhi::IDevice *device, nvrhi::ICommandList *commandList, std::string_view debugName);
+
+// Generates mip levels 1..mipLevels-1 of a cubemap (or 2D array texture) from mip 0 using native
+// vkCmdBlitImage (VK_FILTER_LINEAR) across all array layers and transitions the entire texture to
+// `finalState`.
+void generateCubemapMips(nvrhi::ICommandList *commandList,
+                         nvrhi::ITexture *cubemap,
+                         uint32_t baseSize,
+                         uint32_t mipLevels,
+                         nvrhi::ResourceStates finalState = nvrhi::ResourceStates::NonPixelShaderResource);
 
 }

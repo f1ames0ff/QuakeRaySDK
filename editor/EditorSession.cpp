@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "EditorSession.h"
 
 #include <algorithm>
@@ -54,6 +71,11 @@ std::string CanonicalMaterialName(const std::string &name)
 
     if (lowered.compare(0, prefix.size(), prefix) == 0 ||
         lowered.compare(0, 6, "progs/") == 0 ||
+        lowered.compare(0, 7, "models/") == 0 ||
+        lowered.compare(0, 4, "gfx/") == 0 ||
+        lowered.compare(0, 8, "sprites/") == 0 ||
+        lowered.compare(0, 4, "env/") == 0 ||
+        lowered.compare(0, 8, "scripts/") == 0 ||
         lowered.find(':') != std::string::npos)
     {
         return name;
@@ -709,18 +731,60 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     return values;
 }
 
-void AppendPolygonOrColorYaml(std::string &out, const std::string &indent,
-                              const std::vector<float> &polyUv, const float color[3],
-                              float threshold)
+void AppendBrushRleTokens(std::string &out, const std::vector<uint8_t> &mask)
 {
-    if (polyUv.size() >= 6)
+    size_t i = 0;
+    while (i < mask.size())
+    {
+        const uint8_t value = mask[i];
+        size_t count = 1;
+        while (i + count < mask.size() && mask[i + count] == value)
+        {
+            count++;
+        }
+
+        if (i > 0)
+        {
+            out += ',';
+        }
+
+        char tok[32];
+        if (count > 1)
+        {
+            std::snprintf(tok, sizeof(tok), "%zu*%02x", count, unsigned(value));
+        }
+        else
+        {
+            std::snprintf(tok, sizeof(tok), "%02x", unsigned(value));
+        }
+        out += tok;
+        i += count;
+    }
+}
+
+template <typename Block>
+void AppendPolygonOrBrushYaml(std::string &out, const std::string &indent, const Block &block)
+{
+    if (IsBrushBlock(block))
+    {
+        char dims[32];
+        std::snprintf(dims, sizeof(dims), "%ux%u ", block.brushWidth, block.brushHeight);
+        out += indent + "  - brush: ";
+        out += dims;
+        AppendBrushRleTokens(out, block.brushMask);
+        out += '\n';
+        return;
+    }
+
+    if (IsPolygonBlock(block))
     {
         char buffer[64];
         out += indent + "  - polygon:";
 
-        for (size_t p = 0; p + 1 < polyUv.size(); p += 2)
+        for (size_t p = 0; p + 1 < block.polyUv.size(); p += 2)
         {
-            std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", polyUv[p], polyUv[p + 1]);
+            std::snprintf(buffer, sizeof(buffer), " %.4f,%.4f", double(block.polyUv[p]),
+                          double(block.polyUv[p + 1]));
             out += buffer;
         }
 
@@ -728,8 +792,8 @@ void AppendPolygonOrColorYaml(std::string &out, const std::string &indent,
         return;
     }
 
-    out += indent + "  - color: " + FormatColor(color) + "\n";
-    out += indent + "    threshold: " + FormatFloat(threshold) + "\n";
+    out += indent + "  - color: " + FormatColor(block.color) + "\n";
+    out += indent + "    threshold: " + FormatFloat(block.threshold) + "\n";
 }
 
 void AppendLumaBlocksYaml(std::string &out, const std::string &indent,
@@ -739,7 +803,7 @@ void AppendLumaBlocksYaml(std::string &out, const std::string &indent,
 
     for (const EditorEmissiveBlock &block : params.emissiveBlocks)
     {
-        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
+        AppendPolygonOrBrushYaml(out, indent, block);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
         out += indent + "    emissive_factor: " + FormatFloat(block.factor) + "\n";
         out += indent + "    blend: " + BlendNameOf(block.blend) + "\n";
@@ -753,7 +817,7 @@ void AppendGlossBlocksYaml(std::string &out, const std::string &indent,
 
     for (const EditorGlossBlock &block : params.glossBlocks)
     {
-        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
+        AppendPolygonOrBrushYaml(out, indent, block);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
         out += indent + "    roughness: " + FormatFloat(block.roughness) + "\n";
         out += indent + "    metalness: " + FormatFloat(block.metalness) + "\n";
@@ -767,7 +831,7 @@ void AppendSssBlocksYaml(std::string &out, const std::string &indent,
 
     for (const EditorSssBlock &block : params.sssBlocks)
     {
-        AppendPolygonOrColorYaml(out, indent, block.polyUv, block.color, block.threshold);
+        AppendPolygonOrBrushYaml(out, indent, block);
         out += indent + "    feather: " + FormatFloat(block.feather) + "\n";
         out += indent + "    factor: " + FormatFloat(block.factor) + "\n";
     }
@@ -891,8 +955,8 @@ std::string_view Trimmed(std::string_view text)
         text.remove_prefix(1);
     }
 
-    while (!text.empty() &&
-           (IsSpace(text.back()) || text.back() == '}' || text.back() == '\r'))
+    while (!text.empty() && (IsSpace(text.back()) || text.back() == '}' || text.back() == '\r' ||
+                             text.back() == '\n'))
     {
         text.remove_suffix(1);
     }
@@ -949,6 +1013,197 @@ void ReadUvPolygon(std::string_view value, std::vector<float> &outPolyUv)
     }
 }
 
+bool ParseBrushUint(std::string_view text, size_t &pos, uint64_t &out)
+{
+    if (pos >= text.size() || !std::isdigit(uint8_t(text[pos])))
+    {
+        return false;
+    }
+
+    uint64_t val = 0;
+    while (pos < text.size() && std::isdigit(uint8_t(text[pos])))
+    {
+        const uint64_t digit = uint64_t(text[pos] - '0');
+        if (val > (4096ull * 4096ull - digit) / 10ull)
+        {
+            return false;
+        }
+        val = val * 10ull + digit;
+        pos++;
+    }
+    out = val;
+    return true;
+}
+
+bool ParseBrushHexByte(std::string_view hex, uint8_t &out)
+{
+    if (hex.size() != 2)
+    {
+        return false;
+    }
+
+    uint8_t val = 0;
+    for (char c : hex)
+    {
+        val <<= 4;
+        if (c >= '0' && c <= '9')
+        {
+            val |= uint8_t(c - '0');
+        }
+        else if (c >= 'a' && c <= 'f')
+        {
+            val |= uint8_t(c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F')
+        {
+            val |= uint8_t(c - 'A' + 10);
+        }
+        else
+        {
+            return false;
+        }
+    }
+    out = val;
+    return true;
+}
+
+std::string_view TrimBrushWhitespace(std::string_view text)
+{
+    while (!text.empty() && (IsSpace(text.front()) || text.front() == '\r' || text.front() == '\n'))
+    {
+        text.remove_prefix(1);
+    }
+
+    while (!text.empty() && (IsSpace(text.back()) || text.back() == '\r' || text.back() == '\n'))
+    {
+        text.remove_suffix(1);
+    }
+
+    return text;
+}
+
+float ParseBlockFeather(std::string_view value, float fallback)
+{
+    const float pixels = FloatOf(value, fallback);
+    if (!std::isfinite(pixels))
+    {
+        return std::clamp(fallback, 0.0f, 16.0f);
+    }
+    return float(std::lround(std::clamp(pixels, 0.0f, 16.0f)));
+}
+
+bool ParseBrushRleToken(std::string_view token, size_t remaining, size_t &outCount,
+                        uint8_t &outByte)
+{
+    token = TrimBrushWhitespace(token);
+    if (token.empty())
+    {
+        return false;
+    }
+
+    const size_t star = token.find('*');
+    if (star == std::string_view::npos)
+    {
+        outCount = 1;
+        return outCount <= remaining && ParseBrushHexByte(token, outByte);
+    }
+
+    size_t pos = 0;
+    uint64_t count = 0;
+    if (!ParseBrushUint(token.substr(0, star), pos, count) || pos != star || count == 0 ||
+        count > remaining)
+    {
+        return false;
+    }
+    outCount = size_t(count);
+    return ParseBrushHexByte(token.substr(star + 1), outByte);
+}
+
+bool IsXSeparator(char ch)
+{
+    return ch == 'x' || ch == 'X';
+}
+
+bool ParseBrushDims(std::string_view value, size_t &pos, uint32_t &outW, uint32_t &outH)
+{
+    uint64_t w = 0;
+    uint64_t h = 0;
+    if (!ParseBrushUint(value, pos, w) || pos >= value.size() || !IsXSeparator(value[pos]))
+    {
+        return false;
+    }
+    pos++;
+    if (!ParseBrushUint(value, pos, h) || w == 0 || h == 0 || w * h > 4096ull * 4096ull)
+    {
+        return false;
+    }
+    if (pos >= value.size() || !IsSpace(value[pos]))
+    {
+        return false;
+    }
+    while (pos < value.size() && IsSpace(value[pos]))
+    {
+        pos++;
+    }
+    outW = uint32_t(w);
+    outH = uint32_t(h);
+    return true;
+}
+
+bool DecodeBrushRleStream(std::string_view stream, size_t total, std::vector<uint8_t> &decoded)
+{
+    decoded.reserve(std::min<size_t>(total, 65536));
+    size_t pos = 0;
+
+    while (pos <= stream.size())
+    {
+        const size_t comma = stream.find(',', pos);
+        const std::string_view token =
+            comma == std::string_view::npos ? stream.substr(pos) : stream.substr(pos, comma - pos);
+        size_t count = 0;
+        uint8_t byteVal = 0;
+        if (!ParseBrushRleToken(token, total - decoded.size(), count, byteVal))
+        {
+            return false;
+        }
+        decoded.insert(decoded.end(), count, byteVal);
+        if (comma == std::string_view::npos)
+        {
+            break;
+        }
+        pos = comma + 1;
+    }
+
+    return decoded.size() == total;
+}
+
+void ReadBrushMask(std::string_view value, uint32_t &outWidth, uint32_t &outHeight,
+                   std::vector<uint8_t> &outMask)
+{
+    outWidth = 0;
+    outHeight = 0;
+    outMask.clear();
+
+    size_t pos = 0;
+    uint32_t w = 0;
+    uint32_t h = 0;
+    if (!ParseBrushDims(value, pos, w, h))
+    {
+        return;
+    }
+
+    const size_t total = size_t(w) * size_t(h);
+    std::vector<uint8_t> decoded;
+    if (!DecodeBrushRleStream(value.substr(pos), total, decoded))
+    {
+        return;
+    }
+
+    outWidth = w;
+    outHeight = h;
+    outMask = std::move(decoded);
+}
+
 template <typename Block>
 bool ApplyCommonMaskBlockKey(std::string_view key, std::string_view value, Block &block,
                              uint32_t &has)
@@ -963,6 +1218,11 @@ bool ApplyCommonMaskBlockKey(std::string_view key, std::string_view value, Block
         ReadUvPolygon(value, block.polyUv);
         return true;
     }
+    if (key == "brush")
+    {
+        ReadBrushMask(value, block.brushWidth, block.brushHeight, block.brushMask);
+        return true;
+    }
     if (key == "threshold")
     {
         block.threshold = FloatOf(value, block.threshold);
@@ -972,8 +1232,7 @@ bool ApplyCommonMaskBlockKey(std::string_view key, std::string_view value, Block
     if (key == "feather")
     {
         // The loader rounds to whole pixels and clamps to the 16 the blur can reach.
-        const float pixels = FloatOf(value, block.feather);
-        block.feather = std::clamp(float(std::lround(pixels)), 0.0f, 16.0f);
+        block.feather = ParseBlockFeather(value, block.feather);
         has |= kOwnedFeather;
         return true;
     }
@@ -1423,6 +1682,8 @@ std::string LevelKeyOf(const std::string &scenePath)
 bool IsLightKey(std::string_view key)
 {
     static const char *const keys[] = { "origin",
+                                        "class",
+                                        "classname",
                                         "offset",
                                         "radius",
                                         "intensity",
@@ -1435,6 +1696,7 @@ bool IsLightKey(std::string_view key)
                                         "light_shafts_power",
                                         "light_shafts_distance",
                                         "light_shafts_falloff",
+                                        "force_rasterize",
                                         "enabled",
                                         "style" };
 
@@ -1616,7 +1878,11 @@ std::vector<SubBlock> SectionBlocks(const std::vector<TextLine> &lines, const st
 void ApplyExtraLightEntryKey(std::string_view key, std::string_view value, std::string_view line,
                              EditorLevelLight &light, std::vector<std::string> &extra)
 {
-    if (key == "offset")
+    if (key == "class" || key == "classname")
+    {
+        light.className = TextOf(value);
+    }
+    else if (key == "offset")
     {
         light.hasOffset = true;
         ParseVector(value, light.offset);
@@ -1637,6 +1903,10 @@ void ApplyExtraLightEntryKey(std::string_view key, std::string_view value, std::
     else if (key == "light_shafts_falloff")
     {
         light.lightShaftsFalloff = std::clamp(FloatOf(value, light.lightShaftsFalloff), 0.0f, 4.0f);
+    }
+    else if (key == "force_rasterize")
+    {
+        light.forceRasterize = BoolOf(value, light.forceRasterize);
     }
     else if (key == "enabled")
     {
@@ -2002,6 +2272,11 @@ std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<st
 
     text += head + "- origin: " + FormatVector(light.origin) + "\n";
 
+    if (!light.className.empty())
+    {
+        text += field + "class: " + light.className + "\n";
+    }
+
     if (light.hasOffset)
     {
         text += field + "offset: " + FormatVector(light.offset) + "\n";
@@ -2023,6 +2298,11 @@ std::string RenderLightEntry(const EditorLevelLight &light, const std::vector<st
         text += field + "angle_inner: " + FormatFloat(light.angleInner) + "\n";
         text += field + "angle_outer: " + FormatFloat(light.angleOuter) + "\n";
         AppendLightEntryShafts(text, field, light);
+    }
+
+    if (light.forceRasterize)
+    {
+        text += field + "force_rasterize: true\n";
     }
 
     if (!light.enabled)
@@ -2435,6 +2715,27 @@ bool EditorMaterialsDocument::HasMaterial(const std::string &name) const
     return FindEntry(name) != size_t(-1);
 }
 
+bool EditorMaterialsDocument::HasMaterialWithPrefix(const std::string &prefix) const
+{
+    const std::string lowerPrefix = Lowercase(prefix);
+    if (lowerPrefix.empty() || m_text.empty())
+    {
+        return false;
+    }
+
+    const std::vector<TextLine> lines = SplitLines(m_text);
+    for (size_t i = 0; i < lines.size(); i++)
+    {
+        std::string found;
+        if (NameOf(lines[i].View(m_text), found) &&
+            found.compare(0, lowerPrefix.size(), lowerPrefix) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace
 {
 
@@ -2844,7 +3145,8 @@ const char *const kEditorStyleNames[kEditorStyleCount] = {
 
 std::string RenderEditorLevelSection(const std::string &level, const EditorLevelSky &sky,
                                      const EditorLevelFog &fog,
-                                     const std::vector<EditorLevelLight> &lights)
+                                     const std::vector<EditorLevelLight> &lights,
+                                     bool includeEmptyLights)
 {
     std::string text = level + ":\n";
 
@@ -2860,8 +3162,24 @@ std::string RenderEditorLevelSection(const std::string &level, const EditorLevel
             text += RenderLightEntry(light, {}, 2);
         }
     }
+    else if (includeEmptyLights)
+    {
+        text += "  lights: []\n";
+    }
 
     return text;
+}
+
+bool IsSavedStandardLightEntry(const EditorLevelLight &entry)
+{
+    return !entry.className.empty() && Lowercase(entry.className) != "custom";
+}
+
+bool HasSavedStandardLightsBlock(const std::vector<EditorLevelLight> &entries)
+{
+    return entries.empty() || std::any_of(entries.begin(), entries.end(), [](const EditorLevelLight &entry) {
+               return !entry.className.empty();
+           });
 }
 
 std::string RenderEmitterLightsBlock(const std::vector<EditorEmitterLightOverride> &emitters)
@@ -3017,9 +3335,70 @@ std::vector<EditorEmitterLightOverride> EditorLevelDocument::ReadEmitterLights()
     return emitters;
 }
 
+namespace
+{
+
+std::vector<std::string> ClaimMatchingOldLightExtra(const EditorLevelLight &light,
+                                                    const std::vector<LightEntryBlock> &oldEntries,
+                                                    std::vector<bool> &used)
+{
+    int fallbackIndex = -1;
+    for (size_t e = 0; e < oldEntries.size(); e++)
+    {
+        const EditorLevelLight &old = oldEntries[e].light;
+        if (used[e] || old.origin[0] != light.origin[0] || old.origin[1] != light.origin[1] ||
+            old.origin[2] != light.origin[2])
+        {
+            continue;
+        }
+        if (old.className == light.className)
+        {
+            used[e] = true;
+            return oldEntries[e].extra;
+        }
+        if (fallbackIndex < 0)
+        {
+            fallbackIndex = int(e);
+        }
+    }
+    if (fallbackIndex >= 0)
+    {
+        used[size_t(fallbackIndex)] = true;
+        return oldEntries[size_t(fallbackIndex)].extra;
+    }
+    return {};
+}
+
+bool WriteMergedLightsBlock(const std::vector<EditorLevelLight> &lights,
+                            const std::vector<LightEntryBlock> &oldEntries, size_t childIndent,
+                            bool includeEmptyLights, std::string &merged)
+{
+    if (!lights.empty())
+    {
+        merged += std::string(childIndent, ' ') + "lights:\n";
+        std::vector<bool> used(oldEntries.size(), false);
+        for (const EditorLevelLight &light : lights)
+        {
+            const std::vector<std::string> extra =
+                ClaimMatchingOldLightExtra(light, oldEntries, used);
+            merged += RenderLightEntry(light, extra, childIndent);
+        }
+        return true;
+    }
+    if (includeEmptyLights)
+    {
+        merged += std::string(childIndent, ' ') + "lights: []\n";
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
 std::string EditorLevelDocument::WriteMerged(const std::string &level, const EditorLevelSky &sky,
                                              const EditorLevelFog &fog,
-                                             const std::vector<EditorLevelLight> &lights) const
+                                             const std::vector<EditorLevelLight> &lights,
+                                             bool includeEmptyLights) const
 {
     const std::vector<TextLine> lines = SplitLines(m_text);
     const std::string key = Lowercase(level);
@@ -3119,39 +3498,8 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             }
             else if (block->key == "lights")
             {
-                // The game writes no `lights:` block for a level without custom lights, and
-                // neither does the editor: an empty list removes the block it owned.
-                if (!lights.empty())
-                {
-                    merged += std::string(childIndent, ' ') + "lights:\n";
-
-                    std::vector<bool> used(oldEntries.size(), false);
-
-                    for (const EditorLevelLight &light : lights)
-                    {
-                        std::vector<std::string> extra;
-
-                        for (size_t e = 0; e < oldEntries.size(); e++)
-                        {
-                            const EditorLevelLight &old = oldEntries[e].light;
-
-                            if (used[e] || old.origin[0] != light.origin[0] ||
-                                old.origin[1] != light.origin[1] ||
-                                old.origin[2] != light.origin[2])
-                            {
-                                continue;
-                            }
-
-                            used[e] = true;
-                            extra = oldEntries[e].extra;
-                            break;
-                        }
-
-                        merged += RenderLightEntry(light, extra, childIndent);
-                    }
-
-                    lightsWritten = true;
-                }
+                lightsWritten = WriteMergedLightsBlock(lights, oldEntries, childIndent,
+                                                       includeEmptyLights, merged);
             }
             else
             {
@@ -3179,14 +3527,9 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             merged.insert(bodyStart, RenderSkyBlock(mergedSky, childIndent));
         }
 
-        if (!lightsWritten && !lights.empty())
+        if (!lightsWritten)
         {
-            merged += std::string(childIndent, ' ') + "lights:\n";
-
-            for (const EditorLevelLight &light : lights)
-            {
-                merged += RenderLightEntry(light, {}, childIndent);
-            }
+            WriteMergedLightsBlock(lights, {}, childIndent, includeEmptyLights, merged);
         }
 
         head = end;
@@ -3204,7 +3547,7 @@ std::string EditorLevelDocument::WriteMerged(const std::string &level, const Edi
             merged += '\n';
         }
 
-        merged += RenderEditorLevelSection(level, sky, fog, lights);
+        merged += RenderEditorLevelSection(level, sky, fog, lights, includeEmptyLights);
     }
 
     return merged;

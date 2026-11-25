@@ -42,7 +42,7 @@
     #define QR_ENUM_UINT32
 #endif
 
-#define QR_API_VERSION "1.06.0000"
+#define QR_API_VERSION "1.07.0000"
 
 #define QR_SPATIAL_CONVENTION_VERSION 2
 
@@ -418,6 +418,8 @@ typedef struct QrGeometryUploadInfo
     QrFloat3D                       subsurfaceColor;
     float                           subsurfaceRadius;
     float                           subsurfaceStrength;
+    /* Optional per-instance cluster override (0 preserves per-vertex cluster). */
+    uint32_t                        clusterOverride;
 } QrGeometryUploadInfo;
 
 typedef struct QrUpdateTransformInfo

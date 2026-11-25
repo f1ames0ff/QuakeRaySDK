@@ -1,5 +1,23 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "EditorApp.h"
 #include "EditorGui.h"
+#include "EditorLightSelection.h"
 #include "EditorSession.h"
 #include "EditorSpatial.h"
 #include "EditorUi.h"
@@ -502,12 +520,34 @@ static constexpr const char *kLumaBlendLabels[] = {
     "cvar", "off", "normal", "screen", "overlay", "hard light", "color dodge",
 };
 
+enum class MaskBlockKind
+{
+    Color,
+    Polygon,
+    Brush,
+};
+
+template <typename Block>
+MaskBlockKind MaskBlockKindOf(const Block &block)
+{
+    if (IsBrushBlock(block))
+    {
+        return MaskBlockKind::Brush;
+    }
+    return IsPolygonBlock(block) ? MaskBlockKind::Polygon : MaskBlockKind::Color;
+}
+
 template <typename Block>
 std::string FormatMaskBlockLabel(size_t index, const Block &block)
 {
     char buf[48] = {};
+    const MaskBlockKind kind = MaskBlockKindOf(block);
 
-    if (block.polyUv.size() >= 6)
+    if (kind == MaskBlockKind::Brush)
+    {
+        std::snprintf(buf, sizeof(buf), "Brush %zu", index + 1);
+    }
+    else if (kind == MaskBlockKind::Polygon)
     {
         std::snprintf(buf, sizeof(buf), "Mask %zu (%zu pts)", index + 1, block.polyUv.size() / 2);
     }
@@ -527,8 +567,8 @@ bool DrawMaskBlockHeader(const char *actionId, size_t index, Block &block, Block
                          bool &clipboardValid, bool &outRemove)
 {
     const std::string header = FormatMaskBlockLabel(index, block);
-    const bool isPoly = block.polyUv.size() >= 6;
-    const bool canPaste = clipboardValid && ((clipboard.polyUv.size() >= 6) == isPoly);
+    const bool canPaste =
+        clipboardValid && MaskBlockKindOf(clipboard) == MaskBlockKindOf(block);
 
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(header.c_str());
@@ -554,8 +594,181 @@ bool DrawMaskBlockHeader(const char *actionId, size_t index, Block &block, Block
     return pasted;
 }
 
+struct OverlayMaskCacheEntry
+{
+    bool valid = false;
+    std::string texName;
+    uint32_t texWidth = 0;
+    uint32_t texHeight = 0;
+    const uint8_t *rgbaPtr = nullptr;
+    bool isGloss = false;
+    float color[3] = {};
+    float threshold = 0.0f;
+    float feather = 0.0f;
+    std::vector<float> polyUv;
+    uint32_t brushWidth = 0;
+    uint32_t brushHeight = 0;
+    std::vector<uint8_t> brushMask;
+    std::vector<float> mask;
+};
+
+bool OverlayTextureMatches(const OverlayMaskCacheEntry &cache, const EditorTexture *previewTex,
+                         const uint8_t *rgba, bool isGloss)
+{
+    return cache.valid && cache.texWidth == previewTex->width &&
+           cache.texHeight == previewTex->height && cache.rgbaPtr == rgba &&
+           cache.texName == previewTex->name && cache.isGloss == isGloss;
+}
+
+template <typename Block>
+bool OverlayBlockColorMatches(const OverlayMaskCacheEntry &cache, const Block &block)
+{
+    return cache.color[0] == block.color[0] && cache.color[1] == block.color[1] &&
+           cache.color[2] == block.color[2] && cache.threshold == block.threshold &&
+           cache.feather == block.feather;
+}
+
+template <typename Block>
+bool OverlayCacheMatches(const OverlayMaskCacheEntry &cache, const Block &block,
+                         const EditorTexture *previewTex, const uint8_t *rgba, bool isGloss)
+{
+    return OverlayTextureMatches(cache, previewTex, rgba, isGloss) &&
+           OverlayBlockColorMatches(cache, block) && cache.polyUv == block.polyUv &&
+           cache.brushWidth == block.brushWidth && cache.brushHeight == block.brushHeight &&
+           cache.brushMask == block.brushMask;
+}
+
+template <typename Block>
+const std::vector<float> *ComputeOverlayMaskCached(const Block &block,
+                                                   const EditorTexture *previewTex, bool isGloss)
+{
+    if (previewTex == nullptr || previewTex->width == 0 || previewTex->height == 0)
+    {
+        return nullptr;
+    }
+
+    static OverlayMaskCacheEntry s_caches[2];
+    OverlayMaskCacheEntry &cache = s_caches[isGloss ? 1 : 0];
+    const size_t minRgbaBytes = size_t(previewTex->width) * size_t(previewTex->height) * 4;
+    const uint8_t *rgba = previewTex->rgba.size() >= minRgbaBytes ? previewTex->rgba.data() : nullptr;
+
+    if (!OverlayCacheMatches(cache, block, previewTex, rgba, isGloss))
+    {
+        cache.valid = true;
+        cache.texName = previewTex->name;
+        cache.texWidth = previewTex->width;
+        cache.texHeight = previewTex->height;
+        cache.rgbaPtr = rgba;
+        cache.isGloss = isGloss;
+        std::copy_n(block.color, 3, cache.color);
+        cache.threshold = block.threshold;
+        cache.feather = block.feather;
+        cache.polyUv = block.polyUv;
+        cache.brushWidth = block.brushWidth;
+        cache.brushHeight = block.brushHeight;
+        cache.brushMask = block.brushMask;
+
+        const EditorMaskEvalSpec spec{ block.color,      block.threshold,  block.feather,
+                                       1.0f,             &block.polyUv,    &block.brushMask,
+                                       block.brushWidth, block.brushHeight, isGloss };
+        ComputeEditorMask(spec, rgba, previewTex->width, previewTex->height, cache.mask, nullptr);
+    }
+
+    return cache.mask.empty() ? nullptr : &cache.mask;
+}
+
+template <typename Block>
+void ResampleBrushMaskIfNeeded(Block &block, const EditorTexture *previewTex)
+{
+    if (previewTex == nullptr || previewTex->width == 0 || previewTex->height == 0)
+    {
+        return;
+    }
+    const size_t dstPixels = size_t(previewTex->width) * size_t(previewTex->height);
+    if (block.brushWidth == previewTex->width && block.brushHeight == previewTex->height &&
+        block.brushMask.size() == dstPixels)
+    {
+        return;
+    }
+
+    if (IsBrushBlock(block))
+    {
+        std::vector<float> resampled;
+        const EditorMaskEvalSpec spec{ nullptr, 0.0f, 0.0f, 1.0f, nullptr, &block.brushMask,
+                                       block.brushWidth, block.brushHeight, false };
+        ComputeEditorMask(spec, nullptr, previewTex->width, previewTex->height, resampled, nullptr);
+        block.brushMask.resize(dstPixels);
+        for (size_t i = 0; i < dstPixels; i++)
+        {
+            block.brushMask[i] =
+                uint8_t(std::clamp(std::lround(resampled[i] * 255.0f), 0l, 255l));
+        }
+    }
+    else
+    {
+        block.brushMask.assign(dstPixels, 0);
+    }
+    block.brushWidth = previewTex->width;
+    block.brushHeight = previewTex->height;
+}
+
+bool FillBrushMaskBytes(std::vector<uint8_t> &mask, uint8_t value)
+{
+    const bool anyDiff =
+        std::any_of(mask.begin(), mask.end(), [value](uint8_t v) { return v != value; });
+    if (!anyDiff)
+    {
+        return false;
+    }
+    std::fill(mask.begin(), mask.end(), value);
+    return true;
+}
+
+template <typename Block>
+bool DrawBrushMaskPreview(const char *brushId, Block &block, uint64_t previewHandle,
+                          const EditorTexture *previewTex, const std::vector<float> *overlayMask)
+{
+    static EditorBrushToolSettings s_tool;
+    bool edited = false;
+
+    EditorGuiSliderFloat("brush_size", &s_tool.radiusTexels, 1.0f, 64.0f,
+                         { false, true, "Brush radius in texels.", "%.1f px" });
+    EditorGuiSliderFloat("brush_hardness", &s_tool.hardness, 0.0f, 1.0f,
+                         { false, true, "Solid inner core fraction before smooth falloff.",
+                           "%.2f" });
+    EditorGuiSliderFloat("brush_opacity", &s_tool.opacity, 0.0f, 1.0f,
+                         { false, true, "Maximum stroke opacity applied per drag.", "%.2f" });
+    EditorGuiCheckbox("brush_erase", &s_tool.erase,
+                      { s_tool.erase, true, "Erase painted mask (RMB always erases)." });
+
+    if (previewHandle != 0 && previewTex != nullptr && previewTex->width > 0 &&
+        previewTex->height > 0)
+    {
+        ResampleBrushMaskIfNeeded(block, previewTex);
+        edited |= EditorBrushEdit(brushId, previewHandle, previewTex->width, previewTex->height,
+                                  block.brushMask, s_tool, overlayMask);
+    }
+    else
+    {
+        ImGui::TextDisabled("Texture preview unavailable.");
+    }
+
+    if (ImGui::Button("Clear brush"))
+    {
+        edited |= FillBrushMaskBytes(block.brushMask, uint8_t(0));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Fill brush"))
+    {
+        edited |= FillBrushMaskBytes(block.brushMask, uint8_t(255));
+    }
+
+    return edited;
+}
+
 bool PickTextureColorPixel(const char *pickId, uint64_t previewHandle,
-                           const EditorTexture *previewTex, float outColor[3])
+                           const EditorTexture *previewTex, float outColor[3],
+                           const std::vector<float> *overlayMask)
 {
     if (previewHandle == 0 || previewTex == nullptr || previewTex->width == 0 ||
         previewTex->height == 0)
@@ -566,7 +779,8 @@ bool PickTextureColorPixel(const char *pickId, uint64_t previewHandle,
 
     float u = 0.5f;
     float v = 0.5f;
-    if (!EditorImagePick(pickId, previewHandle, previewTex->width, previewTex->height, u, v))
+    if (!EditorImagePick(pickId, previewHandle, previewTex->width, previewTex->height, u, v,
+                         overlayMask))
     {
         return false;
     }
@@ -591,15 +805,16 @@ bool PickTextureColorPixel(const char *pickId, uint64_t previewHandle,
 }
 
 bool DrawUvPolygonMaskPreview(const char *maskId, std::vector<float> &polyUv,
-                              uint64_t previewHandle, const EditorTexture *previewTex)
+                              uint64_t previewHandle, const EditorTexture *previewTex,
+                              const std::vector<float> *overlayMask)
 {
     bool edited = false;
 
     if (previewHandle != 0 && previewTex != nullptr && previewTex->width > 0 &&
         previewTex->height > 0)
     {
-        edited |=
-            EditorPolygonEdit(maskId, previewHandle, previewTex->width, previewTex->height, polyUv, 16);
+        edited |= EditorPolygonEdit(maskId, previewHandle, previewTex->width, previewTex->height,
+                                    polyUv, 16, overlayMask);
     }
     else
     {
@@ -627,7 +842,8 @@ struct BlockColorUiLabels
 template <typename Block>
 bool DrawColorBlockPickerAndThreshold(const BlockColorUiLabels &ui, Block &block,
                                       const Block *baseBlock, uint64_t previewHandle,
-                                      const EditorTexture *previewTex)
+                                      const EditorTexture *previewTex,
+                                      const std::vector<float> *overlayMask)
 {
     bool edited = false;
     const bool clrChanged = baseBlock != nullptr && !ColorEq(block.color, baseBlock->color);
@@ -642,7 +858,7 @@ bool DrawColorBlockPickerAndThreshold(const BlockColorUiLabels &ui, Block &block
         edited |= ResetVec3IfClicked(block.color, baseBlock->color, &clrReset);
     }
 
-    edited |= PickTextureColorPixel(ui.pickId, previewHandle, previewTex, block.color);
+    edited |= PickTextureColorPixel(ui.pickId, previewHandle, previewTex, block.color, overlayMask);
 
     const bool thrChanged = baseBlock != nullptr && !AlmostEq(block.threshold, baseBlock->threshold);
     bool thrReset = false;
@@ -697,7 +913,8 @@ bool DrawBlockUnitFloatSlider(const char *label, const char *tip, float &value, 
 }
 
 bool DrawLumaColorPreview(EditorEmissiveBlock &block, const EditorEmissiveBlock *baseBlock,
-                          uint64_t previewHandle, const EditorTexture *previewTex)
+                          uint64_t previewHandle, const EditorTexture *previewTex,
+                          const std::vector<float> *overlayMask)
 {
     static constexpr BlockColorUiLabels kUi{
         "##color",
@@ -706,11 +923,13 @@ bool DrawLumaColorPreview(EditorEmissiveBlock &block, const EditorEmissiveBlock 
         "The color this block matches, up to the threshold distance.",
         "Color cube distance within which pixels emit.",
     };
-    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex);
+    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex,
+                                            overlayMask);
 }
 
 bool DrawGlossColorPreview(EditorGlossBlock &block, const EditorGlossBlock *baseBlock,
-                           uint64_t previewHandle, const EditorTexture *previewTex)
+                           uint64_t previewHandle, const EditorTexture *previewTex,
+                           const std::vector<float> *overlayMask)
 {
     static constexpr BlockColorUiLabels kUi{
         "##gloss_color",
@@ -719,11 +938,13 @@ bool DrawGlossColorPreview(EditorGlossBlock &block, const EditorGlossBlock *base
         "The color this gloss block matches, up to the threshold distance.",
         "Color cube distance within which pixels apply gloss.",
     };
-    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex);
+    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex,
+                                            overlayMask);
 }
 
 bool DrawSssColorPreview(EditorSssBlock &block, const EditorSssBlock *baseBlock,
-                         uint64_t previewHandle, const EditorTexture *previewTex)
+                         uint64_t previewHandle, const EditorTexture *previewTex,
+                         const std::vector<float> *overlayMask)
 {
     static constexpr BlockColorUiLabels kUi{
         "##sss_color",
@@ -732,7 +953,8 @@ bool DrawSssColorPreview(EditorSssBlock &block, const EditorSssBlock *baseBlock,
         "The color this subsurface block matches, up to the threshold distance.",
         "Color cube distance within which pixels receive subsurface scattering.",
     };
-    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex);
+    return DrawColorBlockPickerAndThreshold(kUi, block, baseBlock, previewHandle, previewTex,
+                                            overlayMask);
 }
 
 bool DrawGlossBlockShadingControls(EditorGlossBlock &block, const EditorGlossBlock *baseBlock)
@@ -1592,7 +1814,6 @@ void EditorApp::StartEditorMode(EditorMode mode)
             BuildEmissiveLights();
         }
     }
-    ApplyBaselineCapture();
     SetCursorMode(true);
 }
 
@@ -1605,9 +1826,8 @@ void EditorApp::BackToChooser()
     SetCursorMode(true);
 }
 
-bool EditorApp::HandleEditorModeKeyDown(int key)
+bool EditorApp::CancelActivePlacementOrDialog()
 {
-    (void)key;
     if (m_openLevelDialog)
     {
         m_openLevelDialog = false;
@@ -1635,6 +1855,21 @@ bool EditorApp::HandleEditorModeKeyDown(int key)
         SetCursorMode(true);
         return true;
     }
+    if (m_marqueePending || m_marqueeDragging)
+    {
+        CancelMarqueeSelection();
+        return true;
+    }
+    return false;
+}
+
+bool EditorApp::HandleEditorModeKeyDown(int key)
+{
+    (void)key;
+    if (CancelActivePlacementOrDialog())
+    {
+        return true;
+    }
     if (m_gizmoDragging || m_grabDragging)
     {
         FinishGizmoDrag(false);
@@ -1660,7 +1895,8 @@ bool EditorApp::HandleEditorModeKeyDown(int key)
     return true;
 }
 
-void EditorApp::HandleLightModePick(const float direction[3], float surfaceDistance, bool hitSurface)
+void EditorApp::PlaceLightOrSunFromPick(const float direction[3], float surfaceDistance,
+                                        bool hitSurface)
 {
     if (m_placingSun)
     {
@@ -1671,39 +1907,112 @@ void EditorApp::HandleLightModePick(const float direction[3], float surfaceDista
         return;
     }
 
-    if (m_customPlacing || m_customCloning >= 0)
+    const float dist = hitSurface ? std::max(16.0f, surfaceDistance) : 128.0f;
+    m_hasPickPoint = true;
+    m_pickCluster = 0;
+    for (int axis = 0; axis < 3; axis++)
     {
-        const float dist = hitSurface ? std::max(16.0f, surfaceDistance) : 128.0f;
-        m_hasPickPoint = true;
-        m_pickCluster = 0;
-        for (int axis = 0; axis < 3; axis++)
+        m_pickPoint[axis] = m_cameraPosition[axis] + direction[axis] * dist;
+    }
+    const bool hasCloneSrc =
+        m_customCloning >= 0 && size_t(m_customCloning) < m_scene.lights.size();
+    const EditorLight *source = hasCloneSrc ? &m_scene.lights[size_t(m_customCloning)] : nullptr;
+    AddCustomLight(source, LightSpawn::Clone);
+    m_customPlacing = false;
+    m_customCloning = -1;
+    m_lightTab = 1;
+    SetCursorMode(true);
+}
+
+void EditorApp::ToggleAdditiveLightSelection(int32_t light, bool lightCustom)
+{
+    auto appendUnique = [](std::vector<int32_t> &list, int32_t value) {
+        if (value >= 0 && std::find(list.begin(), list.end(), value) == list.end())
         {
-            m_pickPoint[axis] = m_cameraPosition[axis] + direction[axis] * dist;
+            list.push_back(value);
         }
-        const bool hasCloneSrc =
-            m_customCloning >= 0 && size_t(m_customCloning) < m_scene.lights.size();
-        const EditorLight *source = hasCloneSrc ? &m_scene.lights[size_t(m_customCloning)] : nullptr;
-        AddCustomLight(source, LightSpawn::Clone);
-        m_customPlacing = false;
-        m_customCloning = -1;
+    };
+    appendUnique(m_selectedLights, m_selectedLight);
+    appendUnique(m_selectedCustomLights, m_selectedCustomLight);
+
+    if (light < 0)
+    {
+        return;
+    }
+
+    std::vector<int32_t> &targetList = lightCustom ? m_selectedCustomLights : m_selectedLights;
+    const auto existing = std::find(targetList.begin(), targetList.end(), light);
+    if (existing != targetList.end())
+    {
+        targetList.erase(existing);
+    }
+    else
+    {
+        targetList.push_back(light);
+    }
+    SyncPrimaryLightSelection();
+
+    if (m_selectedLights.empty() && !m_selectedCustomLights.empty())
+    {
         m_lightTab = 1;
-        SetCursorMode(true);
+    }
+    else if (!m_selectedLights.empty() && m_selectedCustomLights.empty())
+    {
+        m_lightTab = 0;
+    }
+    else if (m_lightTab == 2)
+    {
+        m_lightTab = 0;
+    }
+}
+
+void EditorApp::SetSingleLightSelection(int32_t light, bool lightCustom)
+{
+    m_selectedLight = -1;
+    m_selectedCustomLight = -1;
+    m_selectedLights.clear();
+    m_selectedCustomLights.clear();
+    if (light < 0)
+    {
+        return;
+    }
+
+    m_selectedLight = lightCustom ? -1 : light;
+    m_selectedCustomLight = lightCustom ? light : -1;
+    if (lightCustom)
+    {
+        m_selectedCustomLights.push_back(light);
+    }
+    else
+    {
+        m_selectedLights.push_back(light);
+    }
+    m_lightTab = lightCustom ? 1 : 0;
+}
+
+void EditorApp::HandleLightModePick(const float direction[3], float surfaceDistance, bool hitSurface)
+{
+    if (m_placingSun || m_customPlacing || m_customCloning >= 0)
+    {
+        PlaceLightOrSunFromPick(direction, surfaceDistance, hitSurface);
         return;
     }
 
     float lightDistance = 0.0f;
     bool lightCustom = false;
     const int32_t light = PickLight(m_cameraPosition, direction, lightDistance, lightCustom);
+    const bool additive = m_pendingAdditivePick || m_keys[size_t(EditorKey::Ctrl)] ||
+                          m_keys[size_t(EditorKey::Shift)];
     m_selectedSurface = -1;
     m_selectedFace = -1;
     m_hasPickPoint = hitSurface;
-    m_selectedLight = -1;
-    m_selectedCustomLight = -1;
-    if (light >= 0)
+    if (additive)
     {
-        m_selectedLight = lightCustom ? -1 : light;
-        m_selectedCustomLight = lightCustom ? light : -1;
-        m_lightTab = lightCustom ? 1 : 0;
+        ToggleAdditiveLightSelection(light, lightCustom);
+    }
+    else
+    {
+        SetSingleLightSelection(light, lightCustom);
     }
     if (hitSurface)
     {
@@ -1723,10 +2032,23 @@ void EditorApp::OpenTextureBrowserForSlot(const std::string &materialName, Edito
 
 void EditorApp::MarkMaterialEdited(int32_t materialIndex)
 {
-    m_materialsChanged = true;
-    if (materialIndex >= 0 && size_t(materialIndex) < m_materials.Count())
+    if (materialIndex < 0 || size_t(materialIndex) >= m_materials.Count())
     {
-        TouchMaterial(m_materials.NameAt(size_t(materialIndex)));
+        m_materialsChanged = true;
+        return;
+    }
+
+    const std::string &name = m_materials.NameAt(size_t(materialIndex));
+    TouchMaterial(name);
+
+    for (const EditorSurface &surf : m_scene.surfaces)
+    {
+        if (EqualsIgnoreCase(surf.textureName, name.c_str()) ||
+            EqualsIgnoreCase(m_materials.EffectiveNameFor(surf), name.c_str()))
+        {
+            m_materialsChanged = true;
+            return;
+        }
     }
 }
 
@@ -1812,11 +2134,18 @@ struct ViewportLightDrawState
 {
     const EditorCameraBasis &cam;
     int32_t selectedIdx = -1;
+    const std::vector<int32_t> *selectedIndices = nullptr;
+    const std::vector<int32_t> *marqueeHoverIndices = nullptr;
     int32_t hoverIdx = -1;
     bool custom = false;
     const std::function<bool(const float[3], float &, float &)> &project;
     bool centerHovered = false;
 };
+
+bool IndexInSortedOrList(const std::vector<int32_t> *list, int32_t idx)
+{
+    return list != nullptr && std::find(list->begin(), list->end(), idx) != list->end();
+}
 
 void DrawViewportLightList(ImDrawList *draw, const std::vector<EditorLight> &lights,
                            const ViewportLightDrawState &state)
@@ -1835,14 +2164,17 @@ void DrawViewportLightList(ImDrawList *draw, const std::vector<EditorLight> &lig
 
         float dist = 0.0f;
         const float scale = ComputePixelsPerUnit(state.cam, pos, dist);
-        const bool isSel = state.selectedIdx == int32_t(i);
-        const bool isHov = state.hoverIdx == int32_t(i);
+        const bool isSel =
+            state.selectedIdx == int32_t(i) || IndexInSortedOrList(state.selectedIndices, int32_t(i));
+        const bool isHov = state.hoverIdx == int32_t(i) ||
+                           IndexInSortedOrList(state.marqueeHoverIndices, int32_t(i));
         const ImU32 idleColor =
             lights[i].enabled ? IM_COL32(0, 255, 255, 200) : IM_COL32(128, 128, 128, 140);
         const ImU32 color =
-            isSel ? IM_COL32(255, 255, 255, 255) : (isHov ? IM_COL32(255, 214, 64, 255) : idleColor);
+            isHov ? IM_COL32(255, 214, 64, 255) : (isSel ? IM_COL32(255, 255, 255, 255) : idleColor);
 
-        draw->AddCircle(ImVec2(sx, sy), std::max(1.0f, lights[i].radius * scale), color, 0, 2.0f);
+        draw->AddCircle(ImVec2(sx, sy), std::max(1.0f, lights[i].radius * scale), color, 0,
+                        (isSel || isHov) ? 2.5f : 2.0f);
 
         if (state.custom)
         {
@@ -1859,6 +2191,16 @@ void DrawViewportLightList(ImDrawList *draw, const std::vector<EditorLight> &lig
                          IM_COL32(200, 235, 255, 255));
         }
     }
+}
+void DrawLightPlacementPrompt(ImDrawList *draw, bool placingSun, uint32_t clientWidth)
+{
+    const char *msg = placingSun ? "Click in viewport to set sun direction (Esc cancels)"
+                                 : "Click surface in viewport to place light (Esc cancels)";
+    const ImVec2 sz = ImGui::CalcTextSize(msg);
+    const ImVec2 pos(float(clientWidth) * 0.5f - sz.x * 0.5f,
+                     ImGui::GetFrameHeight() + 16.0f * EditorGuiScale());
+    draw->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 200), msg);
+    draw->AddText(pos, IM_COL32(255, 224, 112, 255), msg);
 }
 } // namespace
 
@@ -1880,22 +2222,33 @@ void EditorApp::DrawLightEditorViewportExtras()
         return ProjectPoint(p, x, y);
     };
 
+    MarqueeLightSelectionResult marqueePreview;
+    const std::vector<int32_t> *hoverMap = nullptr;
+    const std::vector<int32_t> *hoverCustom = nullptr;
+    if (m_marqueeDragging && m_showPanel && !HasModalOpen())
+    {
+        const MarqueeSelectionQuery query = {
+            m_marqueeStart[0], m_marqueeStart[1], m_marqueeEnd[0], m_marqueeEnd[1], false,
+            nullptr,           nullptr,
+        };
+        marqueePreview =
+            SelectVisibleLightsInMarquee(MarqueeCamera(), m_scene.lights, m_customLights, query);
+        hoverMap = &marqueePreview.mapIndices;
+        hoverCustom = &marqueePreview.customIndices;
+    }
+
     DrawViewportLightList(draw, m_scene.lights,
-                          { cam, m_selectedLight, m_hoverLight, false, project, false });
-    const bool centerActive = (m_hoverGizmoPart == GizmoPart::Center || m_grabDragging);
+                          { cam, m_selectedLight, &m_selectedLights, hoverMap, m_hoverLight,
+                            false, project, false });
+    const bool centerActive =
+        !HasMultiLightSelection() && (m_hoverGizmoPart == GizmoPart::Center || m_grabDragging);
     DrawViewportLightList(draw, m_customLights,
-                          { cam, m_selectedCustomLight, m_hoverCustomLight, true, project, centerActive });
+                          { cam, m_selectedCustomLight, &m_selectedCustomLights, hoverCustom,
+                            m_hoverCustomLight, true, project, centerActive });
 
     if (m_placingSun || m_customPlacing || m_customCloning >= 0)
     {
-        const char *msg = m_placingSun
-                              ? "Click in viewport to set sun direction (Esc cancels)"
-                              : "Click surface in viewport to place light (Esc cancels)";
-        const ImVec2 sz = ImGui::CalcTextSize(msg);
-        const ImVec2 pos(float(m_clientWidth) * 0.5f - sz.x * 0.5f,
-                         ImGui::GetFrameHeight() + 16.0f * EditorGuiScale());
-        draw->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 200), msg);
-        draw->AddText(pos, IM_COL32(255, 224, 112, 255), msg);
+        DrawLightPlacementPrompt(draw, m_placingSun, m_clientWidth);
     }
 }
 
@@ -2176,7 +2529,7 @@ void EditorApp::DrawModeMenu()
 
     ImGui::Separator();
 
-    if (ImGui::MenuItem("Regenerate Light Models...", nullptr, false, m_sceneLoaded))
+    if (ImGui::MenuItem("Regenerate Lights from Map...", nullptr, false, m_sceneLoaded))
     {
         m_regenPrompt = 1;
         m_loggedRegenLayout = 0;
@@ -2243,11 +2596,13 @@ void EditorApp::DrawMenuBarStatus()
 
 void EditorApp::DrawMainMenuBar()
 {
+    m_menuBarBottom = 0.0f;
     if (!ImGui::BeginMainMenuBar())
     {
         return;
     }
 
+    m_menuBarBottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     DrawFileMenu();
     DrawModeMenu();
     DrawViewMenu();
@@ -2594,9 +2949,14 @@ void EditorApp::DrawEmptySceneOverlay()
         "Open Mod / Game Directory...",
         "Exit",
     };
-    static constexpr const char *kDescs[] = {
+    const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+    const char *modDirDesc =
+        (adapter != nullptr && !adapter->modDirectoryDescription.empty())
+            ? adapter->modDirectoryDescription.c_str()
+            : "Mount a Quake game or mod folder (id1, hipnotic, rogue, custom mods).";
+    const char *const descs[] = {
         "Browse maps inside the active mod or open a .bsp / .obj file from disk.",
-        "Mount a Quake game or mod folder (id1, hipnotic, rogue, custom mods).",
+        modDirDesc,
         "Close QuakeRay Editor.",
     };
     const std::string sub = m_gamePath.empty()
@@ -2605,7 +2965,7 @@ void EditorApp::DrawEmptySceneOverlay()
                                    std::filesystem::path(m_gamePath).filename().string() +
                                    "), no level open.");
     const int32_t choice = EditorGuiDialogVertical("##EmptySceneChooser", "QuakeRay Editor",
-                                                   sub.c_str(), kButtons, kDescs, 3);
+                                                   sub.c_str(), kButtons, descs, 3);
     if (choice == 0)
     {
         OpenLevelBrowserDialog();
@@ -2754,7 +3114,18 @@ const EditorSurface *FindAnimatedSurfaceForMaterial(const EditorScene &scene,
     return nullptr;
 }
 
-void AppendLumaBlock(EditorMaterialParams &params, bool isMask, int32_t &selectedBlock)
+template <typename Block>
+void InitBrushBlockStorage(Block &blk, const EditorTexture *previewTex)
+{
+    const uint32_t w = (previewTex != nullptr && previewTex->width > 0) ? previewTex->width : 64;
+    const uint32_t h = (previewTex != nullptr && previewTex->height > 0) ? previewTex->height : 64;
+    blk.brushWidth = w;
+    blk.brushHeight = h;
+    blk.brushMask.assign(size_t(w) * size_t(h), 0);
+}
+
+void AppendLumaBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &selectedBlock,
+                     const EditorTexture *previewTex = nullptr)
 {
     EditorEmissiveBlock blk;
     blk.color[0] = 1.0f;
@@ -2765,9 +3136,13 @@ void AppendLumaBlock(EditorMaterialParams &params, bool isMask, int32_t &selecte
     blk.factor = params.emissiveFactor;
     blk.blend = params.lumaBlend;
 
-    if (isMask)
+    if (kind == MaskBlockKind::Polygon)
     {
         blk.polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
+    }
+    else if (kind == MaskBlockKind::Brush)
+    {
+        InitBrushBlockStorage(blk, previewTex);
     }
 
     params.emissiveBlocks.push_back(std::move(blk));
@@ -2949,7 +3324,7 @@ bool DrawMaterialLumaToggleSection(EditorMaterialParams &params, const EditorMat
 
     if (!prevLuma && params.hasColorEmissive && params.emissiveBlocks.empty() && !hasTexEmis)
     {
-        AppendLumaBlock(params, false, selectedBlock);
+        AppendLumaBlock(params, MaskBlockKind::Color, selectedBlock);
         edited = true;
     }
 
@@ -3052,7 +3427,7 @@ void SeedGlossBlockColor(const EditorTexture *previewTex, float outColor[3])
     TryReadOpaqueTexelRgb(*previewTex, cx, cy, false, outColor);
 }
 
-void AppendGlossBlock(EditorMaterialParams &params, bool isMask, int32_t &selectedBlock,
+void AppendGlossBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &selectedBlock,
                       const EditorTexture *previewTex = nullptr)
 {
     EditorGlossBlock blk;
@@ -3066,9 +3441,13 @@ void AppendGlossBlock(EditorMaterialParams &params, bool isMask, int32_t &select
                         ? std::clamp(params.metalnessFactor, 0.0f, 1.0f)
                         : 0.70f;
 
-    if (isMask)
+    if (kind == MaskBlockKind::Polygon)
     {
         blk.polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
+    }
+    else if (kind == MaskBlockKind::Brush)
+    {
+        InitBrushBlockStorage(blk, previewTex);
     }
 
     params.glossBlocks.push_back(std::move(blk));
@@ -3076,7 +3455,7 @@ void AppendGlossBlock(EditorMaterialParams &params, bool isMask, int32_t &select
     selectedBlock = int32_t(params.glossBlocks.size()) - 1;
 }
 
-void AppendSssBlock(EditorMaterialParams &params, bool isMask, int32_t &selectedBlock,
+void AppendSssBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &selectedBlock,
                     const EditorTexture *previewTex = nullptr)
 {
     EditorSssBlock blk;
@@ -3085,9 +3464,13 @@ void AppendSssBlock(EditorMaterialParams &params, bool isMask, int32_t &selected
     blk.feather = params.sssFeather;
     blk.factor = 1.0f;
 
-    if (isMask)
+    if (kind == MaskBlockKind::Polygon)
     {
         blk.polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
+    }
+    else if (kind == MaskBlockKind::Brush)
+    {
+        InitBrushBlockStorage(blk, previewTex);
     }
 
     params.sssBlocks.push_back(std::move(blk));
@@ -3158,7 +3541,7 @@ bool DrawMaterialGlossSection(EditorMaterialParams &params, const EditorMaterial
 
     if (!prevGloss && params.hasColorGloss && params.glossBlocks.empty() && !hasTexGloss)
     {
-        AppendGlossBlock(params, false, selectedBlock, previewTex);
+        AppendGlossBlock(params, MaskBlockKind::Color, selectedBlock, previewTex);
         edited = true;
     }
 
@@ -3211,9 +3594,23 @@ bool DrawMaterialSssSection(EditorMaterialParams &params, const EditorMaterialPa
     return edited;
 }
 
+const char *MaskBlockHintText(MaskBlockKind kind)
+{
+    if (kind == MaskBlockKind::Brush)
+    {
+        return "the brush canvas below: LMB paints, RMB erases; Ctrl+wheel zooms";
+    }
+    if (kind == MaskBlockKind::Polygon)
+    {
+        return "the mask below: drag a point, an edge to slide it; "
+               "Ctrl+click adds a point; right-click removes; Ctrl+wheel zooms";
+    }
+    return "the preview below: click a pixel to set the color; Ctrl+wheel zooms";
+}
+
 template <typename Block>
 bool DrawMaskBlockSelector(const char *kindTooltip, std::vector<Block> &blocks,
-                           int32_t &selectedBlock, bool &outIsPoly)
+                           int32_t &selectedBlock, MaskBlockKind &outKind)
 {
     if (blocks.empty())
     {
@@ -3221,14 +3618,10 @@ bool DrawMaskBlockSelector(const char *kindTooltip, std::vector<Block> &blocks,
     }
 
     selectedBlock = std::clamp(selectedBlock, 0, int32_t(blocks.size()) - 1);
-    outIsPoly = blocks[size_t(selectedBlock)].polyUv.size() >= 6;
+    outKind = MaskBlockKindOf(blocks[size_t(selectedBlock)]);
 
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.66f, 0.72f, 1.0f));
-    ImGui::TextWrapped("%s", outIsPoly
-                                 ? "the mask below: drag a point, an edge to slide it; "
-                                   "Ctrl+click adds a point; right-click removes; Ctrl+wheel zooms"
-                                 : "the preview below: click a pixel to set the color; "
-                                   "Ctrl+wheel zooms");
+    ImGui::TextWrapped("%s", MaskBlockHintText(outKind));
     ImGui::PopStyleColor();
 
     EditorGuiComboModel blkModel{
@@ -3244,26 +3637,35 @@ bool DrawMaskBlockSelector(const char *kindTooltip, std::vector<Block> &blocks,
     return true;
 }
 
-bool DrawAddColorOrMaskButtons(bool canAdd, bool &outAddColor, bool &outAddMask)
+bool DrawAddColorOrMaskButtons(bool canAdd, MaskBlockKind &outKind)
 {
-    outAddColor = false;
-    outAddMask = false;
+    bool clicked = false;
     ImGui::BeginDisabled(!canAdd);
 
     if (ImGui::Button("Add color"))
     {
-        outAddColor = true;
+        outKind = MaskBlockKind::Color;
+        clicked = true;
     }
 
     ImGui::SameLine();
 
     if (ImGui::Button("Add mask"))
     {
-        outAddMask = true;
+        outKind = MaskBlockKind::Polygon;
+        clicked = true;
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("Add brush"))
+    {
+        outKind = MaskBlockKind::Brush;
+        clicked = true;
     }
 
     ImGui::EndDisabled();
-    return outAddColor || outAddMask;
+    return clicked;
 }
 
 template <typename DrawColorFn, typename DrawControlsFn>
@@ -3272,6 +3674,8 @@ struct MaskBlockPanelUi
     const char *selectorTip;
     const char *actionId;
     const char *maskPickId;
+    const char *brushId;
+    bool isGlossOverlay;
     bool *hasColorFlag;
     DrawColorFn drawColor;
     DrawControlsFn drawControls;
@@ -3283,8 +3687,8 @@ bool DrawActiveMaskBlock(const MaskBlockPanelUi<DrawColorFn, DrawControlsFn> &ui
                          ClipboardState clipboard, const BlockPreviewTarget &preview,
                          int32_t &selectedBlock)
 {
-    bool isPoly = false;
-    if (!DrawMaskBlockSelector(ui.selectorTip, blocks, selectedBlock, isPoly))
+    MaskBlockKind kind = MaskBlockKind::Color;
+    if (!DrawMaskBlockSelector(ui.selectorTip, blocks, selectedBlock, kind))
     {
         return false;
     }
@@ -3310,9 +3714,21 @@ bool DrawActiveMaskBlock(const MaskBlockPanelUi<DrawColorFn, DrawControlsFn> &ui
     }
     else
     {
-        edited |= isPoly ? DrawUvPolygonMaskPreview(ui.maskPickId, block.polyUv, preview.handle,
-                                                    preview.tex)
-                         : ui.drawColor(block, baseBlock, preview.handle, preview.tex);
+        const std::vector<float> *overlay =
+            ComputeOverlayMaskCached(block, preview.tex, ui.isGlossOverlay);
+        if (kind == MaskBlockKind::Brush)
+        {
+            edited |= DrawBrushMaskPreview(ui.brushId, block, preview.handle, preview.tex, overlay);
+        }
+        else if (kind == MaskBlockKind::Polygon)
+        {
+            edited |= DrawUvPolygonMaskPreview(ui.maskPickId, block.polyUv, preview.handle,
+                                               preview.tex, overlay);
+        }
+        else
+        {
+            edited |= ui.drawColor(block, baseBlock, preview.handle, preview.tex, overlay);
+        }
         edited |= ui.drawControls(block, baseBlock);
     }
 
@@ -3328,6 +3744,8 @@ bool DrawActiveLumaBlock(EditorMaterialParams &params, const EditorMaterialParam
         "The luma block the form below edits.",
         "##blkact",
         "##mask_pick",
+        "##luma_brush",
+        false,
         &params.hasColorEmissive,
         DrawLumaColorPreview,
         DrawLumaBlockToneControls,
@@ -3344,6 +3762,8 @@ bool DrawActiveGlossBlock(EditorMaterialParams &params, const EditorMaterialPara
         "The gloss block the form below edits.",
         "##glossact",
         "##gloss_mask_pick",
+        "##gloss_brush",
+        true,
         &params.hasColorGloss,
         DrawGlossColorPreview,
         DrawGlossBlockShadingControls,
@@ -3360,6 +3780,8 @@ bool DrawActiveSssBlock(EditorMaterialParams &params, const EditorMaterialParams
         "The subsurface block the form below edits.",
         "##sssact",
         "##sss_mask_pick",
+        "##sss_brush",
+        false,
         static_cast<bool *>(nullptr),
         DrawSssColorPreview,
         DrawSssBlockControls,
@@ -3368,13 +3790,35 @@ bool DrawActiveSssBlock(EditorMaterialParams &params, const EditorMaterialParams
                                selectedBlock);
 }
 
-int32_t FindDefaultPreviewModelIndex(const std::vector<EditorAssetCatalogEntry> &catalog)
+int32_t FindDefaultPreviewModelIndex(const std::vector<EditorAssetCatalogEntry> &catalog,
+                                     bool preferExternalAdapter)
 {
+    const EditorFormatAdapter *adapter = GetEditorFormatAdapter();
+    if (preferExternalAdapter && adapter != nullptr &&
+        adapter->findDefaultPreviewModelIndex != nullptr)
+    {
+        const int32_t idx = adapter->findDefaultPreviewModelIndex(catalog);
+        if (idx >= 0)
+        {
+            return idx;
+        }
+    }
+
     for (size_t i = 0; i < catalog.size(); i++)
     {
         if (EqualsIgnoreCase(catalog[i].path, "progs/soldier.mdl"))
         {
             return int32_t(i);
+        }
+    }
+
+    if (!preferExternalAdapter && adapter != nullptr &&
+        adapter->findDefaultPreviewModelIndex != nullptr)
+    {
+        const int32_t idx = adapter->findDefaultPreviewModelIndex(catalog);
+        if (idx >= 0)
+        {
+            return idx;
         }
     }
 
@@ -3423,11 +3867,10 @@ bool RunMaskBlockPanel(const char *pushId, bool canAdd, DrawFn drawActive, Appen
         ImGui::PushID(pushId);
     }
     bool edited = drawActive();
-    bool addColor = false;
-    bool addMask = false;
-    if (DrawAddColorOrMaskButtons(canAdd, addColor, addMask))
+    MaskBlockKind addKind = MaskBlockKind::Color;
+    if (DrawAddColorOrMaskButtons(canAdd, addKind))
     {
-        appendBlock(addMask);
+        appendBlock(addKind);
         edited = true;
     }
     if (pushId != nullptr)
@@ -3452,7 +3895,9 @@ void EditorApp::DrawMaterialEditorLumaBlocks(const std::string &name, EditorMate
                 params, ctx.base, LumaClipboardState{ m_lumaClipboard, m_lumaClipboardValid },
                 ctx.preview, m_selectedLumaBlock);
         },
-        [&](bool addMask) { AppendLumaBlock(params, addMask, m_selectedLumaBlock); });
+        [&](MaskBlockKind addKind) {
+            AppendLumaBlock(params, addKind, m_selectedLumaBlock, ctx.preview.tex);
+        });
 
     if (edited)
     {
@@ -3473,8 +3918,8 @@ void EditorApp::DrawMaterialEditorGlossBlocks(const std::string &name, EditorMat
                 params, ctx.base, GlossClipboardState{ m_glossClipboard, m_glossClipboardValid },
                 ctx.preview, m_selectedGlossBlock);
         },
-        [&](bool addMask) {
-            AppendGlossBlock(params, addMask, m_selectedGlossBlock, ctx.preview.tex);
+        [&](MaskBlockKind addKind) {
+            AppendGlossBlock(params, addKind, m_selectedGlossBlock, ctx.preview.tex);
         });
 
     if (edited)
@@ -3496,8 +3941,8 @@ void EditorApp::DrawMaterialEditorSssBlocks(const std::string &name, EditorMater
                 params, ctx.base, SssClipboardState{ m_sssClipboard, m_sssClipboardValid },
                 ctx.preview, m_selectedSssBlock);
         },
-        [&](bool addMask) {
-            AppendSssBlock(params, addMask, m_selectedSssBlock, ctx.preview.tex);
+        [&](MaskBlockKind addKind) {
+            AppendSssBlock(params, addKind, m_selectedSssBlock, ctx.preview.tex);
         });
 
     if (edited)
@@ -3717,11 +4162,79 @@ void DrawPreviewModelPoseControl(const EditorPreviewModel &model, int32_t &frame
 
 } // namespace
 
+void EditorApp::DrawModelTabSkinSelector()
+{
+    const int32_t skinCount = ActivePreviewSkinCount();
+    if (skinCount <= 1)
+    {
+        return;
+    }
+
+    int32_t chosenSkin = m_previewModelSkin;
+    EditorGuiComboModel skinModel{
+        skinCount,
+        [this](int32_t idx) {
+            static std::string s_skinLabel;
+            const char *raw = ActivePreviewSkinName(idx);
+            if (m_previewModel.hasMultiSections)
+            {
+                s_skinLabel = FormatModelEntryComboLabel(raw, IsPreviewPresetInActiveMod(idx),
+                                                         IsPreviewPresetFromBaseMod(idx));
+            }
+            else
+            {
+                s_skinLabel = FormatModelSkinComboLabel(FormatMaterialListLabel(raw));
+            }
+            return s_skinLabel.c_str();
+        },
+    };
+    if (EditorGuiComboFiltered("Skin", &chosenSkin, skinModel,
+                               { false, true, "Select model skin preset or skin slot." }) &&
+        chosenSkin != m_previewModelSkin)
+    {
+        SelectPreviewModelSkin(chosenSkin);
+    }
+}
+
+void EditorApp::DrawModelTabSurfaceSelector()
+{
+    if (!m_previewModel.hasMultiSections || m_previewModel.frames.empty())
+    {
+        return;
+    }
+
+    const size_t fIdx = std::clamp<size_t>(size_t(std::max(0, m_previewModelFrame)), 0,
+                                           m_previewModel.frames.size() - 1);
+    const auto &sections = m_previewModel.frames[fIdx].sections;
+    if (sections.size() <= 1)
+    {
+        return;
+    }
+
+    int32_t chosenSec = std::clamp(m_previewModelSection, 0, int32_t(sections.size()) - 1);
+    EditorGuiComboModel secModel{
+        int32_t(sections.size()),
+        [this, &sections](int32_t idx) {
+            static std::string s_secLabel;
+            const EditorPreviewModelSection &sec = sections[size_t(idx)];
+            const std::string matName = ActivePreviewSectionMaterialName(sec);
+            s_secLabel = sec.surfaceName + " (" + FormatMaterialListLabel(matName) + ")";
+            return s_secLabel.c_str();
+        },
+    };
+    if (EditorGuiComboFiltered("Surface", &chosenSec, secModel,
+                               { false, true, "Select which surface material to edit." }) &&
+        chosenSec != m_previewModelSection)
+    {
+        SelectPreviewModelSection(chosenSec);
+    }
+}
+
 void EditorApp::DrawMaterialEditorModelsTab()
 {
     if (m_modelCatalog.empty())
     {
-        ImGui::TextDisabled("No .mdl models found in mounted game assets.");
+        ImGui::TextDisabled("No preview models found in mounted game assets.");
         return;
     }
 
@@ -3731,7 +4244,7 @@ void EditorApp::DrawMaterialEditorModelsTab()
             (m_selectedModelCatalog >= 0 &&
              size_t(m_selectedModelCatalog) < m_modelCatalog.size())
                 ? m_selectedModelCatalog
-                : FindDefaultPreviewModelIndex(m_modelCatalog);
+                : FindDefaultPreviewModelIndex(m_modelCatalog, m_scene.usesExternalLightingModel);
         if (initialIdx >= 0)
         {
             SelectPreviewModel(initialIdx);
@@ -3743,15 +4256,14 @@ void EditorApp::DrawMaterialEditorModelsTab()
         int32_t(m_modelCatalog.size()),
         [this](int32_t idx) {
             static std::string s_label;
-            const std::string &path = m_modelCatalog[size_t(idx)].path;
-            const std::string skin0 = LowercaseCopy(path) + ":frame0";
-            s_label = FormatModelEntryComboLabel(path, IsMaterialInActiveMod(skin0),
-                                                 IsMaterialFromBaseMod(skin0));
+            const EditorAssetCatalogEntry &entry = m_modelCatalog[size_t(idx)];
+            s_label = FormatModelEntryComboLabel(entry.path, IsModelCatalogEntryInActiveMod(entry),
+                                                 IsModelCatalogEntryFromBaseMod(entry));
             return s_label.c_str();
         },
     };
     if (EditorGuiComboFiltered("Model", &chosenModel, mdlModel,
-                               { false, true, "Pick .mdl model to preview and edit." }) &&
+                               { false, true, "Pick model to preview and edit." }) &&
         chosenModel != m_selectedModelCatalog)
     {
         SelectPreviewModel(chosenModel);
@@ -3762,25 +4274,8 @@ void EditorApp::DrawMaterialEditorModelsTab()
         return;
     }
 
-    if (m_previewModel.skins.size() > 1)
-    {
-        int32_t chosenSkin = m_previewModelSkin;
-        EditorGuiComboModel skinModel{
-            int32_t(m_previewModel.skins.size()),
-            [this](int32_t idx) {
-                static std::string s_skinLabel;
-                const std::string &skinName = m_previewModel.skins[size_t(idx)].name;
-                s_skinLabel = FormatModelSkinComboLabel(FormatMaterialListLabel(skinName));
-                return s_skinLabel.c_str();
-            },
-        };
-        if (EditorGuiComboFiltered("Skin", &chosenSkin, skinModel,
-                                   { false, true, "Select which MDL skin slot to edit." }) &&
-            chosenSkin != m_previewModelSkin)
-        {
-            SelectPreviewModelSkin(chosenSkin);
-        }
-    }
+    DrawModelTabSkinSelector();
+    DrawModelTabSurfaceSelector();
 
     DrawPreviewModelPoseControl(m_previewModel, m_previewModelFrame);
 
@@ -3973,9 +4468,13 @@ bool DrawEntityLightCombo(const std::vector<EditorLight> &lights, int32_t &selec
     return picked;
 }
 
-void DrawEntityLightFields(EditorLight &light, const EditorLight *base, float camYaw, float camPitch)
+void DrawEntityLightFields(EditorLight &light, const EditorLight *base, float camYaw, float camPitch,
+                           const EditorScene &scene)
 {
-    DrawLightCommonFields(light, base, false);
+    if (DrawLightCommonFields(light, base, false))
+    {
+        ResolveLightClusterFromEffectivePos(scene, light);
+    }
     DrawSpotLightFields(light, base, false, camYaw, camPitch);
 
     bool frReset = false;
@@ -4244,13 +4743,730 @@ void EditorApp::DrawEmitterControlsForSelected()
     }
 }
 
+void EditorApp::ApplyMultiEmitterOverrideBatch(
+    const std::vector<int32_t> &emitterIndices, std::vector<EditorEmitterLightOverride> &ovs,
+    const std::function<void(EditorEmitterLightOverride &)> &mutator)
+{
+    bool anyApplied = false;
+    for (size_t k = 0; k < emitterIndices.size(); ++k)
+    {
+        EditorEmitterLightOverride next = ovs[k];
+        mutator(next);
+        if (next == ovs[k])
+        {
+            continue;
+        }
+        ApplyEntityEmitterEdit(emitterIndices[k], next, false);
+        anyApplied = true;
+    }
+    if (anyApplied)
+    {
+        ReapplyGeneratedLights();
+    }
+}
+
+bool EditorApp::DrawMultiEmitterBasicFields(const std::vector<int32_t> &emitterIndices,
+                                            std::vector<EditorEmitterLightOverride> &ovs,
+                                            const MultiEmitterAggregate &agg)
+{
+    bool enabledVal = agg.enabled;
+    if (EditorGuiCheckbox("enabled", &enabledVal,
+                          { false, true, "Include selected emitter lights in rendering.", nullptr,
+                            nullptr, {}, nullptr, false, agg.mixedEnabled }))
+    {
+        ApplyMultiEmitterOverrideBatch(
+            emitterIndices, ovs, [enabledVal](EditorEmitterLightOverride &ov) { ov.enabled = enabledVal; });
+        return true;
+    }
+
+    float radiusVal = agg.radius;
+    if (EditorGuiSliderFloat("light_radius", &radiusVal, 0.0f, 10.0f,
+                             { false, true,
+                               "Size fraction of the model's size, or absolute meters for a proxy.",
+                               "%.2f", nullptr, {}, nullptr, false, agg.mixedRadius }))
+    {
+        ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                       [radiusVal](EditorEmitterLightOverride &ov) {
+                                           ov.hasRadius = true;
+                                           ov.radius = radiusVal;
+                                       });
+        return true;
+    }
+
+    float intVal = agg.intensity;
+    if (EditorGuiSliderFloat("light_intensity", &intVal, 0.0f, 100.0f,
+                             { false, true, "Brightness multiplier of the selected emitter lights.",
+                               "%.2f", nullptr, {}, nullptr, false, agg.mixedIntensity }))
+    {
+        ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                       [intVal](EditorEmitterLightOverride &ov) {
+                                           ov.hasIntensity = true;
+                                           ov.intensity = intVal;
+                                       });
+        return true;
+    }
+
+    float offVal[3] = { agg.offset[0], agg.offset[1], agg.offset[2] };
+    uint8_t editedOffsetAxes = 0;
+    if (EditorGuiVec3Input("light_offset", offVal, 1.0f,
+                           { false, true, "Offset from each emitter's pivot in Quake units.",
+                             nullptr, nullptr, {}, nullptr, false, agg.mixedOffsetAxes != 0,
+                             agg.mixedOffsetAxes, &editedOffsetAxes }) &&
+        editedOffsetAxes != 0)
+    {
+        ApplyMultiEmitterOverrideBatch(
+            emitterIndices, ovs, [editedOffsetAxes, &offVal](EditorEmitterLightOverride &ov) {
+                ov.hasOffset = true;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    if ((editedOffsetAxes & uint8_t(1u << axis)) != 0)
+                    {
+                        ov.offset[axis] = offVal[axis];
+                    }
+                }
+            });
+        return true;
+    }
+
+    float clrVal[3] = { agg.color[0], agg.color[1], agg.color[2] };
+    if (EditorGuiColorHex("light_color", clrVal,
+                          { false, true, "Explicit color for the selected emitter lights.", nullptr,
+                            nullptr, {}, nullptr, false, agg.mixedColor }))
+    {
+        ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                       [&clrVal](EditorEmitterLightOverride &ov) {
+                                           ov.hasColor = true;
+                                           std::copy_n(clrVal, 3, ov.color);
+                                       });
+        return true;
+    }
+
+    return false;
+}
+
+namespace
+{
+
+void FillEmitterStyleItems(const char *(&items)[kEditorStyleCount + 1])
+{
+    items[0] = "NONE";
+    for (int32_t i = 0; i < kEditorStyleCount; i++)
+    {
+        items[i + 1] = kEditorStyleNames[i];
+    }
+}
+
+void ComputeCameraAimDir(float yaw, float pitch, float outDir[3])
+{
+    const float cp = std::cos(pitch);
+    outDir[0] = cp * std::cos(yaw);
+    outDir[1] = cp * std::sin(yaw);
+    outDir[2] = std::sin(pitch);
+}
+
+} // namespace
+
+bool EditorApp::DrawMultiEmitterSpotAndRasterFields(const std::vector<int32_t> &emitterIndices,
+                                                    std::vector<EditorEmitterLightOverride> &ovs,
+                                                    const MultiEmitterAggregate &agg)
+{
+    if (agg.anySpot && agg.anyInstanceEdit)
+    {
+        float dirVal[3] = { agg.dir[0], agg.dir[1], agg.dir[2] };
+        uint8_t editedDirAxes = 0;
+        if (EditorGuiVec3Input("dir", dirVal, 0.05f,
+                               { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                                 agg.mixedDirAxes != 0, agg.mixedDirAxes, &editedDirAxes }) &&
+            editedDirAxes != 0)
+        {
+            ApplyMultiEmitterOverrideBatch(
+                emitterIndices, ovs, [editedDirAxes, &dirVal](EditorEmitterLightOverride &ov) {
+                    ApplyEmitterDirectionAxes(ov, editedDirAxes, dirVal);
+                });
+            return true;
+        }
+        if (ImGui::Button("Aim along camera view"))
+        {
+            float camDir[3] = {};
+            ComputeCameraAimDir(m_cameraYaw, m_cameraPitch, camDir);
+            ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                           [&camDir](EditorEmitterLightOverride &ov) {
+                                               ApplyEmitterAimDirection(ov, camDir);
+                                           });
+            return true;
+        }
+    }
+
+    if (agg.anySpot)
+    {
+        float inVal = agg.angleInner;
+        if (EditorGuiSliderFloat("angle_inner", &inVal, 0.0f, 90.0f,
+                                 { false, true, nullptr, "%.1f", nullptr, {}, nullptr, false,
+                                   agg.mixedAngleInner }))
+        {
+            ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                           [inVal](EditorEmitterLightOverride &ov) {
+                                               ov.angleInner = std::clamp(inVal, 0.0f, 90.0f);
+                                               ov.angleOuter = std::max(ov.angleOuter, ov.angleInner);
+                                               ov.hasAngles = true;
+                                           });
+            return true;
+        }
+
+        float outVal = agg.angleOuter;
+        if (EditorGuiSliderFloat("angle_outer", &outVal, 0.0f, 90.0f,
+                                 { false, true, nullptr, "%.1f", nullptr, {}, nullptr, false,
+                                   agg.mixedAngleOuter }))
+        {
+            ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                           [outVal](EditorEmitterLightOverride &ov) {
+                                               ov.angleOuter = std::clamp(outVal, 0.0f, 90.0f);
+                                               ov.angleInner = std::min(ov.angleInner, ov.angleOuter);
+                                               ov.hasAngles = true;
+                                           });
+            return true;
+        }
+    }
+
+    bool frVal = agg.forceRasterize;
+    if (EditorGuiCheckbox("force_rasterize", &frVal,
+                          { false, true, "Draw selected emitters in the rasterized path.", nullptr,
+                            nullptr, {}, nullptr, false, agg.mixedForceRasterize }))
+    {
+        ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                       [frVal](EditorEmitterLightOverride &ov) {
+                                           ov.forceRasterize = frVal;
+                                       });
+        return true;
+    }
+    return false;
+}
+
+void EditorApp::DrawMultiSelectedEmitterFields(const std::vector<int32_t> &emitterIndices)
+{
+    if (emitterIndices.empty())
+    {
+        return;
+    }
+
+    std::vector<EditorEmitterLightOverride> ovs;
+    ovs.reserve(emitterIndices.size());
+    for (int32_t idx : emitterIndices)
+    {
+        ovs.push_back(EffectiveEmitterOverride(idx));
+    }
+
+    const MultiEmitterAggregate agg = AggregateMultiEmitterOverrides(ovs);
+    if (DrawMultiEmitterBasicFields(emitterIndices, ovs, agg))
+    {
+        return;
+    }
+
+    const char *styleItems[kEditorStyleCount + 1] = {};
+    FillEmitterStyleItems(styleItems);
+    int32_t styleIdx = agg.styleIndex;
+    if (EditorGuiCombo("light_style", &styleIdx, styleItems, kEditorStyleCount + 1,
+                       { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                         agg.mixedStyle }))
+    {
+        ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                       [styleIdx](EditorEmitterLightOverride &ov) {
+                                           ApplyEmitterStyleIndex(ov, styleIdx);
+                                       });
+        return;
+    }
+
+    bool spotVal = agg.spot;
+    if (EditorGuiCheckbox("spot", &spotVal,
+                          { false, true, "Convert selected emitters to directional cone spotlights.",
+                            nullptr, nullptr, {}, nullptr, false, agg.mixedSpot }))
+    {
+        ApplyMultiEmitterOverrideBatch(emitterIndices, ovs,
+                                       [spotVal](EditorEmitterLightOverride &ov) {
+                                           ov.hasSpot = true;
+                                           ov.spot = spotVal;
+                                       });
+        return;
+    }
+
+    DrawMultiEmitterSpotAndRasterFields(emitterIndices, ovs, agg);
+}
+
+void EditorApp::CollectMultiLightEditTargets(MultiLightEditTargets &outTargets)
+{
+    for (int32_t idx : m_selectedLights)
+    {
+        if (idx < 0 || size_t(idx) >= m_scene.lights.size())
+        {
+            continue;
+        }
+        EditorLight &l = m_scene.lights[size_t(idx)];
+        outTargets.constPtrs.push_back(&l);
+        outTargets.isCustomFlags.push_back(false);
+        if (l.emitterUniqueID != 0)
+        {
+            outTargets.emitterIndices.push_back(idx);
+        }
+        else
+        {
+            outTargets.directLightPtrs.push_back(&l);
+            outTargets.directSceneLightPtrs.push_back(&l);
+        }
+    }
+
+    for (int32_t idx : m_selectedCustomLights)
+    {
+        if (idx < 0 || size_t(idx) >= m_customLights.size())
+        {
+            continue;
+        }
+        EditorLight &l = m_customLights[size_t(idx)];
+        outTargets.constPtrs.push_back(&l);
+        outTargets.isCustomFlags.push_back(true);
+        outTargets.directLightPtrs.push_back(&l);
+        outTargets.customLightPtrs.push_back(&l);
+    }
+}
+
+void EditorApp::ApplyEmitterFieldBatch(
+    const std::vector<int32_t> &emitterIndices,
+    const std::function<void(EditorEmitterLightOverride &, const EditorGeneratedLightBase *)> &mutator)
+{
+    if (emitterIndices.empty())
+    {
+        return;
+    }
+    bool anyApplied = false;
+    for (int32_t idx : emitterIndices)
+    {
+        const EditorEmitterLightOverride before = EffectiveEmitterOverride(idx);
+        EditorEmitterLightOverride ov = before;
+        const EditorLight &l = m_scene.lights[size_t(idx)];
+        const EditorGeneratedLightBase *base = nullptr;
+        for (const EditorGeneratedLightBase &candidate : m_generatedLightBases)
+        {
+            if (candidate.uniqueID == l.emitterUniqueID && candidate.name == l.className)
+            {
+                base = &candidate;
+                break;
+            }
+        }
+        mutator(ov, base);
+        if (ov == before)
+        {
+            continue;
+        }
+        ApplyEntityEmitterEdit(idx, ov, false);
+        anyApplied = true;
+    }
+    if (anyApplied)
+    {
+        ReapplyGeneratedLights();
+    }
+}
+
+bool EditorApp::DrawMultiLightBasicFields(const MultiLightAggregate &agg,
+                                          const MultiLightEditTargets &targets)
+{
+    bool enabledVal = agg.enabled;
+    if (EditorGuiCheckbox("enabled", &enabledVal,
+                          { false, true, "Include all selected lights in scene rendering and clusters.",
+                            nullptr, nullptr, {}, nullptr, false, agg.mixedEnabled }))
+    {
+        ApplyBatchLightEnabled(targets.directLightPtrs, enabledVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [enabledVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ov.enabled = enabledVal;
+            });
+        return true;
+    }
+
+    float originVal[3] = { agg.position[0], agg.position[1], agg.position[2] };
+    uint8_t editedOriginAxes = 0;
+    const bool originEditable = !targets.directLightPtrs.empty();
+    if (EditorGuiVec3Input("origin", originVal, 2.0f,
+                           { false, originEditable, nullptr, nullptr, nullptr, {}, nullptr, false,
+                             agg.mixedPositionAxes != 0, agg.mixedPositionAxes, &editedOriginAxes }) &&
+        editedOriginAxes != 0)
+    {
+        ApplyBatchLightOrigin(m_scene, targets.directLightPtrs, editedOriginAxes, originVal);
+        return true;
+    }
+
+    bool hoVal = agg.hasOffset;
+    if (EditorGuiCheckbox("has_offset", &hoVal,
+                          { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                            agg.mixedHasOffset }))
+    {
+        ApplyBatchLightHasOffset(m_scene, targets.directLightPtrs, hoVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [hoVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ov.hasOffset = hoVal;
+            });
+        return true;
+    }
+
+    if (agg.anyHasOffset)
+    {
+        float offVal[3] = { agg.offset[0], agg.offset[1], agg.offset[2] };
+        uint8_t editedOffAxes = 0;
+        if (EditorGuiVec3Input("offset", offVal, 1.0f,
+                               { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                                 agg.mixedOffsetAxes != 0, agg.mixedOffsetAxes, &editedOffAxes }) &&
+            editedOffAxes != 0)
+        {
+            ApplyBatchLightOffset(m_scene, targets.directLightPtrs, editedOffAxes, offVal);
+            ApplyEmitterFieldBatch(
+                targets.emitterIndices,
+                [editedOffAxes, &offVal](EditorEmitterLightOverride &ov,
+                                         const EditorGeneratedLightBase *) {
+                    ov.hasOffset = true;
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        if ((editedOffAxes & uint8_t(1u << axis)) != 0)
+                        {
+                            ov.offset[axis] = offVal[axis];
+                        }
+                    }
+                });
+            return true;
+        }
+    }
+
+    float radM = agg.radiusUnits / kEditorUnitsPerMeter;
+    if (EditorGuiSliderFloat("radius (m)", &radM, 0.05f, 10.0f,
+                             { false, true, nullptr, "%.2f", nullptr, {}, nullptr, false,
+                               agg.mixedRadius }))
+    {
+        ApplyBatchLightRadiusUnits(targets.directLightPtrs, radM * kEditorUnitsPerMeter);
+        ApplyEmitterFieldBatch(targets.emitterIndices,
+                               [radM](EditorEmitterLightOverride &ov,
+                                      const EditorGeneratedLightBase *b) {
+                                   const float scale =
+                                       (b != nullptr && b->modelSizeMeters > 0.0f) ? b->modelSizeMeters
+                                                                                   : 1.0f;
+                                   ov.hasRadius = true;
+                                   ov.radius = std::max(radM / scale,
+                                                        0.5f / (scale * kEditorUnitsPerMeter));
+                               });
+        return true;
+    }
+
+    return false;
+}
+
+bool EditorApp::DrawMultiLightColorAndStyleFields(const MultiLightAggregate &agg,
+                                                  const MultiLightEditTargets &targets)
+{
+    const float intensityScale = agg.allCustom ? kEditorCustomLightIntensityUnits : 1.0f;
+    float intUi = agg.intensity / intensityScale;
+    const char *intLabel = agg.allCustom ? "intensity" : "light";
+    const char *intFmt = agg.allCustom ? "%.2f" : "%.0f";
+    if (EditorGuiSliderFloat(intLabel, &intUi, 0.0f, agg.allCustom ? 100.0f : 2000.0f,
+                             { false, true, nullptr, intFmt, nullptr, {}, nullptr, false,
+                               agg.mixedIntensity }))
+    {
+        const float newIntensity = intUi * intensityScale;
+        ApplyBatchLightIntensity(targets.directLightPtrs, newIntensity);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [this, newIntensity](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *b) {
+                if (b == nullptr)
+                {
+                    return;
+                }
+                const float gain = ov.hasColor ? 1.0f : b->baseGain;
+                const float denom = gain * std::max(0.0f, m_settings.globalLightMult) *
+                                    std::max(0.0f, m_settings.brightness) * 10.0f;
+                if (denom > 1e-6f)
+                {
+                    ov.hasIntensity = true;
+                    ov.intensity = newIntensity / denom;
+                }
+            });
+        return true;
+    }
+
+    float clrVal[3] = { agg.tint[0], agg.tint[1], agg.tint[2] };
+    if (EditorGuiColorHex("color", clrVal,
+                          { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                            agg.mixedColor }))
+    {
+        ApplyBatchLightTint(targets.directLightPtrs, clrVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [&clrVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ov.hasColor = true;
+                std::copy_n(clrVal, 3, ov.color);
+            });
+        return true;
+    }
+
+    if (agg.emitterCount > 0)
+    {
+        const char *styleItems[kEditorStyleCount + 1] = {};
+        FillEmitterStyleItems(styleItems);
+        int32_t styleIdx = agg.styleIndex;
+        if (EditorGuiCombo("style", &styleIdx, styleItems, kEditorStyleCount + 1,
+                           { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                             agg.mixedStyle }))
+        {
+            ApplyBatchLightStyle(targets.directLightPtrs, (styleIdx > 0) ? (styleIdx - 1) : 0);
+            ApplyEmitterFieldBatch(
+                targets.emitterIndices,
+                [styleIdx](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                    ApplyEmitterStyleIndex(ov, styleIdx);
+                });
+            return true;
+        }
+    }
+    else
+    {
+        int32_t styleVal = std::max(0, agg.style);
+        if (EditorGuiCombo("style", &styleVal, kEditorStyleNames, kEditorStyleCount,
+                           { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                             agg.mixedStyle }))
+        {
+            ApplyBatchLightStyle(targets.directLightPtrs, styleVal);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+namespace
+{
+
+bool DrawCustomLightShaftFields(const MultiLightAggregate &agg,
+                                const std::vector<EditorLight *> &customLightPtrs)
+{
+    if (customLightPtrs.empty())
+    {
+        return false;
+    }
+
+    bool lsVal = agg.lightShafts;
+    if (EditorGuiCheckbox("light_shafts", &lsVal,
+                          { false, true, "Volumetric shafts for selected custom spotlights.",
+                            nullptr, nullptr, {}, nullptr, false, agg.mixedLightShafts }))
+    {
+        ApplyBatchLightShafts(customLightPtrs, lsVal);
+        return true;
+    }
+    if (!agg.anyLightShafts)
+    {
+        return false;
+    }
+
+    float pVal = agg.lightShaftsPower;
+    if (EditorGuiSliderFloat("light_shafts_power", &pVal, 0.0f, 16.0f,
+                             { false, true, nullptr, "%.2f", nullptr, {}, nullptr, false,
+                               agg.mixedLightShaftsPower }))
+    {
+        ApplyBatchLightShaftsPower(customLightPtrs, pVal);
+        return true;
+    }
+    float dVal = agg.lightShaftsDistance;
+    if (EditorGuiSliderFloat(
+            "light_shafts_distance", &dVal, 0.0f, 25.0f,
+            { false, true,
+              "How far the volumetric shafts reach in meters (0.5..25). Set 0 for automatic distance.",
+              "%.2f", nullptr, {}, nullptr, false, agg.mixedLightShaftsDistance }))
+    {
+        ApplyBatchLightShaftsDistance(customLightPtrs, dVal);
+        return true;
+    }
+    float fVal = agg.lightShaftsFalloff;
+    if (EditorGuiSliderFloat(
+            "light_shafts_falloff", &fVal, 0.0f, 4.0f,
+            { false, true,
+              "How quickly the shafts fade with distance (0 = nearly steady until the end fade, 1 = smooth default fade, higher = steeper near-lamp decay).",
+              "%.2f", nullptr, {}, nullptr, false, agg.mixedLightShaftsFalloff }))
+    {
+        ApplyBatchLightShaftsFalloff(customLightPtrs, fVal);
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool EditorApp::DrawMultiLightSpotAndShaftFields(const MultiLightAggregate &agg,
+                                                 const MultiLightEditTargets &targets)
+{
+    if (!agg.anySpot)
+    {
+        return false;
+    }
+
+    float dirVal[3] = { agg.direction[0], agg.direction[1], agg.direction[2] };
+    uint8_t editedDirAxes = 0;
+    if (EditorGuiVec3Input("dir", dirVal, 0.05f,
+                           { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                             agg.mixedDirectionAxes != 0, agg.mixedDirectionAxes,
+                             &editedDirAxes }) &&
+        editedDirAxes != 0)
+    {
+        ApplyBatchLightDirection(targets.directLightPtrs, editedDirAxes, dirVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [editedDirAxes, &dirVal](EditorEmitterLightOverride &ov,
+                                     const EditorGeneratedLightBase *) {
+                ApplyEmitterDirectionAxes(ov, editedDirAxes, dirVal);
+            });
+        return true;
+    }
+
+    if (ImGui::Button("Aim along camera view"))
+    {
+        float camDir[3] = {};
+        ComputeCameraAimDir(m_cameraYaw, m_cameraPitch, camDir);
+        ApplyBatchLightDirection(targets.directLightPtrs, 0x7u, camDir);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [&camDir](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ApplyEmitterAimDirection(ov, camDir);
+            });
+        return true;
+    }
+
+    float inVal = agg.angleInner;
+    if (EditorGuiSliderFloat("angle_inner", &inVal, 0.0f, 90.0f,
+                             { false, true, nullptr, "%.1f", nullptr, {}, nullptr, false,
+                               agg.mixedAngleInner }))
+    {
+        ApplyBatchLightAngleInner(targets.directLightPtrs, inVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [inVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ov.angleInner = std::clamp(inVal, 0.0f, 90.0f);
+                ov.angleOuter = std::max(ov.angleOuter, ov.angleInner);
+                ov.hasAngles = true;
+            });
+        return true;
+    }
+
+    float outVal = agg.angleOuter;
+    if (EditorGuiSliderFloat("angle_outer", &outVal, 0.0f, 90.0f,
+                             { false, true, nullptr, "%.1f", nullptr, {}, nullptr, false,
+                               agg.mixedAngleOuter }))
+    {
+        ApplyBatchLightAngleOuter(targets.directLightPtrs, outVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [outVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ov.angleOuter = std::clamp(outVal, 0.0f, 90.0f);
+                ov.angleInner = std::min(ov.angleInner, ov.angleOuter);
+                ov.hasAngles = true;
+            });
+        return true;
+    }
+
+    return DrawCustomLightShaftFields(agg, targets.customLightPtrs);
+}
+
+void EditorApp::DrawMultiSelectedLightsInspector()
+{
+    SyncPrimaryLightSelection();
+
+    MultiLightEditTargets targets;
+    CollectMultiLightEditTargets(targets);
+
+    const MultiLightAggregate agg =
+        AggregateMultiLightState(targets.constPtrs, &targets.isCustomFlags);
+    if (agg.count == 0)
+    {
+        ImGui::TextDisabled("nothing selected");
+        return;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.80f, 1.0f, 1.0f));
+    ImGui::Text("%zu dlights selected", agg.count);
+    ImGui::PopStyleColor();
+    ImGui::TextDisabled("entity: %zu   emitter: %zu   custom: %zu", agg.mapEntityCount,
+                        agg.emitterCount, agg.customCount);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("Differing parameters show gray '?'; editing replaces all selected.");
+    ImGui::PopStyleColor();
+    if (ImGui::SmallButton("Clear selection"))
+    {
+        ClearSelection();
+        return;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Remove selected"))
+    {
+        RemoveSelectedLights();
+        return;
+    }
+    ImGui::Separator();
+
+    if (agg.allEmitters)
+    {
+        DrawMultiSelectedEmitterFields(targets.emitterIndices);
+        return;
+    }
+
+    if (DrawMultiLightBasicFields(agg, targets) ||
+        DrawMultiLightColorAndStyleFields(agg, targets))
+    {
+        return;
+    }
+
+    bool spotVal = agg.spot;
+    if (EditorGuiCheckbox("spot", &spotVal,
+                          { false, true, "Convert selected lights to directional cone spotlights.",
+                            nullptr, nullptr, {}, nullptr, false, agg.mixedSpot }))
+    {
+        ApplyBatchLightSpot(targets.directLightPtrs, spotVal);
+        ApplyEmitterFieldBatch(
+            targets.emitterIndices,
+            [spotVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                ov.hasSpot = true;
+                ov.spot = spotVal;
+            });
+        return;
+    }
+
+    if (DrawMultiLightSpotAndShaftFields(agg, targets))
+    {
+        return;
+    }
+
+    if ((agg.mapEntityCount + agg.emitterCount) > 0)
+    {
+        bool frVal = agg.forceRasterize;
+        if (EditorGuiCheckbox("force_rasterize", &frVal,
+                              { false, true, nullptr, nullptr, nullptr, {}, nullptr, false,
+                                agg.mixedForceRasterize }))
+        {
+            ApplyBatchLightForceRasterize(targets.directSceneLightPtrs, frVal);
+            ApplyEmitterFieldBatch(
+                targets.emitterIndices,
+                [frVal](EditorEmitterLightOverride &ov, const EditorGeneratedLightBase *) {
+                    ov.forceRasterize = frVal;
+                });
+        }
+    }
+}
+
 void EditorApp::DrawLightEditorEntityTab()
 {
     const bool hasEntityLights = !m_scene.lights.empty();
     if (!hasEntityLights)
     {
         m_selectedLight = -1;
+        m_selectedLights.clear();
         m_hoverLight = -1;
+    }
+
+    if (HasMultiLightSelection())
+    {
+        DrawMultiSelectedLightsInspector();
+        return;
     }
 
     const bool ownOverride = hasEntityLights && HasOwnEmitterInstanceOverride(m_selectedLight);
@@ -4270,9 +5486,8 @@ void EditorApp::DrawLightEditorEntityTab()
     }
 
     EditorLight &light = m_scene.lights[size_t(m_selectedLight)];
-    const EditorLight *base = size_t(m_selectedLight) < m_baselineMapLights.size()
-                                  ? &m_baselineMapLights[size_t(m_selectedLight)]
-                                  : nullptr;
+    const EditorLight *base =
+        BaselineMapLightAt(m_selectedLight, m_scene.lights, m_baselineMapLights);
 
     if (ImGui::Button("Teleport"))
     {
@@ -4294,10 +5509,16 @@ void EditorApp::DrawLightEditorEntityTab()
         AddCustomLight(&light, LightSpawn::Duplicate);
         m_lightTab = 1;
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove"))
+    {
+        RemoveSelectedLights();
+        return;
+    }
 
     if (light.emitterUniqueID == 0)
     {
-        DrawEntityLightFields(light, base, m_cameraYaw, m_cameraPitch);
+        DrawEntityLightFields(light, base, m_cameraYaw, m_cameraPitch, m_scene);
         return;
     }
 
@@ -4319,17 +5540,25 @@ void EditorApp::DrawLightEditorCustomTab()
         AddCustomLight(nullptr, LightSpawn::Camera);
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(m_selectedCustomLight < 0);
+    ImGui::BeginDisabled(m_selectedCustomLight < 0 || HasMultiLightSelection());
     if (ImGui::Button("Duplicate"))
     {
         DuplicateSelectedLight();
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
+    ImGui::BeginDisabled(m_selectedCustomLight < 0 && m_selectedCustomLights.empty());
     if (ImGui::Button("Remove"))
     {
         RemoveSelectedCustomLight();
     }
     ImGui::EndDisabled();
+
+    if (HasMultiLightSelection())
+    {
+        DrawMultiSelectedLightsInspector();
+        return;
+    }
 
     if (m_customLights.empty())
     {
@@ -4359,9 +5588,8 @@ void EditorApp::DrawLightEditorCustomTab()
     }
 
     EditorLight &light = m_customLights[size_t(m_selectedCustomLight)];
-    const EditorLight *base = size_t(m_selectedCustomLight) < m_baselineCustomLights.size()
-                                  ? &m_baselineCustomLights[size_t(m_selectedCustomLight)]
-                                  : nullptr;
+    const EditorLight *base =
+        BaselineCustomLightAt(m_selectedCustomLight, m_customLights, m_baselineCustomLights);
 
     if (DrawLightCommonFields(light, base, true))
     {
@@ -4404,8 +5632,8 @@ void EditorApp::DrawLightEditorGlobalTab()
     }
     if (ImGui::IsItemHovered())
     {
-        ImGui::SetTooltip("Mark the level's light models as light materials and write their "
-                          "entries to the materials file (created if missing).");
+        ImGui::SetTooltip("Restore the level's standard predefined lights from the map and "
+                          "save them to qray.lights.yaml.");
     }
 }
 
@@ -4426,20 +5654,28 @@ void EditorApp::DrawLightEditorPanel()
                   "Reset current light / global parameters to baseline");
     if (resetClicked)
     {
-        if (m_lightTab == 0 && m_selectedLight >= 0)
+        if ((m_lightTab == 0 || m_lightTab == 1) && HasMultiLightSelection())
+        {
+            ResetMultiSelectedLightsToBaseline();
+        }
+        else if (m_lightTab == 0 && m_selectedLight >= 0)
         {
             ResetEntityEmitterLight(m_selectedLight);
         }
-        else if (m_lightTab == 1 && m_selectedCustomLight >= 0 &&
-                 size_t(m_selectedCustomLight) < m_baselineCustomLights.size())
+        else if (m_lightTab == 1)
         {
-            m_customLights[size_t(m_selectedCustomLight)] =
-                m_baselineCustomLights[size_t(m_selectedCustomLight)];
+            if (const EditorLight *base = BaselineCustomLightAt(
+                    m_selectedCustomLight, m_customLights, m_baselineCustomLights))
+            {
+                m_customLights[size_t(m_selectedCustomLight)] = *base;
+                ClearDirtyFlagIfClean();
+            }
         }
         else if (m_lightTab == 2)
         {
             m_settings = m_baselineSettings;
             m_sun = m_baselineSun;
+            ClearDirtyFlagIfClean();
         }
     }
 

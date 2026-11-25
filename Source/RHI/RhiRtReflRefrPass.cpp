@@ -1,4 +1,21 @@
-﻿#include "RhiRtReflRefrPass.h"
+﻿// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
+#include "RhiRtReflRefrPass.h"
 
 #include "RhiDescriptors.h"
 #include "RhiFrameContext.h"
@@ -783,11 +800,73 @@ void RhiRtReflRefrPass::SetRenderCubemaps(nvrhi::ITexture *pCubemap, nvrhi::ITex
     renderCubemapSampler = pSampler;
 }
 
+bool RhiRtReflRefrPass::ValidateRenderInputs(nvrhi::IBindingSet *pLightSet,
+                                              nvrhi::rt::IAccelStruct *pTopLevel,
+                                              const Framebuffers *pFramebuffers,
+                                              nvrhi::IBuffer *pUniformBuffer,
+                                              const RhiRtPrimaryPass::VertexData &vertexData)
+{
+    // Set 6 is the frame's light set the host prepared before this pass (EnsureLightSet): the
+    // traced particle stand-ins need the sun and cluster data, and a frame without it has no
+    // defined lighting for them.
+    if (pLightSet == nullptr)
+    {
+        if (!warnedMissingLightSet)
+        {
+            warnedMissingLightSet = true;
+            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no light set, the trace is skipped");
+        }
+        return false;
+    }
+
+    if (pTopLevel == nullptr)
+    {
+        if (!warnedMissingTopLevel)
+        {
+            warnedMissingTopLevel = true;
+            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no top-level acceleration structure, the trace is skipped");
+        }
+        return false;
+    }
+
+    if (pFramebuffers == nullptr)
+    {
+        if (!warnedMissingFramebuffers)
+        {
+            warnedMissingFramebuffers = true;
+            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no engine framebuffers, the trace is skipped");
+        }
+        return false;
+    }
+
+    if (pUniformBuffer == nullptr)
+    {
+        if (!warnedMissingUniform)
+        {
+            warnedMissingUniform = true;
+            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no global uniform, the trace is skipped");
+        }
+        return false;
+    }
+
+    if (!vertexData.IsComplete())
+    {
+        if (!warnedMissingVertexData)
+        {
+            warnedMissingVertexData = true;
+            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no vertex-data buffers, the trace is skipped");
+        }
+        return false;
+    }
+
+    return true;
+}
+
 void RhiRtReflRefrPass::Render(nvrhi::ICommandList *pCommandList,
                                uint32_t frameIndex,
                                nvrhi::IBuffer *pParticleProxies,
                                nvrhi::IBuffer *pTonemappingBuffer,
-                               nvrhi::BindingSetHandle pLightSet,
+                               const nvrhi::BindingSetHandle &pLightSet,
                                nvrhi::rt::IAccelStruct *pTopLevel,
                                nvrhi::IBuffer *pUniformBuffer,
                                const RhiRtPrimaryPass::VertexData &vertexData,
@@ -809,67 +888,11 @@ void RhiRtReflRefrPass::Render(nvrhi::ICommandList *pCommandList,
     // set is built here - it follows the pointer the coordinator's SetPortalBuffer gave.
     Target &target = targets[frameIndex];
 
-    if (!PreparePortalSet(target))
+    if (!PreparePortalSet(target) ||
+        !PrepareParticleSet(target, pParticleProxies) ||
+        !PrepareTonemappingSet(pCommandList, target, pTonemappingBuffer) ||
+        !ValidateRenderInputs(pLightSet, pTopLevel, pFramebuffers, pUniformBuffer, vertexData))
     {
-        return;
-    }
-
-    if (!PrepareParticleSet(target, pParticleProxies) ||
-        !PrepareTonemappingSet(pCommandList, target, pTonemappingBuffer))
-    {
-        return;
-    }
-
-    // Set 6 is the frame's light set the host prepared before this pass (EnsureLightSet): the
-    // traced particle stand-ins need the sun and cluster data, and a frame without it has no
-    // defined lighting for them.
-    if (pLightSet == nullptr)
-    {
-        if (!warnedMissingLightSet)
-        {
-            warnedMissingLightSet = true;
-            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no light set, the trace is skipped");
-        }
-        return;
-    }
-
-    if (pTopLevel == nullptr)
-    {
-        if (!warnedMissingTopLevel)
-        {
-            warnedMissingTopLevel = true;
-            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no top-level acceleration structure, the trace is skipped");
-        }
-        return;
-    }
-
-    if (pFramebuffers == nullptr)
-    {
-        if (!warnedMissingFramebuffers)
-        {
-            warnedMissingFramebuffers = true;
-            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no engine framebuffers, the trace is skipped");
-        }
-        return;
-    }
-
-    if (pUniformBuffer == nullptr)
-    {
-        if (!warnedMissingUniform)
-        {
-            warnedMissingUniform = true;
-            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no global uniform, the trace is skipped");
-        }
-        return;
-    }
-
-    if (!vertexData.IsComplete())
-    {
-        if (!warnedMissingVertexData)
-        {
-            warnedMissingVertexData = true;
-            LogMessage(print, "Warning: RHI: the reflect/refract RT pass got no vertex-data buffers, the trace is skipped");
-        }
         return;
     }
 
@@ -879,9 +902,14 @@ void RhiRtReflRefrPass::Render(nvrhi::ICommandList *pCommandList,
     // fixed raw binding - the shader never sees the swap. All 24 images are render-sized (the
     // generated flag table), so the 3-tuple overload suffices; the guard below makes a future
     // shader change that adds a differently sized image a skip instead of a wrong wrap.
+    static_assert(sizeof(Target::imageHandles) / sizeof(Target::imageHandles[0]) == FRAMEBUFFER_BINDING_COUNT);
+    static_assert(sizeof(Target::framebufferTextures) / sizeof(Target::framebufferTextures[0]) == FRAMEBUFFER_BINDING_COUNT);
+
+    const ResolutionState resolutionState = { width, height, width, height };
     uint64_t imageHandles[FRAMEBUFFER_BINDING_COUNT] = {};
     uint64_t imageViews[FRAMEBUFFER_BINDING_COUNT] = {};
     VkFormat imageFormats[FRAMEBUFFER_BINDING_COUNT] = {};
+    VkExtent2D imageExtents[FRAMEBUFFER_BINDING_COUNT] = {};
 
     for (uint32_t i = 0; i < FRAMEBUFFER_BINDING_COUNT; i++)
     {
@@ -900,11 +928,12 @@ void RhiRtReflRefrPass::Render(nvrhi::ICommandList *pCommandList,
             return;
         }
 
-        const auto [image, view, format] = pFramebuffers->GetImageHandles(index, frameIndex);
+        const auto [image, view, format, extent] = pFramebuffers->GetImageHandles(index, frameIndex, resolutionState);
 
         imageHandles[i] = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(image));
         imageViews[i] = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(view));
         imageFormats[i] = format;
+        imageExtents[i] = extent;
 
         if (imageHandles[i] == 0)
         {
@@ -937,7 +966,8 @@ void RhiRtReflRefrPass::Render(nvrhi::ICommandList *pCommandList,
                                           " frame " + std::to_string(frameIndex);
 
             target.framebufferTextures[i] = rhi::wrapEngineStorageImage(
-                device, imageHandles[i], imageViews[i], imageFormats[i], width, height, debugName);
+                device, imageHandles[i], imageViews[i], imageFormats[i],
+                imageExtents[i].width, imageExtents[i].height, debugName);
 
             if (target.framebufferTextures[i] == nullptr)
             {

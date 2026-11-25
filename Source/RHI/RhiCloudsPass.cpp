@@ -368,6 +368,145 @@ std::array<float, 4> RhiCloudsPass::MakeShadowPlacement(const LayerParams &param
              params.cloudAnchor[1] - extent * 0.5f, extent };
 }
 
+namespace
+{
+struct CloudLayerUpdate
+{
+    bool structureChanged = false;
+    bool motionChanged = false;
+};
+
+template <size_t N>
+bool FloatArrayEqual(const float (&a)[N], const float (&b)[N])
+{
+    return std::equal(std::begin(a), std::end(a), std::begin(b));
+}
+
+bool ShadowParamsEqual(const RhiCloudsPass::ShadowParams &a, const RhiCloudsPass::ShadowParams &b)
+{
+    return FloatArrayEqual(a.sunDirection, b.sunDirection) &&
+           FloatArrayEqual(a.cloudLayer, b.cloudLayer) &&
+           FloatArrayEqual(a.cloudMarch, b.cloudMarch) &&
+           FloatArrayEqual(a.mapProjection, b.mapProjection);
+}
+
+bool SkyLightingParamsEqual(const RhiCloudsPass::LayerParams &a, const RhiCloudsPass::LayerParams &b)
+{
+    return FloatArrayEqual(a.sunDirection, b.sunDirection) &&
+           FloatArrayEqual(a.skyColor, b.skyColor) &&
+           FloatArrayEqual(a.skyParams, b.skyParams) &&
+           FloatArrayEqual(a.cloudColor, b.cloudColor) &&
+           FloatArrayEqual(a.cloudParams, b.cloudParams) &&
+           FloatArrayEqual(a.sunDiscColor, b.sunDiscColor) &&
+           FloatArrayEqual(a.sunTint, b.sunTint) &&
+           FloatArrayEqual(a.atmosphereParams, b.atmosphereParams) &&
+           FloatArrayEqual(a.moonDirection, b.moonDirection) &&
+           FloatArrayEqual(a.moonParams, b.moonParams);
+}
+
+bool LayerParamsEqual(const RhiCloudsPass::LayerParams &a, const RhiCloudsPass::LayerParams &b)
+{
+    for (size_t i = 0; i < std::size(a.faceBasis); i++)
+    {
+        if (!FloatArrayEqual(a.faceBasis[i], b.faceBasis[i]))
+        {
+            return false;
+        }
+    }
+    return SkyLightingParamsEqual(a, b) &&
+           FloatArrayEqual(a.cloudLayer, b.cloudLayer) &&
+           FloatArrayEqual(a.cloudMarch, b.cloudMarch) &&
+           FloatArrayEqual(a.cloudAnchor, b.cloudAnchor) &&
+           FloatArrayEqual(a.cloudShadowPlacement, b.cloudShadowPlacement);
+}
+
+bool ComputeShadowUpdateNeeded(const RhiCloudsPass::ShadowParams &shadow,
+                               const RhiCloudsPass::ShadowParams &lastShadowParams,
+                               const std::array<float, 4> &placement,
+                               uint32_t shadowWidth,
+                               bool shadowValid)
+{
+    if (placement[0] <= 0.5f)
+    {
+        return false;
+    }
+
+    RhiCloudsPass::ShadowParams shadowStructural = shadow;
+    RhiCloudsPass::ShadowParams lastShadowStructural = lastShadowParams;
+    shadowStructural.cloudMarch[0] = lastShadowStructural.cloudMarch[0] = 0.0f;
+    shadowStructural.mapProjection[0] = lastShadowStructural.mapProjection[0] = 0.0f;
+    shadowStructural.mapProjection[1] = lastShadowStructural.mapProjection[1] = 0.0f;
+
+    const float shadowTexelWorld = std::max(placement[3] / float(shadowWidth), 0.001f);
+    const float shadowRebuildThreshold = 0.75f * shadowTexelWorld;
+    // Wind displaces coordinates in world space by time * speed * (0.75, 0.30).
+    const float windDrift = std::abs(shadow.cloudMarch[0] - lastShadowParams.cloudMarch[0]) *
+                            std::abs(shadow.cloudMarch[1]) * 0.8078f;
+    const float anchorDrift = std::max(std::abs(shadow.mapProjection[0] - lastShadowParams.mapProjection[0]),
+                                       std::abs(shadow.mapProjection[1] - lastShadowParams.mapProjection[1]));
+    return !shadowValid ||
+           !ShadowParamsEqual(shadowStructural, lastShadowStructural) ||
+           windDrift >= shadowRebuildThreshold ||
+           anchorDrift >= shadowRebuildThreshold;
+}
+
+CloudLayerUpdate AnalyzeCloudLayerUpdate(const RhiCloudsPass::LayerParams &layer,
+                                         const RhiCloudsPass::LayerParams &lastLayerParams,
+                                         uint32_t layerWidth,
+                                         bool layerValid)
+{
+    RhiCloudsPass::LayerParams structuralLayer = layer;
+    RhiCloudsPass::LayerParams structuralLast = lastLayerParams;
+    structuralLayer.cloudColor[3] = structuralLast.cloudColor[3] = 0.0f;
+    structuralLayer.atmosphereParams[3] = structuralLast.atmosphereParams[3] = 0.0f;
+    structuralLayer.cloudMarch[1] = structuralLast.cloudMarch[1] = 0.0f;
+    std::fill(std::begin(structuralLayer.cloudAnchor), std::end(structuralLayer.cloudAnchor), 0.0f);
+    std::fill(std::begin(structuralLast.cloudAnchor), std::end(structuralLast.cloudAnchor), 0.0f);
+    std::fill(std::begin(structuralLayer.cloudShadowPlacement), std::end(structuralLayer.cloudShadowPlacement), 0.0f);
+    std::fill(std::begin(structuralLast.cloudShadowPlacement), std::end(structuralLast.cloudShadowPlacement), 0.0f);
+
+    const float layerHalfTexel = std::max(
+        layer.cloudLayer[0] * 0.5f * (3.14159265358979323846f * 0.5f) / float(layerWidth),
+        0.025f);
+    const bool layerJump = !layerValid ||
+        std::abs(layer.cloudAnchor[0] - lastLayerParams.cloudAnchor[0]) > layerHalfTexel ||
+        std::abs(layer.cloudAnchor[1] - lastLayerParams.cloudAnchor[1]) > layerHalfTexel ||
+        std::abs(layer.cloudAnchor[2] - lastLayerParams.cloudAnchor[2]) > layerHalfTexel;
+
+    CloudLayerUpdate update;
+    update.structureChanged = layerJump ||
+        !LayerParamsEqual(structuralLayer, structuralLast);
+    update.motionChanged =
+        layer.cloudColor[3] != lastLayerParams.cloudColor[3] ||
+        !FloatArrayEqual(layer.cloudAnchor, lastLayerParams.cloudAnchor);
+    return update;
+}
+
+void SelectCloudLayerFaces(bool layerStructureChanged,
+                           uint32_t totalFaces,
+                           uint32_t &nextLayerFacePhase,
+                           uint32_t &faceOffset,
+                           uint32_t &faceCount)
+{
+    if (layerStructureChanged)
+    {
+        nextLayerFacePhase = 0u;
+        faceOffset = 0u;
+        faceCount = totalFaces;
+        return;
+    }
+
+    // Face 3 looks straight down (-Z) where dir.z < 0 for every texel, so once written on a
+    // structural build its transparent pixels never change. Balance the five upper faces
+    // across three phases: {+X,-X}, {+Z zenith}, {+Y,-Y}.
+    static constexpr uint32_t phaseOffsets[3] = { 0u, 2u, 4u };
+    static constexpr uint32_t phaseCounts[3] = { 2u, 1u, 2u };
+    faceOffset = phaseOffsets[nextLayerFacePhase];
+    faceCount = phaseCounts[nextLayerFacePhase];
+    nextLayerFacePhase = (nextLayerFacePhase + 1u) % 3u;
+}
+} // namespace
+
 bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
                            uint32_t frameIndex,
                            const LayerParams &params,
@@ -392,55 +531,44 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
     const auto placement = MakeShadowPlacement(params);
     std::memcpy(shadowPlacement, placement.data(), sizeof(shadowPlacement));
 
+    const uint32_t shadowWidth = std::max(shadowTexture->getDesc().width, 1u);
     ShadowParams shadow = shadowParams;
-    shadow.mapProjection[0] = shadowPlacement[1];
-    shadow.mapProjection[1] = shadowPlacement[2];
-    shadow.mapProjection[2] = shadowPlacement[3];
-    shadow.mapProjection[3] = float(shadowTexture->getDesc().width);
+    shadow.mapProjection[0] = placement[1];
+    shadow.mapProjection[1] = placement[2];
+    shadow.mapProjection[2] = placement[3];
+    shadow.mapProjection[3] = float(shadowWidth);
     shadow.cloudMarch[3] = params.cloudAnchor[2] + params.cloudLayer[0];
 
     LayerParams layer = params;
-    std::memcpy(layer.cloudShadowPlacement, shadowPlacement, sizeof(shadowPlacement));
     if (layer.cloudParams[2] == 0.0f)
     {
         layer.cloudColor[3] = 0.0f;
         shadow.cloudMarch[0] = 0.0f;
     }
+
+    const bool shadowNeedsUpdate =
+        ComputeShadowUpdateNeeded(shadow, lastShadowParams, placement, shadowWidth, shadowValid);
+
+    if (placement[0] > 0.5f)
+    {
+        const float *activePlacement = (shadowValid && !shadowNeedsUpdate) ? renderedShadowPlacement : placement.data();
+        std::memcpy(shadowPlacement, activePlacement, sizeof(shadowPlacement));
+    }
+    std::memcpy(layer.cloudShadowPlacement, shadowPlacement, sizeof(shadowPlacement));
     if (shadowPlacement[0] <= 0.5f)
     {
         shadowValid = false;
     }
-    LayerParams structuralLayer = layer;
-    LayerParams structuralLast = lastLayerParams;
-    structuralLayer.cloudColor[3] = structuralLast.cloudColor[3] = 0.0f;
-    structuralLayer.starParams[3] = structuralLast.starParams[3] = 0.0f;
-    structuralLayer.cloudMarch[1] = structuralLast.cloudMarch[1] = 0.0f;
-    std::fill(std::begin(structuralLayer.cloudAnchor), std::end(structuralLayer.cloudAnchor), 0.0f);
-    std::fill(std::begin(structuralLast.cloudAnchor), std::end(structuralLast.cloudAnchor), 0.0f);
-    std::fill(std::begin(structuralLayer.cloudShadowPlacement), std::end(structuralLayer.cloudShadowPlacement), 0.0f);
-    std::fill(std::begin(structuralLast.cloudShadowPlacement), std::end(structuralLast.cloudShadowPlacement), 0.0f);
 
-    const float layerHalfTexel = std::max(
-        layer.cloudLayer[0] * 0.5f * (3.14159265358979323846f * 0.5f) / float(layerTexture->getDesc().width),
-        0.025f);
-    const bool layerJump = !layerValid ||
-        std::abs(layer.cloudAnchor[0] - lastLayerParams.cloudAnchor[0]) > layerHalfTexel ||
-        std::abs(layer.cloudAnchor[1] - lastLayerParams.cloudAnchor[1]) > layerHalfTexel ||
-        std::abs(layer.cloudAnchor[2] - lastLayerParams.cloudAnchor[2]) > layerHalfTexel;
-    const bool layerStructureChanged = layerJump ||
-        std::memcmp(&structuralLayer, &structuralLast, sizeof(layer)) != 0;
-    const bool layerMotionChanged =
-        std::memcmp(&layer.cloudColor[3], &lastLayerParams.cloudColor[3], sizeof(float)) != 0 ||
-        std::memcmp(layer.cloudAnchor, lastLayerParams.cloudAnchor, sizeof(layer.cloudAnchor)) != 0;
+    const CloudLayerUpdate layerUpdate =
+        AnalyzeCloudLayerUpdate(layer, lastLayerParams, layerTexture->getDesc().width, layerValid);
 
-    if (layerValid && !layerStructureChanged && !layerMotionChanged &&
-        std::memcmp(&shadow, &lastShadowParams, sizeof(shadow)) == 0)
+    if (layerValid && !layerUpdate.structureChanged && !layerUpdate.motionChanged && !shadowNeedsUpdate)
     {
         return false;
     }
 
-    if (shadowPlacement[0] > 0.5f && (!shadowValid ||
-        std::memcmp(&shadow, &lastShadowParams, sizeof(shadow)) != 0))
+    if (shadowNeedsUpdate)
     {
         rhi::writeBuffer(pCommandList, shadowParamsBuffers[frameIndex], &shadow, sizeof(shadow));
         nvrhi::ComputeState state;
@@ -448,8 +576,10 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
         state.addBindingSet(shadowSets[frameIndex]);
         pCommandList->setComputeState(state);
 
-        const uint32_t groups = Utils::GetWorkGroupCount(shadowTexture->getDesc().width, THREAD_GROUP_SIZE);
+        const uint32_t groups = Utils::GetWorkGroupCount(shadowWidth, THREAD_GROUP_SIZE);
         pCommandList->dispatch(groups, groups, 1);
+        std::memcpy(renderedShadowPlacement, placement.data(), sizeof(renderedShadowPlacement));
+        lastShadowParams = shadow;
         shadowValid = true;
     }
 
@@ -463,18 +593,18 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
         pCommandList->setComputeState(state);
 
         const uint32_t groups = Utils::GetWorkGroupCount(layerTexture->getDesc().width, THREAD_GROUP_SIZE);
-        const uint32_t faceOffset = layerStructureChanged ? 0u : nextLayerFaceOffset;
-        const uint32_t faceCount = layerStructureChanged ? LAYER_CUBEMAP_FACE_COUNT : 3u;
+        uint32_t faceOffset = 0u;
+        uint32_t faceCount = LAYER_CUBEMAP_FACE_COUNT;
+        SelectCloudLayerFaces(layerUpdate.structureChanged, LAYER_CUBEMAP_FACE_COUNT,
+                              nextLayerFacePhase, faceOffset, faceCount);
         layer.cloudMarch[1] = float(faceOffset);
         rhi::writeBuffer(pCommandList, layerParamsBuffers[frameIndex], &layer, sizeof(layer));
         pCommandList->dispatch(groups, groups, faceCount);
-        nextLayerFaceOffset = (faceOffset + faceCount) % LAYER_CUBEMAP_FACE_COUNT;
     }
 
     pCommandList->setTextureState(layerTexture, nvrhi::AllSubresources,
                                    nvrhi::ResourceStates::NonPixelShaderResource);
     lastLayerParams = layer;
-    lastShadowParams = shadow;
     layerValid = true;
     return true;
 }

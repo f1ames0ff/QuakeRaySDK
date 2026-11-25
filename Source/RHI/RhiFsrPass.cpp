@@ -1,3 +1,20 @@
+// Copyright (c) 2026 f1ames0ff <f1am3sdev.github@protonmail.com>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+//
+
 #include "RhiFsrPass.h"
 
 #include "RhiFrameContext.h"
@@ -36,10 +53,10 @@ constexpr FramebufferImageIndex FSR_IMAGES[FSR_IMAGE_COUNT] =
     FB_IMAGE_INDEX_FINAL,          // 28  color   B10G11R11_UFLOAT_PACK32  render size
     FB_IMAGE_INDEX_DEPTH_NDC,      // 12  depth   R32_SFLOAT               render size
     FB_IMAGE_INDEX_MOTION_DLSS,    // 31  motion  R16G16_SFLOAT            render size
-    FB_IMAGE_INDEX_UPSCALED_PONG,  // 30  output  B10G11R11_UFLOAT_PACK32  upscaled size
+    FB_IMAGE_INDEX_UPSCALED_PING,  // 29  output  B10G11R11_UFLOAT_PACK32  upscaled size
 };
 static_assert(FSR_IMAGE_COUNT == 4, "RhiFsrPass::Target is sized by the four images");
-static_assert(FSR_IMAGES[RhiFsrPass::IMAGE_OUTPUT] == FB_IMAGE_INDEX_UPSCALED_PONG,
+static_assert(FSR_IMAGES[RhiFsrPass::IMAGE_OUTPUT] == FB_IMAGE_INDEX_UPSCALED_PING,
               "the module's output slot has to be the image FSR::Apply writes");
 
 const char *const FSR_IMAGE_DEBUG_NAMES[FSR_IMAGE_COUNT] =
@@ -47,7 +64,7 @@ const char *const FSR_IMAGE_DEBUG_NAMES[FSR_IMAGE_COUNT] =
     "FINAL",
     "DEPTH_NDC",
     "MOTION_DLSS",
-    "UPSCALED_PONG",
+    "UPSCALED_PING",
 };
 
 }
@@ -190,7 +207,7 @@ bool RhiFsrPass::Render(nvrhi::ICommandList *pCommandList,
         nativeCmdBuffer, frameIndex, framebuffersAlias, renderResolution,
         jitterOffset, timeDelta, nearPlane, farPlane, fovVerticalRad, resetAccumulation);
 
-    if (output != FB_IMAGE_INDEX_UPSCALED_PONG)
+    if (output != FB_IMAGE_INDEX_UPSCALED_PING)
     {
         // `Apply` answered FINAL, which happens in two sub-cases that its return value cannot tell
         // apart:

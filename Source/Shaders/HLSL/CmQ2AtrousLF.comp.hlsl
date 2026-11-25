@@ -124,13 +124,28 @@ void filter_image(
         field_right = width;
     }
 
+    // Zero-mean centrosymmetric 2x2 Bayer tap rotation on coarse LF steps prevents
+    // blocky square grid ringing without temporal jitter.
+    const int lf_rot_hi = (step_size >= 2) ? max(1, step_size / 2) : 0;
+    const int lf_rot_lo = (step_size >= 4) ? max(1, step_size / 4) : 0;
+    const uint lf_tile_hash = (((uint(ipos_lowres.x) & 1u) | ((uint(ipos_lowres.y) & 1u) << 1u)) + push.iteration) & 3u;
+    int lf_rot = 0;
+    if (lf_rot_hi > 0)
+    {
+        if (lf_tile_hash == 0u)      lf_rot =  lf_rot_hi;
+        else if (lf_tile_hash == 1u) lf_rot = -lf_rot_hi;
+        else if (lf_tile_hash == 2u) lf_rot =  lf_rot_lo;
+        else                         lf_rot = -lf_rot_lo;
+    }
+    const float lf_eff_step = sqrt((float)(step_size * step_size + lf_rot * lf_rot));
+
     // Compute the weighted average of color from a sparse 3x3 pattern around the target pixel
     const int r = 1;
     for(int yy = -r; yy <= r; yy++)
     {
         for(int xx = -r; xx <= r; xx++)
         {
-            int2 p_lowres = ipos_lowres + int2(xx, yy) * step_size;
+            int2 p_lowres = ipos_lowres + int2(xx * step_size + yy * lf_rot, yy * step_size - xx * lf_rot);
             int2 p_hires = p_lowres * Q2_GRAD_DWN + (int2)1;
 
             if(xx == 0 && yy == 0)
@@ -139,7 +154,8 @@ void filter_image(
             // Skip out-of-range neighbours instead of fetching them with a zero weight:
             // texelFetch with out-of-range integer coordinates is undefined, and a NaN
             // result would still poison the accumulated sum (NaN * 0 is NaN).
-            if(any(p_hires < int2(field_left, 0))
+            if(any(p_lowres < (int2)0)
+                    || any(p_hires < int2(field_left, 0))
                     || any(p_hires >= int2(field_right, height)))
                 continue;
 
@@ -152,7 +168,7 @@ void filter_image(
             float depth = framebufQ2ViewDepth_Sampled.Load(int3(p_hires, 0)).r;
 
             float dist_z = abs(depth_center - depth) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;
-            w *= exp(-dist_z / (float)(step_size * Q2_GRAD_DWN));
+            w *= exp(-dist_z / (lf_eff_step * (float)Q2_GRAD_DWN));
             w *= Q2_WAVELET_KERNEL[abs(xx)][abs(yy)];
 
             float w_lf = w;
@@ -165,11 +181,14 @@ void filter_image(
 
             Q2SH c_lf = q2LoadSH(img_lf_shY, img_lf_CoCg, p_lowres);
 
-            // The last iteration has a filter footprint big enough to step over obstacles
-            // and produce noticeable light leaking. Prevent that by throwing away samples
-            // that are too bright.
+            const float center_lum_safe = max(color_center_lf.shY.w, 1e-4);
+            const float lum_ratio = max(c_lf.shY.w, 0.0) / center_lum_safe;
+            // Suppress bright-outlier samples to prevent light leaking and firefly smearing,
+            // while avoiding 0/0 NaNs when the center low-res pixel is dark.
             if(push.iteration == 3)
-                w_lf *= clamp(1.5 - c_lf.shY.w / color_center_lf.shY.w * 0.25, 0, 1);
+                w_lf *= clamp(1.5 - lum_ratio * 0.25, 0.0, 1.0);
+            else if(color_center_lf.shY.w > 1e-4)
+                w_lf *= clamp(2.0 - lum_ratio * 0.0625, 0.0, 1.0);
 
             q2AccumulateSH(sum_color_lf, c_lf, w_lf);
             sum_w_lf += w_lf;
@@ -228,6 +247,7 @@ void deflicker_image(
     }
 
     float sum_lum = 0.0;
+    float max_lum1 = -1e30;
     int num_neighbors = 0;
 
     const int r = 1;
@@ -257,7 +277,9 @@ void deflicker_image(
             if(dist_depth >= Q2_FLT_DEFLICKER_DEPTH || dot_geo_normals <= Q2_FLT_DEFLICKER_NORMAL)
                 continue;
 
-            sum_lum += q2LoadSH(img_lf_shY, img_lf_CoCg, p_lowres).shY.w;
+            const float n_lum = q2LoadSH(img_lf_shY, img_lf_CoCg, p_lowres).shY.w;
+            sum_lum += n_lum;
+            max_lum1 = max(max_lum1, n_lum);
             num_neighbors++;
         }
     }
@@ -269,7 +291,17 @@ void deflicker_image(
         return;
     }
 
-    float limit = sum_lum / (float)num_neighbors * Q2_FLT_ATROUS_DEFLICKER_LF;
+    // Trimmed mean dropping the single brightest neighbour so adjacent emissive firefly pairs
+    // cannot shield each other without darkening sparse valid indirect illumination.
+    float trimmed_sum = sum_lum;
+    int trimmed_count = num_neighbors;
+    if(num_neighbors >= 3)
+    {
+        trimmed_sum -= max_lum1;
+        trimmed_count -= 1;
+    }
+
+    float limit = (max(0.0, trimmed_sum) / (float)max(trimmed_count, 1)) * Q2_FLT_ATROUS_DEFLICKER_LF;
     if(lum_center > limit)
     {
         float ratio = limit / lum_center;
