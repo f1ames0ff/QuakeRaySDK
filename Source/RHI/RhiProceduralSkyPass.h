@@ -314,7 +314,7 @@ private:
     // params buffer and the cloud layer with its sampler, because the blob declares all five items
     // in one descriptor set.
     nvrhi::BufferHandle paramsBuffers[MAX_FRAMES_IN_FLIGHT];
-    nvrhi::BindingSetHandle skySets[MAX_FRAMES_IN_FLIGHT][CUBEMAP_MIP_LEVELS];
+    nvrhi::BindingSetHandle skySets[MAX_FRAMES_IN_FLIGHT];
 
     // The params of the last recorded dispatch, compared with memcmp exactly like the legacy's
     // mapped buffer (RenderCubemap.cpp:899-913). Zero-initialized, like the legacy buffer.

@@ -342,7 +342,7 @@ public:
                 uint32_t frameIndex,
                 nvrhi::IBuffer *pParticleProxies,
                 nvrhi::IBuffer *pTonemappingBuffer,
-                nvrhi::BindingSetHandle pLightSet,
+                const nvrhi::BindingSetHandle &pLightSet,
                 nvrhi::rt::IAccelStruct *pTopLevel,
                 nvrhi::IBuffer *pUniformBuffer,
                 const RhiRtPrimaryPass::VertexData &vertexData,
@@ -410,6 +410,12 @@ private:
     };
 
     bool LoadShader(const char *pFileName, nvrhi::ShaderType type, nvrhi::ShaderHandle &result);
+
+    bool ValidateRenderInputs(nvrhi::IBindingSet *pLightSet,
+                              nvrhi::rt::IAccelStruct *pTopLevel,
+                              const Framebuffers *pFramebuffers,
+                              nvrhi::IBuffer *pUniformBuffer,
+                              const RhiRtPrimaryPass::VertexData &vertexData);
 
     // Retires the slot's image wraps and the framebuffer set over them (the framebuffer re-create
     // path), and the slot's TLAS/uniform/vertex-data/portal sets (ReleaseTargets).

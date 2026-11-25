@@ -34,52 +34,44 @@ qray::TextureUploader::UploadResult qray::CubemapUploader::UploadImage(const Upl
     UploadResult result{};
     result.wasUploaded = false;
 
-    VkBuffer stagingBuffers[FaceCount] = {};
-    void *mappedData[FaceCount] = {};
-
     const VkDeviceSize faceSize = static_cast<VkDeviceSize>(info.dataSize);
 
     VkBufferCreateInfo stagingInfo{};
     stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    stagingInfo.size = faceSize;
+    stagingInfo.size = faceSize * FaceCount;
     stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
-    for (uint32_t i = 0; i < FaceCount; i++)
+    void *mappedData = nullptr;
+    VkBuffer stagingBuffer = memAllocator->CreateStagingSrcTextureBuffer(&stagingInfo, info.pDebugName, &mappedData);
+    if (stagingBuffer == VK_NULL_HANDLE)
     {
-        stagingBuffers[i] = memAllocator->CreateStagingSrcTextureBuffer(&stagingInfo, info.pDebugName, &mappedData[i]);
-
-        if (stagingBuffers[i] == VK_NULL_HANDLE)
-        {
-            for (uint32_t j = 0; j < i; j++)
-            {
-                memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffers[j]);
-            }
-
-            return result;
-        }
-
-        SET_DEBUG_NAME(device, stagingBuffers[i], VK_OBJECT_TYPE_BUFFER, info.pDebugName);
+        return result;
     }
+
+    SET_DEBUG_NAME(device, stagingBuffer, VK_OBJECT_TYPE_BUFFER, info.pDebugName);
 
     VkImage image = VK_NULL_HANDLE;
     const bool wasCreated = CreateImage(info, &image);
 
     if (!wasCreated)
     {
-        for (uint32_t i = 0; i < FaceCount; i++)
-        {
-            memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffers[i]);
-        }
-
+        memAllocator->DestroyStagingSrcTextureBuffer(stagingBuffer);
         return result;
     }
 
+    VkBuffer stagingBuffers[FaceCount] = {};
+    VkDeviceSize stagingOffsets[FaceCount] = {};
+    uint8_t *dstBytes = static_cast<uint8_t *>(mappedData);
+
     for (uint32_t i = 0; i < FaceCount; i++)
     {
-        memcpy(mappedData[i], info.cubemap.pFaces[i], faceSize);
+        const VkDeviceSize offset = static_cast<VkDeviceSize>(i) * faceSize;
+        memcpy(dstBytes + offset, info.cubemap.pFaces[i], faceSize);
+        stagingBuffers[i] = stagingBuffer;
+        stagingOffsets[i] = offset;
     }
 
-    PrepareImage(image, stagingBuffers, info, ImagePrepareType::INIT);
+    PrepareImage(image, stagingBuffers, info, ImagePrepareType::INIT, stagingOffsets);
 
     const VkImageView imageView = CreateImageView(
         image, info.format, info.isCubemap, GetMipmapCount(size, info),
@@ -87,10 +79,7 @@ qray::TextureUploader::UploadResult qray::CubemapUploader::UploadImage(const Upl
 
     SET_DEBUG_NAME(device, imageView, VK_OBJECT_TYPE_IMAGE_VIEW, info.pDebugName);
 
-    for (uint32_t i = 0; i < FaceCount; i++)
-    {
-        stagingToFree[info.frameIndex].push_back(stagingBuffers[i]);
-    }
+    stagingToFree[info.frameIndex].push_back(stagingBuffer);
 
     result.wasUploaded = true;
     result.image = image;

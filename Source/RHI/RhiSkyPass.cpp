@@ -784,6 +784,54 @@ bool RhiSkyPass::Prepare(nvrhi::ICommandList *pCommandList,
     return true;
 }
 
+namespace
+{
+nvrhi::Viewport ResolveSkyDrawViewport(const RasterizedDataCollector::DrawInfo &info,
+                                       float targetWidth,
+                                       float targetHeight,
+                                       bool legacyViewport)
+{
+    nvrhi::Viewport viewport(targetWidth, targetHeight);
+    if (info.viewport)
+    {
+        const VkViewport &v = *info.viewport;
+        viewport = nvrhi::Viewport(v.x, v.x + v.width, v.y, v.y + v.height, v.minDepth, v.maxDepth);
+    }
+
+    if (legacyViewport)
+    {
+        viewport = ToLegacyViewport(viewport);
+    }
+
+    return viewport;
+}
+
+void RecordSkyDrawCommand(nvrhi::ICommandList *pCommandList,
+                          const RasterizedDataCollector::DrawInfo &info,
+                          const float (&defaultViewProj)[16])
+{
+    const SkyPushConstants push(info, defaultViewProj);
+    pCommandList->setPushConstants(&push, sizeof(push));
+
+    nvrhi::DrawArguments args;
+    if (info.indexCount > 0)
+    {
+        // NVRHI carries the index count in 'vertexCount' for an indexed draw: drawIndexed maps
+        // it to vkCmdDrawIndexed's indexCount (vulkan-graphics.cpp:689-700).
+        args.vertexCount = info.indexCount;
+        args.startIndexLocation = info.firstIndex;
+        args.startVertexLocation = info.firstVertex;
+        pCommandList->drawIndexed(args);
+    }
+    else
+    {
+        args.vertexCount = info.vertexCount;
+        args.startVertexLocation = info.firstVertex;
+        pCommandList->draw(args);
+    }
+}
+} // namespace
+
 void RhiSkyPass::Render(nvrhi::ICommandList *pCommandList,
                         const RasterizedDataCollector::DrawInfo *pDraws,
                         uint32_t drawCount,
@@ -847,6 +895,9 @@ void RhiSkyPass::Render(nvrhi::ICommandList *pCommandList,
 
     const float targetWidth = float(target.width);
     const float targetHeight = float(target.height);
+    const nvrhi::Rect fullScissor(0, int(target.width), 0, int(target.height));
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
+    nvrhi::Viewport lastViewport;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
@@ -864,37 +915,29 @@ void RhiSkyPass::Render(nvrhi::ICommandList *pCommandList,
 
         // The viewport of the draw, or the whole target: the legacy loop keeps the scissor at the
         // whole render area and switches only the viewport (Rasterizer.cpp:356-357, :389-396).
-        nvrhi::Viewport viewport(targetWidth, targetHeight);
-        if (info.viewport)
+        const nvrhi::Viewport viewport =
+            ResolveSkyDrawViewport(info, targetWidth, targetHeight, legacyViewport);
+
+        if (lastPipeline != pipeline || lastViewport != viewport)
         {
-            const VkViewport &v = *info.viewport;
-            viewport = nvrhi::Viewport(v.x, v.x + v.width, v.y, v.y + v.height, v.minDepth, v.maxDepth);
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.framebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(fullScissor);
+            // Set 0 is the bindless texture table, the pipeline's first layout; the second layout only
+            // carries the push constants and has no descriptors to bind.
+            state.addBindingSet(textureTable->GetTable());
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
+
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+            lastViewport = viewport;
         }
-
-        // The target's convention: the inverted rectangle makes the backend emit the legacy
-        // positive-height VkViewport (ToLegacyViewport above and the class comment), which is what
-        // the engine-convention ALBEDO of the traced frame needs; the raster-mode default keeps
-        // NVRHI's DX viewport that the present and the overlay share.
-        if (legacyViewport)
-        {
-            viewport = ToLegacyViewport(viewport);
-        }
-
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.framebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(nvrhi::Rect(0, int(target.width), 0, int(target.height)));
-        // Set 0 is the bindless texture table, the pipeline's first layout; the second layout only
-        // carries the push constants and has no descriptors to bind.
-        state.addBindingSet(textureTable->GetTable());
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(indexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
-
-        pCommandList->setGraphicsState(state);
 
         // The framebuffer use above emits the GENERAL -> COLOR_ATTACHMENT_OPTIMAL barrier. The image
         // does not rest there: the present samples it, and the frame skeleton's last state of the
@@ -902,26 +945,45 @@ void RhiSkyPass::Render(nvrhi::ICommandList *pCommandList,
 
         // After the state: changing the state invalidates push constants (nvrhi.h:3430-3432), and
         // the block is rebuilt per draw exactly as Rasterizer::Draw does (Rasterizer.cpp:399-409).
-        const SkyPushConstants push(info, defaultViewProj);
-        pCommandList->setPushConstants(&push, sizeof(push));
-
-        nvrhi::DrawArguments args;
-        if (info.indexCount > 0)
-        {
-            // NVRHI carries the index count in 'vertexCount' for an indexed draw: drawIndexed maps
-            // it to vkCmdDrawIndexed's indexCount (vulkan-graphics.cpp:689-700).
-            args.vertexCount = info.indexCount;
-            args.startIndexLocation = info.firstIndex;
-            args.startVertexLocation = info.firstVertex;
-            pCommandList->drawIndexed(args);
-        }
-        else
-        {
-            args.vertexCount = info.vertexCount;
-            args.startVertexLocation = info.firstVertex;
-            pCommandList->draw(args);
-        }
+        RecordSkyDrawCommand(pCommandList, info, defaultViewProj);
     }
+}
+
+bool RhiSkyPass::ValidateWorldInputs(const Target &target)
+{
+    if (!target.valid || !target.worldValid ||
+        worldUniformSet == nullptr || worldTonemappingSets[activeTargetIndex] == nullptr ||
+        worldFramebuffersSet == nullptr)
+    {
+        if (!warnedMissingWorldTarget)
+        {
+            warnedMissingWorldTarget = true;
+            LogMessage(print, "Warning: RHI: the world sub-pass has no target (no CreateWorld handles or no engine framebuffers), the world is skipped");
+        }
+        return false;
+    }
+
+    if (vertexBuffer == nullptr || indexBuffer == nullptr)
+    {
+        if (!warnedMissingGeometry)
+        {
+            warnedMissingGeometry = true;
+            LogMessage(print, "Warning: RHI: the raster pass has no geometry buffers, the sky and the world are skipped");
+        }
+        return false;
+    }
+
+    if (!hasSkyCamera)
+    {
+        if (!warnedMissingCamera)
+        {
+            warnedMissingCamera = true;
+            LogMessage(print, "Warning: RHI: the raster pass got no camera, the sky and the world are skipped");
+        }
+        return false;
+    }
+
+    return true;
 }
 
 void RhiSkyPass::RenderWorld(nvrhi::ICommandList *pCommandList,
@@ -935,35 +997,8 @@ void RhiSkyPass::RenderWorld(nvrhi::ICommandList *pCommandList,
     }
 
     Target &target = targets[activeTargetIndex];
-    if (!target.valid || !target.worldValid ||
-        worldUniformSet == nullptr || worldTonemappingSets[activeTargetIndex] == nullptr ||
-        worldFramebuffersSet == nullptr)
+    if (!ValidateWorldInputs(target))
     {
-        if (!warnedMissingWorldTarget)
-        {
-            warnedMissingWorldTarget = true;
-            LogMessage(print, "Warning: RHI: the world sub-pass has no target (no CreateWorld handles or no engine framebuffers), the world is skipped");
-        }
-        return;
-    }
-
-    if (vertexBuffer == nullptr || indexBuffer == nullptr)
-    {
-        if (!warnedMissingGeometry)
-        {
-            warnedMissingGeometry = true;
-            LogMessage(print, "Warning: RHI: the raster pass has no geometry buffers, the sky and the world are skipped");
-        }
-        return;
-    }
-
-    if (!hasSkyCamera)
-    {
-        if (!warnedMissingCamera)
-        {
-            warnedMissingCamera = true;
-            LogMessage(print, "Warning: RHI: the raster pass got no camera, the sky and the world are skipped");
-        }
         return;
     }
 
@@ -994,6 +1029,9 @@ void RhiSkyPass::RenderWorld(nvrhi::ICommandList *pCommandList,
 
     const float targetWidth = float(target.width);
     const float targetHeight = float(target.height);
+    const nvrhi::Rect fullScissor(0, int(target.width), 0, int(target.height));
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
+    nvrhi::Viewport lastViewport;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
@@ -1010,51 +1048,36 @@ void RhiSkyPass::RenderWorld(nvrhi::ICommandList *pCommandList,
         }
 
         // The same viewport/scissor rule as the sky's Render (Rasterizer.cpp:356-357, :389-396).
-        nvrhi::Viewport viewport(targetWidth, targetHeight);
-        if (info.viewport)
+        const nvrhi::Viewport viewport =
+            ResolveSkyDrawViewport(info, targetWidth, targetHeight, false);
+
+        if (lastPipeline != pipeline || lastViewport != viewport)
         {
-            const VkViewport &v = *info.viewport;
-            viewport = nvrhi::Viewport(v.x, v.x + v.width, v.y, v.y + v.height, v.minDepth, v.maxDepth);
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.worldFramebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(fullScissor);
+            // Sets 0..4 in the layout order of CreateWorld: the table, the uniform, the slot's
+            // tonemapping buffer, the real empty set of the set-3 hole and the partial framebuffers
+            // set with the binding-25 storage image.
+            state.addBindingSet(textureTable->GetTable());
+            state.addBindingSet(worldUniformSet);
+            state.addBindingSet(worldTonemappingSets[activeTargetIndex]);
+            state.addBindingSet(worldHoleSet);
+            state.addBindingSet(worldFramebuffersSet);
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
+
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+            lastViewport = viewport;
         }
 
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.worldFramebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(nvrhi::Rect(0, int(target.width), 0, int(target.height)));
-        // Sets 0..4 in the layout order of CreateWorld: the table, the uniform, the slot's
-        // tonemapping buffer, the real empty set of the set-3 hole and the partial framebuffers
-        // set with the binding-25 storage image.
-        state.addBindingSet(textureTable->GetTable());
-        state.addBindingSet(worldUniformSet);
-        state.addBindingSet(worldTonemappingSets[activeTargetIndex]);
-        state.addBindingSet(worldHoleSet);
-        state.addBindingSet(worldFramebuffersSet);
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(indexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
-
-        pCommandList->setGraphicsState(state);
-
-        const SkyPushConstants push(info, defaultViewProj);
-        pCommandList->setPushConstants(&push, sizeof(push));
-
-        nvrhi::DrawArguments args;
-        if (info.indexCount > 0)
-        {
-            args.vertexCount = info.indexCount;
-            args.startIndexLocation = info.firstIndex;
-            args.startVertexLocation = info.firstVertex;
-            pCommandList->drawIndexed(args);
-        }
-        else
-        {
-            args.vertexCount = info.vertexCount;
-            args.startVertexLocation = info.firstVertex;
-            pCommandList->draw(args);
-        }
+        RecordSkyDrawCommand(pCommandList, info, defaultViewProj);
     }
 
     // The world's framebuffer leaves SCREEN_EMISSION in the render-target layout, while the engine's

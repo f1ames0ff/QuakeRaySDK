@@ -257,6 +257,8 @@ void qray::GeomInfoManager::ResetWithStatic()
 
     staticGeomCount = 0;
     dynamicGeomCount = 0;
+    staticContentRevision++;
+    staticMatchPrevRevision++;
 
     geomType.clear();
     simpleToLocalIndex.clear();
@@ -338,6 +340,8 @@ uint32_t qray::GeomInfoManager::WriteGeomInfo(
         assert(dynamicGeomCount == 0);
         assert(staticGeomCount == simpleIndex);
         staticGeomCount++;
+        staticContentRevision++;
+        staticMatchPrevRevision++;
 
         frameBegin = 0;
         frameEnd = MAX_FRAMES_IN_FLIGHT;
@@ -498,6 +502,8 @@ void qray::GeomInfoManager::WriteStaticGeomInfoMaterials(
 
         MarkGeomInfoIndexToCopy(i, simpleToLocalIndex[simpleIndex], flagsId);
     }
+
+    staticContentRevision++;
 }
 
 void qray::GeomInfoManager::WriteStaticGeomInfoTransform(
@@ -601,7 +607,36 @@ const int32_t *qray::GeomInfoManager::GetMatchPrevData() const
     return matchPrevShadow.get();
 }
 
+void qray::GeomInfoManager::GetMatchPrevCopyBounds(uint32_t &outMaxStatic, uint32_t &outMaxDynamic) const
+{
+    outMaxStatic = std::max(matchPrevCopyInfo.maxStaticGeomCount, staticGeomCount);
+    outMaxDynamic = std::max(matchPrevCopyInfo.maxDynamicGeomCount, dynamicGeomCount);
+}
+
 uint32_t qray::GeomInfoManager::GetStaticGeomBaseVertexIndex(uint32_t simpleIndex)
 {
     return GetGeomInfoAddressByGlobalIndex(0, ConvertSimpleIndexToGlobal(simpleIndex))->baseVertexIndex;
+}
+
+void qray::GeomInfoManager::GetStaticGeomVertexInfo(uint32_t simpleIndex,
+                                                     uint32_t *outBaseVertex,
+                                                     uint32_t *outVertexCount,
+                                                     uint32_t *outFlags)
+{
+    const ShGeometryInstance *geom = GetGeomInfoAddressByGlobalIndex(0, ConvertSimpleIndexToGlobal(simpleIndex));
+
+    if (outBaseVertex != nullptr)
+    {
+        *outBaseVertex = geom->baseVertexIndex;
+    }
+
+    if (outVertexCount != nullptr)
+    {
+        *outVertexCount = geom->vertexCount;
+    }
+
+    if (outFlags != nullptr)
+    {
+        *outFlags = geom->flags;
+    }
 }

@@ -1125,6 +1125,69 @@ void RhiRasterOverlayPass::SetParticleTimer(nvrhi::ITimerQuery *pParticleTimerQu
     particleTimerQuery = pParticleTimerQuery;
 }
 
+bool RhiRasterOverlayPass::ValidateRenderInputs(uint32_t frameIndex, const float *pView,
+                                                const float *pProj, const float jitter[2],
+                                                nvrhi::IBuffer *pUniformBuffer)
+{
+    if (vertexBuffer == nullptr || indexBuffer == nullptr)
+    {
+        if (!warnedMissingGeometry)
+        {
+            warnedMissingGeometry = true;
+            LogMessage(print, "Warning: RHI: the raster overlay pass has no geometry buffers, the overlay is skipped");
+        }
+        return false;
+    }
+
+    if (pView == nullptr || pProj == nullptr || jitter == nullptr)
+    {
+        if (!warnedMissingCamera)
+        {
+            warnedMissingCamera = true;
+            LogMessage(print, "Warning: RHI: the raster overlay pass got no view/projection/jitter, the overlay is skipped");
+        }
+        return false;
+    }
+
+    if (pUniformBuffer == nullptr || pUniformBuffer->getDesc().isVolatile ||
+        !pUniformBuffer->getDesc().isConstantBuffer)
+    {
+        // A volatile buffer would become a dynamic-offset binding (nvrhi.h:2311-2318), which the
+        // static ConstantBuffer layout item rejects, and the validation device refuses a
+        // ConstantBuffer binding on a desc without isConstantBuffer (validation-device.cpp:
+        // 1717-1730). The skeleton's wrap of the engine uniform is neither.
+        if (!warnedMissingUniform)
+        {
+            warnedMissingUniform = true;
+            LogMessage(print, "Warning: RHI: the raster overlay pass needs the static wrap of the global uniform (set 1)");
+        }
+        return false;
+    }
+
+    if (tonemappingBuffers[frameIndex] == nullptr)
+    {
+        if (!warnedMissingTonemapping)
+        {
+            warnedMissingTonemapping = true;
+            LogMessage(print, "Warning: RHI: the raster overlay pass has no tonemapping buffer, the overlay is skipped");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool RhiRasterOverlayPass::HasCommonLitOverlayInputs(const Target &target,
+                                                     nvrhi::rt::IAccelStruct *pSmokeTopLevel,
+                                                     nvrhi::IBindingSet *pSmokeLightSet,
+                                                     nvrhi::IBindingSet *pRayStatsSet) const
+{
+    return smokeSampler != nullptr &&
+           smokeLightLayout != nullptr && pSmokeLightSet != nullptr && pSmokeTopLevel != nullptr &&
+           rayStatsLayout != nullptr && pRayStatsSet != nullptr &&
+           target.smokeTlasSet != nullptr;
+}
+
 void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
                                   uint32_t frameIndex,
                                   const Framebuffers *pFramebuffers,
@@ -1153,47 +1216,22 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
-    if (vertexBuffer == nullptr || indexBuffer == nullptr)
+    if (!ValidateRenderInputs(frameIndex, pView, pProj, jitter, pUniformBuffer))
     {
-        if (!warnedMissingGeometry)
-        {
-            warnedMissingGeometry = true;
-            LogMessage(print, "Warning: RHI: the raster overlay pass has no geometry buffers, the overlay is skipped");
-        }
         return;
     }
 
-    if (pView == nullptr || pProj == nullptr || jitter == nullptr)
+    const bool hasAnyRequestedDraws =
+        (pDraws != nullptr && drawCount > 0) ||
+        (pSmokeDraws != nullptr && smokeDrawCount > 0) ||
+        (pParticleDraws != nullptr && particleDrawCount > 0) ||
+        (pParticlePointDraws != nullptr && particlePointDrawCount > 0);
+    if (!hasAnyRequestedDraws)
     {
-        if (!warnedMissingCamera)
+        if (particleTimerQuery != nullptr)
         {
-            warnedMissingCamera = true;
-            LogMessage(print, "Warning: RHI: the raster overlay pass got no view/projection/jitter, the overlay is skipped");
-        }
-        return;
-    }
-
-    if (pUniformBuffer == nullptr || pUniformBuffer->getDesc().isVolatile ||
-        !pUniformBuffer->getDesc().isConstantBuffer)
-    {
-        // A volatile buffer would become a dynamic-offset binding (nvrhi.h:2311-2318), which the
-        // static ConstantBuffer layout item rejects, and the validation device refuses a
-        // ConstantBuffer binding on a desc without isConstantBuffer (validation-device.cpp:
-        // 1717-1730). The skeleton's wrap of the engine uniform is neither.
-        if (!warnedMissingUniform)
-        {
-            warnedMissingUniform = true;
-            LogMessage(print, "Warning: RHI: the raster overlay pass needs the static wrap of the global uniform (set 1)");
-        }
-        return;
-    }
-
-    if (tonemappingBuffers[frameIndex] == nullptr)
-    {
-        if (!warnedMissingTonemapping)
-        {
-            warnedMissingTonemapping = true;
-            LogMessage(print, "Warning: RHI: the raster overlay pass has no tonemapping buffer, the overlay is skipped");
+            pCommandList->beginTimerQuery(particleTimerQuery);
+            pCommandList->endTimerQuery(particleTimerQuery);
         }
         return;
     }
@@ -1206,26 +1244,14 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
-    // The pass-owned depth: the legacy copies DEPTH_NDC into it right before the draws
-    // (RasterPass.cpp:96-99) and the world pass then loads it (RasterPass.cpp:263-275). Runs for an
-    // empty draw list too, which is what the legacy does - PrepareForFinal precedes the empty-list
-    // early-out of Rasterizer::Draw (Rasterizer.cpp:262-263, :341-347).
-    RecordDepthCopy(pCommandList, target, width, height);
-
     const bool worldDrawable = pDraws != nullptr && drawCount > 0;
+    const bool litCommonReady =
+        HasCommonLitOverlayInputs(target, pSmokeTopLevel, pSmokeLightSet, pRayStatsSet);
 
-    // The smoke half runs only when the whole chain of its inputs is present: the pair of blobs,
-    // the direct pass's light layout, this frame's light set, the slot's TLAS, the slot's smoke
-    // framebuffer set (which needs the three engine images its set 4 binds) and a non-empty smoke
-    // list. A missing piece skips the smoke list alone; the world loop then keeps those entries and
-    // draws them as it did before this half existed - a zero-area draw, because all six vertices of
-    // a puff carry the puff origin.
     const bool smokeDrawable =
+        litCommonReady &&
         smokeVertexShader != nullptr && smokePixelShader != nullptr && smokeInputLayout != nullptr &&
-        smokeHoleSet != nullptr && smokeSampler != nullptr &&
-        smokeLightLayout != nullptr && pSmokeLightSet != nullptr && pSmokeTopLevel != nullptr &&
-        rayStatsLayout != nullptr && pRayStatsSet != nullptr &&
-        target.smokeFramebuffersSet != nullptr && target.smokeTlasSet != nullptr &&
+        smokeHoleSet != nullptr && target.smokeFramebuffersSet != nullptr &&
         pSmokeDraws != nullptr && smokeDrawCount > 0;
 
     if (pSmokeDraws != nullptr && smokeDrawCount > 0 && !smokeDrawable && !warnedMissingSmokeInputs)
@@ -1235,11 +1261,10 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
     }
 
     const bool particleDrawable =
+        litCommonReady &&
         particleVertexShader != nullptr && particlePixelShader != nullptr &&
-        particleInputLayout != nullptr && particleHoleSet != nullptr && smokeSampler != nullptr &&
-        smokeLightLayout != nullptr && pSmokeLightSet != nullptr && pSmokeTopLevel != nullptr &&
-        rayStatsLayout != nullptr && pRayStatsSet != nullptr &&
-        target.particleFramebuffersSet != nullptr && target.smokeTlasSet != nullptr &&
+        particleInputLayout != nullptr && particleHoleSet != nullptr &&
+        target.particleFramebuffersSet != nullptr &&
         pParticleDraws != nullptr && particleDrawCount > 0;
 
     if (pParticleDraws != nullptr && particleDrawCount > 0 && !particleDrawable &&
@@ -1250,12 +1275,10 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
     }
 
     const bool particlePointDrawable =
+        litCommonReady &&
         particlePointVertexShader != nullptr && particlePixelShader != nullptr &&
-        particlePointInputLayout != nullptr && particleHoleSet != nullptr && smokeSampler != nullptr &&
-        smokeLightLayout != nullptr && pSmokeLightSet != nullptr && pSmokeTopLevel != nullptr &&
-        rayStatsLayout != nullptr && pRayStatsSet != nullptr &&
-        target.particleFramebuffersSet != nullptr && target.smokeTlasSet != nullptr &&
-        particlePointBuffer != nullptr &&
+        particlePointInputLayout != nullptr && particleHoleSet != nullptr &&
+        target.particleFramebuffersSet != nullptr && particlePointBuffer != nullptr &&
         pParticlePointDraws != nullptr && particlePointDrawCount > 0;
 
     if (pParticlePointDraws != nullptr && particlePointDrawCount > 0 && !particlePointDrawable &&
@@ -1267,6 +1290,8 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
 
     if (worldDrawable || smokeDrawable || particleDrawable || particlePointDrawable)
     {
+        RecordDepthCopy(pCommandList, target, width, height);
+
         // The engine textures the table wrapped since the last frame need their first-use state
         // declared in the first list that binds the table (RhiTextureSource.h); all three halves
         // bind it as set 0, and any of them may be that list.
@@ -1321,45 +1346,37 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
             RecordSmokeDraws(pCommandList, target, width, height, defaultViewProj,
                              pSmokeDraws, smokeDrawCount, pSmokeLightSet, pRayStatsSet);
         }
+
+        // Restore overlay/smoke/particle targets back to GENERAL (UnorderedAccess) for compose continuation.
+        pCommandList->setTextureState(target.finalTexture, nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::UnorderedAccess);
+        pCommandList->setTextureState(target.screenEmissionTexture, nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::UnorderedAccess);
+        pCommandList->setTextureState(target.depthNdcTexture, nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::UnorderedAccess);
+        pCommandList->setTextureState(target.storageTexture, nvrhi::AllSubresources,
+                                      nvrhi::ResourceStates::UnorderedAccess);
+
+        if (target.smokeDepthWorldTexture != nullptr)
+        {
+            pCommandList->setTextureState(target.smokeDepthWorldTexture, nvrhi::AllSubresources,
+                                          nvrhi::ResourceStates::UnorderedAccess);
+        }
+        if (target.smokePingLfShTexture != nullptr)
+        {
+            pCommandList->setTextureState(target.smokePingLfShTexture, nvrhi::AllSubresources,
+                                          nvrhi::ResourceStates::UnorderedAccess);
+        }
+        if (target.smokePingLfCocgTexture != nullptr)
+        {
+            pCommandList->setTextureState(target.smokePingLfCocgTexture, nvrhi::AllSubresources,
+                                          nvrhi::ResourceStates::UnorderedAccess);
+        }
     }
     else if (particleTimerQuery != nullptr)
     {
         pCommandList->beginTimerQuery(particleTimerQuery);
         pCommandList->endTimerQuery(particleTimerQuery);
-    }
-
-    // The framebuffer use left FINAL and SCREEN_EMISSION in the render-target layout, and the
-    // binding-25 storage image is a shader-write state; the compose's continuation reads all of
-    // them through its own wraps, whose tracked state is UnorderedAccess from the compose's own
-    // announcement - naming GENERAL as the old layout is only correct because the physical layouts
-    // are moved back here, at the end of the list that used them. The engine's own descriptors
-    // declare VK_IMAGE_LAYOUT_GENERAL for every framebuffer image (Framebuffers.cpp:754-758, :786).
-    // The smoke half's three sampled images (DEPTH_WORLD and the two LF ping images) end the same
-    // way: their SRV use left them in the read-only layout, and the compose's continuation and the
-    // next frame's own wraps expect GENERAL again.
-    pCommandList->setTextureState(target.finalTexture, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::UnorderedAccess);
-    pCommandList->setTextureState(target.screenEmissionTexture, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::UnorderedAccess);
-    pCommandList->setTextureState(target.depthNdcTexture, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::UnorderedAccess);
-    pCommandList->setTextureState(target.storageTexture, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::UnorderedAccess);
-
-    if (target.smokeDepthWorldTexture != nullptr)
-    {
-        pCommandList->setTextureState(target.smokeDepthWorldTexture, nvrhi::AllSubresources,
-                                      nvrhi::ResourceStates::UnorderedAccess);
-    }
-    if (target.smokePingLfShTexture != nullptr)
-    {
-        pCommandList->setTextureState(target.smokePingLfShTexture, nvrhi::AllSubresources,
-                                      nvrhi::ResourceStates::UnorderedAccess);
-    }
-    if (target.smokePingLfCocgTexture != nullptr)
-    {
-        pCommandList->setTextureState(target.smokePingLfCocgTexture, nvrhi::AllSubresources,
-                                      nvrhi::ResourceStates::UnorderedAccess);
     }
 }
 
@@ -1873,6 +1890,23 @@ void RhiRasterOverlayPass::RecordDepthCopy(nvrhi::ICommandList *pCommandList, co
     pCommandList->draw(args);
 }
 
+static bool ShouldSkipWorldDraw(const RasterizedDataCollector::DrawInfo &info,
+                                bool skipSmokeEntries,
+                                bool skipParticleEntries)
+{
+    if (info.vertexCount == 0 && info.indexCount == 0)
+    {
+        return true;
+    }
+
+    if (skipSmokeEntries && (info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
+    {
+        return true;
+    }
+
+    return skipParticleEntries && (info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_PARTICLE) != 0;
+}
+
 void RhiRasterOverlayPass::RecordWorldDraws(nvrhi::ICommandList *pCommandList, const Target &target,
                                             uint32_t width, uint32_t height, const float *defaultViewProj,
                                             const RasterizedDataCollector::DrawInfo *pDraws,
@@ -1887,30 +1921,14 @@ void RhiRasterOverlayPass::RecordWorldDraws(nvrhi::ICommandList *pCommandList, c
     // per-draw viewports.
     const VkViewport legacyDefaultViewport = { 0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f };
     const nvrhi::Viewport defaultViewport = ToLegacyViewport(legacyDefaultViewport);
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
+    nvrhi::Viewport lastViewport;
+    nvrhi::Rect lastScissor;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
         const RasterizedDataCollector::DrawInfo &info = pDraws[i];
-
-        // A draw with no vertices and no indices records nothing: the legacy loop would issue a
-        // zero-vertex draw (Rasterizer.cpp:412-419), which rasterizes no primitive. The collector
-        // itself rejects nothing for this stream (only SWAPCHAIN loses its depth state,
-        // RasterizedDataCollector.cpp:153-167), so this is the only skip.
-        if (info.vertexCount == 0 && info.indexCount == 0)
-        {
-            continue;
-        }
-
-        // The smoke entries the smoke half will draw are skipped here so that no entry is recorded
-        // twice. The bit is the engine's own SMOKE state flag (qray.h:514), the one the legacy
-        // BindPipelineIfNew switches pipelines on (Rasterizer.cpp:472-476) and the host filters the
-        // smoke list by (VulkanDevice.cpp).
-        if (skipSmokeEntries && (info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_SMOKE) != 0)
-        {
-            continue;
-        }
-
-        if (skipParticleEntries && (info.pipelineState & QR_RASTERIZED_GEOMETRY_STATE_PARTICLE) != 0)
+        if (ShouldSkipWorldDraw(info, skipSmokeEntries, skipParticleEntries))
         {
             continue;
         }
@@ -1936,26 +1954,32 @@ void RhiRasterOverlayPass::RecordWorldDraws(nvrhi::ICommandList *pCommandList, c
 
         const nvrhi::Rect scissor = info.scissor ? ToLegacyScissor(*info.scissor) : fullTarget;
 
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.framebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(scissor);
-        // Sets 0..4 in the layout order of Create: the table, the uniform, the slot's tonemapping
-        // buffer, the real empty set of the set-3 hole and the partial framebuffers set with the
-        // binding-25 storage image.
-        state.addBindingSet(textureTable->GetTable());
-        state.addBindingSet(target.uniformSet);
-        state.addBindingSet(target.tonemappingSet);
-        state.addBindingSet(worldHoleSet);
-        state.addBindingSet(target.framebuffersSet);
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(indexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
+        if (lastPipeline != pipeline || lastViewport != viewport || lastScissor != scissor)
+        {
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.framebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(scissor);
+            // Sets 0..4 in the layout order of Create: the table, the uniform, the slot's tonemapping
+            // buffer, the real empty set of the set-3 hole and the partial framebuffers set with the
+            // binding-25 storage image.
+            state.addBindingSet(textureTable->GetTable());
+            state.addBindingSet(target.uniformSet);
+            state.addBindingSet(target.tonemappingSet);
+            state.addBindingSet(worldHoleSet);
+            state.addBindingSet(target.framebuffersSet);
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
 
-        pCommandList->setGraphicsState(state);
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+            lastViewport = viewport;
+            lastScissor = scissor;
+        }
 
         // After the state: changing the state invalidates push constants (nvrhi.h:3430-3432), and
         // the block is rebuilt per draw exactly as Rasterizer::Draw does (Rasterizer.cpp:399-409).
@@ -1994,6 +2018,9 @@ void RhiRasterOverlayPass::RecordSmokeDraws(nvrhi::ICommandList *pCommandList, c
 
     const VkViewport legacyDefaultViewport = { 0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f };
     const nvrhi::Viewport defaultViewport = ToLegacyViewport(legacyDefaultViewport);
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
+    nvrhi::Viewport lastViewport;
+    nvrhi::Rect lastScissor;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
@@ -2028,29 +2055,35 @@ void RhiRasterOverlayPass::RecordSmokeDraws(nvrhi::ICommandList *pCommandList, c
 
         const nvrhi::Rect scissor = info.scissor ? ToLegacyScissor(*info.scissor) : fullTarget;
 
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.framebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(scissor);
-        // Sets 0..6 in the layout order CreateSmokePipeline adds them: the table, the uniform, the
-        // slot's tonemapping buffer, the smoke set-3 hole, the smoke framebuffers set, the slot's
-        // TLAS and the direct pass's light set.
-        state.addBindingSet(textureTable->GetTable());
-        state.addBindingSet(target.uniformSet);
-        state.addBindingSet(target.tonemappingSet);
-        state.addBindingSet(smokeHoleSet);
-        state.addBindingSet(target.smokeFramebuffersSet);
-        state.addBindingSet(target.smokeTlasSet);
-        state.addBindingSet(pSmokeLightSet);
-        state.addBindingSet(pRayStatsSet);
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(indexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
+        if (lastPipeline != pipeline || lastViewport != viewport || lastScissor != scissor)
+        {
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.framebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(scissor);
+            // Sets 0..6 in the layout order CreateSmokePipeline adds them: the table, the uniform, the
+            // slot's tonemapping buffer, the smoke set-3 hole, the smoke framebuffers set, the slot's
+            // TLAS and the direct pass's light set.
+            state.addBindingSet(textureTable->GetTable());
+            state.addBindingSet(target.uniformSet);
+            state.addBindingSet(target.tonemappingSet);
+            state.addBindingSet(smokeHoleSet);
+            state.addBindingSet(target.smokeFramebuffersSet);
+            state.addBindingSet(target.smokeTlasSet);
+            state.addBindingSet(pSmokeLightSet);
+            state.addBindingSet(pRayStatsSet);
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
 
-        pCommandList->setGraphicsState(state);
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+            lastViewport = viewport;
+            lastScissor = scissor;
+        }
 
         // After the state: changing the state invalidates push constants (nvrhi.h:3430-3432), and
         // the block is the full 120-byte legacy RasterizedPushConst rebuilt per draw, exactly as
@@ -2085,6 +2118,9 @@ void RhiRasterOverlayPass::RecordParticleDraws(nvrhi::ICommandList *pCommandList
 
     const VkViewport legacyDefaultViewport = { 0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f };
     const nvrhi::Viewport defaultViewport = ToLegacyViewport(legacyDefaultViewport);
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
+    nvrhi::Viewport lastViewport;
+    nvrhi::Rect lastScissor;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
@@ -2114,26 +2150,32 @@ void RhiRasterOverlayPass::RecordParticleDraws(nvrhi::ICommandList *pCommandList
 
         const nvrhi::Rect scissor = info.scissor ? ToLegacyScissor(*info.scissor) : fullTarget;
 
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.framebuffer;
-        state.viewport.addViewport(viewport);
-        state.viewport.addScissorRect(scissor);
-        state.addBindingSet(textureTable->GetTable());
-        state.addBindingSet(target.uniformSet);
-        state.addBindingSet(target.tonemappingSet);
-        state.addBindingSet(particleHoleSet);
-        state.addBindingSet(target.particleFramebuffersSet);
-        state.addBindingSet(target.smokeTlasSet);
-        state.addBindingSet(pLightSet);
-        state.addBindingSet(pRayStatsSet);
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.setIndexBuffer(nvrhi::IndexBufferBinding()
-                                 .setBuffer(indexBuffer)
-                                 .setFormat(nvrhi::Format::R32_UINT)
-                                 .setOffset(0));
+        if (lastPipeline != pipeline || lastViewport != viewport || lastScissor != scissor)
+        {
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.framebuffer;
+            state.viewport.addViewport(viewport);
+            state.viewport.addScissorRect(scissor);
+            state.addBindingSet(textureTable->GetTable());
+            state.addBindingSet(target.uniformSet);
+            state.addBindingSet(target.tonemappingSet);
+            state.addBindingSet(particleHoleSet);
+            state.addBindingSet(target.particleFramebuffersSet);
+            state.addBindingSet(target.smokeTlasSet);
+            state.addBindingSet(pLightSet);
+            state.addBindingSet(pRayStatsSet);
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.setIndexBuffer(nvrhi::IndexBufferBinding()
+                                     .setBuffer(indexBuffer)
+                                     .setFormat(nvrhi::Format::R32_UINT)
+                                     .setOffset(0));
 
-        pCommandList->setGraphicsState(state);
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+            lastViewport = viewport;
+            lastScissor = scissor;
+        }
 
         const RasterizedPushConstants push(info, defaultViewProj);
         pCommandList->setPushConstants(&push, sizeof(push));
@@ -2165,6 +2207,7 @@ void RhiRasterOverlayPass::RecordParticlePointDraws(nvrhi::ICommandList *pComman
 
     const VkViewport legacyDefaultViewport = { 0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f };
     const nvrhi::Viewport defaultViewport = ToLegacyViewport(legacyDefaultViewport);
+    nvrhi::IGraphicsPipeline *lastPipeline = nullptr;
 
     for (uint32_t i = 0; i < drawCount; i++)
     {
@@ -2189,23 +2232,27 @@ void RhiRasterOverlayPass::RecordParticlePointDraws(nvrhi::ICommandList *pComman
             return;
         }
 
-        nvrhi::GraphicsState state;
-        state.pipeline = pipeline;
-        state.framebuffer = target.framebuffer;
-        state.viewport.addViewport(defaultViewport);
-        state.viewport.addScissorRect(fullTarget);
-        state.addBindingSet(textureTable->GetTable());
-        state.addBindingSet(target.uniformSet);
-        state.addBindingSet(target.tonemappingSet);
-        state.addBindingSet(particleHoleSet);
-        state.addBindingSet(target.particleFramebuffersSet);
-        state.addBindingSet(target.smokeTlasSet);
-        state.addBindingSet(pLightSet);
-        state.addBindingSet(pRayStatsSet);
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
-        state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(particlePointBuffer).setSlot(1).setOffset(0));
+        if (lastPipeline != pipeline)
+        {
+            nvrhi::GraphicsState state;
+            state.pipeline = pipeline;
+            state.framebuffer = target.framebuffer;
+            state.viewport.addViewport(defaultViewport);
+            state.viewport.addScissorRect(fullTarget);
+            state.addBindingSet(textureTable->GetTable());
+            state.addBindingSet(target.uniformSet);
+            state.addBindingSet(target.tonemappingSet);
+            state.addBindingSet(particleHoleSet);
+            state.addBindingSet(target.particleFramebuffersSet);
+            state.addBindingSet(target.smokeTlasSet);
+            state.addBindingSet(pLightSet);
+            state.addBindingSet(pRayStatsSet);
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(vertexBuffer).setSlot(0).setOffset(0));
+            state.addVertexBuffer(nvrhi::VertexBufferBinding().setBuffer(particlePointBuffer).setSlot(1).setOffset(0));
 
-        pCommandList->setGraphicsState(state);
+            pCommandList->setGraphicsState(state);
+            lastPipeline = pipeline;
+        }
 
         const RasterizedPushConstants push(info, defaultViewProj);
         pCommandList->setPushConstants(&push, sizeof(push));

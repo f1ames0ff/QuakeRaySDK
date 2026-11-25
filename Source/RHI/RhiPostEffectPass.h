@@ -245,7 +245,6 @@ private:
         EFFECT_COLOR_TINT = 0,
         EFFECT_INVERSE_BW,
         EFFECT_HUE_SHIFT,
-        EFFECT_CHROMATIC_ABERRATION,
         EFFECT_DISTORTED_SIDES,
         EFFECT_WAVES,
         EFFECT_RADIAL_BLUR,
@@ -314,7 +313,49 @@ private:
         nvrhi::BindingSetHandle uniformSet;
     };
 
+    struct TransitionInput
+    {
+        bool present = false;
+        bool isActive = false;
+        float durationIn = 0.0f;
+        float durationOut = 0.0f;
+    };
+
+    struct TransitionOutput
+    {
+        uint32_t transitionType = 0;
+        float transitionBeginTime = 0.0f;
+        float transitionDuration = 0.0f;
+    };
+
+    template <typename TParams>
+    static TransitionInput MakeTransitionInput(const TParams *pParams, bool extraEnabled = true)
+    {
+        if (pParams == nullptr || !extraEnabled)
+        {
+            return {};
+        }
+        return {
+            true,
+            static_cast<bool>(pParams->isActive),
+            pParams->transitionDurationIn,
+            pParams->transitionDurationOut,
+        };
+    }
+
     bool LoadShader(const char *pFileName, nvrhi::ShaderHandle &result);
+
+    bool TryPrepareTransition(EffectId effect,
+                              float currentTime,
+                              const TransitionInput &input,
+                              TransitionOutput &outTransition);
+
+    void RecordCrtPasses(nvrhi::ICommandList *pCommandList,
+                         Target &target,
+                         uint32_t groupsX,
+                         uint32_t groupsY,
+                         float currentTime,
+                         bool &sourceIsPing);
 
     // The shared preamble of the two entry points: validates the arguments, resolves the slot's
     // four image handles and extents, retires and re-wraps them when the engine re-created its

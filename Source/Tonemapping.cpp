@@ -100,7 +100,7 @@ void Tonemapping::PrepareExposureParams(uint32_t frameIndex, const std::shared_p
     tm->tonemapPower        = bounded(tonemapPower, 0.0f, 1.0f, 0.9f);
     tm->tonemapType         = std::min(tonemapType, 4u);
     tm->tmKneeStart         = 0.6f;
-    tm->tmWhitePoint        = bounded(params.luminanceWhitePoint, 1.0f, 40.0f, 20.0f);
+    tm->tmWhitePoint        = bounded(params.luminanceWhitePoint, 1.05f, 40.0f, 20.0f);
     tm->highlightDesaturation = bounded(params.highlightDesaturation, 0.0f, 1.0f, 0.0f);
     tm->chromaPreservation    = bounded(params.chromaPreservation, 0.0f, 1.0f, 0.8f);
     tm->tmSlopeBlurSigma    = 12.0f;
@@ -121,7 +121,7 @@ void Tonemapping::PrepareExposureParams(uint32_t frameIndex, const std::shared_p
 
     const float kneeStart      = tm->tmKneeStart;
     const float kneeWhitePoint = tm->tmWhitePoint;
-    const float kneeW = (kneeStart * (kneeStart - 2.0f) + kneeWhitePoint) / (kneeWhitePoint - 1.0f);
+    const float kneeW = (kneeStart * (kneeStart - 2.0f) + kneeWhitePoint) / std::max(kneeWhitePoint - 1.0f, 1e-4f);
 
     tm->kneeW = kneeW;
     tm->kneeA = -kneeStart * kneeStart;

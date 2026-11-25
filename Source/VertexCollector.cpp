@@ -339,28 +339,31 @@ uint32_t VertexCollector::AddGeometry( uint32_t                         frameInd
     const bool     useIndices     = info.indexCount != 0 && info.pIndices != nullptr;
     const uint32_t primitiveCount = useIndices ? info.indexCount / 3 : info.vertexCount / 3;
 
-    curVertexCount = vertIndex + info.vertexCount;
-    curIndexCount  = indIndex + ( useIndices ? info.indexCount : 0 );
+    const uint64_t nextVertexCount = uint64_t(vertIndex) + info.vertexCount;
+    const uint64_t nextIndexCount  = uint64_t(indIndex) + (useIndices ? info.indexCount : 0u);
+
+    if( nextVertexCount > maxVertexCount )
+    {
+        assert( 0 );
+        return UINT32_MAX;
+    }
+
+    if( nextIndexCount > uint64_t( MAX_INDEXED_PRIMITIVE_COUNT ) * 3u )
+    {
+        assert( 0 );
+        return UINT32_MAX;
+    }
+
+    if( geomInfoMgr->GetCount() + 1 > MAX_BOTTOM_LEVEL_GEOMETRIES_COUNT )
+    {
+        assert( 0 );
+        return UINT32_MAX;
+    }
+
+    curVertexCount     = static_cast< uint32_t >( nextVertexCount );
+    curIndexCount      = static_cast< uint32_t >( nextIndexCount );
     curPrimitiveCount += primitiveCount;
     curTransformCount += 1;
-
-    if( curVertexCount >= maxVertexCount )
-    {
-        assert( 0 );
-        return UINT32_MAX;
-    }
-
-    if( curIndexCount >= MAX_INDEXED_PRIMITIVE_COUNT * 3 )
-    {
-        assert( 0 );
-        return UINT32_MAX;
-    }
-
-    if( geomInfoMgr->GetCount() + 1 >= MAX_BOTTOM_LEVEL_GEOMETRIES_COUNT )
-    {
-        assert( 0 );
-        return UINT32_MAX;
-    }
 
     assert( stagingVertBuffer.IsMapped() );
     CopyDataToStaging( info, vertIndex );
@@ -456,6 +459,7 @@ uint32_t VertexCollector::AddGeometry( uint32_t                         frameInd
     }
 
     geomInfo.portalIndex = info.pPortalIndex ? *info.pPortalIndex : PORTAL_INDEX_NONE;
+    geomInfo.clusterOverride = info.clusterOverride;
 
     const uint32_t simpleIndex = geomInfoMgr->WriteGeomInfo( frameIndex, info.uniqueID, localIndex, geomFlags, geomInfo );
 
@@ -490,7 +494,7 @@ uint32_t VertexCollector::AddGeometry( uint32_t                         frameInd
 
 void VertexCollector::CopyDataToStaging(const QrGeometryUploadInfo &info, uint32_t vertIndex)
 {
-    assert( ( vertIndex + info.vertexCount ) * sizeof( ShVertex ) < vertBuffer->GetSize() );
+    assert( ( uint64_t( vertIndex ) + info.vertexCount ) * sizeof( ShVertex ) <= vertBuffer->GetSize() );
 
     ShVertex* const pDst = &mappedVertexData[ vertIndex ];
 
@@ -527,6 +531,7 @@ void VertexCollector::Reset()
     curTransformCount = 0;
 
     simpleIndexToTransformIndex.clear();
+    pendingTexCoordUpdates.clear();
 
     materialDependencies.clear();
 
@@ -542,6 +547,8 @@ bool VertexCollector::CopyVertexDataFromStaging( VkCommandBuffer cmd )
     {
         return false;
     }
+
+    pendingTexCoordUpdates.clear();
 
     const VkBufferCopy info =
     {
@@ -704,18 +711,37 @@ void VertexCollector::UpdateTexCoords( uint32_t                     simpleIndex,
     assert( isStatic );
     assert( mappedVertexData != nullptr );
 
+    if( texCoordsInfo.vertexCount == 0 )
+    {
+        return;
+    }
+
     const uint32_t maxVertexCount = isStatic ? MAX_STATIC_VERTEX_COUNT : MAX_DYNAMIC_VERTEX_COUNT;
 
-    const uint32_t globalVertIndex = geomInfoMgr->GetStaticGeomBaseVertexIndex( simpleIndex );
-    const uint32_t dstVertIndex    = globalVertIndex + texCoordsInfo.vertexOffset;
+    uint32_t globalVertIndex = 0;
+    uint32_t geomVertexCount = 0;
+    uint32_t geomFlags = 0;
+    geomInfoMgr->GetStaticGeomVertexInfo( simpleIndex, &globalVertIndex, &geomVertexCount, &geomFlags );
 
-    if( dstVertIndex + texCoordsInfo.vertexCount >= maxVertexCount )
+    if( texCoordsInfo.vertexOffset > geomVertexCount ||
+        texCoordsInfo.vertexCount > geomVertexCount - texCoordsInfo.vertexOffset )
+    {
+        assert( 0 );
+        return;
+    }
+
+    const uint32_t dstVertIndex = globalVertIndex + texCoordsInfo.vertexOffset;
+
+    if( globalVertIndex > maxVertexCount ||
+        texCoordsInfo.vertexOffset > maxVertexCount - globalVertIndex ||
+        texCoordsInfo.vertexCount > maxVertexCount - dstVertIndex )
     {
         assert( 0 );
         return;
     }
 
     ShVertex* const pDst = &mappedVertexData[ dstVertIndex ];
+    bool anyLayerUpdated = false;
 
     for( uint32_t layer = 0; layer < 3; layer++ )
     {
@@ -725,6 +751,8 @@ void VertexCollector::UpdateTexCoords( uint32_t                     simpleIndex,
         {
             continue;
         }
+
+        anyLayerUpdated = true;
 
         for( uint32_t i = 0; i < texCoordsInfo.vertexCount; i++ )
         {
@@ -736,6 +764,26 @@ void VertexCollector::UpdateTexCoords( uint32_t                     simpleIndex,
             pUv[ 1 ] = pSrc[ i * 2 + 1 ];
         }
     }
+
+    if( anyLayerUpdated )
+    {
+        pendingTexCoordUpdates.push_back( TexCoordUpdateRange{
+            .firstVertex = dstVertIndex,
+            .vertexCount = texCoordsInfo.vertexCount,
+            .preserveGpuNormals = ( geomFlags & GEOM_INST_FLAG_GENERATE_NORMALS ) != 0,
+        } );
+    }
+}
+
+const ShVertex *VertexCollector::GetStagingVertexData() const
+{
+    return mappedVertexData;
+}
+
+void VertexCollector::ConsumePendingTexCoordUpdates( std::vector< TexCoordUpdateRange >& outRanges )
+{
+    outRanges.clear();
+    outRanges.swap( pendingTexCoordUpdates );
 }
 
 void VertexCollector::AddMaterialDependency( uint32_t simpleIndex,
@@ -839,15 +887,18 @@ std::vector<VertexCollector::GeometryDrawInfo> VertexCollector::GetGeometryDrawI
             info.vertexBuffer = vertBuffer->GetBuffer();
             info.indexBuffer  = indexBuffer->GetBuffer();
             info.baseVertex   = static_cast< uint32_t >( ( tr.vertexData.deviceAddress - vertexBase ) / sizeof( ShVertex ) );
-            info.indexCount   = ranges[ i ].primitiveCount * 3;
 
             if( tr.indexType == VK_INDEX_TYPE_UINT32 )
             {
-                info.firstIndex = static_cast< uint32_t >( ( tr.indexData.deviceAddress - indexBase ) / sizeof( uint32_t ) );
+                info.firstIndex  = static_cast< uint32_t >( ( tr.indexData.deviceAddress - indexBase ) / sizeof( uint32_t ) );
+                info.indexCount  = ranges[ i ].primitiveCount * 3;
+                info.vertexCount = tr.maxVertex;
             }
             else
             {
-                info.firstIndex = 0;
+                info.firstIndex  = 0;
+                info.indexCount  = 0;
+                info.vertexCount = ranges[ i ].primitiveCount * 3;
             }
 
             const VkDeviceAddress transformAddr = tr.transformData.deviceAddress;

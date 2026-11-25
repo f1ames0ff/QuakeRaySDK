@@ -183,7 +183,7 @@ public:
     class UploadLockScope
     {
     public:
-        UploadLockScope(VulkanDevice &device, uint32_t lane);
+        UploadLockScope(VulkanDevice &device, std::mutex &mutex, uint32_t lane);
         ~UploadLockScope();
         UploadLockScope(const UploadLockScope &) = delete;
         UploadLockScope &operator=(const UploadLockScope &) = delete;
@@ -236,6 +236,7 @@ private:
 
     void LockSpatialFrame();
     void FillUniform(ShGlobalUniform *gu, const QrDrawFrameInfo &drawInfo) const;
+    void UpdateFrameStatsAndResolution(const QrDrawFrameInfo &drawInfo, uint32_t frameIndex);
     bool UpdateWorldSamplers(uint32_t frameIndex, const QrDrawFrameTexturesParams *pTexturesParams);
 
     VkCommandBuffer BeginFrame(const QrStartFrameInfo &startInfo);
@@ -262,10 +263,10 @@ private:
         0,
         {},
     };
-    bool                spatialFrameLocked = false;
+    std::atomic<bool>   spatialFrameLocked{ false };
     bool                smokeWindDirectionSet = false;
     QrFloat3D           smokeWindDirection = { { 0.45f, 0.20f, 0.87f } };
-    std::unordered_map<uint32_t, bool> geometryWindingFlips;
+    std::unordered_map<uint64_t, bool> geometryWindingFlips;
 
     uint32_t            frameId;
 
@@ -273,7 +274,8 @@ private:
     VkSemaphore         imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
     VkSemaphore         inFrameSemaphores[MAX_FRAMES_IN_FLIGHT] = {};
 
-    bool                waitForOutOfFrameFence;
+    bool                frameFenceSubmitted[MAX_FRAMES_IN_FLIGHT] = {};
+    bool                waitForOutOfFrameFence[MAX_FRAMES_IN_FLIGHT] = {};
     VkFence             outOfFrameFences[MAX_FRAMES_IN_FLIGHT] = {};
 
     std::shared_ptr<PhysicalDevice>         physDevice;
@@ -335,6 +337,7 @@ private:
     QrayGpuRequirements                     gpuRequirements = {};
     bool                                    gpuRequirementsProvided = false;
     bool                                    timelineSemaphoreEnabled = false;
+    bool                                    nvrhiUniformBufferUpdateAfterBind = false;
     QrayGpuFrameHooks                       gpuFrameHooks = {};
     bool                                    inGpuFrameCallback = false;
 
@@ -395,6 +398,9 @@ private:
     float                                   statsGpuFrameMs = 0.0f;
     float                                   statsGpuPassMs[QR_GPU_PASS_COUNT] = {};
     std::mutex                              geometryUploadMutex;
+    std::mutex                              rasterUploadMutex;
+    std::mutex                              decalUploadMutex;
+    std::mutex                              portalUploadMutex;
     std::atomic<uint64_t>                   uploadLockWaitSumNs[QR_UPLOAD_LANE_COUNT]{};
     std::atomic<uint64_t>                   uploadLockWaitMaxNs[QR_UPLOAD_LANE_COUNT]{};
     std::atomic<uint64_t>                   uploadLockHoldSumNs[QR_UPLOAD_LANE_COUNT]{};

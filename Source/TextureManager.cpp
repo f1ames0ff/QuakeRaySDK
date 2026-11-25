@@ -182,6 +182,11 @@ namespace
             return std::min(imageInfo.levelCount, MAX_PREGENERATED_MIPMAP_LEVELS);
         }
 
+        if (imageInfo.format != VK_FORMAT_R8G8B8A8_SRGB && imageInfo.format != VK_FORMAT_R8G8B8A8_UNORM)
+        {
+            return 1;
+        }
+
         const auto widthLevelCount = static_cast<uint32_t>(std::log2(imageInfo.baseSize.width));
         const auto heightLevelCount = static_cast<uint32_t>(std::log2(imageInfo.baseSize.height));
 
@@ -310,7 +315,10 @@ void TextureManager::CreateEmptyTexture(VkCommandBuffer cmd, uint32_t frameIndex
 
     assert(emptyImage != VK_NULL_HANDLE && emptyView != VK_NULL_HANDLE);
 
-    textureDesc->SetEmptyTextureInfo(emptyView);
+    if (textureDesc != nullptr)
+    {
+        textureDesc->SetEmptyTextureInfo(emptyView);
+    }
 }
 
 void qray::TextureManager::CreateWaterNormalTexture(VkCommandBuffer cmd, uint32_t frameIndex, const char *pFilePath)
@@ -418,7 +426,10 @@ void TextureManager::SubmitDescriptors(uint32_t frameIndex,
 
     if (forceUpdateAllDescriptors)
     {
-        textureDesc->ResetAllCache(frameIndex);
+        if (textureDesc != nullptr)
+        {
+            textureDesc->ResetAllCache(frameIndex);
+        }
 
         MarkAllDescDirty();
     }
@@ -435,18 +446,36 @@ void TextureManager::SubmitDescriptors(uint32_t frameIndex,
 
         if (texture.image != VK_NULL_HANDLE)
         {
-            textureDesc->UpdateTextureDesc(frameIndex, i, texture.view, texture.samplerHandle);
+            if (textureDesc != nullptr)
+            {
+                textureDesc->UpdateTextureDesc(frameIndex, i, texture.view, texture.samplerHandle);
+            }
 
             if (rhiTextureTable != nullptr)
             {
-                rhiTextureTable->SetSlot(i, texture.image, texture.format,
-                                         texture.baseSize.width, texture.baseSize.height,
-                                         texture.mipLevels, texture.samplerHandle.GetIndex());
+                rhiTextureTable->SetSlot({
+                    .slot = i,
+                    .image = texture.image,
+                    .format = texture.format,
+                    .width = texture.baseSize.width,
+                    .height = texture.baseSize.height,
+                    .mipLevels = texture.mipLevels,
+                    .samplerIndex = texture.samplerHandle.GetIndex(),
+                    .swizzling = texture.swizzling,
+                });
             }
         }
         else
         {
-            textureDesc->ResetTextureDesc(frameIndex, i);
+            if (textureDesc != nullptr)
+            {
+                textureDesc->ResetTextureDesc(frameIndex, i);
+            }
+
+            if (rhiTextureTable != nullptr)
+            {
+                rhiTextureTable->ResetSlot(i);
+            }
         }
 
         texturesToUpdateDescMarked[frameIndex][i] = 0;
@@ -454,7 +483,7 @@ void TextureManager::SubmitDescriptors(uint32_t frameIndex,
 
     dirty.clear();
 
-    if (hasDescWrites)
+    if (hasDescWrites && textureDesc != nullptr)
     {
         textureDesc->FlushDescWrites();
     }
@@ -645,7 +674,7 @@ bool TextureManager::UpdateMaterial(VkCommandBuffer cmd, uint32_t frameIndex, co
             continue;
         }
 
-        textureUploader->UpdateImage(cmd, image, updateData[i]);
+        textureUploader->UpdateImage(cmd, frameIndex, image, updateData[i]);
 
         if (i == MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX)
         {
@@ -718,9 +747,12 @@ uint32_t TextureManager::PrepareTexture(
                                                  image,
                                                  view,
                                                  samplerHandle,
-                                                 imageInfo.format,
-                                                 VkExtent2D{ imageInfo.baseSize.width, imageInfo.baseSize.height },
-                                                 mipLevels );
+                                                 TextureImageSpec{
+                                                     .format = imageInfo.format,
+                                                     .baseSize = VkExtent2D{ imageInfo.baseSize.width, imageInfo.baseSize.height },
+                                                     .mipLevels = mipLevels,
+                                                 },
+                                                 swizzling );
 
     talCdfSources[ textureIndex ] = TalCdfSource{ .baseSize = imageInfo.baseSize,
                                                   .format = imageInfo.format,
@@ -748,7 +780,7 @@ void TextureManager::RebuildTalCdf(VkCommandBuffer cmd, uint32_t frameIndex, uin
                                GetTalCdfPixelLayout(source.format, &bytesPerPixel, &emissiveOffset) &&
                                uint64_t(source.baseSize.width) * source.baseSize.height * bytesPerPixel == source.level0Size;
 
-    std::vector<uint32_t> entries(TAL_CDF_LUT_ENTRIES, TAL_CDF_EMPTY_ENTRY);
+    talCdfScratch.assign(TAL_CDF_LUT_ENTRIES, TAL_CDF_EMPTY_ENTRY);
 
     if (layoutMatches)
     {
@@ -757,7 +789,7 @@ void TextureManager::RebuildTalCdf(VkCommandBuffer cmd, uint32_t frameIndex, uin
                            source.baseSize.height,
                            bytesPerPixel,
                            emissiveOffset,
-                           entries.data(),
+                           talCdfScratch.data(),
                            uint32_t(TAL_CDF_LUT_ENTRIES));
     }
 
@@ -767,7 +799,7 @@ void TextureManager::RebuildTalCdf(VkCommandBuffer cmd, uint32_t frameIndex, uin
     uint32_t *pStaging = static_cast<uint32_t *>(talCdfBuffer->GetMapped(frameIndex)) +
                          static_cast<size_t>(textureIndex) * TAL_CDF_LUT_ENTRIES;
 
-    std::memcpy(pStaging, entries.data(), size_t(lutSize));
+    std::memcpy(pStaging, talCdfScratch.data(), size_t(lutSize));
 
     talCdfBuffer->CopyFromStaging(cmd, frameIndex, lutSize, offset);
 }
@@ -930,6 +962,8 @@ void TextureManager::DestroyMaterialTextures(uint32_t frameIndex, const Material
         texture.image = VK_NULL_HANDLE;
         texture.view = VK_NULL_HANDLE;
         texture.samplerHandle = SamplerManager::Handle();
+        texture.swizzling = std::nullopt;
+        freeTextureSearchCursor = std::min(freeTextureSearchCursor, textureIndex);
 
         MarkDescDirty(textureIndex);
     }
@@ -980,24 +1014,46 @@ void TextureManager::DestroyMaterial(uint32_t currentFrameIndex, uint32_t materi
     }
 }
 
-void TextureManager::CheckForHotReload(VkCommandBuffer cmd, uint32_t frameIndex)
+void TextureManager::CheckForHotReload(const std::function<VkCommandBuffer()> &getCmd, uint32_t frameIndex)
 {
     if (observer && imageLoaderDev)
     {
-        observer->CheckPathsAndReupload(cmd, frameIndex, *this, imageLoaderDev.get());
+        observer->CheckPathsAndReupload(getCmd, frameIndex, *this, imageLoaderDev.get());
     }
 }
 
 uint32_t TextureManager::InsertTexture(uint32_t frameIndex, VkImage image, VkImageView view,
-                                       SamplerManager::Handle samplerHandle, VkFormat format,
-                                       VkExtent2D baseSize, uint32_t mipLevels)
+                                       SamplerManager::Handle samplerHandle, const TextureImageSpec &spec,
+                                       std::optional<QrTextureSwizzling> swizzling)
 {
-    const auto textureIt = std::find_if(textures.begin(), textures.end(), [] (const Texture &texture)
-    {
-        return texture.image == VK_NULL_HANDLE && texture.view == VK_NULL_HANDLE;
-    });
+    const uint32_t totalSlots = static_cast<uint32_t>(textures.size());
+    uint32_t freeSlot = totalSlots;
 
-    if (textureIt == textures.end())
+    if (totalSlots > 0)
+    {
+        const uint32_t start = freeTextureSearchCursor < totalSlots ? freeTextureSearchCursor : 0u;
+        for (uint32_t idx = start; idx < totalSlots; idx++)
+        {
+            if (textures[idx].image == VK_NULL_HANDLE && textures[idx].view == VK_NULL_HANDLE)
+            {
+                freeSlot = idx;
+                break;
+            }
+        }
+        if (freeSlot == totalSlots)
+        {
+            for (uint32_t idx = 0; idx < start; idx++)
+            {
+                if (textures[idx].image == VK_NULL_HANDLE && textures[idx].view == VK_NULL_HANDLE)
+                {
+                    freeSlot = idx;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (freeSlot == totalSlots)
     {
         Texture pending = {};
         pending.image = image;
@@ -1009,21 +1065,22 @@ uint32_t TextureManager::InsertTexture(uint32_t frameIndex, VkImage image, VkIma
         return EMPTY_TEXTURE_INDEX;
     }
 
-    *textureIt = Texture
+    textures[freeSlot] = Texture
     {
         .image = image,
         .view = view,
         .samplerHandle = samplerHandle,
-        .format = format,
-        .baseSize = baseSize,
-        .mipLevels = mipLevels,
+        .format = spec.format,
+        .baseSize = spec.baseSize,
+        .mipLevels = spec.mipLevels,
+        .swizzling = swizzling,
     };
 
-    const uint32_t textureIndex = static_cast<uint32_t>(std::distance(textures.begin(), textureIt));
+    freeTextureSearchCursor = (freeSlot + 1u < totalSlots) ? (freeSlot + 1u) : 0u;
 
-    MarkDescDirty(textureIndex);
+    MarkDescDirty(freeSlot);
 
-    return textureIndex;
+    return freeSlot;
 }
 
 void TextureManager::DestroyTexture(const Texture &texture)
@@ -1077,12 +1134,12 @@ VkBuffer TextureManager::GetTalCdfBuffer() const
 
 VkDescriptorSet TextureManager::GetDescSet(uint32_t frameIndex) const
 {
-    return textureDesc->GetDescSet(frameIndex);
+    return textureDesc != nullptr ? textureDesc->GetDescSet(frameIndex) : VK_NULL_HANDLE;
 }
 
 VkDescriptorSetLayout TextureManager::GetDescSetLayout() const
 {
-    return textureDesc->GetDescSetLayout();
+    return textureDesc != nullptr ? textureDesc->GetDescSetLayout() : VK_NULL_HANDLE;
 }
 
 void TextureManager::Subscribe(std::shared_ptr<IMaterialDependency> subscriber)
@@ -1119,6 +1176,7 @@ void TextureManager::SetRhiTextureTable(rhi::RhiTextureTable *pTable)
 
     if (rhiTextureTable != nullptr)
     {
+        textureDesc.reset();
         MarkAllDescDirty();
     }
 }

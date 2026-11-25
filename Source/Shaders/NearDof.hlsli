@@ -68,29 +68,44 @@ float3 nearDofFilter(Texture2D<float4> source, Texture2D<float4> depthTexture,
     for (uint tap = 0; tap < tapCount; tap++)
     {
         const float radial = sqrt(((float)tap + 0.5) / (float)tapCount);
+        const float radialWeight = exp(-2.0 * radial * radial);
         const float angle = float(tap) * 2.39996323;
         const float2 samplePosition = float2(pix) + float2(cos(angle), sin(angle)) * radial * radius;
         const int2 basePix = int2(floor(samplePosition));
         const float2 fraction = frac(samplePosition);
         for (int y = 0; y < 2; y++)
         {
+            const float wy = (y == 0) ? (1.0 - fraction.y) : fraction.y;
+            if (wy <= 0.0)
+            {
+                continue;
+            }
             for (int x = 0; x < 2; x++)
             {
+                const float wx = (x == 0) ? (1.0 - fraction.x) : fraction.x;
+                if (wx <= 0.0)
+                {
+                    continue;
+                }
                 const int2 samplePix = basePix + int2(x, y);
-                if (any(samplePix < 0) || any(samplePix >= int2(width, height)) ||
-                    !nearDofIsWeapon(surface, samplePix, int(width)))
+                if (any(samplePix < 0) || any(samplePix >= int2(width, height)))
                 {
                     continue;
                 }
 
-                const float sampleDepth = depthTexture.Load(int3(nearDofCheckerboardPix(samplePix, int(width)), 0)).r;
+                const int2 cbPix = nearDofCheckerboardPix(samplePix, int(width));
+                if ((asuint(surface.Load(int3(cbPix, 0)).w) & INSTANCE_CUSTOM_INDEX_FLAG_FIRST_PERSON) == 0u)
+                {
+                    continue;
+                }
+
+                const float sampleDepth = depthTexture.Load(int3(cbPix, 0)).r;
                 if (!isfinite(sampleDepth) || sampleDepth <= 0.0 || sampleDepth * axisFactor >= focusDistance)
                 {
                     continue;
                 }
 
-                const float weight = exp(-2.0 * radial * radial) *
-                    (x == 0 ? 1.0 - fraction.x : fraction.x) * (y == 0 ? 1.0 - fraction.y : fraction.y);
+                const float weight = radialWeight * wx * wy;
                 sum += source.Load(int3(samplePix, 0)).rgb * weight;
                 weightSum += weight;
             }

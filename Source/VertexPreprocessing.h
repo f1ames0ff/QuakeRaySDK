@@ -58,10 +58,10 @@ private:
 
 private:
     VkDevice device;
-    VkPipelineLayout pipelineLayout;
-    VkPipeline pipelineOnlyDynamic;
-    VkPipeline pipelineDynamicAndMovable;
-    VkPipeline pipelineAll;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline pipelineOnlyDynamic = VK_NULL_HANDLE;
+    VkPipeline pipelineDynamicAndMovable = VK_NULL_HANDLE;
+    VkPipeline pipelineAll = VK_NULL_HANDLE;
 };
 
 }

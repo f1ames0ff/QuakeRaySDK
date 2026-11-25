@@ -36,4 +36,13 @@ void writeBuffer(nvrhi::ICommandList *commandList, nvrhi::IBuffer *buffer, const
 // that the texture+sampler path is exercised while the image stays what it was.
 nvrhi::TextureHandle createWhiteTexture(nvrhi::IDevice *device, nvrhi::ICommandList *commandList, std::string_view debugName);
 
+// Generates mip levels 1..mipLevels-1 of a cubemap (or 2D array texture) from mip 0 using native
+// vkCmdBlitImage (VK_FILTER_LINEAR) across all array layers and transitions the entire texture to
+// `finalState`.
+void generateCubemapMips(nvrhi::ICommandList *commandList,
+                         nvrhi::ITexture *cubemap,
+                         uint32_t baseSize,
+                         uint32_t mipLevels,
+                         nvrhi::ResourceStates finalState = nvrhi::ResourceStates::NonPixelShaderResource);
+
 }

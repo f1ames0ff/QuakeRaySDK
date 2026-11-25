@@ -81,8 +81,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const int width = (int)globalUniform.renderWidth;
     const int height = (int)globalUniform.renderHeight;
-    const int grad_width = width / Q2_GRAD_DWN;
-    const int grad_height = height / Q2_GRAD_DWN;
+    const int grad_width = (width + Q2_GRAD_DWN - 1) / Q2_GRAD_DWN;
+    const int grad_height = (height + Q2_GRAD_DWN - 1) / Q2_GRAD_DWN;
 
     if (pos_grad.x >= grad_width || pos_grad.y >= grad_height)
     {
@@ -105,6 +105,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         for (int offx = 0; offx < Q2_GRAD_DWN; offx++)
         {
             int2 p = pos_grad * Q2_GRAD_DWN + int2(offx, offy);
+            if (p.x >= width || p.y >= height)
+            {
+                continue;
+            }
             if (halfResIndir && ((p.y & 1) != currTracedParity))
             {
                 continue;
@@ -171,7 +175,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             float3 geo_normal_prev = texelFetchNormalGeometry_Prev(pp);
 
             const float motion_z = (depth_curr < 0.0) ? -motion.z : motion.z;
-            float dist_depth = abs(depth_curr - depth_prev + motion_z) / abs(depth_curr);
+            float dist_depth = abs(depth_curr - depth_prev + motion_z) / max(abs(depth_curr), 1e-6);
             float dot_geo_normals = dot(geo_normal_curr, geo_normal_prev);
 
             if (cluster_curr == cluster_prev && dist_depth < 0.1 && dot_geo_normals > 0.9)

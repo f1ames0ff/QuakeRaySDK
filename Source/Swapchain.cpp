@@ -56,7 +56,7 @@ namespace
             }
         }
 
-        return {};
+        return !availableFormats.empty() ? availableFormats.front() : VkSurfaceFormatKHR{};
     }
 
     const char *VkPresentModeName(VkPresentModeKHR mode)
@@ -126,6 +126,11 @@ Swapchain::Swapchain(
     r = vkGetPhysicalDeviceSurfaceFormatsKHR(physDevice, surface, &formatCount, availableFormats.data());
     VK_CHECKERROR(r);
 
+    if (availableFormats.empty())
+    {
+        throw QrException(QR_GRAPHICS_API_ERROR, "Vulkan surface reported no supported formats");
+    }
+
     surfaceFormat = PickSurfaceFormat(availableFormats);
 
     uint32_t presentModeCount = 0;
@@ -141,10 +146,12 @@ Swapchain::Swapchain(
 
 bool Swapchain::IsExtentOptimal() const
 {
-    if (cachedSurfaceCapsValid)
+    if (cachedSurfaceCapsValid && cachedIsExtentOptimal)
     {
-        return cachedIsExtentOptimal;
+        return true;
     }
+
+    ResetSurfaceCapabilitiesCache();
 
     VkSurfaceCapabilitiesKHR surfCapabilities;
     const VkResult r = GetSurfaceCapabilities(&surfCapabilities);
@@ -332,50 +339,49 @@ bool Swapchain::RecreateIfNeeded(bool allowRecreate)
     return TryRecreate(requestedExtent, requestedPresentMode, forceRecreate || wasPending);
 }
 
-SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore, bool allowRecreate)
+bool Swapchain::WaitForPresentWait2IfNeeded(bool allowRecreate, SwapchainAcquireTimings &timings)
 {
     using Clock = std::chrono::steady_clock;
 
-    SwapchainAcquireTimings timings;
-
-    RecreateIfNeeded(allowRecreate);
-    if (!allowRecreate && recreatePending)
+    if (!usePresentWait2 || sVkWaitForPresent2KHR == nullptr || currentPresentId + 1 <= maxFrameLatency)
     {
-        return timings;
+        return true;
     }
 
-    PollPresentFences();
-
-    if (usePresentWait2 && sVkWaitForPresent2KHR != nullptr && currentPresentId + 1 > maxFrameLatency)
+    const uint64_t targetPresentId = currentPresentId + 1 - maxFrameLatency;
+    if (targetPresentId > waitablePresentId)
     {
-        const uint64_t targetPresentId = currentPresentId + 1 - maxFrameLatency;
+        return true;
+    }
 
-        if (targetPresentId <= waitablePresentId)
+    const Clock::time_point waitStart = Clock::now();
+
+    VkPresentWait2InfoKHR waitInfo = {};
+    waitInfo.sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR;
+    waitInfo.presentId = targetPresentId;
+    waitInfo.timeout = 50ull * 1000ull * 1000ull;
+
+    const VkResult waitResult = sVkWaitForPresent2KHR(device, swapchain, &waitInfo);
+    timings.presentWaitMs +=
+        std::chrono::duration<float, std::milli>(Clock::now() - waitStart).count();
+
+    if (waitResult == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        if (!allowRecreate)
         {
-            const Clock::time_point waitStart = Clock::now();
-
-            VkPresentWait2InfoKHR waitInfo = {};
-            waitInfo.sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR;
-            waitInfo.presentId = targetPresentId;
-            waitInfo.timeout = 50ull * 1000ull * 1000ull;
-
-            const VkResult waitResult = sVkWaitForPresent2KHR(device, swapchain, &waitInfo);
-            timings.presentWaitMs +=
-                std::chrono::duration<float, std::milli>(Clock::now() - waitStart).count();
-
-            if (waitResult == VK_ERROR_OUT_OF_DATE_KHR)
-            {
-                if (!allowRecreate)
-                {
-                    recreatePending = true;
-                    return timings;
-                }
-
-                ResetSurfaceCapabilitiesCache();
-                TryRecreate(GetOptimalExtent(), requestedPresentMode, true);
-            }
+            recreatePending = true;
+            return false;
         }
+
+        ResetSurfaceCapabilitiesCache();
+        TryRecreate(GetOptimalExtent(), requestedPresentMode, true);
     }
+
+    return true;
+}
+
+void Swapchain::UpdateFullscreenExclusiveState()
+{
     if (createdExclusive && !exclusiveAcquired && acquireFullScreenExclusive != nullptr)
     {
         if (acquireFullScreenExclusive(device, swapchain) == VK_SUCCESS)
@@ -400,8 +406,30 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
             }
         }
     }
+}
 
-    while (true)
+SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaphore, bool allowRecreate)
+{
+    using Clock = std::chrono::steady_clock;
+
+    SwapchainAcquireTimings timings;
+
+    RecreateIfNeeded(allowRecreate);
+    if (!allowRecreate && recreatePending)
+    {
+        return timings;
+    }
+
+    PollPresentFences();
+
+    if (!WaitForPresentWait2IfNeeded(allowRecreate, timings))
+    {
+        return timings;
+    }
+    UpdateFullscreenExclusiveState();
+
+    constexpr uint32_t MAX_ACQUIRE_ATTEMPTS = 8;
+    for (uint32_t attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt++)
     {
         const Clock::time_point acquireStart = Clock::now();
         const VkResult r = vkAcquireNextImageKHR(
@@ -428,12 +456,29 @@ SwapchainAcquireTimings Swapchain::AcquireImage(VkSemaphore imageAvailableSemaph
             }
 
             ResetSurfaceCapabilitiesCache();
-            TryRecreate(GetOptimalExtent(), requestedPresentMode, true);
+            const VkExtent2D optimalExtent = GetOptimalExtent();
+            if (IsNullExtent(optimalExtent))
+            {
+                recreatePending = true;
+                return timings;
+            }
+
+            TryRecreate(optimalExtent, requestedPresentMode, true);
             continue;
         }
 
-        assert(0);
+        if (r == VK_ERROR_SURFACE_LOST_KHR)
+        {
+            ResetSurfaceCapabilitiesCache();
+            recreatePending = true;
+            throw QrException(QR_GRAPHICS_API_ERROR, "Vulkan surface lost during swapchain acquire");
+        }
+
+        VK_CHECKERROR(r);
+        throw QrException(QR_GRAPHICS_API_ERROR, "Unexpected vkAcquireNextImageKHR result: " + std::to_string(r));
     }
+
+    throw QrException(QR_GRAPHICS_API_ERROR, "Failed to acquire swapchain image after repeated recreation attempts");
 }
 
 SwapchainPresentTimings Swapchain::Present(const std::shared_ptr<Queues> &queues, VkSemaphore renderFinishedSemaphore)
@@ -487,8 +532,7 @@ SwapchainPresentTimings Swapchain::Present(const std::shared_ptr<Queues> &queues
     if (usePresentFences)
     {
         const bool queued =
-            r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_OUT_OF_DATE_KHR ||
-            r == VK_ERROR_SURFACE_LOST_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT;
+            r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_OUT_OF_DATE_KHR;
 
         if (queued)
         {
@@ -857,6 +901,8 @@ VkSwapchainKHR Swapchain::DestroyWithoutSwapchain()
 
 void Swapchain::WaitPresentFences()
 {
+    constexpr uint64_t PRESENT_FENCE_TIMEOUT_NS = 2ull * 1000ull * 1000ull * 1000ull;
+
     for (size_t i = 0; i < presentFences.size(); i++)
     {
         if (!presentFencePending[i])
@@ -864,7 +910,11 @@ void Swapchain::WaitPresentFences()
             continue;
         }
 
-        VK_CHECKERROR(vkWaitForFences(device, 1, &presentFences[i], VK_TRUE, UINT64_MAX));
+        const VkResult waitResult = vkWaitForFences(device, 1, &presentFences[i], VK_TRUE, PRESENT_FENCE_TIMEOUT_NS);
+        if (waitResult != VK_SUCCESS && waitResult != VK_TIMEOUT && waitResult != VK_ERROR_DEVICE_LOST)
+        {
+            VK_CHECKERROR(waitResult);
+        }
         presentFencePending[i] = 0;
     }
 }

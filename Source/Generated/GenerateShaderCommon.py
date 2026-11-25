@@ -291,6 +291,9 @@ CONST = {
     "SBT_INDEX_MISS_SHADOW"                 : 1,
     "SBT_INDEX_HITGROUP_FULLY_OPAQUE"       : 0,
     "SBT_INDEX_HITGROUP_ALPHA_TESTED"       : 1,
+    "SBT_INDEX_HITGROUP_SHADOW_OFFSET"       : 2,
+    "SBT_INDEX_HITGROUP_SHADOW_FULLY_OPAQUE" : 2,
+    "SBT_INDEX_HITGROUP_SHADOW_ALPHA_TESTED" : 3,
 
     "MATERIAL_ALBEDO_ALPHA_INDEX"                   : 0,
     "MATERIAL_ROUGHNESS_METALLIC_EMISSION_INDEX"    : 1,
@@ -669,7 +672,7 @@ GEOM_INSTANCE_MEMBERS = [
     (UINT32, 1, "portalIndex",          1),
     (UINT32, 1, "materials2A",          1),
     (UINT32, 1, "materials2B",          1),
-    (UINT32, 1, "_unused0",             1),
+    (UINT32, 1, "clusterOverride",      1),
     (UINT32, 1, "flags",                1),
     (UINT32, 1, "baseVertexIndex",      1),
     (UINT32, 1, "baseIndexIndex",       1),

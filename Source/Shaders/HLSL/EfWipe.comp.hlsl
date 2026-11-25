@@ -41,6 +41,10 @@ struct WipePush_BT
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     const int2 pix = int2(dispatchThreadID.x, dispatchThreadID.y);
+    if (!effect_isPixValid(pix))
+    {
+        return;
+    }
     int2 sz = effect_getFramebufSize();
 
     uint count = sz.x  / push.stripWidthInPixels;

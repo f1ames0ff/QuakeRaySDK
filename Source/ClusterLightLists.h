@@ -147,6 +147,7 @@ private:
     // lists were composed from, leaving their order alone. False when the frame is not made of
     // the lights the lists hold.
     bool UpdateSourceRecords();
+    void RecordSourceCluster(uint32_t sourceIndex, uint32_t cluster);
     bool AppendSlot(uint32_t cluster, uint32_t sourceIndex, float dist2, bool fromTopUp);
     void RecordCandidate(uint32_t cluster, uint32_t sourceIndex, float dist2);
     void UnrecordCandidate(uint32_t cluster, uint32_t sourceIndex);
@@ -167,6 +168,16 @@ private:
     void  CountDenied(uint32_t sourceIndex);
     void  TickReachGated(bool gated);
     void  TickTopUpGrant();
+    void  MergeTopUpSlices();
+    void  BuildClusterSpatialGrid(const WorldLights &worldLights);
+    void  ComputeFiniteClusterBounds(const WorldLights &worldLights, float outMins[3],
+                                     float outMaxs[3], bool &outAnyFinite) const;
+    void  PopulateClusterSpatialGrid(const WorldLights &worldLights);
+    void  CollectUnboundedAndGridCounts(const WorldLights &worldLights, std::vector<uint32_t> &counts);
+    void  FillClusterGridEntries(const WorldLights &worldLights, std::vector<uint32_t> &cursor);
+    bool  ValidateSourceSetIncrementalState(uint32_t added, uint32_t removed, uint32_t changed) const;
+    void  MarkChangedSourcesDirty(float reach);
+    void  MarkClusterGridCellsDirty(const float *origin, float gate, float gateSquared);
 
     const WorldLights *worldLights = nullptr;
     // Leaf count of the map the tables were prepared for, before clamping to the cluster cap.
@@ -251,6 +262,10 @@ private:
     };
 
     std::vector<TailCandidate> tailScratch;
+    std::vector<double>        aliasScaledScratch;
+    std::vector<int>           aliasSmallScratch;
+    std::vector<int>           aliasLargeScratch;
+    std::vector<std::vector<uint32_t>> sourceClusters;
     std::vector<uint32_t>  candidateCounts;
     std::vector<uint64_t>  tailUidsNext;
     std::vector<float>     tailProbNext;
@@ -298,6 +313,7 @@ private:
         std::vector<uint32_t>                     tailDirty;
         std::vector<uint32_t>                     appendedSlots;
         std::vector<uint32_t>                     statsResets;
+        std::vector<std::pair<uint32_t, uint32_t>> sourceClusterAdds;
         uint32_t                                  reachGated = 0;
         uint32_t                                  topUpGrants = 0;
         uint32_t                                  violations = 0;
@@ -321,6 +337,12 @@ private:
     int   gridDims[3] = { 1, 1, 1 };
     float gridMins[3] = {};
     float gridCell = 0.025f;
+
+    float     clusterGridMins[3] = {};
+    float     clusterGridInvCell[3] = {};
+    std::vector<uint32_t> clusterGridOffsets;
+    std::vector<uint32_t> clusterGridEntries;
+    std::vector<uint32_t> unboundedClusters;
 
     std::vector<uint32_t> offsets;    // numClusters + 1
     std::vector<uint64_t> list;

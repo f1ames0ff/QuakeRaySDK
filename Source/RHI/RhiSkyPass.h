@@ -344,6 +344,7 @@ private:
     void PrepareWorldTarget(nvrhi::ICommandList *pCommandList, Target &target,
                             const Framebuffers &framebuffers, uint32_t frameIndex,
                             uint32_t width, uint32_t height);
+    bool ValidateWorldInputs(const Target &target);
     void UpdateWorldWraps(const Framebuffers &framebuffers, uint32_t frameIndex,
                           uint32_t width, uint32_t height);
     void UpdateWorldFramebuffer(Target &target);

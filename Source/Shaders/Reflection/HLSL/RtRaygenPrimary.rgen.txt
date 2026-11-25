@@ -1,5 +1,5 @@
 # Format: 1
-# Toolchain: dxc dxcompiler.dll: 1.9 - 1.8.0.4973 (8f5595872); spirv-dis SPIRV-Tools v2025.3 v2025.3.rc1-0-g33e02568
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
 === block set 11 binding 0
 
 [0] offset 0 array[6](uint32) stride 4
@@ -256,6 +256,10 @@ UniformConstant
 UniformConstant
 === descriptor set 1 binding 13
 image:2D:0:0:0:2:Rgba16f
+=== descriptor set 1 binding 132
+image:2D:0:0:0:2:Rgba16f
+=== descriptor set 1 binding 132: storage class
+UniformConstant
 === descriptor set 1 binding 13: storage class
 UniformConstant
 === descriptor set 1 binding 19

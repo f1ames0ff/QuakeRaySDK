@@ -150,6 +150,12 @@ float3 smokeLightCenter(const ShLightEncoded e, out float radius)
         return e.data_2.xyz + e.data_0.xyz * uvCenter.x + e.data_1.xyz * uvCenter.y;
     }
 
+    if (e.lightType == LIGHT_TYPE_DTAL_GROUP)
+    {
+        radius = max(e.data_1.w, 0.025);
+        return e.data_2.xyz;
+    }
+
     return e.data_0.xyz;
 }
 
@@ -171,13 +177,17 @@ float smokeLightWeight(const ShLightEncoded e, const float3 p)
     {
         intensity *= max(e.data_1.w, 0.0);
     }
+    else if (e.lightType == LIGHT_TYPE_DTAL_GROUP)
+    {
+        intensity *= max(e.data_1.x, 0.05);
+    }
 
     return intensity * radius2 / (dist2 + radius2 + 6.25e-4);
 }
 
 float3 smokeLightAt(const float3 worldPos, const uint cluster, const float seed, const float strength, const float minLight)
 {
-    const float3 toViewer = normalize(globalUniform.cameraPosition.xyz - worldPos);
+    const float3 toViewer = safeNormalize(globalUniform.cameraPosition.xyz - worldPos);
     const float2 rnd      = float2(smokeHash(float3(seed, 1.7, 3.1)), smokeHash(float3(seed, 5.3, 7.9)));
 
     float3 light = (float3)0.0;
@@ -187,12 +197,17 @@ float3 smokeLightAt(const float3 worldPos, const uint cluster, const float seed,
         const DirectionalLight sun = decodeAsDirectionalLight(lightSources[LIGHT_ARRAY_DIRECTIONAL_LIGHT_OFFSET]);
         const LightSample sunSample = sampleDirectionalLight(sun, worldPos, rnd);
 
-        const float3 toSun    = normalize(sunSample.position - worldPos);
-        const float  distance = length(sunSample.position - worldPos);
+        const float3 diff = sunSample.position - worldPos;
+        const float  distance = length(diff);
 
-        if (smokeVisible(worldPos, toSun, distance))
+        if (distance > 1e-6)
         {
-            light += sunSample.color * sunSample.dw * smokePhase(toSun, toViewer);
+            const float3 toSun = diff / distance;
+
+            if (smokeVisible(worldPos, toSun, distance))
+            {
+                light += sunSample.color * sunSample.dw * smokePhase(toSun, toViewer);
+            }
         }
     }
 
@@ -225,16 +240,24 @@ float3 smokeLightAt(const float3 worldPos, const uint cluster, const float seed,
 
     if (bestLight != uint(LIGHT_INDEX_NONE))
     {
-        const LightSample lightSample = sampleLight(lightSources[bestLight], worldPos, rnd);
+        const float2 memberRnd = float2(smokeHash(float3(seed, 11.3, 13.7)), smokeHash(float3(seed, 17.9, 23.1)));
+        float memberPdf = 1.0;
+        const LightSample lightSample = sampleLightNee(lightSources[bestLight], worldPos, rnd, memberRnd, memberPdf);
+        const float dw = memberPdf > 1e-6 ? (lightSample.dw / memberPdf) : 0.0;
 
-        if (lightSample.dw > 0.0)
+        if (dw > 0.0)
         {
-            const float3 toLight  = normalize(lightSample.position - worldPos);
-            const float  distance = length(lightSample.position - worldPos);
+            const float3 diff = lightSample.position - worldPos;
+            const float  distance = length(diff);
 
-            if (smokeVisible(worldPos, toLight, distance))
+            if (distance > 1e-6)
             {
-                light += lightSample.color * lightSample.dw * smokePhase(toLight, toViewer);
+                const float3 toLight = diff / distance;
+
+                if (smokeVisible(worldPos, toLight, distance))
+                {
+                    light += lightSample.color * dw * smokePhase(toLight, toViewer);
+                }
             }
         }
     }

@@ -43,7 +43,7 @@ const uint chunkCount = max(1u, dynamicChunkCount);
 const uint chunkFirst = (uint(geomCount) * groupID.y) / chunkCount;
 const uint chunkLast = (uint(geomCount) * (groupID.y + 1u)) / chunkCount;
 
-for (uint localGeomIndex = chunkFirst + groupThreadID.x; localGeomIndex < chunkLast; localGeomIndex += COMPUTE_VERT_PREPROC_GROUP_SIZE_X)
+for (uint localGeomIndex = chunkFirst; localGeomIndex < chunkLast; localGeomIndex++)
 {
     const ShGeometryInstance inst = geometryInstances[geomIndexOffset + localGeomIndex];
 
@@ -58,71 +58,43 @@ for (uint localGeomIndex = chunkFirst + groupThreadID.x; localGeomIndex < chunkL
 
     const bool useIndices = inst.baseIndexIndex != UINT32_MAX;
     const bool genNormals = (inst.flags & GEOM_INST_FLAG_GENERATE_NORMALS) != 0;
-    const float normalSign = float((inst.flags & GEOM_INST_FLAG_INVERTED_NORMALS) == 0) * 2.0 - 1.0;
-
-    const float4x4 model = inst.model;
-    const float3x3 model3 = (float3x3)model;
-
-
-    if (useIndices)
+    if (!genNormals)
     {
-        for (uint tri = 0; tri < inst.indexCount / 3; tri++)
-        {
-            const uint i = inst.baseIndexIndex + tri * 3;
-
-            const uint3 vertexIndices = uint3(
-                inst.baseVertexIndex + INDICES[i + 0],
-                inst.baseVertexIndex + INDICES[i + 1],
-                inst.baseVertexIndex + INDICES[i + 2]);
-
-            const float3 localPos[3] =
-            {
-                GET_POSITIONS(vertexIndices[0]),
-                GET_POSITIONS(vertexIndices[1]),
-                GET_POSITIONS(vertexIndices[2])
-            };
-
-            float3 localNormal;
-
-            if (genNormals)
-            {
-                localNormal = normalSign * normalize(cross(localPos[1] - localPos[0], localPos[2] - localPos[0]));
-
-                SET_NORMALS(vertexIndices[0], localNormal);
-                SET_NORMALS(vertexIndices[1], localNormal);
-                SET_NORMALS(vertexIndices[2], localNormal);
-            }
-        }
+        continue;
     }
-    else
+
+    const float normalSign = float((inst.flags & GEOM_INST_FLAG_INVERTED_NORMALS) == 0) * 2.0 - 1.0;
+    const uint triCount = useIndices ? (inst.indexCount / 3) : (inst.vertexCount / 3);
+
+    // Cooperate across all workgroup lanes on each geometry's triangles so dynamic BLAS meshes
+    // smaller than the group thread count don't serialize on 1 lane per geometry.
+    for (uint tri = groupThreadID.x; tri < triCount; tri += COMPUTE_VERT_PREPROC_GROUP_SIZE_X)
     {
-        for (uint tri = 0; tri < inst.vertexCount / 3; tri++)
+        const uint3 vertexIndices = useIndices
+            ? uint3(inst.baseVertexIndex + INDICES[inst.baseIndexIndex + tri * 3 + 0],
+                    inst.baseVertexIndex + INDICES[inst.baseIndexIndex + tri * 3 + 1],
+                    inst.baseVertexIndex + INDICES[inst.baseIndexIndex + tri * 3 + 2])
+            : uint3(inst.baseVertexIndex + tri * 3 + 0,
+                    inst.baseVertexIndex + tri * 3 + 1,
+                    inst.baseVertexIndex + tri * 3 + 2);
+
+        const float3 localPos[3] =
         {
-            const uint v = inst.baseVertexIndex + tri * 3;
+            GET_POSITIONS(vertexIndices[0]),
+            GET_POSITIONS(vertexIndices[1]),
+            GET_POSITIONS(vertexIndices[2])
+        };
 
-            const uint3 vertexIndices = uint3(
-                v + 0,
-                v + 1,
-                v + 2);
+        const float3 rawNormal = cross(localPos[1] - localPos[0], localPos[2] - localPos[0]);
+        const float maxComp = max(abs(rawNormal.x), max(abs(rawNormal.y), abs(rawNormal.z)));
+        const float3 unitNormal = (all(isfinite(rawNormal)) && maxComp > 1.0e-20)
+            ? ((rawNormal / maxComp) * rsqrt(dot(rawNormal / maxComp, rawNormal / maxComp)))
+            : float3(0.0, 0.0, 1.0);
+        const float3 localNormal = normalSign * unitNormal;
 
-            const float3 localPos[3] =
-            {
-                GET_POSITIONS(vertexIndices[0]),
-                GET_POSITIONS(vertexIndices[1]),
-                GET_POSITIONS(vertexIndices[2])
-            };
-
-            float3 localNormal;
-
-            if (genNormals)
-            {
-                localNormal = normalSign * normalize(cross(localPos[1] - localPos[0], localPos[2] - localPos[0]));
-
-                SET_NORMALS(vertexIndices[0], localNormal);
-                SET_NORMALS(vertexIndices[1], localNormal);
-                SET_NORMALS(vertexIndices[2], localNormal);
-            }
-        }
+        SET_NORMALS(vertexIndices[0], localNormal);
+        SET_NORMALS(vertexIndices[1], localNormal);
+        SET_NORMALS(vertexIndices[2], localNormal);
     }
 }
 

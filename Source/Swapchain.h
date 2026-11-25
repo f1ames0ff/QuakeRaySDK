@@ -130,6 +130,8 @@ private:
 
     void CallCreateSubscribers();
     void CallDestroySubscribers();
+    bool WaitForPresentWait2IfNeeded(bool allowRecreate, SwapchainAcquireTimings &timings);
+    void UpdateFullscreenExclusiveState();
 
 private:
     VkDevice device;

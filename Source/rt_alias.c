@@ -3,7 +3,87 @@
 #include <math.h>
 #include <stdlib.h>
 
-int RT_Alias_Build(const double *weights, int count, float *outPrimary, uint32_t *outAlias)
+typedef struct AliasScratch
+{
+    double *scaled;
+    int *smallIdx;
+    int *largeIdx;
+} AliasScratch;
+
+static double AliasComputeTotalWeight(const double *weights, int count)
+{
+    double total = 0.0;
+    for (int i = 0; i < count; i++)
+    {
+        if (isfinite(weights[i]) && weights[i] > 0.0)
+            total += weights[i];
+    }
+    return total;
+}
+
+static void AliasPartitionWeights(const double *weights, int count, double total,
+                                  const AliasScratch *scratch,
+                                  int *outSmallCount, int *outLargeCount)
+{
+    int smallCount = 0;
+    int largeCount = 0;
+    const double scale = (double)count / total;
+
+    for (int i = 0; i < count; i++)
+    {
+        const double w = (isfinite(weights[i]) && weights[i] > 0.0) ? weights[i] : 0.0;
+        const double p = w * scale;
+        scratch->scaled[i] = p;
+
+        if (p < 1.0)
+            scratch->smallIdx[smallCount++] = i;
+        else
+            scratch->largeIdx[largeCount++] = i;
+    }
+
+    *outSmallCount = smallCount;
+    *outLargeCount = largeCount;
+}
+
+static void AliasCollapseBuckets(int smallCount, int largeCount, uint32_t *outAlias,
+                                 const AliasScratch *scratch)
+{
+    while (smallCount > 0 && largeCount > 0)
+    {
+        const int s = scratch->smallIdx[--smallCount];
+        const int l = scratch->largeIdx[--largeCount];
+
+        outAlias[s] = (uint32_t)l;
+        scratch->scaled[l] = (scratch->scaled[l] + scratch->scaled[s]) - 1.0;
+
+        if (scratch->scaled[l] < 1.0)
+            scratch->smallIdx[smallCount++] = l;
+        else
+            scratch->largeIdx[largeCount++] = l;
+    }
+
+    while (largeCount > 0)
+        scratch->scaled[scratch->largeIdx[--largeCount]] = 1.0;
+
+    while (smallCount > 0)
+        scratch->scaled[scratch->smallIdx[--smallCount]] = 1.0;
+}
+
+static void AliasWritePrimary(int count, const double *scaledScratch, float *outPrimary)
+{
+    for (int i = 0; i < count; i++)
+    {
+        double p = scaledScratch[i];
+        if (!isfinite(p) || p < 0.0)
+            p = 0.0;
+        if (p > 1.0)
+            p = 1.0;
+        outPrimary[i] = (float)p;
+    }
+}
+
+int RT_Alias_BuildWithScratch(const double *weights, int count, float *outPrimary, uint32_t *outAlias,
+                              double *scaledScratch, int *smallScratch, int *largeScratch)
 {
     if (weights == NULL || outPrimary == NULL || outAlias == NULL || count <= 0)
         return 0;
@@ -15,20 +95,46 @@ int RT_Alias_Build(const double *weights, int count, float *outPrimary, uint32_t
     }
 
     if (count == 1)
-    {
         return 1;
-    }
 
-    double total = 0.0;
-
-    for (int i = 0; i < count; i++)
-    {
-        if (isfinite(weights[i]) && weights[i] > 0.0)
-            total += weights[i];
-    }
-
+    const double total = AliasComputeTotalWeight(weights, count);
     if (!(total > 0.0))
         return 1;
+
+    if (scaledScratch == NULL || smallScratch == NULL || largeScratch == NULL)
+        return 0;
+
+    const AliasScratch scratch = { scaledScratch, smallScratch, largeScratch };
+    int smallCount = 0;
+    int largeCount = 0;
+    AliasPartitionWeights(weights, count, total, &scratch, &smallCount, &largeCount);
+    AliasCollapseBuckets(smallCount, largeCount, outAlias, &scratch);
+    AliasWritePrimary(count, scaledScratch, outPrimary);
+
+    return 1;
+}
+
+int RT_Alias_Build(const double *weights, int count, float *outPrimary, uint32_t *outAlias)
+{
+    if (weights == NULL || outPrimary == NULL || outAlias == NULL || count <= 0)
+        return 0;
+
+    if (count == 1)
+    {
+        outPrimary[0] = 1.0f;
+        outAlias[0] = 0u;
+        return 1;
+    }
+
+    enum { kStackCapacity = 256 };
+    if (count <= kStackCapacity)
+    {
+        double scaledStack[kStackCapacity];
+        int smallStack[kStackCapacity];
+        int largeStack[kStackCapacity];
+        return RT_Alias_BuildWithScratch(weights, count, outPrimary, outAlias,
+                                         scaledStack, smallStack, largeStack);
+    }
 
     double *scaled = (double *)malloc(sizeof(double) * (size_t)count);
     int *small = (int *)malloc(sizeof(int) * (size_t)count);
@@ -42,65 +148,14 @@ int RT_Alias_Build(const double *weights, int count, float *outPrimary, uint32_t
         return 0;
     }
 
-    int smallCount = 0;
-    int largeCount = 0;
-    const double scale = (double)count / total;
-
-    for (int i = 0; i < count; i++)
-    {
-        const double w = (isfinite(weights[i]) && weights[i] > 0.0) ? weights[i] : 0.0;
-        const double p = w * scale;
-        scaled[i] = p;
-
-        if (p < 1.0)
-            small[smallCount++] = i;
-        else
-            large[largeCount++] = i;
-    }
-
-    while (smallCount > 0 && largeCount > 0)
-    {
-        const int s = small[--smallCount];
-        const int l = large[--largeCount];
-
-        outAlias[s] = (uint32_t)l;
-        scaled[l] = (scaled[l] + scaled[s]) - 1.0;
-
-        if (scaled[l] < 1.0)
-            small[smallCount++] = l;
-        else
-            large[largeCount++] = l;
-    }
-
-    while (largeCount > 0)
-    {
-        const int l = large[--largeCount];
-        scaled[l] = 1.0;
-    }
-
-    while (smallCount > 0)
-    {
-        const int s = small[--smallCount];
-        scaled[s] = 1.0;
-    }
-
-    for (int i = 0; i < count; i++)
-    {
-        double p = scaled[i];
-
-        if (!isfinite(p) || p < 0.0)
-            p = 0.0;
-        if (p > 1.0)
-            p = 1.0;
-
-        outPrimary[i] = (float)p;
-    }
+    const int ok = RT_Alias_BuildWithScratch(weights, count, outPrimary, outAlias,
+                                             scaled, small, large);
 
     free(scaled);
     free(small);
     free(large);
 
-    return 1;
+    return ok;
 }
 
 void RT_Alias_Marginals(const float *primary, const uint32_t *alias, int count, float *outMarginal)

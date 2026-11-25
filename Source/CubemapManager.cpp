@@ -63,7 +63,6 @@ qray::CubemapManager::CubemapManager(
     }
 
     imageLoader = std::make_shared<ImageLoader>(std::move(_userFileLoad));
-    cubemapDesc = std::make_shared<TextureDescriptors>(device, samplerManager, MAX_CUBEMAP_COUNT, BINDING_CUBEMAPS, BINDING_CUBEMAPS_SAMPLER);
     cubemapUploader = std::make_shared<CubemapUploader>(device, allocator);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -96,7 +95,10 @@ void qray::CubemapManager::CreateEmptyCubemap(VkCommandBuffer cmd)
     const uint32_t index = CreateCubemap(cmd, 0, info);
     assert(index == QR_EMPTY_CUBEMAP);
 
-    cubemapDesc->SetEmptyTextureInfo(cubemaps[QR_EMPTY_CUBEMAP].view);
+    if (cubemapDesc != nullptr)
+    {
+        cubemapDesc->SetEmptyTextureInfo(cubemaps[QR_EMPTY_CUBEMAP].view);
+    }
 }
 
 qray::CubemapManager::~CubemapManager()
@@ -123,6 +125,91 @@ qray::CubemapManager::~CubemapManager()
     destroyTextures(cubemaps);
 }
 
+namespace qray
+{
+namespace
+{
+bool CollectOverrideCubemapFaces(TextureOverrides *const (&overrides)[6],
+                                 TextureUploader::UploadInfo &upload,
+                                 QrExtent2D &commonSize,
+                                 VkFormat &commonFormat)
+{
+    using namespace std::string_literals;
+
+    const auto &firstAlbedo = overrides[0]->GetResult(MATERIAL_COLOR_TEXTURE_INDEX);
+    if (!firstAlbedo)
+    {
+        return false;
+    }
+
+    commonSize = { firstAlbedo->baseSize.width, firstAlbedo->baseSize.height };
+    commonFormat = firstAlbedo->format;
+
+    for (TextureOverrides *o : overrides)
+    {
+        const auto &albedo = o->GetResult(MATERIAL_COLOR_TEXTURE_INDEX);
+        if (!albedo)
+        {
+            return false;
+        }
+
+        const char *debugName = o->GetDebugName();
+        assert(albedo->pData != nullptr);
+        const QrExtent2D &faceSize = albedo->baseSize;
+
+        if (albedo->format != commonFormat)
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Cubemap must have the same format on each face. Failed on: "s + debugName);
+        }
+
+        if (faceSize.width != faceSize.height)
+        {
+            throw QrException(QR_WRONG_ARGUMENT, "Cubemap must have square face size: "s + debugName + " has (" + std::to_string(faceSize.width) + ", " + std::to_string(faceSize.height) + ")");
+        }
+
+        if (faceSize.width != commonSize.width || faceSize.height != commonSize.height)
+        {
+            throw QrException(QR_WRONG_ARGUMENT,
+                "Cubemap faces must have the same size: "s +
+                debugName + " has (" + std::to_string(faceSize.width) + ", " + std::to_string(faceSize.height) + ")"
+                "but expected (" + std::to_string(commonSize.width) + ", " + std::to_string(commonSize.height) + ") like on " + debugName);
+        }
+    }
+
+    upload.pDebugName = overrides[0]->GetDebugName();
+    for (uint32_t i = 0; i < 6; i++)
+    {
+        upload.cubemap.pFaces[i] = overrides[i]->GetResult(MATERIAL_COLOR_TEXTURE_INDEX)->pData;
+    }
+    return true;
+}
+
+bool CollectRawCubemapFaces(const QrCubemapCreateInfo &info,
+                            TextureUploader::UploadInfo &upload,
+                            QrExtent2D &commonSize,
+                            VkFormat &commonFormat)
+{
+    commonSize = { info.sideSize, info.sideSize };
+    commonFormat = VK_FORMAT_R8G8B8A8_SRGB;
+
+    if (info.sideSize == 0)
+    {
+        throw QrException(QR_WRONG_ARGUMENT, "Cubemap's side size must be non-zero");
+    }
+
+    for (uint32_t i = 0; i < 6; i++)
+    {
+        if (info.pData[i] == nullptr)
+        {
+            return false;
+        }
+        upload.cubemap.pFaces[i] = info.pData[i];
+    }
+    return true;
+}
+} // namespace
+} // namespace qray
+
 uint32_t qray::CubemapManager::CreateCubemap(VkCommandBuffer cmd, uint32_t frameIndex, const QrCubemapCreateInfo &info)
 {
     using namespace std::string_literals;
@@ -134,6 +221,11 @@ uint32_t qray::CubemapManager::CreateCubemap(VkCommandBuffer cmd, uint32_t frame
 
         return texture.image == VK_NULL_HANDLE && texture.view == VK_NULL_HANDLE;
     });
+
+    if (slotIt == cubemaps.end())
+    {
+        return QR_EMPTY_CUBEMAP;
+    }
 
     TextureUploader::UploadInfo upload = {};
     upload.cmd = cmd;
@@ -176,82 +268,13 @@ uint32_t qray::CubemapManager::CreateCubemap(VkCommandBuffer cmd, uint32_t frame
         &ovrd5,
     };
 
-    bool useOverrides = true;
-
     QrExtent2D commonSize = {};
     VkFormat commonFormat = VK_FORMAT_UNDEFINED;
 
-    if (const auto &firstAlbedo = overrides[0]->GetResult(MATERIAL_COLOR_TEXTURE_INDEX))
+    if (!CollectOverrideCubemapFaces(overrides, upload, commonSize, commonFormat) &&
+        !CollectRawCubemapFaces(info, upload, commonSize, commonFormat))
     {
-        commonSize = { firstAlbedo->baseSize.width, firstAlbedo->baseSize.height };
-        commonFormat = firstAlbedo->format;
-    }
-    else
-    {
-        useOverrides = false;
-    }
-
-    for (TextureOverrides *o : overrides)
-    {
-        if (const auto &albedo = o->GetResult(MATERIAL_COLOR_TEXTURE_INDEX))
-        {
-            const char *debugName = o->GetDebugName();
-            assert(albedo->pData != nullptr);
-
-            const QrExtent2D &faceSize = albedo->baseSize;
-
-            if (albedo->format != commonFormat)
-            {
-                throw QrException(QR_WRONG_ARGUMENT, "Cubemap must have the same format on each face. Failed on: "s + debugName);
-            }
-
-            if (faceSize.width != faceSize.height)
-            {
-                throw QrException(QR_WRONG_ARGUMENT, "Cubemap must have square face size: "s + debugName + " has (" + std::to_string(faceSize.width) + ", " + std::to_string(faceSize.height) + ")");
-            }
-
-            if (faceSize.width != commonSize.width || faceSize.height != commonSize.height)
-            {
-                throw QrException(QR_WRONG_ARGUMENT,
-                    "Cubemap faces must have the same size: "s +
-                    debugName + " has (" + std::to_string(faceSize.width) + ", " + std::to_string(faceSize.height) + ")"
-                    "but expected (" + std::to_string(commonSize.width) + ", " + std::to_string(commonSize.height) + ") like on " + debugName);
-            }
-        }
-        else
-        {
-            useOverrides = false;
-        }
-    }
-
-    if (useOverrides)
-    {
-        upload.pDebugName = overrides[0]->GetDebugName();
-
-        for (uint32_t i = 0; i < 6; i++)
-        {
-            upload.cubemap.pFaces[i] = overrides[i]->GetResult(MATERIAL_COLOR_TEXTURE_INDEX)->pData;
-        }
-    }
-    else
-    {
-        commonSize = { info.sideSize, info.sideSize };
-        commonFormat = VK_FORMAT_R8G8B8A8_SRGB;
-
-        if (info.sideSize == 0)
-        {
-            throw QrException(QR_WRONG_ARGUMENT, "Cubemap's side size must be non-zero");
-        }
-
-        for (uint32_t i = 0; i < 6; i++)
-        {
-            if (info.pData[i] == nullptr)
-            {
-                return QR_EMPTY_CUBEMAP;
-            }
-
-            upload.cubemap.pFaces[i] = info.pData[i];
-        }
+        return QR_EMPTY_CUBEMAP;
     }
 
     upload.format = commonFormat;
@@ -308,20 +331,19 @@ void qray::CubemapManager::DestroyCubemap(uint32_t frameIndex, uint32_t cubemapI
 
 VkDescriptorSetLayout qray::CubemapManager::GetDescSetLayout() const
 {
-    return cubemapDesc->GetDescSetLayout();
+    return cubemapDesc != nullptr ? cubemapDesc->GetDescSetLayout() : VK_NULL_HANDLE;
 }
 
 VkDescriptorSet qray::CubemapManager::GetDescSet(uint32_t frameIndex) const
 {
-    return cubemapDesc->GetDescSet(frameIndex);
+    return cubemapDesc != nullptr ? cubemapDesc->GetDescSet(frameIndex) : VK_NULL_HANDLE;
 }
 
 void qray::CubemapManager::PrepareForFrame(uint32_t frameIndex)
 {
     for (auto &texture : cubemapsToDestroy[frameIndex])
     {
-        vkDestroyImage(device, texture.image, nullptr);
-        vkDestroyImageView(device, texture.view, nullptr);
+        cubemapUploader->DestroyImage(texture.image, texture.view);
     }
 
     cubemapsToDestroy[frameIndex].clear();
@@ -361,6 +383,12 @@ void qray::CubemapManager::MarkAllDescDirty()
 
 void qray::CubemapManager::SubmitDescriptors(uint32_t frameIndex)
 {
+    if (cubemapDesc == nullptr)
+    {
+        cubemapsToUpdateDesc[frameIndex].clear();
+        return;
+    }
+
     auto &dirty = cubemapsToUpdateDesc[frameIndex];
 
     const bool hasDescWrites = !dirty.empty();

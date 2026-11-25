@@ -17,9 +17,13 @@
 
 #pragma once
 
+#include <optional>
+#include <vector>
+
 #include "Common.h"
 #include "Const.h"
 #include "SamplerManager.h"
+#include "qray/qray.h"
 
 namespace qray
 {
@@ -33,9 +37,10 @@ struct Texture
 
     // Info the RHI texture table (RHI/RhiTextureTable.h) needs to wrap this slot. Filled by
     // TextureManager::InsertTexture; the defaults keep value-initialised records valid.
-    VkFormat                format = VK_FORMAT_UNDEFINED;
-    VkExtent2D              baseSize = {};
-    uint32_t                mipLevels = 1;
+    VkFormat                            format = VK_FORMAT_UNDEFINED;
+    VkExtent2D                          baseSize = {};
+    uint32_t                            mipLevels = 1;
+    std::optional<QrTextureSwizzling>   swizzling = std::nullopt;
 };
 
 

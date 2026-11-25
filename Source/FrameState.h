@@ -41,6 +41,8 @@ private:
         VkSemaphore          semaphoreToWait = VK_NULL_HANDLE;
         VkPipelineStageFlags semaphoreWaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         VkCommandBuffer      preFrameCmd = VK_NULL_HANDLE;
+        VkCommandBuffer      inFrameMaterialCmd = VK_NULL_HANDLE;
+        bool                 frameStarted = false;
     };
 
     uint32_t                 frameIndex;
@@ -78,7 +80,9 @@ public:
     {
         Slot &slot = GetSlot();
 
+        assert(!slot.frameStarted);
         assert(slot.frameCmd == VK_NULL_HANDLE);
+        slot.frameStarted = true;
         slot.frameCmd = cmd;
     }
 
@@ -86,8 +90,10 @@ public:
     {
         Slot &slot = GetSlot();
 
-        assert(slot.frameCmd != VK_NULL_HANDLE);
+        assert(slot.frameStarted);
         assert(slot.preFrameCmd == VK_NULL_HANDLE);
+        assert(slot.inFrameMaterialCmd == VK_NULL_HANDLE);
+        slot.frameStarted = false;
         slot.frameCmd = VK_NULL_HANDLE;
     }
 
@@ -105,7 +111,12 @@ public:
 
         if (WasFrameStarted())
         {
-            return GetCmdBuffer();
+            if (slot.inFrameMaterialCmd == VK_NULL_HANDLE)
+            {
+                slot.inFrameMaterialCmd = cmdManager->StartGraphicsCmd();
+            }
+
+            return slot.inFrameMaterialCmd;
         }
 
         if (slot.preFrameCmd == VK_NULL_HANDLE)
@@ -126,9 +137,18 @@ public:
         return c;
     }
 
+    VkCommandBuffer GetInFrameMaterialCmdAndRemove()
+    {
+        Slot &slot = GetSlot();
+        VkCommandBuffer c = slot.inFrameMaterialCmd;
+
+        slot.inFrameMaterialCmd = VK_NULL_HANDLE;
+        return c;
+    }
+
     bool WasFrameStarted() const
     {
-        return GetSlot().frameCmd != VK_NULL_HANDLE;
+        return GetSlot().frameStarted;
     }
 
     void SetSemaphore(VkSemaphore s, VkPipelineStageFlags waitStage)

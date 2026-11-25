@@ -40,7 +40,6 @@ namespace
 const char *const COLOR_TINT_SHADER_FILE_NAME = "EfColorTint.comp.spv";
 const char *const INVERSE_BW_SHADER_FILE_NAME = "EfInverseBW.comp.spv";
 const char *const HUE_SHIFT_SHADER_FILE_NAME = "EfHueShift.comp.spv";
-const char *const CHROMATIC_ABERRATION_SHADER_FILE_NAME = "EfChromaticAberration.comp.spv";
 const char *const DISTORTED_SIDES_SHADER_FILE_NAME = "EfDistortedSides.comp.spv";
 const char *const WAVES_SHADER_FILE_NAME = "EfWaves.comp.spv";
 const char *const RADIAL_BLUR_SHADER_FILE_NAME = "EfRadialBlur.comp.spv";
@@ -448,7 +447,6 @@ bool RhiPostEffectPass::Create(nvrhi::IDevice *pDevice,
         { EFFECT_COLOR_TINT, "color tint", COLOR_TINT_SHADER_FILE_NAME, FB_SIMPLE, true },
         { EFFECT_INVERSE_BW, "inverse black and white", INVERSE_BW_SHADER_FILE_NAME, FB_ALBEDO, true },
         { EFFECT_HUE_SHIFT, "hue shift", HUE_SHIFT_SHADER_FILE_NAME, FB_ALBEDO, true },
-        { EFFECT_CHROMATIC_ABERRATION, "chromatic aberration", CHROMATIC_ABERRATION_SHADER_FILE_NAME, FB_SIMPLE, true },
         { EFFECT_DISTORTED_SIDES, "distorted sides", DISTORTED_SIDES_SHADER_FILE_NAME, FB_SIMPLE, true },
         { EFFECT_WAVES, "waves", WAVES_SHADER_FILE_NAME, FB_SIMPLE, true },
         { EFFECT_RADIAL_BLUR, "radial blur", RADIAL_BLUR_SHADER_FILE_NAME, FB_SIMPLE, true },
@@ -513,6 +511,38 @@ bool RhiPostEffectPass::Create(nvrhi::IDevice *pDevice,
     return true;
 }
 
+namespace
+{
+float ClampFiniteOrDefault(float value, float minVal, float maxVal, float fallback)
+{
+    return std::isfinite(value) ? std::clamp(value, minVal, maxVal) : fallback;
+}
+} // namespace
+
+bool RhiPostEffectPass::TryPrepareTransition(EffectId effect,
+                                             float currentTime,
+                                             const TransitionInput &input,
+                                             TransitionOutput &outTransition)
+{
+    if (!input.present)
+    {
+        SetupNull(effect);
+        return false;
+    }
+
+    if (!SetupSimple(effect, currentTime, input.isActive, input.durationIn, input.durationOut))
+    {
+        return false;
+    }
+
+    outTransition = {
+        effects[effect].transition.transitionType,
+        effects[effect].transition.transitionBeginTime,
+        effects[effect].transition.transitionDuration,
+    };
+    return true;
+}
+
 void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
                                uint32_t frameIndex,
                                const Framebuffers *pFramebuffers,
@@ -529,221 +559,113 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
         return;
     }
 
-    Target *pTarget = PrepareFrame(frameIndex, pFramebuffers, renderWidth, renderHeight,
-                                   upscaledWidth, upscaledHeight, pUniformBuffer);
-    if (pTarget == nullptr)
-    {
-        return;
-    }
-
-    Target &target = *pTarget;
-
-    // The upscaler wrote image 29 on this very list through its own wrap; the announcement says
-    // where the engine leaves the image (GENERAL, NVRHI's UnorderedAccess) and the requirement is
-    // the same-state UAV barrier that orders that write before the first effect's read - the
-    // barrier the legacy `EffectBase::Dispatch` records over its source every dispatch
-    // (EffectBase.h:148-152). Image 30 is announced with it for the odd-dispatch hand-offs.
-    AnnounceImage(pCommandList, target, IMAGE_PING);
-    AnnounceImage(pCommandList, target, IMAGE_PONG);
-
-    // The sampled ALBEDO of the inverse-BW/hue-shift effects: after the compose it rests in the
-    // same GENERAL state. The announcement is bookkeeping only - the image is bound as an SRV and
-    // the binding's own UAV -> SRV transition is the barrier that orders the primary's
-    // checkerboard write before the read. It is made once, here, and not per dispatch: the first
-    // of the two dispatches moves the image to the read-only state through the binding, and a
-    // second announcement would claim a GENERAL the image no longer is (the second dispatch binds
-    // the same set object, so NVRHI does not re-apply the set's requirements and the claim would
-    // never be corrected). The restore at the end of the chain names the read-only state the
-    // tracker then really holds.
-    pCommandList->beginTrackingTextureState(target.textures[IMAGE_ALBEDO], nvrhi::AllSubresources,
-                                            nvrhi::ResourceStates::UnorderedAccess);
-
-    // The source role of the first effect: the upscale output lives in the ping image. The role
-    // flips after every recorded dispatch, exactly the legacy `isSourcePing` bookkeeping.
     bool sourceIsPing = true;
-
-    // The legacy `args.width`/`args.height` of this chain are the upscaled size
-    // (VulkanDevice.cpp:1151) and every dispatch is `Utils::GetWorkGroupCount(size, 16)`.
     const uint32_t groupsX = Utils::GetWorkGroupCount(upscaledWidth, EFFECT_GROUP_SIZE);
     const uint32_t groupsY = Utils::GetWorkGroupCount(upscaledHeight, EFFECT_GROUP_SIZE);
-
-    // Whether one of the two ALBEDO-sampling effects was dispatched: their set moves ALBEDO to the
-    // read-only state and the module returns it to the engine's resting state below.
     bool albedoSampled = false;
+
+    Target *pTarget = nullptr;
+    bool prepareAttempted = false;
+    auto dispatchIfReady = [&](EffectId effect, const void *pPush, uint32_t pushSize) -> bool
+    {
+        if (!prepareAttempted)
+        {
+            prepareAttempted = true;
+            pTarget = PrepareFrame(frameIndex, pFramebuffers, renderWidth, renderHeight,
+                                   upscaledWidth, upscaledHeight, pUniformBuffer);
+            if (pTarget != nullptr)
+            {
+                AnnounceImage(pCommandList, *pTarget, IMAGE_PING);
+                AnnounceImage(pCommandList, *pTarget, IMAGE_PONG);
+                pCommandList->beginTrackingTextureState(pTarget->textures[IMAGE_ALBEDO], nvrhi::AllSubresources,
+                                                        nvrhi::ResourceStates::UnorderedAccess);
+            }
+        }
+        return pTarget != nullptr &&
+               DispatchEffect(pCommandList, *pTarget, effect, sourceIsPing, pPush, pushSize, groupsX, groupsY);
+    };
+
+    auto dispatchBaseTransition = [&](EffectId effect, const TransitionInput &input, bool marksAlbedo)
+    {
+        TransitionOutput transition;
+        if (!TryPrepareTransition(effect, currentTime, input, transition))
+        {
+            return;
+        }
+        EffectBasePush push{};
+        push.transition = {
+            transition.transitionType,
+            transition.transitionBeginTime,
+            transition.transitionDuration,
+        };
+        if (dispatchIfReady(effect, &push, sizeof(push)))
+        {
+            sourceIsPing = !sourceIsPing;
+            albedoSampled = albedoSampled || marksAlbedo;
+        }
+    };
 
     // 1. The colour tint (`effectColorTint->Setup(args, pColorTint)`, VulkanDevice.cpp:1166-1169):
     // the custom members are written whenever the params exist (EffectSimple_Instances.h:129-142),
     // the setup decides whether the effect runs.
-    if (params.pColorTint != nullptr)
+    TransitionOutput colorTintTransition;
+    if (TryPrepareTransition(EFFECT_COLOR_TINT, currentTime, MakeTransitionInput(params.pColorTint), colorTintTransition))
     {
-        if (SetupSimple(EFFECT_COLOR_TINT, currentTime, params.pColorTint->isActive,
-                        params.pColorTint->transitionDurationIn, params.pColorTint->transitionDurationOut))
-        {
-            EffectColorTintPush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_COLOR_TINT].transition.transitionType,
-                effects[EFFECT_COLOR_TINT].transition.transitionBeginTime,
-                effects[EFFECT_COLOR_TINT].transition.transitionDuration,
-            };
-            push.intensity = params.pColorTint->intensity;
-            push.r = params.pColorTint->color.data[0];
-            push.g = params.pColorTint->color.data[1];
-            push.b = params.pColorTint->color.data[2];
+        EffectColorTintPush push{};
+        push.transition = {
+            colorTintTransition.transitionType,
+            colorTintTransition.transitionBeginTime,
+            colorTintTransition.transitionDuration,
+        };
+        push.intensity = params.pColorTint->intensity;
+        push.r = params.pColorTint->color.data[0];
+        push.g = params.pColorTint->color.data[1];
+        push.b = params.pColorTint->color.data[2];
 
-            if (DispatchEffect(pCommandList, target, EFFECT_COLOR_TINT, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-            }
+        if (dispatchIfReady(EFFECT_COLOR_TINT, &push, sizeof(push)))
+        {
+            sourceIsPing = !sourceIsPing;
         }
     }
-    else
-    {
-        SetupNull(EFFECT_COLOR_TINT);
-    }
 
-    // 2. The inverse black and white (`effectInverseBW`, :1170-1173).
-    if (params.pInverseBlackAndWhite != nullptr)
-    {
-        if (SetupSimple(EFFECT_INVERSE_BW, currentTime, params.pInverseBlackAndWhite->isActive,
-                        params.pInverseBlackAndWhite->transitionDurationIn,
-                        params.pInverseBlackAndWhite->transitionDurationOut))
-        {
-            EffectBasePush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_INVERSE_BW].transition.transitionType,
-                effects[EFFECT_INVERSE_BW].transition.transitionBeginTime,
-                effects[EFFECT_INVERSE_BW].transition.transitionDuration,
-            };
-
-            if (DispatchEffect(pCommandList, target, EFFECT_INVERSE_BW, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-                albedoSampled = true;
-            }
-        }
-    }
-    else
-    {
-        SetupNull(EFFECT_INVERSE_BW);
-    }
-
-    // 3. The hue shift (`effectHueShift`, :1174-1177).
-    if (params.pHueShift != nullptr)
-    {
-        if (SetupSimple(EFFECT_HUE_SHIFT, currentTime, params.pHueShift->isActive,
-                        params.pHueShift->transitionDurationIn, params.pHueShift->transitionDurationOut))
-        {
-            EffectBasePush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_HUE_SHIFT].transition.transitionType,
-                effects[EFFECT_HUE_SHIFT].transition.transitionBeginTime,
-                effects[EFFECT_HUE_SHIFT].transition.transitionDuration,
-            };
-
-            if (DispatchEffect(pCommandList, target, EFFECT_HUE_SHIFT, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-                albedoSampled = true;
-            }
-        }
-    }
-    else
-    {
-        SetupNull(EFFECT_HUE_SHIFT);
-    }
-
-    SetupNull(EFFECT_CHROMATIC_ABERRATION);
-
-    // 5. The distorted sides (`effectDistortedSides`, :1182-1185).
-    if (params.pDistortedSides != nullptr)
-    {
-        if (SetupSimple(EFFECT_DISTORTED_SIDES, currentTime, params.pDistortedSides->isActive,
-                        params.pDistortedSides->transitionDurationIn,
-                        params.pDistortedSides->transitionDurationOut))
-        {
-            EffectBasePush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_DISTORTED_SIDES].transition.transitionType,
-                effects[EFFECT_DISTORTED_SIDES].transition.transitionBeginTime,
-                effects[EFFECT_DISTORTED_SIDES].transition.transitionDuration,
-            };
-
-            if (DispatchEffect(pCommandList, target, EFFECT_DISTORTED_SIDES, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-            }
-        }
-    }
-    else
-    {
-        SetupNull(EFFECT_DISTORTED_SIDES);
-    }
+    // 2. Inverse B&W, 3. Hue shift, 5. Distorted sides.
+    dispatchBaseTransition(EFFECT_INVERSE_BW, MakeTransitionInput(params.pInverseBlackAndWhite), true);
+    dispatchBaseTransition(EFFECT_HUE_SHIFT, MakeTransitionInput(params.pHueShift), true);
+    dispatchBaseTransition(EFFECT_DISTORTED_SIDES, MakeTransitionInput(params.pDistortedSides), false);
 
     // 6. The underwater waves (`effectWaves`, :1186-1189): a null pointer or a non-positive
-    // amplitude turns it off without a fade (EffectSimple_Instances.h:208-222); the game gates the
-    // pointer on `r_waterwarp == 1` and the activation on the camera's media
-    // (gl_vidsdl.c:2100-2107, :2150).
-    if (params.pWaves == nullptr || params.pWaves->amplitude <= 0.0f)
-    {
-        SetupNull(EFFECT_WAVES);
-    }
-    else if (SetupSimple(EFFECT_WAVES, currentTime, params.pWaves->isActive,
-                         params.pWaves->transitionDurationIn, params.pWaves->transitionDurationOut))
+    // amplitude turns it off without a fade (EffectSimple_Instances.h:208-222).
+    TransitionOutput wavesTransition;
+    if (TryPrepareTransition(
+            EFFECT_WAVES, currentTime,
+            MakeTransitionInput(params.pWaves, params.pWaves != nullptr && params.pWaves->amplitude > 0.0f),
+            wavesTransition))
     {
         EffectWavesPush push{};
-        push.transition = EffectTransitionPush{
-            effects[EFFECT_WAVES].transition.transitionType,
-            effects[EFFECT_WAVES].transition.transitionBeginTime,
-            effects[EFFECT_WAVES].transition.transitionDuration,
+        push.transition = {
+            wavesTransition.transitionType,
+            wavesTransition.transitionBeginTime,
+            wavesTransition.transitionDuration,
         };
         push.amplitude = params.pWaves->amplitude;
         push.speed = params.pWaves->speed;
         push.multX = params.pWaves->xMultiplier;
 
-        if (DispatchEffect(pCommandList, target, EFFECT_WAVES, sourceIsPing,
-                           &push, sizeof(push), groupsX, groupsY))
+        if (dispatchIfReady(EFFECT_WAVES, &push, sizeof(push)))
         {
             sourceIsPing = !sourceIsPing;
         }
     }
 
     // 7. The radial blur (`effectRadialBlur`, :1190-1193).
-    if (params.pRadialBlur != nullptr)
-    {
-        if (SetupSimple(EFFECT_RADIAL_BLUR, currentTime, params.pRadialBlur->isActive,
-                        params.pRadialBlur->transitionDurationIn,
-                        params.pRadialBlur->transitionDurationOut))
-        {
-            EffectBasePush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_RADIAL_BLUR].transition.transitionType,
-                effects[EFFECT_RADIAL_BLUR].transition.transitionBeginTime,
-                effects[EFFECT_RADIAL_BLUR].transition.transitionDuration,
-            };
-
-            if (DispatchEffect(pCommandList, target, EFFECT_RADIAL_BLUR, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-            }
-        }
-    }
-    else
-    {
-        SetupNull(EFFECT_RADIAL_BLUR);
-    }
+    dispatchBaseTransition(EFFECT_RADIAL_BLUR, MakeTransitionInput(params.pRadialBlur), false);
 
     if (params.pSharpen != nullptr && params.pSharpen->isActive && params.pSharpen->strength > 0.0f)
     {
         EffectSharpenPush push{};
         push.strength = std::clamp(params.pSharpen->strength, 0.0f, 1.0f);
 
-        if (DispatchEffect(pCommandList, target, EFFECT_SHARPEN, sourceIsPing,
-                           &push, sizeof(push), groupsX, groupsY))
+        if (dispatchIfReady(EFFECT_SHARPEN, &push, sizeof(push)))
         {
             sourceIsPing = !sourceIsPing;
         }
@@ -754,15 +676,11 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
     {
         EffectVignettePush push{};
         push.intensity = std::clamp(params.pVignette->intensity, 0.0f, 1.0f);
-        push.start = std::isfinite(params.pVignette->start)
-            ? std::clamp(params.pVignette->start, 0.0f, 0.99f) : 0.45f;
-        push.end = std::isfinite(params.pVignette->end)
-            ? std::clamp(params.pVignette->end, push.start + 0.01f, 2.0f) : 1.0f;
-        push.roundness = std::isfinite(params.pVignette->roundness)
-            ? std::clamp(params.pVignette->roundness, 0.0f, 1.0f) : 0.35f;
+        push.start = ClampFiniteOrDefault(params.pVignette->start, 0.0f, 0.99f, 0.45f);
+        push.end = ClampFiniteOrDefault(params.pVignette->end, push.start + 0.01f, 2.0f, 1.0f);
+        push.roundness = ClampFiniteOrDefault(params.pVignette->roundness, 0.0f, 1.0f, 0.35f);
 
-        if (DispatchEffect(pCommandList, target, EFFECT_VIGNETTE, sourceIsPing,
-                           &push, sizeof(push), groupsX, groupsY))
+        if (dispatchIfReady(EFFECT_VIGNETTE, &push, sizeof(push)))
         {
             sourceIsPing = !sourceIsPing;
         }
@@ -774,7 +692,7 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
         const float liquid = std::clamp(params.pGameplayFeedback->liquid, 0.0f, 1.0f);
         const float pickup = std::clamp(params.pGameplayFeedback->pickup, 0.0f, 1.0f);
 
-        if (damage > 0.0f || liquid > 0.0f || pickup > 0.0f)
+        if (damage > 0.0f || pickup > 0.0f)
         {
             EffectGameplayFeedbackPush push{};
             push.damage = damage;
@@ -786,8 +704,7 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
             push.pickupColorG = std::clamp(params.pGameplayFeedback->pickupColor.data[1], 0.0f, 1.0f);
             push.pickupColorB = std::clamp(params.pGameplayFeedback->pickupColor.data[2], 0.0f, 1.0f);
 
-            if (DispatchEffect(pCommandList, target, EFFECT_GAMEPLAY_FEEDBACK, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
+            if (dispatchIfReady(EFFECT_GAMEPLAY_FEEDBACK, &push, sizeof(push)))
             {
                 sourceIsPing = !sourceIsPing;
             }
@@ -799,14 +716,17 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
     {
         EffectFilmGrainPush push{};
         push.intensity = std::clamp(params.pFilmGrain->intensity, 0.0f, 1.0f);
-        push.size = std::isfinite(params.pFilmGrain->size)
-            ? std::clamp(params.pFilmGrain->size, 0.25f, 8.0f) : 2.5f;
+        push.size = ClampFiniteOrDefault(params.pFilmGrain->size, 0.25f, 8.0f, 2.5f);
 
-        if (DispatchEffect(pCommandList, target, EFFECT_FILM_GRAIN, sourceIsPing,
-                           &push, sizeof(push), groupsX, groupsY))
+        if (dispatchIfReady(EFFECT_FILM_GRAIN, &push, sizeof(push)))
         {
             sourceIsPing = !sourceIsPing;
         }
+    }
+
+    if (pTarget == nullptr)
+    {
+        return;
     }
 
     // The two ALBEDO-sampling effects left the image in the read-only state their SRV requires.
@@ -815,7 +735,7 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
     // applies to its sampled reads (RhiRtComposePass.h's CHAIN_RESTORE list).
     if (albedoSampled)
     {
-        pCommandList->setTextureState(target.textures[IMAGE_ALBEDO], nvrhi::AllSubresources,
+        pCommandList->setTextureState(pTarget->textures[IMAGE_ALBEDO], nvrhi::AllSubresources,
                                       nvrhi::ResourceStates::UnorderedAccess);
     }
 
@@ -824,7 +744,36 @@ void RhiPostEffectPass::Render(nvrhi::ICommandList *pCommandList,
     // back, the pair the skeleton records after the FSR upscale (NvrhiFrameSkeleton.cpp:1001-1007).
     if (!sourceIsPing)
     {
-        CopyPongToPing(pCommandList, target);
+        CopyPongToPing(pCommandList, *pTarget);
+    }
+}
+
+void RhiPostEffectPass::RecordCrtPasses(nvrhi::ICommandList *pCommandList,
+                                        Target &target,
+                                        uint32_t groupsX,
+                                        uint32_t groupsY,
+                                        float currentTime,
+                                        bool &sourceIsPing)
+{
+    const TransitionInput crtInput = { true, true, 0.0f, 0.0f };
+    for (EffectId crtPass : { EFFECT_CRT_DEMODULATE_ENCODE, EFFECT_CRT_DECODE })
+    {
+        TransitionOutput transition;
+        if (!TryPrepareTransition(crtPass, currentTime, crtInput, transition))
+        {
+            continue;
+        }
+        EffectBasePush push{};
+        push.transition = {
+            transition.transitionType,
+            transition.transitionBeginTime,
+            transition.transitionDuration,
+        };
+        if (DispatchEffect(pCommandList, target, crtPass, sourceIsPing,
+                           &push, sizeof(push), groupsX, groupsY))
+        {
+            sourceIsPing = !sourceIsPing;
+        }
     }
 }
 
@@ -845,6 +794,13 @@ void RhiPostEffectPass::RenderPostUi(nvrhi::ICommandList *pCommandList,
         return;
     }
 
+    const bool runWipe = params.pWipe != nullptr && wipeAvailable;
+    const bool runCrt = params.pCRT != nullptr && params.pCRT->isActive;
+    if (!runWipe && !runCrt)
+    {
+        return;
+    }
+
     Target *pTarget = PrepareFrame(frameIndex, pFramebuffers, renderWidth, renderHeight,
                                    upscaledWidth, upscaledHeight, pUniformBuffer);
     if (pTarget == nullptr)
@@ -852,71 +808,28 @@ void RhiPostEffectPass::RenderPostUi(nvrhi::ICommandList *pCommandList,
         return;
     }
 
-    Target &target = *pTarget;
-
-    // `Render` left the result in image 29 (the UI has drawn over it since); the same announcement
-    // and same-state requirement as there order the UI's render-target write before the wipe's
-    // read of the image.
-    AnnounceImage(pCommandList, target, IMAGE_PING);
-    AnnounceImage(pCommandList, target, IMAGE_PONG);
+    AnnounceImage(pCommandList, *pTarget, IMAGE_PING);
+    AnnounceImage(pCommandList, *pTarget, IMAGE_PONG);
 
     bool sourceIsPing = true;
-
     const uint32_t groupsX = Utils::GetWorkGroupCount(upscaledWidth, EFFECT_GROUP_SIZE);
     const uint32_t groupsY = Utils::GetWorkGroupCount(upscaledHeight, EFFECT_GROUP_SIZE);
 
-    // 8. The wipe (`effectWipe->Setup(args, pWipe, swapchain, frameId)`, :1212-1215). The path is
-    // inert for this game - `pWipe` is never filled and `effectWipeIsUsed` is never set - but it is
-    // ported to the legacy shape, so a caller that uses the feature gets the same early-outs.
-    if (params.pWipe != nullptr && wipeAvailable)
+    if (runWipe &&
+        RecordWipe(pCommandList, *pTarget, *params.pWipe, upscaledWidth, upscaledHeight,
+                   currentTime, frameId, sourceIsPing))
     {
-        if (RecordWipe(pCommandList, target, *params.pWipe, upscaledWidth, upscaledHeight,
-                       currentTime, frameId, sourceIsPing))
-        {
-            sourceIsPing = !sourceIsPing;
-        }
+        sourceIsPing = !sourceIsPing;
     }
 
-    // 9. The CRT pair (`:1216-1223`): only while `pCRT != nullptr && pCRT->isActive`, with the
-    // legacy host's `Setup(args)` = `Setup(args, true, 0, 0)` (EffectSimple_Instances.h:177-191).
-    if (params.pCRT != nullptr && params.pCRT->isActive)
+    if (runCrt)
     {
-        if (SetupSimple(EFFECT_CRT_DEMODULATE_ENCODE, currentTime, true, 0.0f, 0.0f))
-        {
-            EffectBasePush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_CRT_DEMODULATE_ENCODE].transition.transitionType,
-                effects[EFFECT_CRT_DEMODULATE_ENCODE].transition.transitionBeginTime,
-                effects[EFFECT_CRT_DEMODULATE_ENCODE].transition.transitionDuration,
-            };
-
-            if (DispatchEffect(pCommandList, target, EFFECT_CRT_DEMODULATE_ENCODE, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-            }
-        }
-
-        if (SetupSimple(EFFECT_CRT_DECODE, currentTime, true, 0.0f, 0.0f))
-        {
-            EffectBasePush push{};
-            push.transition = EffectTransitionPush{
-                effects[EFFECT_CRT_DECODE].transition.transitionType,
-                effects[EFFECT_CRT_DECODE].transition.transitionBeginTime,
-                effects[EFFECT_CRT_DECODE].transition.transitionDuration,
-            };
-
-            if (DispatchEffect(pCommandList, target, EFFECT_CRT_DECODE, sourceIsPing,
-                               &push, sizeof(push), groupsX, groupsY))
-            {
-                sourceIsPing = !sourceIsPing;
-            }
-        }
+        RecordCrtPasses(pCommandList, *pTarget, groupsX, groupsY, currentTime, sourceIsPing);
     }
 
     if (!sourceIsPing)
     {
-        CopyPongToPing(pCommandList, target);
+        CopyPongToPing(pCommandList, *pTarget);
     }
 }
 

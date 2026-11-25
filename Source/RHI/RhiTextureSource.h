@@ -45,13 +45,19 @@ namespace qray::rhi
 //
 // Returns a null handle if 'device' or the image is null, or if 'width'/'height' is zero, or if
 // 'vkFormat' is one the pinned NVRHI cannot map (including VK_FORMAT_UNDEFINED).
+struct EngineTextureExtent
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t mipLevels = 1;
+};
+
 nvrhi::TextureHandle wrapEngineTexture(nvrhi::IDevice *device,
                                        uint64_t vkImage,
                                        uint32_t vkFormat,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint32_t mipLevels = 1,
-                                       std::string_view debugName = {});
+                                       const EngineTextureExtent &extent,
+                                       std::string_view debugName = {},
+                                       nvrhi::ComponentMapping componentMapping = {});
 
 // Wraps an engine image that is a texture array, i.e. one whose layers a shader addresses as
 // Texture2DArray. The blue-noise image is the first instance: the indirect raygen's set 5 binding 0

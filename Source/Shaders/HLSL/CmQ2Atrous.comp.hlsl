@@ -309,7 +309,8 @@ filter_image(
 
             float3 normal_spec = normal_center;
             float depth_spec = depth_center;
-            if (spec_in_bounds && Q2_ATROUS_ITERATIONS_SPEC > q2AtrousIteration)
+            const bool do_spec = spec_in_bounds && (Q2_ATROUS_ITERATIONS_SPEC > q2AtrousIteration) && (spec_filter_width_scale > 0.0);
+            if (do_spec)
             {
                 normal_spec = texelFetchNormal(p_spec);
                 depth_spec = framebufQ2ViewDepth_Sampled.Load(int3(p_spec, 0)).r;
@@ -346,7 +347,7 @@ filter_image(
                     && all(p_hf < int2(field_right, height));
                 if (hf_in_bounds)
                 {
-                    const bool reuse_spec = (hf_rot == 0) && (Q2_ATROUS_ITERATIONS_SPEC > q2AtrousIteration);
+                    const bool reuse_spec = (hf_rot == 0) && do_spec;
                     const float3 normal_hf = reuse_spec ? normal_spec : texelFetchNormal(p_hf);
                     const float depth_hf = reuse_spec ? depth_spec : framebufQ2ViewDepth_Sampled.Load(int3(p_hf, 0)).r;
                     const float dist_z_hf = abs(depth_center - depth_hf) * fwidth_depth * Q2_FLT_ATROUS_DEPTH;

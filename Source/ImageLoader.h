@@ -18,6 +18,8 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <unordered_set>
 #include <vector>
 #include <filesystem>
 
@@ -75,6 +77,7 @@ private:
     std::shared_ptr<UserFileLoad> userFileLoad;
     std::vector<ktxTexture *> loadedImages;
     std::vector<void *> loadedPngs;
+    std::unordered_set<std::string> missingPaths;
 };
 
 }

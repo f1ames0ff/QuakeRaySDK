@@ -76,7 +76,7 @@ struct IterationInfo_BT
 
 float2 q2FilterGradientImage(RWTexture2D<float4> img, const int2 ipos)
 {
-    const int2 grad_size = int2((int)globalUniform.renderWidth, (int)globalUniform.renderHeight) / Q2_GRAD_DWN;
+    const int2 grad_size = (int2((int)globalUniform.renderWidth, (int)globalUniform.renderHeight) + (int2)(Q2_GRAD_DWN - 1)) / Q2_GRAD_DWN;
     const int half_width = grad_size.x / 2;
     const int field_left = (ipos.x < half_width) ? 0 : half_width;
     const int field_right = (ipos.x < half_width) ? half_width : grad_size.x;
@@ -105,14 +105,14 @@ float2 q2FilterGradientImage(RWTexture2D<float4> img, const int2 ipos)
         }
     }
 
-    return sum_color / sum_w;
+    return sum_w > 0.0 ? (sum_color / sum_w) : (float2)0;
 }
 
 [numthreads(16, 16, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     int2 ipos = int2(dispatchThreadID.xy);
-    int2 grad_size = int2((int)globalUniform.renderWidth, (int)globalUniform.renderHeight) / Q2_GRAD_DWN;
+    int2 grad_size = (int2((int)globalUniform.renderWidth, (int)globalUniform.renderHeight) + (int2)(Q2_GRAD_DWN - 1)) / Q2_GRAD_DWN;
     if (any(ipos >= grad_size))
     {
         return;

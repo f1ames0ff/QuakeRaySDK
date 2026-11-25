@@ -334,6 +334,9 @@ private:
 
     bool LoadShader(const char *pFileName, nvrhi::ShaderType type, nvrhi::ShaderHandle &result);
 
+    bool ValidateCreateBaseInputs();
+    bool ValidateCreatePassDependencies();
+
     // Retires the slot's image wraps and the framebuffer set over them (the framebuffer re-create
     // path), the slot's TLAS/uniform/vertex-data sets (ReleaseTargets), and the slot's set-6 wraps,
     // set and staging wraps (a light-buffer handle change).
@@ -384,6 +387,7 @@ private:
     nvrhi::ShaderHandle shadowMissShader;
     nvrhi::ShaderHandle closestHitShader;
     nvrhi::ShaderHandle anyHitShader;
+    nvrhi::ShaderHandle shadowAnyHitShader;
 
     // The two layouts this module owns: set 1 (the exact 12 items above) and set 6 (the exact 5
     // items). Every other layout is the primary's.

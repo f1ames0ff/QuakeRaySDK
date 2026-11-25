@@ -29,20 +29,10 @@ RayStats::RayStats(VkDevice _device, std::shared_ptr<MemoryAllocator> &_allocato
     , allocator(_allocator)
 {
     CreateBuffers(allocator);
-    CreateDescSetLayout();
-    CreateDescSet();
 }
 
 RayStats::~RayStats()
 {
-    if (descPool != VK_NULL_HANDLE)
-    {
-        vkDestroyDescriptorPool(device, descPool, nullptr);
-    }
-    if (descSetLayout != VK_NULL_HANDLE)
-    {
-        vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
-    }
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         if (mapped[i])
@@ -69,77 +59,10 @@ void RayStats::CreateBuffers(std::shared_ptr<MemoryAllocator> &allocator)
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                         "RayStats buffer");
         mapped[i] = buffers[i].Map();
-    }
-}
-
-void RayStats::CreateDescSetLayout()
-{
-    VkDescriptorSetLayoutBinding binding = {};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                         VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-                         VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
-
-    VkResult r = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descSetLayout);
-    VK_CHECKERROR(r);
-
-    SET_DEBUG_NAME(device, descSetLayout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "RayStats desc set layout");
-}
-
-void RayStats::CreateDescSet()
-{
-    VkDescriptorPoolSize poolSize = {};
-    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT;
-
-    VkDescriptorPoolCreateInfo poolInfo = {};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-
-    VkResult r = vkCreateDescriptorPool(device, &poolInfo, nullptr, &descPool);
-    VK_CHECKERROR(r);
-
-    VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT] = {};
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-    {
-        layouts[i] = descSetLayout;
-    }
-
-    VkDescriptorSetAllocateInfo allocInfo = {};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descPool;
-    allocInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
-    allocInfo.pSetLayouts = layouts;
-
-    r = vkAllocateDescriptorSets(device, &allocInfo, descSets);
-    VK_CHECKERROR(r);
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-    {
-        VkDescriptorBufferInfo bufferInfo = {};
-        bufferInfo.buffer = buffers[i].GetBuffer();
-        bufferInfo.offset = 0;
-        bufferInfo.range = RAY_STATS_CATEGORY_COUNT * sizeof(uint32_t);
-
-        VkWriteDescriptorSet write = {};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = descSets[i];
-        write.dstBinding = 0;
-        write.dstArrayElement = 0;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo = &bufferInfo;
-
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        if (mapped[i] != nullptr)
+        {
+            std::memset(mapped[i], 0, size);
+        }
     }
 }
 
@@ -179,16 +102,6 @@ void RayStats::GetRaysPerCategory(uint32_t frameIndex, uint32_t *pOutCounts) con
     {
         pOutCounts[i] = p[i];
     }
-}
-
-VkDescriptorSetLayout RayStats::GetDescSetLayout() const
-{
-    return descSetLayout;
-}
-
-VkDescriptorSet RayStats::GetDescSet(uint32_t frameIndex) const
-{
-    return descSets[frameIndex];
 }
 
 VkBuffer RayStats::GetBuffer(uint32_t frameIndex) const

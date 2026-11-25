@@ -441,7 +441,7 @@ float3 traceShadowRay(uint surfInstCustomIndex, float3 start, float3 end, bool i
             topLevelAS,
             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | getAdditionalRayFlags(),
             cullMask,
-            0, 0,
+            SBT_INDEX_HITGROUP_SHADOW_OFFSET, 0,
             SBT_INDEX_MISS_SHADOW,
             rayDesc,
             g_payloadShadow);

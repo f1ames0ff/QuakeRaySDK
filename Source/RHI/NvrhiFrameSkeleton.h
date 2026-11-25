@@ -179,18 +179,20 @@ public:
         const ParticleProxy *particleProxies = nullptr;
         uint32_t particleProxyCount = 0;
 
-        // -- the 2D UI pass (A5.1) --
-        // The frame's SWAPCHAIN draw list and the collector's per-slot staging vertex and index
-        // buffers: the UI is rewritten every frame, so the pass reads the staging - the device copy
-        // of the collector is recorded on the legacy command buffer, which is submitted after the
-        // RHI list. 'disableRasterization' is the host's per-frame gate (VulkanDevice.cpp:1199); a
-        // zero staging handle or an empty list simply skips the UI.
+        // -- rasterized geometry buffers (sky, world overlay, particle points, UI) --
         const RasterizedDataCollector::DrawInfo *swapchainDraws = nullptr;
         uint32_t swapchainDrawCount = 0;
         uint64_t swapchainVertexStaging = 0;
         uint64_t swapchainIndexStaging = 0;
         uint64_t swapchainVertexStagingSize = 0;
         uint64_t swapchainIndexStagingSize = 0;
+        uint64_t particlePointStagingSize = 0;
+        uint64_t rasterVertexDevice = 0;
+        uint64_t rasterIndexDevice = 0;
+        uint64_t rasterParticlePointDevice = 0;
+        uint64_t rasterVertexCopyBytes = 0;
+        uint64_t rasterIndexCopyBytes = 0;
+        uint64_t rasterParticlePointCopyBytes = 0;
         bool disableRasterization = false;
         bool renderUiOnly = false;
         CpuFrameProfiler *cpuProfiler = nullptr;
@@ -334,6 +336,7 @@ public:
         uint32_t rayCullMaskWorld = 0;
         bool allowGeometryWithSkyFlag = false;
         bool disableRayTracedGeometry = false;
+        bool preprocessStatic = false;
     };
 
     // The frame mode of the whole run. Only Traced is reachable now: with the bring-up flags
@@ -719,6 +722,9 @@ private:
     // staging buffers (the UI is rewritten every frame, and the engine's device copy is recorded on
     // the legacy command buffer, submitted after this list), wrapped once per slot and re-wrapped
     // through the frame context if a handle ever changes. The handle arrays are the wrap keys.
+    bool PrepareAndCopyRasterGeometry(
+        nvrhi::ICommandList *commandList, uint32_t frameIndex, const SkyFrameInputs &sky);
+
     nvrhi::BufferHandle uiVertexStagingWraps[MAX_FRAMES_IN_FLIGHT];
     nvrhi::BufferHandle uiIndexStagingWraps[MAX_FRAMES_IN_FLIGHT];
     uint64_t uiVertexStagingHandles[MAX_FRAMES_IN_FLIGHT] = {};
@@ -726,6 +732,12 @@ private:
     nvrhi::BufferHandle particlePointStagingWraps[MAX_FRAMES_IN_FLIGHT];
     uint64_t particlePointStagingHandles[MAX_FRAMES_IN_FLIGHT] = {};
     uint64_t particlePointStagingBytes[MAX_FRAMES_IN_FLIGHT] = {};
+    nvrhi::BufferHandle rasterVertexDeviceWrap;
+    nvrhi::BufferHandle rasterIndexDeviceWrap;
+    nvrhi::BufferHandle rasterParticlePointDeviceWrap;
+    uint64_t rasterVertexDeviceHandle = 0;
+    uint64_t rasterIndexDeviceHandle = 0;
+    uint64_t rasterParticlePointDeviceHandle = 0;
     nvrhi::TextureHandle uiFrameTextures[MAX_FRAMES_IN_FLIGHT];
     uint64_t uiFrameImageHandles[MAX_FRAMES_IN_FLIGHT] = {};
     CpuFrameProfiler *cpuProfiler = nullptr;
@@ -760,6 +772,8 @@ private:
     // re-create replaces it, and every replaced wrap goes through the frame context's retire queue.
     nvrhi::TextureHandle presentDirectTextures[MAX_FRAMES_IN_FLIGHT];
     uint64_t presentDirectImageHandles[MAX_FRAMES_IN_FLIGHT] = {};
+    nvrhi::TextureHandle presentDirectDummyTexture;
+    bool presentDirectDummyCleared = false;
 
     // The shared RHI texture table (RhiTextureTable.h, owned by the host): the sky pass binds it as
     // descriptor set 0 and its slot 0 holds the engine's empty texture. Render also asks it to

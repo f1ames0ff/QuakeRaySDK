@@ -50,14 +50,6 @@ constexpr uint32_t SKY_ENV_CUBEMAP_UAV_SLOT = 2;
 constexpr uint32_t SKY_CLOUD_LAYER_SRV_SLOT = 3;
 constexpr uint32_t SKY_CLOUD_LAYER_SAMPLER_SLOT = 4;
 
-// The extent of one mip of a CUBEMAP_SIZE x CUBEMAP_SIZE face: 1024 >> m for m = 0..10, floored at
-// one texel for the last level (the same halving the legacy's blit chain walks,
-// RenderCubemap.cpp:259-299).
-uint32_t GetMipExtent(uint32_t mipLevel)
-{
-    return std::max(1u, RhiProceduralSkyPass::CUBEMAP_SIZE >> mipLevel);
-}
-
 // One of the two cube images, created once for the whole run (the legacy creates both in its
 // constructor and never re-creates them, RenderCubemap.cpp:90-91). The desc is the sampling shape
 // the set-8 consumers need (`TextureCube`, 6 layers, 11 mips, RGBA16F) plus the usage bits of the
@@ -174,11 +166,7 @@ RhiProceduralSkyPass::~RhiProceduralSkyPass()
 
     for (uint32_t frameIndex = 0; frameIndex < MAX_FRAMES_IN_FLIGHT; frameIndex++)
     {
-        for (uint32_t mipLevel = 0; mipLevel < CUBEMAP_MIP_LEVELS; mipLevel++)
-        {
-            skySets[frameIndex][mipLevel] = nullptr;
-        }
-
+        skySets[frameIndex] = nullptr;
         paramsBuffers[frameIndex] = nullptr;
     }
 
@@ -345,18 +333,15 @@ bool RhiProceduralSkyPass::Create(nvrhi::IDevice *pDevice,
             return false;
         }
 
-        for (uint32_t mipLevel = 0; mipLevel < CUBEMAP_MIP_LEVELS; mipLevel++)
-        {
-            skySets[frameIndex][mipLevel] = CreateSkySet(
-                device, skyLayout, cubemapTexture, environmentTexture, paramsBuffers[frameIndex],
-                cloudLayerReal ? cloudLayerTexture : placeholderCloudLayer.Get(), cloudLayerSampler,
-                mipLevel);
+        skySets[frameIndex] = CreateSkySet(
+            device, skyLayout, cubemapTexture, environmentTexture, paramsBuffers[frameIndex],
+            cloudLayerReal ? cloudLayerTexture : placeholderCloudLayer.Get(), cloudLayerSampler,
+            0);
 
-            if (skySets[frameIndex][mipLevel] == nullptr)
-            {
-                LogMessage(print, "Warning: RHI: failed to create a procedural-sky pass binding set");
-                return false;
-            }
+        if (skySets[frameIndex] == nullptr)
+        {
+            LogMessage(print, "Warning: RHI: failed to create a procedural-sky pass binding set");
+            return false;
         }
     }
 
@@ -374,26 +359,20 @@ bool RhiProceduralSkyPass::SetCloudLayer(nvrhi::ITexture *pTexture, nvrhi::ISamp
     {
         return true;
     }
-    nvrhi::BindingSetHandle nextSets[MAX_FRAMES_IN_FLIGHT][CUBEMAP_MIP_LEVELS];
+    nvrhi::BindingSetHandle nextSets[MAX_FRAMES_IN_FLIGHT];
     for (uint32_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; frame++)
     {
-        for (uint32_t mip = 0; mip < CUBEMAP_MIP_LEVELS; mip++)
+        nextSets[frame] = CreateSkySet(device, skyLayout, cubemapTexture, environmentTexture,
+                                       paramsBuffers[frame], pTexture, pSampler, 0);
+        if (nextSets[frame] == nullptr)
         {
-            nextSets[frame][mip] = CreateSkySet(device, skyLayout, cubemapTexture, environmentTexture,
-                                                paramsBuffers[frame], pTexture, pSampler, mip);
-            if (nextSets[frame][mip] == nullptr)
-            {
-                return false;
-            }
+            return false;
         }
     }
     for (uint32_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; frame++)
     {
-        for (uint32_t mip = 0; mip < CUBEMAP_MIP_LEVELS; mip++)
-        {
-            frameContext->Retire(skySets[frame][mip]);
-            skySets[frame][mip] = std::move(nextSets[frame][mip]);
-        }
+        frameContext->Retire(skySets[frame]);
+        skySets[frame] = std::move(nextSets[frame]);
     }
     cloudLayerTexture = pTexture;
     cloudLayerSampler = pSampler;
@@ -443,37 +422,22 @@ void RhiProceduralSkyPass::Render(nvrhi::ICommandList *pCommandList,
 
     rhi::writeBuffer(pCommandList, paramsBuffers[frameIndex], &params, sizeof(params));
 
-    // One dispatch per mip. Each set names its own single-level storage views, so the shader's
-    // GetDimensions returns that mip's extent and its bounds check, direction math and stores all
-    // work at that resolution; the z extent is the legacy's face count 6
-    // (RenderCubemap.cpp:946). The per-mip UAV bindings also make the automatic barrier pass move
-    // exactly the six layers of the mip being written out of the resting read-only layout before
-    // its dispatch - the mip-chain equivalent of the legacy's blit barriers (RenderCubemap.cpp:
-    // 240-313). The dispatches write disjoint subresources, so no barrier orders one level against
-    // another and none has to: each level is produced from the params alone, not from level m-1.
-    for (uint32_t mipLevel = 0; mipLevel < CUBEMAP_MIP_LEVELS; mipLevel++)
+    // Compute mip 0 across all 6 faces, then generate mips 1..10 via native vkCmdBlitImage
+    // (VK_FILTER_LINEAR) instead of running CmProceduralSky 10 extra times per frame.
     {
         nvrhi::ComputeState state;
         state.setPipeline(skyPipeline);
-        state.addBindingSet(skySets[frameIndex][mipLevel]);
+        state.addBindingSet(skySets[frameIndex]);
 
         pCommandList->setComputeState(state);
 
-        // Utils::GetWorkGroupCount is the legacy's `1 + ceil(size / 16)` (Utils.cpp:319-328), so mip
-        // 0 dispatches (65, 65, 6) like the legacy and the shader's bounds check discards the extra
-        // workgroup's invocations.
-        const uint32_t groups = Utils::GetWorkGroupCount(GetMipExtent(mipLevel), SKY_GROUP_SIZE);
+        const uint32_t groups = Utils::GetWorkGroupCount(CUBEMAP_SIZE, SKY_GROUP_SIZE);
 
         pCommandList->dispatch(groups, groups, CUBEMAP_FACE_COUNT);
     }
 
-    // The images are written now; put them back into the state the consumers' set-8 SRVs require and
-    // the next list starts from (see the state discipline in the class comment). This mirrors the
-    // legacy's final SHADER_READ_ONLY_OPTIMAL barrier after the mip chain (RenderCubemap.cpp:
-    // 324-329) and makes every later SRV binding on this list a no-op - the consumers bind these
-    // very handles, so the tracker sees one texture and no state can conflict.
-    pCommandList->setTextureState(cubemapTexture, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::NonPixelShaderResource);
-    pCommandList->setTextureState(environmentTexture, nvrhi::AllSubresources,
-                                  nvrhi::ResourceStates::NonPixelShaderResource);
+    rhi::generateCubemapMips(pCommandList, cubemapTexture, CUBEMAP_SIZE, CUBEMAP_MIP_LEVELS,
+                             nvrhi::ResourceStates::NonPixelShaderResource);
+    rhi::generateCubemapMips(pCommandList, environmentTexture, CUBEMAP_SIZE, CUBEMAP_MIP_LEVELS,
+                             nvrhi::ResourceStates::NonPixelShaderResource);
 }

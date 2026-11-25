@@ -48,7 +48,7 @@ public:
     Framebuffers &operator=(const Framebuffers &other) = delete;
     Framebuffers &operator=(Framebuffers &&other) noexcept = delete;
 
-    bool PrepareForSize(ResolutionState resolutionState);
+    bool PrepareForSize(ResolutionState resolutionState, bool waitIdle = true);
     bool NeedsPrepareForSize(const ResolutionState &resolutionState) const { return !(currentResolution == resolutionState); }
 
     enum class BarrierType { All, Storage, ColorAttachment, Transfer };
@@ -91,7 +91,6 @@ private:
     ResolutionState currentResolution;
 
     std::vector<VkImage> images;
-    std::vector<VkDeviceMemory> imageMemories;
     std::vector<VkImageView> imageViews;
 
     std::list<std::weak_ptr<IFramebuffersDependency>> subscribers;

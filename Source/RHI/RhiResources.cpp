@@ -1,5 +1,8 @@
 #include "RhiResources.h"
 
+#include <vulkan/vulkan.h>
+
+#include <algorithm>
 #include <string>
 
 namespace qray::rhi
@@ -68,6 +71,113 @@ nvrhi::TextureHandle createWhiteTexture(nvrhi::IDevice *device, nvrhi::ICommandL
     commandList->setTextureState(texture, nvrhi::AllSubresources, nvrhi::ResourceStates::ShaderResource);
 
     return texture;
+}
+
+void generateCubemapMips(nvrhi::ICommandList *commandList,
+                         nvrhi::ITexture *cubemap,
+                         uint32_t baseSize,
+                         uint32_t mipLevels,
+                         nvrhi::ResourceStates finalState)
+{
+    if (commandList == nullptr || cubemap == nullptr)
+    {
+        return;
+    }
+
+    if (mipLevels <= 1)
+    {
+        commandList->setTextureState(cubemap, nvrhi::AllSubresources, finalState);
+        return;
+    }
+
+    const uint32_t arraySize = cubemap->getDesc().arraySize;
+
+    // Move mip 0 to CopySource and mips 1..N-1 to CopyDest so vkCmdBlitImage can walk down
+    // the chain across all layers, then flush NVRHI's queued barriers onto VkCommandBuffer.
+    commandList->setTextureState(
+        cubemap,
+        nvrhi::TextureSubresourceSet(0, 1, 0, nvrhi::TextureSubresourceSet::AllArraySlices),
+        nvrhi::ResourceStates::CopySource);
+    commandList->setTextureState(
+        cubemap,
+        nvrhi::TextureSubresourceSet(1, nvrhi::MipLevel(mipLevels - 1), 0, nvrhi::TextureSubresourceSet::AllArraySlices),
+        nvrhi::ResourceStates::CopyDest);
+    commandList->commitBarriers();
+
+    const VkCommandBuffer cmd = static_cast<VkCommandBuffer>(
+        commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer).pointer);
+    const VkImage image = static_cast<VkImage>(
+        cubemap->getNativeObject(nvrhi::ObjectTypes::VK_Image).pointer);
+
+    if (cmd == VK_NULL_HANDLE || image == VK_NULL_HANDLE)
+    {
+        commandList->setTextureState(cubemap, nvrhi::AllSubresources, finalState);
+        return;
+    }
+
+    for (uint32_t mip = 1; mip < mipLevels; ++mip)
+    {
+        const uint32_t srcSize = std::max(1u, baseSize >> (mip - 1));
+        const uint32_t dstSize = std::max(1u, baseSize >> mip);
+
+        VkImageBlit blit = {};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = mip - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = arraySize;
+        blit.srcOffsets[0] = { 0, 0, 0 };
+        blit.srcOffsets[1] = { int32_t(srcSize), int32_t(srcSize), 1 };
+
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = mip;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = arraySize;
+        blit.dstOffsets[0] = { 0, 0, 0 };
+        blit.dstOffsets[1] = { int32_t(dstSize), int32_t(dstSize), 1 };
+
+        vkCmdBlitImage(
+            cmd,
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        if (mip + 1 < mipLevels)
+        {
+            VkImageMemoryBarrier barrier = {};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.baseMipLevel = mip;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = arraySize;
+
+            vkCmdPipelineBarrier(
+                cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                1, &barrier);
+        }
+    }
+
+    // Re-sync NVRHI's state tracker with the actual Vulkan layouts before transitioning all mips to finalState.
+    commandList->beginTrackingTextureState(
+        cubemap,
+        nvrhi::TextureSubresourceSet(0, nvrhi::MipLevel(mipLevels - 1), 0, nvrhi::TextureSubresourceSet::AllArraySlices),
+        nvrhi::ResourceStates::CopySource);
+    commandList->beginTrackingTextureState(
+        cubemap,
+        nvrhi::TextureSubresourceSet(nvrhi::MipLevel(mipLevels - 1), 1, 0, nvrhi::TextureSubresourceSet::AllArraySlices),
+        nvrhi::ResourceStates::CopyDest);
+    commandList->setTextureState(cubemap, nvrhi::AllSubresources, finalState);
 }
 
 }
