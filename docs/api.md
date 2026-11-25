@@ -11,7 +11,7 @@ with [embedding.md](embedding.md) for a walkthrough and use
 The [host feature matrix](host-feature-matrix.md) links the focused guides for
 sun/god rays, lights/DTAL/NEE, GI/ReSTIR/denoiser and other frame blocks.
 
-Current API version: `QR_API_VERSION 1.06.0000`.
+Current API version: `QR_API_VERSION 1.07.0000`.
 
 The package is source-level: rebuild the host and SDK together when updating.
 `QR_API_VERSION`, `QR_SPATIAL_CONVENTION_VERSION` and the in/out

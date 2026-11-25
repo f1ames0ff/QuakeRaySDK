@@ -168,9 +168,9 @@ public:
 
     // The shape of the borrowed cube and of the module's own depth (RenderCubemap.cpp:34-37, :80:
     // 1024x1024, 6 faces, 11 mips, D16).
-    static constexpr uint32_t CUBEMAP_SIZE = 1024;
+    static constexpr uint32_t CUBEMAP_SIZE = 2048;
     static constexpr uint32_t CUBEMAP_FACE_COUNT = 6;
-    static constexpr uint32_t CUBEMAP_MIP_LEVELS = 11;
+    static constexpr uint32_t CUBEMAP_MIP_LEVELS = 12;
 
     RhiRasterSkyPass();
     ~RhiRasterSkyPass();

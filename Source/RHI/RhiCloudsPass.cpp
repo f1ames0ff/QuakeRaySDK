@@ -363,7 +363,7 @@ float RhiCloudsPass::GetWindSpeed(float setting, float altitude)
 std::array<float, 4> RhiCloudsPass::MakeShadowPlacement(const LayerParams &params)
 {
     const float extent = std::max(params.cloudLayer[0] * SHADOW_VOLUME_EXTENT_PER_ALTITUDE, 0.025f);
-    const bool enabled = params.sunDirection[3] > 0.5f && params.sunDirection[2] > 0.05f;
+    const bool enabled = params.sunDirection[3] > 0.5f && params.sunDirection[2] > 0.01f;
     return { enabled ? 1.0f : 0.0f, params.cloudAnchor[0] - extent * 0.5f,
              params.cloudAnchor[1] - extent * 0.5f, extent };
 }
@@ -390,6 +390,20 @@ bool ShadowParamsEqual(const RhiCloudsPass::ShadowParams &a, const RhiCloudsPass
            FloatArrayEqual(a.mapProjection, b.mapProjection);
 }
 
+bool SkyLightingParamsEqual(const RhiCloudsPass::LayerParams &a, const RhiCloudsPass::LayerParams &b)
+{
+    return FloatArrayEqual(a.sunDirection, b.sunDirection) &&
+           FloatArrayEqual(a.skyColor, b.skyColor) &&
+           FloatArrayEqual(a.skyParams, b.skyParams) &&
+           FloatArrayEqual(a.cloudColor, b.cloudColor) &&
+           FloatArrayEqual(a.cloudParams, b.cloudParams) &&
+           FloatArrayEqual(a.sunDiscColor, b.sunDiscColor) &&
+           FloatArrayEqual(a.sunTint, b.sunTint) &&
+           FloatArrayEqual(a.atmosphereParams, b.atmosphereParams) &&
+           FloatArrayEqual(a.moonDirection, b.moonDirection) &&
+           FloatArrayEqual(a.moonParams, b.moonParams);
+}
+
 bool LayerParamsEqual(const RhiCloudsPass::LayerParams &a, const RhiCloudsPass::LayerParams &b)
 {
     for (size_t i = 0; i < std::size(a.faceBasis); i++)
@@ -399,12 +413,7 @@ bool LayerParamsEqual(const RhiCloudsPass::LayerParams &a, const RhiCloudsPass::
             return false;
         }
     }
-    return FloatArrayEqual(a.sunDirection, b.sunDirection) &&
-           FloatArrayEqual(a.skyColor, b.skyColor) &&
-           FloatArrayEqual(a.skyParams, b.skyParams) &&
-           FloatArrayEqual(a.cloudColor, b.cloudColor) &&
-           FloatArrayEqual(a.cloudParams, b.cloudParams) &&
-           FloatArrayEqual(a.sunDiscColor, b.sunDiscColor) &&
+    return SkyLightingParamsEqual(a, b) &&
            FloatArrayEqual(a.cloudLayer, b.cloudLayer) &&
            FloatArrayEqual(a.cloudMarch, b.cloudMarch) &&
            FloatArrayEqual(a.cloudAnchor, b.cloudAnchor) &&
@@ -449,6 +458,7 @@ CloudLayerUpdate AnalyzeCloudLayerUpdate(const RhiCloudsPass::LayerParams &layer
     RhiCloudsPass::LayerParams structuralLayer = layer;
     RhiCloudsPass::LayerParams structuralLast = lastLayerParams;
     structuralLayer.cloudColor[3] = structuralLast.cloudColor[3] = 0.0f;
+    structuralLayer.atmosphereParams[3] = structuralLast.atmosphereParams[3] = 0.0f;
     structuralLayer.cloudMarch[1] = structuralLast.cloudMarch[1] = 0.0f;
     std::fill(std::begin(structuralLayer.cloudAnchor), std::end(structuralLayer.cloudAnchor), 0.0f);
     std::fill(std::begin(structuralLast.cloudAnchor), std::end(structuralLast.cloudAnchor), 0.0f);
@@ -547,7 +557,6 @@ bool RhiCloudsPass::Render(nvrhi::ICommandList *pCommandList,
     std::memcpy(layer.cloudShadowPlacement, shadowPlacement, sizeof(shadowPlacement));
     if (shadowPlacement[0] <= 0.5f)
     {
-        layer.sunDirection[3] = 0.0f;
         shadowValid = false;
     }
 

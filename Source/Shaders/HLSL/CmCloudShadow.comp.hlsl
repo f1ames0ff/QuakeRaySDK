@@ -58,7 +58,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 origin = float3(flatPos.x, flatPos.y, layer.altitude);
     origin.xy += sunDir.xy * (params.cloudMarch.w / max(sunDir.z, 1.0e-3));
 
-    float dt = layer.thickness / max(sunDir.z, 1.0e-3) / (float)steps;
+    float dt = layer.thickness / max(sunDir.z, 0.06) / (float)steps;
     float3 tangent;
     float3 bitangent;
     float sampleStep;

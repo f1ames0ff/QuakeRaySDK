@@ -162,7 +162,8 @@ bool RhiLightShaftVolumePass::CreateBindingLayouts()
                                  "RhiLightShaftVolumePass sampler");
 
     if (tlasLayout == nullptr || paramsLayout == nullptr || uniformLayout == nullptr ||
-        volumeLayout == nullptr || prefixLayout == nullptr || assignLayout == nullptr || sampler == nullptr)
+        volumeLayout == nullptr || prefixLayout == nullptr || assignLayout == nullptr || sampler == nullptr ||
+        !cloudShadowBinding.Create(device, frameContext, nvrhi::ShaderType::Compute))
     {
         LogMessage(print, "Warning: RHI: failed to create a light-shaft volume binding layout");
         return false;
@@ -188,6 +189,7 @@ bool RhiLightShaftVolumePass::CreatePipelines()
         {
             desc.addBindingLayout(lightLayout);
         }
+        desc.addBindingLayout(cloudShadowBinding.GetLayout());
         volumePipeline = rhi::createComputePipeline(device, desc, "RhiLightShaftVolumePass");
     }
 
@@ -530,6 +532,7 @@ bool RhiLightShaftVolumePass::Render(nvrhi::ICommandList *pCommandList,
     state.addBindingSet(target.uavSet);
     state.addBindingSet(textureTable->GetTable());
     state.addBindingSet(pLightSet);
+    state.addBindingSet(cloudShadowBinding.GetSet());
     pCommandList->setComputeState(state);
 
     const uint32_t groupsX = (volumeSizeX + GROUP_SIZE_X - 1) / GROUP_SIZE_X;

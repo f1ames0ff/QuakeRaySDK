@@ -24,9 +24,14 @@ struct CmSkyCloudsParams_BT
     float4 cloudColor;
     float4 cloudParams;
     float4 sunDiscColor;
+    float4 sunTint;
+    float4 moonDirection;
+    float4 moonParams;
+    float4 atmosphereParams;
+    float4 starParams;
     float4 cloudLayer;
-    float4 cloudMarch;
     float4 cloudAnchor;
+    float4 cloudMarch;
     float4 cloudShadowPlacement;
 };
 
@@ -37,6 +42,7 @@ struct CmSkyCloudsParams_BT
 
 #include "CloudLayer.hlsli"
 #include "CloudShadowMap.hlsli"
+#include "AtmosphereCommon.hlsli"
 
 static const float CLOUD_POWDER = 8.0;
 static const float CLOUD_STEP_GROWTH = 1.045;
@@ -52,6 +58,13 @@ float henyeyGreenstein(float mu, float g)
 float cloudPhase(float mu, float g)
 {
     return lerp(henyeyGreenstein(mu, g), henyeyGreenstein(mu, -g * 0.35), 0.5);
+}
+
+float cloudSilverLiningPhase(float mu, float g)
+{
+    return 0.10 * henyeyGreenstein(mu, min(g + 0.05, 0.80)) +
+           0.55 * henyeyGreenstein(mu, g * 0.55) +
+           0.35 * henyeyGreenstein(mu, -g * 0.35);
 }
 
 float cloudMultiScatter(float sunDepth, float3 phase)
@@ -78,6 +91,33 @@ float cloudSunTauFromMap(CloudLayer layer, float3 p, float3 sunDir, out float bl
     return cloudShadowTau(cloudShadowMap, cloudShadowMap_Sampler, worldPos, sunDir, placement, height, blend);
 }
 
+float cloudCoarseTau(CloudLayer layer, float3 p, float3 lightDir)
+{
+    if (lightDir.z <= -0.04)
+    {
+        return 0.0;
+    }
+
+    const int STEPS = 4;
+    float maxDist = lightDir.z > 0.04
+        ? min((layer.altitude + layer.thickness - p.z) / lightDir.z, layer.thickness * 3.0)
+        : layer.thickness * 3.0;
+    float dt = max(maxDist, 0.0) / (float)STEPS;
+    float col = 0.0;
+
+    for (int i = 0; i < STEPS; i++)
+    {
+        float3 q = p + lightDir * (((float)i + 0.5) * dt);
+        if (q.z <= layer.altitude || q.z >= layer.altitude + layer.thickness)
+        {
+            continue;
+        }
+        col += cloudDensity(layer, q, false) * dt;
+    }
+
+    return cloudOpticalDepth(layer, col);
+}
+
 [numthreads(16, 16, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -101,6 +141,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 dir = normalize(ndc.x * right + (-ndc.y) * up + forward);
 
     float opacity  = clamp(params.skyParams.y, 0.0, 1.0);
+    bool  aaaMode  = params.skyColor.w > 0.5;
     float sunLight = params.sunDirection.w;
 
     CloudLayer layer;
@@ -121,14 +162,48 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     int sunSlices = (int)volumeZ;
 
     float3 albedo = max(params.cloudColor.xyz, float3(0.0, 0.0, 0.0));
+    float3 sunDir = normalize(params.sunDirection.xyz);
+    float3 moonDir = length(params.moonDirection.xyz) > 1.0e-5
+        ? normalize(params.moonDirection.xyz)
+        : -sunDir;
 
-    float3 sunColor = params.sunDiscColor.xyz * max(params.cloudLayer.z, 0.0) * sunLight;
-    float3 skyLight = max(params.skyColor.xyz, float3(0.0, 0.0, 0.0)) * max(params.cloudLayer.w, 0.0);
+    AtmosphereConfig atmo = makeAtmosphereConfig(params.skyColor.rgb, params.atmosphereParams.xyz);
+    float moonPhaseScale = params.moonParams.w >= 0.0
+        ? lerp(0.18, 1.0, clamp(params.moonParams.w, 0.0, 1.0))
+        : lerp(0.18, 1.0, clamp(0.5 + 0.5 * dot(-sunDir, moonDir), 0.0, 1.0));
+    float3 moonBase = max(params.moonParams.xyz, (float3)0.0) * moonPhaseScale;
+    bool moonActive = aaaMode && params.moonDirection.w > 0.0 &&
+                      max(moonBase.r, max(moonBase.g, moonBase.b)) > 1.0e-5;
+    bool sunActive = sunLight > 0.5 &&
+                     (!aaaMode || atmoHorizonMask(layer.altitude + layer.thickness, sunDir) > 0.0);
+
+    float3 zenithAmbient = (float3)0.0;
+    float3 horizSunward = (float3)0.0;
+    float3 horizAway = (float3)0.0;
+    if (aaaMode)
+    {
+        float3 sunTintRaw = max(params.sunTint.xyz, (float3)0.0) * max(params.sunTint.w, 0.0);
+        evalCloudSkyAmbient(sunDir, sunActive ? 1.0 : 0.0, sunTintRaw,
+                            moonDir, moonActive ? 1.0 : 0.0, moonBase,
+                            atmo, zenithAmbient, horizSunward, horizAway);
+        float skyScale = max(params.cloudLayer.w, 0.0);
+        zenithAmbient *= skyScale;
+        horizSunward *= skyScale;
+        horizAway *= skyScale;
+    }
+
+    float3 legacySunColor = params.sunDiscColor.xyz * max(params.cloudLayer.z, 0.0) * (sunLight > 0.5 ? sunLight : 0.0);
+    float3 legacySkyLight = max(params.skyColor.xyz, float3(0.0, 0.0, 0.0)) * max(params.cloudLayer.w, 0.0);
+    float dawnDirectFade = smoothstep(-0.025, 0.06, sunDir.z);
+    float3 aaaSunBase = max(params.sunTint.xyz, (float3)0.0) * max(params.sunTint.w, 0.0) * max(params.cloudLayer.z, 0.0) * (2.8 * dawnDirectFade);
 
     float3 inscatter = float3(0.0, 0.0, 0.0);
     float transmittance = 1.0;
 
-    bool lit = sunColor.r + sunColor.g + sunColor.b > 0.0 || skyLight.r + skyLight.g + skyLight.b > 0.0;
+    bool lit = aaaMode
+        ? (sunActive || moonActive || atmo.scatterGain > 0.0)
+        : (legacySunColor.r + legacySunColor.g + legacySunColor.b > 0.0 ||
+           legacySkyLight.r + legacySkyLight.g + legacySkyLight.b > 0.0);
 
     if (dir.z > 0.0 && lit && opacity > 0.0 && params.cloudParams.w > 0.5 &&
         layer.coverage < 1.0 && layer.density > 0.0)
@@ -144,16 +219,25 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         float t = tIn;
         float step = dt;
 
-        float3 sunDir = normalize(params.sunDirection.xyz);
-        float mu = dot(dir, sunDir);
-        float sunPhase = cloudPhase(mu, phaseG);
-        float3 multiScatterPhase;
+        float muSun = dot(dir, sunDir);
+        float sunPhase = aaaMode ? cloudSilverLiningPhase(muSun, phaseG) : cloudPhase(muSun, phaseG);
+        float muMoon = dot(dir, moonDir);
+        float moonPhaseFn = cloudPhase(muMoon, phaseG * 0.8);
 
+        float3 multiScatterPhase;
         for (int order = 1; order <= 3; order++)
         {
             float gOrder = phaseG * (1.0 - 0.3 * (float)order);
             multiScatterPhase[order - 1] =
-                lerp(henyeyGreenstein(mu, gOrder), henyeyGreenstein(mu, -gOrder), 0.5);
+                lerp(henyeyGreenstein(muSun, gOrder), henyeyGreenstein(muSun, -gOrder), 0.5);
+        }
+
+        float3 moonMultiPhase;
+        for (int order = 1; order <= 3; order++)
+        {
+            float gOrder = phaseG * (1.0 - 0.3 * (float)order);
+            moonMultiPhase[order - 1] =
+                lerp(henyeyGreenstein(muMoon, gOrder), henyeyGreenstein(muMoon, -gOrder), 0.5);
         }
 
         for (int i = 0; i < viewSteps; i++)
@@ -169,32 +253,60 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             if (density > 1.0e-3)
             {
                 float sigma = cloudOpticalDepth(layer, density);
-
-                float sunTau = 0.0;
-                float sunVisibility = 1.0;
-                if (sunLight > 0.5)
-                {
-                    float blend;
-                    float mapTau = cloudSunTauFromMap(layer, p, sunDir, blend);
-                    float marchTau = -1.0;
-                    if (blend < 1.0)
-                    {
-                        marchTau = cloudOpticalDepth(layer, cloudSunDepth(layer, p, sunDir, min(CLOUD_SHADOW_STEPS, 8), sunSlices));
-                    }
-                    sunTau = (marchTau >= 0.0) ? lerp(marchTau, max(mapTau, 0.0), blend) : mapTau;
-                    sunVisibility = exp(-sunTau);
-                }
-
-                float powder = 1.0 - exp(-density * CLOUD_POWDER);
-                float rim = lerp(1.0, powder, clamp(-mu, 0.0, 1.0));
-
                 float h = (p.z - layer.altitude) / layer.thickness;
                 float solid = density / max(cloudHeightProfile(h), 1.0e-3);
                 float skyShield = exp(-solid * layer.density * CLOUD_EXTINCTION * (1.0 - h));
+                float powder = 1.0 - exp(-density * CLOUD_POWDER);
 
-                float3 light = sunColor * (sunVisibility * sunPhase * rim +
-                                           cloudMultiScatter(sunTau, multiScatterPhase)) +
-                               skyLight * skyShield;
+                float3 light = (float3)0.0;
+
+                if (sunActive)
+                {
+                    float blend = 0.0;
+                    float mapTau = (params.cloudShadowPlacement.x > 0.5 && sunDir.z > 0.01)
+                        ? cloudSunTauFromMap(layer, p, sunDir, blend)
+                        : -1.0;
+                    float marchTau = -1.0;
+                    if (blend < 1.0)
+                    {
+                        marchTau = cloudSunDepth(layer, p, sunDir, min(CLOUD_SHADOW_STEPS, 8), sunSlices);
+                    }
+                    float sunTau = (marchTau >= 0.0 && blend > 0.0 && mapTau >= 0.0)
+                        ? lerp(marchTau, mapTau, blend)
+                        : (blend >= 1.0 && mapTau >= 0.0 ? mapTau : marchTau);
+                    float sunVisibility = exp(-sunTau);
+
+                    float rim = lerp(1.0, powder, clamp(-muSun, 0.0, 1.0));
+                    float3 sunColorHere = aaaMode
+                        ? aaaSunBase * evalSunTransmittanceAtAltitude(p.z, sunDir, atmo)
+                        : legacySunColor;
+
+                    light += sunColorHere * (sunVisibility * sunPhase * rim +
+                                             cloudMultiScatter(sunTau, multiScatterPhase));
+                }
+
+                if (aaaMode && moonActive)
+                {
+                    float moonTau = cloudCoarseTau(layer, p, moonDir);
+                    float moonVis = exp(-moonTau);
+                    float moonRim = lerp(1.0, powder, clamp(-muMoon, 0.0, 1.0));
+                    float3 moonColorHere = moonBase * evalSunTransmittanceAtAltitude(p.z, moonDir, atmo) * 0.055;
+                    light += moonColorHere * (moonVis * moonPhaseFn * moonRim +
+                                              cloudMultiScatter(moonTau, moonMultiPhase));
+                }
+
+                if (aaaMode)
+                {
+                    float align = sunActive ? muSun : muMoon;
+                    float3 localHoriz = lerp(horizAway, horizSunward, smoothstep(-0.65, 0.70, align));
+                    float3 skyFill = lerp(localHoriz * 0.45 + zenithAmbient * 0.55,
+                                          zenithAmbient, smoothstep(0.15, 0.85, h)) * 1.15;
+                    light += skyFill * skyShield;
+                }
+                else
+                {
+                    light += legacySkyLight * skyShield;
+                }
 
                 float stepTransmittance = exp(-sigma * step);
                 inscatter += transmittance * light * (1.0 - stepTransmittance);

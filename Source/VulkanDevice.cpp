@@ -402,7 +402,7 @@ void PopulateGodRaysInputs(const QrDrawFrameInfo &drawInfo,
                            Scene &scene,
                            NvrhiFrameSkeleton::SkyFrameInputs::GodRays &out)
 {
-    static constexpr float kGodRaysRadianceScale = 500.0f;
+    static constexpr float kGodRaysRadianceScale = 50.0f;
     static constexpr float kStepScales[5] = { 2.0f, 1.5f, 1.0f, 0.75f, 0.5f };
 
     const float godRaysIntensity =
@@ -443,6 +443,129 @@ void PopulateGodRaysInputs(const QrDrawFrameInfo &drawInfo,
     }
     CopyLightShaftSources(lightShafts, lightShaftCount, out);
     PopulateGodRaysWorldBounds(scene, frameIndex, out);
+}
+
+void NormalizeDirectionOrFallback(const float inVec[3], const float fallback[3], float outVec[3])
+{
+    const float x = std::isfinite(inVec[0]) ? inVec[0] : 0.0f;
+    const float y = std::isfinite(inVec[1]) ? inVec[1] : 0.0f;
+    const float z = std::isfinite(inVec[2]) ? inVec[2] : 0.0f;
+    const float lenSq = x * x + y * y + z * z;
+    if (lenSq > 1e-8f)
+    {
+        const float invLen = 1.0f / std::sqrt(lenSq);
+        outVec[0] = x * invLen;
+        outVec[1] = y * invLen;
+        outVec[2] = z * invLen;
+        return;
+    }
+
+    outVec[0] = fallback[0];
+    outVec[1] = fallback[1];
+    outVec[2] = fallback[2];
+}
+
+float SanitizeClamped(float value, float lo, float hi, float fallback)
+{
+    return std::isfinite(value) ? std::clamp(value, lo, hi) : fallback;
+}
+
+void PopulateProceduralAtmosphere(const QrDrawFrameSkyParams &skyParams,
+                                  float frameTime,
+                                  RhiProceduralSkyPass::Params &p)
+{
+    static constexpr float kDefaultSunFallback[3] = { 0.303f, 0.505f, 0.808f };
+    p.sunDirection[3] = skyParams.proceduralSunEnabled ? 1.0f : 0.0f;
+    NormalizeDirectionOrFallback(skyParams.proceduralSunDirection.data, kDefaultSunFallback, p.sunDirection);
+
+    p.sunTint[0] = std::max(0.0f, skyParams.proceduralSunTint.data[0]);
+    p.sunTint[1] = std::max(0.0f, skyParams.proceduralSunTint.data[1]);
+    p.sunTint[2] = std::max(0.0f, skyParams.proceduralSunTint.data[2]);
+    p.sunTint[3] = std::isfinite(skyParams.proceduralSunStrength)
+        ? std::max(0.0f, skyParams.proceduralSunStrength)
+        : 1.0f;
+
+    const float defaultMoonFallback[3] = { -p.sunDirection[0], -p.sunDirection[1], -p.sunDirection[2] };
+    NormalizeDirectionOrFallback(skyParams.proceduralMoonDirection.data, defaultMoonFallback, p.moonDirection);
+    p.moonDirection[3] = 0.022f * SanitizeClamped(skyParams.proceduralMoonSize, 0.0f, 10.0f, 1.0f);
+
+    p.moonParams[0] = std::max(0.0f, skyParams.proceduralMoonColor.data[0]);
+    p.moonParams[1] = std::max(0.0f, skyParams.proceduralMoonColor.data[1]);
+    p.moonParams[2] = std::max(0.0f, skyParams.proceduralMoonColor.data[2]);
+    p.moonParams[3] = std::isfinite(skyParams.proceduralMoonPhase) ? skyParams.proceduralMoonPhase : -1.0f;
+
+    p.atmosphereParams[0] = SanitizeClamped(skyParams.atmosphereDensity, 0.0f, 4.0f, 1.0f);
+    p.atmosphereParams[1] = SanitizeClamped(skyParams.atmosphereMie, 0.0f, 4.0f, 1.0f);
+    p.atmosphereParams[2] = SanitizeClamped(skyParams.atmosphereOzone, 0.0f, 4.0f, 1.0f);
+    p.atmosphereParams[3] = std::isfinite(skyParams.celestialRotationRadians)
+        ? skyParams.celestialRotationRadians
+        : 0.0f;
+
+    p.starParams[0] = skyParams.proceduralStarsEnabled ? 1.0f : 0.0f;
+    p.starParams[1] = SanitizeClamped(skyParams.proceduralStarDensity, 0.0f, 4.0f, 1.0f);
+    p.starParams[2] = SanitizeClamped(skyParams.proceduralStarIntensity, 0.0f, 5.0f, 1.0f);
+    p.starParams[3] = frameTime;
+}
+
+void PopulateLegacyProceduralSun(const float sunDir[3], bool hasSun, RhiProceduralSkyPass::Params &p)
+{
+    static constexpr float kDefaultSunFallback[3] = { 0.303f, 0.505f, 0.808f };
+    p.sunDirection[3] = hasSun ? 1.0f : 0.0f;
+    if (hasSun)
+    {
+        p.sunDirection[0] = -sunDir[0];
+        p.sunDirection[1] = -sunDir[1];
+        p.sunDirection[2] = -sunDir[2];
+    }
+    else
+    {
+        p.sunDirection[0] = kDefaultSunFallback[0];
+        p.sunDirection[1] = kDefaultSunFallback[1];
+        p.sunDirection[2] = kDefaultSunFallback[2];
+    }
+}
+
+bool ConfigureProceduralSkySunAndTint(const QrDrawFrameSkyParams *pSkyParams,
+                                      const ShGlobalUniform *globalUniform,
+                                      Scene &scene,
+                                      RhiProceduralSkyPass::Params &p,
+                                      float outSunColor[3])
+{
+    p.skyTint[0] = globalUniform->skyColorDefault[0];
+    p.skyTint[1] = globalUniform->skyColorDefault[1];
+    p.skyTint[2] = globalUniform->skyColorDefault[2];
+
+    const bool configured =
+        pSkyParams != nullptr && pSkyParams->proceduralAtmosphereConfigured != 0;
+    p.skyTint[3] = configured ? 1.0f : 0.0f;
+
+    p.sunDiscColor[0] = p.sunDiscColor[1] = p.sunDiscColor[2] = 1.0f;
+    if (pSkyParams != nullptr)
+    {
+        p.sunDiscColor[0] = pSkyParams->sunDiscColor.data[0];
+        p.sunDiscColor[1] = pSkyParams->sunDiscColor.data[1];
+        p.sunDiscColor[2] = pSkyParams->sunDiscColor.data[2];
+    }
+
+    float sunDir[3] = {};
+    float sunAngularRadius = 0.0047f;
+    const bool hasSun = scene.GetLightManager()->GetLastDirectionalLight(outSunColor, sunDir, &sunAngularRadius);
+    if (configured)
+    {
+        PopulateProceduralAtmosphere(*pSkyParams, globalUniform->time, p);
+    }
+    else
+    {
+        PopulateLegacyProceduralSun(sunDir, hasSun, p);
+    }
+
+    p.skyParams[0] = globalUniform->skyColorMultiplier;
+    p.skyParams[1] = globalUniform->skyColorSaturation;
+    p.skyParams[2] = 30.0f;
+    float sunDiscSize = pSkyParams != nullptr ? pSkyParams->sunDiscSize : 1.0f;
+    sunDiscSize = std::isfinite(sunDiscSize) ? std::clamp(sunDiscSize, 0.0f, 10.0f) : 1.0f;
+    p.skyParams[3] = 0.025f * sunDiscSize;
+    return !configured && hasSun;
 }
 
 }
@@ -704,7 +827,8 @@ static void FillUniformTonemappingAndSky(ShGlobalUniform *gu,
         memcpy(gu->skyColorDefault, sp.skyColorDefault.data, sizeof(float) * 3);
         gu->skyColorMultiplier = sp.skyColorMultiplier;
         gu->skyColorSaturation = std::max(sp.skyColorSaturation, 0.0f);
-        gu->skyAmbientLod = std::clamp(sp.skyAmbientLod, 0.0f, 10.0f);
+        const float maxSkyLod = static_cast<float>(qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1);
+        gu->skyAmbientLod = std::clamp(sp.skyAmbientLod, 0.0f, maxSkyLod);
         gu->skyLightMultiplier = std::max(sp.skyLightMultiplier, 0.0f);
         gu->skyNee = sp.skyNee != 0 ? 1.0f : 0.0f;
 
@@ -725,7 +849,7 @@ static void FillUniformTonemappingAndSky(ShGlobalUniform *gu,
         gu->skyColorDefault[0] = gu->skyColorDefault[1] = gu->skyColorDefault[2] = gu->skyColorDefault[3] = 1.0f;
         gu->skyColorMultiplier = 1.0f;
         gu->skyColorSaturation = 1.0f;
-        gu->skyAmbientLod = 10.0f;
+        gu->skyAmbientLod = static_cast<float>(qray::RhiProceduralSkyPass::CUBEMAP_MIP_LEVELS - 1);
         gu->skyLightMultiplier = 1.0f;
         gu->skyNee = 0.0f;
         gu->skyType = SKY_TYPE_COLOR;
@@ -1470,42 +1594,9 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     if (!drawInfo.renderUiOnly)
     {
         RhiProceduralSkyPass::Params p = {};
-
-        p.skyTint[0] = globalUniform->skyColorDefault[0];
-        p.skyTint[1] = globalUniform->skyColorDefault[1];
-        p.skyTint[2] = globalUniform->skyColorDefault[2];
-
-        p.sunDiscColor[0] = p.sunDiscColor[1] = p.sunDiscColor[2] = 1.0f;
-        if (drawInfo.pSkyParams)
-        {
-            p.sunDiscColor[0] = drawInfo.pSkyParams->sunDiscColor.data[0];
-            p.sunDiscColor[1] = drawInfo.pSkyParams->sunDiscColor.data[1];
-            p.sunDiscColor[2] = drawInfo.pSkyParams->sunDiscColor.data[2];
-        }
-
-        float sunColor[3], sunDir[3], sunAngularRadius = 0.0047f;
-        const bool hasSun = scene->GetLightManager()->GetLastDirectionalLight(sunColor, sunDir, &sunAngularRadius);
-        p.sunDirection[3] = hasSun ? 1.0f : 0.0f;
-        if (hasSun)
-        {
-            p.sunDirection[0] = -sunDir[0];
-            p.sunDirection[1] = -sunDir[1];
-            p.sunDirection[2] = -sunDir[2];
-        }
-        else
-        {
-            float d[3] = { 0.3f, 0.5f, 0.8f };
-            const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-            p.sunDirection[0] = d[0] / len;
-            p.sunDirection[1] = d[1] / len;
-            p.sunDirection[2] = d[2] / len;
-        }
-        p.skyParams[0] = globalUniform->skyColorMultiplier;
-        p.skyParams[1] = globalUniform->skyColorSaturation;
-        p.skyParams[2] = 30.0f;
-        float sunDiscSize = drawInfo.pSkyParams != nullptr ? drawInfo.pSkyParams->sunDiscSize : 1.0f;
-        sunDiscSize = std::isfinite(sunDiscSize) ? std::clamp(sunDiscSize, 0.0f, 10.0f) : 1.0f;
-        p.skyParams[3] = 0.025f * sunDiscSize;
+        float sunColor[3] = {};
+        const bool applyLegacySunColor = ConfigureProceduralSkySunAndTint(
+            drawInfo.pSkyParams, globalUniform, *scene, p, sunColor);
 
         const uint32_t cloudsQuality = drawInfo.pSkyParams != nullptr
             ? std::min(drawInfo.pSkyParams->skyCloudsQuality, uint32_t(QR_SKY_CLOUDS_MAX_QUALITY))
@@ -1535,9 +1626,16 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
             }
         }
 
-        p.skyTint[3] = 0.0f;
         const float wind = RhiCloudsPass::GetWindSpeed(p.cloudParams[2], cloudAltitude);
         p.cloudParams[2] = wind;
+        p.cloudLayer[0] = cloudAltitude;
+        p.cloudLayer[1] = cloudThickness;
+        p.cloudLayer[2] = 1.0f;
+        p.cloudLayer[3] = 1.0f;
+        p.cloudAnchor[0] = globalUniform->cameraPosition[0];
+        p.cloudAnchor[1] = globalUniform->cameraPosition[1];
+        p.cloudAnchor[2] = globalUniform->cameraPosition[2];
+        p.cloudAnchor[3] = 0.35f;
 
         constexpr float PI = 3.14159265358979323846f;
         const float faceAngles[6][2] = {
@@ -1561,11 +1659,11 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         }
 
         RhiCloudsPass::LayerParams clouds = {};
-        static_assert(offsetof(RhiCloudsPass::LayerParams, cloudLayer) == sizeof(RhiProceduralSkyPass::Params),
+        static_assert(offsetof(RhiCloudsPass::LayerParams, cloudMarch) == sizeof(RhiProceduralSkyPass::Params),
                       "the layer params must start with the procedural sky params");
         memcpy(&clouds, &p, sizeof(p));
 
-        if (hasSun)
+        if (applyLegacySunColor)
         {
             clouds.sunDiscColor[0] = sunColor[0];
             clouds.sunDiscColor[1] = sunColor[1];
@@ -1573,17 +1671,9 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
         }
 
         clouds.cloudParams[2] = wind;
-
-        clouds.cloudLayer[0] = cloudAltitude;
-        clouds.cloudLayer[1] = cloudThickness;
-        clouds.cloudLayer[2] = 1.0f;
-        clouds.cloudLayer[3] = 1.0f;
         clouds.cloudMarch[0] = float(RhiCloudsPass::GetViewSteps(cloudsQuality));
         clouds.cloudMarch[2] = 0.35f;
         clouds.cloudMarch[3] = 0.75f;
-        clouds.cloudAnchor[0] = globalUniform->cameraPosition[0];
-        clouds.cloudAnchor[1] = globalUniform->cameraPosition[1];
-        clouds.cloudAnchor[2] = globalUniform->cameraPosition[2];
         sky.cloudsParams = clouds;
 
         RhiCloudsPass::ShadowParams cloudsShadow = {};

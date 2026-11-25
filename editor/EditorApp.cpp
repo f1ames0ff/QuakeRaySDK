@@ -4888,10 +4888,36 @@ bool EditorApp::UploadWorldClusters()
     return true;
 }
 
+namespace
+{
+
+float ResolveEditorSunIntensity(const EditorRenderSettings &settings, const EditorSunState &sun)
+{
+    if (sun.enabled)
+    {
+        return sun.radiance;
+    }
+
+    const bool timeSunActive = settings.skyType == QR_SKY_TYPE_PROCEDURAL && settings.timeOfDayEnable;
+    return timeSunActive ? kEditorSkySunRadiance : 0.0f;
+}
+
+} // namespace
+
+void EditorApp::AdvanceCelestialClock(float deltaSeconds)
+{
+    if (m_settings.skyType == QR_SKY_TYPE_PROCEDURAL && m_settings.timeOfDayEnable &&
+        m_settings.timeOfDaySpeed > 0.0f)
+    {
+        m_celestialClockSeconds += double(deltaSeconds);
+    }
+}
+
 void EditorApp::RenderSceneFrameContents(float deltaSeconds)
 {
     if (m_sceneLoaded)
     {
+        AdvanceCelestialClock(deltaSeconds);
         if (IsModelPreviewActive() && m_previewAutoRotate && !m_previewModelDragging)
         {
             m_previewYaw += deltaSeconds * 0.65f;
@@ -5043,10 +5069,12 @@ void EditorApp::SubmitSceneFrame()
 
     // The sun the viewport shows is the sun the sky and the shafts use, so the
     // disc, the scattering direction and the directional light cannot disagree.
-    float toSun[3];
-    SunDirection(toSun);
+    float toSun[3], toMoon[3], celestialRotRad = 0.0f;
+    ComputeEditorCelestialFrame(m_settings, m_sun, m_celestialClockSeconds, toSun, toMoon,
+                                celestialRotRad);
+    const float activeSunIntensity = ResolveEditorSunIntensity(m_settings, m_sun);
 
-    BuildEditorFrameParams(m_settings, toSun, m_sun.enabled ? m_sun.radiance : 0.0f, eye,
+    BuildEditorFrameParams(m_settings, toSun, toMoon, celestialRotRad, activeSunIntensity, eye,
                            m_scene.hasSkyFlatColor ? m_scene.skyFlatColor : nullptr,
                            m_frameParams);
 
@@ -5705,26 +5733,56 @@ void EditorApp::SunDirection(float direction[3]) const
 
 void EditorApp::UploadSun()
 {
-    // The game uploads the sun light only while rt_physical_sun is on, and the shafts scatter it,
-    // so an off sun leaves the level's own lights alone instead of adding a dark one.
-    if (!m_sun.enabled)
+    const bool timeSunActive = m_settings.skyType == QR_SKY_TYPE_PROCEDURAL && m_settings.timeOfDayEnable;
+    if (!m_sun.enabled && !timeSunActive)
     {
         return;
     }
 
-    float toSun[3];
-    SunDirection(toSun);
+    float toSun[3], toMoon[3], celestialRotRad = 0.0f;
+    ComputeEditorCelestialFrame(m_settings, m_sun, m_celestialClockSeconds, toSun, toMoon,
+                                celestialRotRad);
 
+    const float radiance = m_sun.radiance > 0.0f ? m_sun.radiance : kEditorSkySunRadiance;
     QrDirectionalLightUploadInfo sun = {};
     sun.uniqueID = 2;
-    // RT_UploadSunLight colours the light with RT_GetSunColor -- rt_sky_sun_color -- before it
-    // scales it by rt_sky_sun, so the disc the sky paints and the light that shades the level
-    // are one sun. A neutral light here floods a level whose sun is authored red, which is what
-    // rt_sky_sun_color "18 5 9" is.
-    sun.color = { m_sun.radiance * m_settings.sunColor[0], m_sun.radiance * m_settings.sunColor[1],
-                  m_sun.radiance * m_settings.sunColor[2] };
-    sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
     sun.angularDiameterDegrees = m_sun.angularDiameter;
+
+    if (m_settings.timeOfDayEnable)
+    {
+        float trans[3];
+        EvalEditorSunGroundTransmittance(m_settings, toSun, trans);
+        const float dayWeight = trans[0] + trans[1] + trans[2];
+        if (dayWeight > 1e-4f)
+        {
+            sun.color = { radiance * m_settings.sunColor[0] * trans[0],
+                          radiance * m_settings.sunColor[1] * trans[1],
+                          radiance * m_settings.sunColor[2] * trans[2] };
+            sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
+        }
+        else if (toMoon[2] > 0.0f && m_settings.moonIntensity > 0.0f)
+        {
+            const float phaseScale = m_settings.moonPhase >= 0.0f
+                ? (0.18f + 0.82f * std::clamp(m_settings.moonPhase, 0.0f, 1.0f))
+                : 0.7f;
+            const float moonScale = radiance * 0.006f * std::max(0.0f, m_settings.moonIntensity) *
+                                    phaseScale * std::min(1.0f, toMoon[2] * 5.0f);
+            sun.color = { moonScale * m_settings.moonColor[0],
+                          moonScale * m_settings.moonColor[1],
+                          moonScale * m_settings.moonColor[2] };
+            sun.direction = { -toMoon[0], -toMoon[1], -toMoon[2] };
+        }
+        else
+        {
+            return;
+        }
+    }
+    else
+    {
+        sun.color = { radiance * m_settings.sunColor[0], radiance * m_settings.sunColor[1],
+                      radiance * m_settings.sunColor[2] };
+        sun.direction = { -toSun[0], -toSun[1], -toSun[2] };
+    }
 
     const QrResult result = qrUploadDirectionalLight(m_instance, &sun);
 
@@ -11412,76 +11470,115 @@ void EditorApp::LoadMaterialsSession()
 namespace
 {
 
+struct SkyFloatBinding
+{
+    const char *name;
+    float EditorRenderSettings::*field;
+};
+
+struct SkyBoolBinding
+{
+    const char *name;
+    bool EditorRenderSettings::*field;
+};
+
+struct SkyColorBinding
+{
+    const char *name;
+    float (EditorRenderSettings::*field)[3];
+};
+
+constexpr SkyFloatBinding kSkyFloatBindings[] = {
+    { "rt_sky", &EditorRenderSettings::skyScale },
+    { "rt_sky_brightness", &EditorRenderSettings::skyBrightness },
+    { "rt_sky_light_mult", &EditorRenderSettings::skyLightMultiplier },
+    { "rt_sky_clouds_alpha", &EditorRenderSettings::cloudsAlpha },
+    { "rt_sky_clouds_coverage", &EditorRenderSettings::cloudsCoverage },
+    { "rt_sky_clouds_density", &EditorRenderSettings::cloudsDensity },
+    { "rt_sky_clouds_speed", &EditorRenderSettings::cloudsSpeed },
+    { "rt_sky_clouds_height", &EditorRenderSettings::cloudsHeight },
+    { "rt_sky_clouds_thickness", &EditorRenderSettings::cloudsThickness },
+    { "rt_sky_sun_size", &EditorRenderSettings::sunDiscSize },
+    { "rt_sky_godrays_intensity", &EditorRenderSettings::godRaysIntensity },
+    { "rt_sky_godrays_sky_threshold", &EditorRenderSettings::godRaysSkyThreshold },
+    { "rt_sky_time", &EditorRenderSettings::timeOfDay },
+    { "rt_sky_time_speed", &EditorRenderSettings::timeOfDaySpeed },
+    { "rt_sky_latitude", &EditorRenderSettings::skyLatitude },
+    { "rt_sky_azimuth", &EditorRenderSettings::skyAzimuth },
+    { "rt_sky_atmosphere_density", &EditorRenderSettings::atmosphereDensity },
+    { "rt_sky_mie", &EditorRenderSettings::atmosphereMie },
+    { "rt_sky_ozone", &EditorRenderSettings::atmosphereOzone },
+    { "rt_sky_stars_density", &EditorRenderSettings::starDensity },
+    { "rt_sky_stars", &EditorRenderSettings::starIntensity },
+    { "rt_sky_moon", &EditorRenderSettings::moonIntensity },
+    { "rt_sky_moon_size", &EditorRenderSettings::moonSize },
+    { "rt_sky_moon_phase", &EditorRenderSettings::moonPhase },
+};
+
+constexpr SkyBoolBinding kSkyBoolBindings[] = {
+    { "rt_sky_nee", &EditorRenderSettings::skyNee },
+    { "rt_sky_clouds", &EditorRenderSettings::clouds },
+    { "rt_sky_godrays", &EditorRenderSettings::godRays },
+    { "rt_sky_time_enable", &EditorRenderSettings::timeOfDayEnable },
+    { "rt_sky_stars_enable", &EditorRenderSettings::starsEnabled },
+};
+
+constexpr SkyColorBinding kSkyColorBindings[] = {
+    { "rt_sky_color", &EditorRenderSettings::skyColor },
+    { "rt_sky_clouds_color", &EditorRenderSettings::cloudsColor },
+    { "rt_sky_sun_color", &EditorRenderSettings::sunColor },
+    { "rt_sky_moon_color", &EditorRenderSettings::moonColor },
+};
+
+void FormatSkyBoundText(const EditorRenderSettings &settings, const std::string &name,
+                        std::string &text)
+{
+    for (const SkyColorBinding &binding : kSkyColorBindings)
+    {
+        if (name == binding.name)
+        {
+            text = FormatSkyText(settings.*(binding.field));
+            return;
+        }
+    }
+
+    for (const SkyBoolBinding &binding : kSkyBoolBindings)
+    {
+        if (name == binding.name)
+        {
+            text = FormatSkyText(settings.*(binding.field));
+            return;
+        }
+    }
+
+    for (const SkyFloatBinding &binding : kSkyFloatBindings)
+    {
+        if (name == binding.name)
+        {
+            text = FormatSkyText(settings.*(binding.field));
+            return;
+        }
+    }
+}
+
 // One `sky:` key as the block states it, taken from the values the panel edits. A name the block
 // does not carry leaves `text` alone, so the two lists cannot drift into writing a value to a key
 // that means something else.
 void SkyTextOf(const EditorRenderSettings &settings, const EditorSunState &sun,
                const std::string &name, std::string &text)
 {
-    if (name == "rt_sky")
-    {
-        text = FormatSkyText(settings.skyScale);
-    }
-    else if (name == "rt_sky_brightness")
-    {
-        text = FormatSkyText(settings.skyBrightness);
-    }
-    else if (name == "rt_sky_light_mult")
-    {
-        text = FormatSkyText(settings.skyLightMultiplier);
-    }
-    else if (name == "rt_sky_color")
-    {
-        text = FormatSkyText(settings.skyColor);
-    }
-    else if (name == "rt_sky_ambient_lod")
+    if (name == "rt_sky_ambient_lod")
     {
         text = FormatSkyText(settings.skyAmbientLod);
-    }
-    else if (name == "rt_sky_nee")
-    {
-        text = FormatSkyText(settings.skyNee);
     }
     else if (name == "rt_physical_sky")
     {
         // The block carries the one sky type it can express: r_fastsky's colour sky has no key.
         text = FormatSkyText(settings.skyType == QR_SKY_TYPE_PROCEDURAL);
     }
-    else if (name == "rt_sky_clouds")
-    {
-        text = FormatSkyText(settings.clouds);
-    }
-    else if (name == "rt_sky_clouds_color")
-    {
-        text = FormatSkyText(settings.cloudsColor);
-    }
-    else if (name == "rt_sky_clouds_alpha")
-    {
-        text = FormatSkyText(settings.cloudsAlpha);
-    }
-    else if (name == "rt_sky_clouds_coverage")
-    {
-        text = FormatSkyText(settings.cloudsCoverage);
-    }
-    else if (name == "rt_sky_clouds_density")
-    {
-        text = FormatSkyText(settings.cloudsDensity);
-    }
-    else if (name == "rt_sky_clouds_speed")
-    {
-        text = FormatSkyText(settings.cloudsSpeed);
-    }
     else if (name == "rt_sky_clouds_quality")
     {
         text = FormatSkyText(settings.cloudsQuality);
-    }
-    else if (name == "rt_sky_clouds_height")
-    {
-        text = FormatSkyText(settings.cloudsHeight);
-    }
-    else if (name == "rt_sky_clouds_thickness")
-    {
-        text = FormatSkyText(settings.cloudsThickness);
     }
     else if (name == "rt_physical_sun")
     {
@@ -11492,14 +11589,6 @@ void SkyTextOf(const EditorRenderSettings &settings, const EditorSunState &sun,
         // The panel holds the radiance the light is uploaded with, the block the cvar multiplier.
         text = FormatSkyText(sun.radiance / kEditorSkySunRadiance);
     }
-    else if (name == "rt_sky_sun_color")
-    {
-        text = FormatSkyText(settings.sunColor);
-    }
-    else if (name == "rt_sky_sun_size")
-    {
-        text = FormatSkyText(settings.sunDiscSize);
-    }
     else if (name == "rt_sky_sun_pitch")
     {
         text = FormatSkyText(sun.pitch);
@@ -11508,17 +11597,9 @@ void SkyTextOf(const EditorRenderSettings &settings, const EditorSunState &sun,
     {
         text = FormatSkyText(sun.yaw);
     }
-    else if (name == "rt_sky_godrays")
+    else
     {
-        text = FormatSkyText(settings.godRays);
-    }
-    else if (name == "rt_sky_godrays_intensity")
-    {
-        text = FormatSkyText(settings.godRaysIntensity);
-    }
-    else if (name == "rt_sky_godrays_sky_threshold")
-    {
-        text = FormatSkyText(settings.godRaysSkyThreshold);
+        FormatSkyBoundText(settings, name, text);
     }
 }
 
@@ -11537,64 +11618,88 @@ EditorLevelSky RenderedSky(const EditorRenderSettings &settings, const EditorSun
     return sky;
 }
 
+bool ApplySkyColorText(const std::string &name, const std::string &text,
+                       EditorRenderSettings &settings)
+{
+    float *target = nullptr;
+
+    for (const SkyColorBinding &binding : kSkyColorBindings)
+    {
+        if (name == binding.name)
+        {
+            target = settings.*(binding.field);
+            break;
+        }
+    }
+
+    if (target == nullptr)
+    {
+        return false;
+    }
+
+    float color[3] = { 0.0f, 0.0f, 0.0f };
+
+    if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
+    {
+        return true;
+    }
+
+    // The block writes 0..255 and the renderer takes 0..1, so a hand-written file may state
+    // either; a channel above 1 can only be the byte form.
+    const float scale = color[0] > 1.0f || color[1] > 1.0f || color[2] > 1.0f ? 1.0f / 255.0f : 1.0f;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        target[axis] = color[axis] * scale;
+    }
+
+    return true;
+}
+
+void ApplySkyScalarBindings(const std::string &name, float value, int32_t integer,
+                            EditorRenderSettings &settings)
+{
+    for (const SkyBoolBinding &binding : kSkyBoolBindings)
+    {
+        if (name == binding.name)
+        {
+            settings.*(binding.field) = integer != 0;
+            return;
+        }
+    }
+
+    for (const SkyFloatBinding &binding : kSkyFloatBindings)
+    {
+        if (name == binding.name)
+        {
+            settings.*(binding.field) = value;
+            return;
+        }
+    }
+}
+
 // The value of one `sky:` entry in the live state. A text the game's parser would reject leaves
 // the setting alone, which is what RT_SkySettings_ApplyParsed does with a zero-argument value too.
 void ApplySkyText(const std::string &name, const std::string &text, EditorRenderSettings &settings,
                   EditorSunState &sun)
 {
-    float value = 0.0f;
-    int32_t integer = 0;
-
-    if (name == "rt_sky_color" || name == "rt_sky_clouds_color" || name == "rt_sky_sun_color")
+    if (ApplySkyColorText(name, text, settings))
     {
-        float color[3] = { 0.0f, 0.0f, 0.0f };
-
-        if (std::sscanf(text.c_str(), "%f %f %f", &color[0], &color[1], &color[2]) != 3)
-        {
-            return;
-        }
-
-        // The block writes 0..255 and the renderer takes 0..1, so a hand-written file may state
-        // either; a channel above 1 can only be the byte form.
-        const float scale = color[0] > 1.0f || color[1] > 1.0f || color[2] > 1.0f ? 1.0f / 255.0f : 1.0f;
-        float *target = name == "rt_sky_color"       ? settings.skyColor
-                        : name == "rt_sky_clouds_color" ? settings.cloudsColor
-                                                        : settings.sunColor;
-
-        for (int axis = 0; axis < 3; axis++)
-        {
-            target[axis] = color[axis] * scale;
-        }
-
         return;
     }
+
+    float value = 0.0f;
 
     if (std::sscanf(text.c_str(), "%f", &value) != 1)
     {
         return;
     }
 
-    integer = int32_t(value);
+    const int32_t integer = int32_t(value);
 
-    if (name == "rt_sky")
-    {
-        settings.skyScale = value;
-    }
-    else if (name == "rt_sky_brightness")
-    {
-        settings.skyBrightness = value;
-    }
-    else if (name == "rt_sky_light_mult")
-    {
-        settings.skyLightMultiplier = value;
-    }
-    else if (name == "rt_sky_ambient_lod")
+    if (name == "rt_sky_ambient_lod")
     {
         settings.skyAmbientLod = integer;
-    }
-    else if (name == "rt_sky_nee")
-    {
-        settings.skyNee = integer != 0;
     }
     else if (name == "rt_physical_sky")
     {
@@ -11609,37 +11714,9 @@ void ApplySkyText(const std::string &name, const std::string &text, EditorRender
             settings.skyType = QR_SKY_TYPE_RASTERIZED_GEOMETRY;
         }
     }
-    else if (name == "rt_sky_clouds")
-    {
-        settings.clouds = integer != 0;
-    }
-    else if (name == "rt_sky_clouds_alpha")
-    {
-        settings.cloudsAlpha = value;
-    }
-    else if (name == "rt_sky_clouds_coverage")
-    {
-        settings.cloudsCoverage = value;
-    }
-    else if (name == "rt_sky_clouds_density")
-    {
-        settings.cloudsDensity = value;
-    }
-    else if (name == "rt_sky_clouds_speed")
-    {
-        settings.cloudsSpeed = value;
-    }
     else if (name == "rt_sky_clouds_quality")
     {
         settings.cloudsQuality = integer;
-    }
-    else if (name == "rt_sky_clouds_height")
-    {
-        settings.cloudsHeight = value;
-    }
-    else if (name == "rt_sky_clouds_thickness")
-    {
-        settings.cloudsThickness = value;
     }
     else if (name == "rt_physical_sun")
     {
@@ -11649,10 +11726,6 @@ void ApplySkyText(const std::string &name, const std::string &text, EditorRender
     {
         sun.radiance = value * kEditorSkySunRadiance;
     }
-    else if (name == "rt_sky_sun_size")
-    {
-        settings.sunDiscSize = value;
-    }
     else if (name == "rt_sky_sun_pitch")
     {
         sun.pitch = value;
@@ -11661,17 +11734,9 @@ void ApplySkyText(const std::string &name, const std::string &text, EditorRender
     {
         sun.yaw = value;
     }
-    else if (name == "rt_sky_godrays")
+    else
     {
-        settings.godRays = integer != 0;
-    }
-    else if (name == "rt_sky_godrays_intensity")
-    {
-        settings.godRaysIntensity = value;
-    }
-    else if (name == "rt_sky_godrays_sky_threshold")
-    {
-        settings.godRaysSkyThreshold = value;
+        ApplySkyScalarBindings(name, value, integer, settings);
     }
 }
 
@@ -11967,7 +12032,7 @@ bool ApplyTypedGlobalText(const std::string &name, float value, int32_t integer,
 }
 
 // One `name "value"` line of the game's config.cfg, which archives every cvar the Global tab
-// drives. The sky block owns its 25 keys and the rest are plain globals, so a name either lands
+// drives. The sky block owns its 40 keys and the rest are plain globals, so a name either lands
 // in the block's reader or in one of the fields beside it. Returns whether the line was one the
 // panel represents, which is what tells a caller the file was understood rather than skipped.
 bool ApplyGlobalText(const std::string &name, const std::string &text, EditorRenderSettings &settings,
@@ -12786,6 +12851,7 @@ void EditorApp::ResetSession()
     m_sun = EditorSunState{};
     ApplySceneRenderDefaults(m_scene, m_sun, m_settings);
     m_skyGlobals = EditorLevelSky{};
+    m_celestialClockSeconds = 0.0;
     m_emitterLightOverrides.clear();
     m_customLights.clear();
     m_selectedCustomLight = -1;

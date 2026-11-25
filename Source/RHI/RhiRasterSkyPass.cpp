@@ -312,8 +312,8 @@ bool RhiRasterSkyPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
-    // The module's own depth and its 66 framebuffers are built over the exact shape of the A5.4
-    // cube (1024-square, 6 faces, 11 mips, RGBA16_FLOAT, render target), so a cube of another
+    // The module's own depth and its 72 framebuffers are built over the exact shape of the A5.4
+    // cube (2048-square, 6 faces, 12 mips, RGBA16_FLOAT, render target), so a cube of another
     // shape is refused here instead of being drawn into with mismatched subresources. Taking the
     // pipeline's colour format from the cube keeps the framebuffer info and the attachment from
     // drifting; the A5.4 cube makes it nvrhi::Format::RGBA16_FLOAT, the legacy CUBEMAP_FORMAT
@@ -330,7 +330,8 @@ bool RhiRasterSkyPass::Create(nvrhi::IDevice *pDevice,
 
     if (!cubeShapeOk)
     {
-        LogMessage(print, "Warning: RHI: the raster sky pass needs a 1024x1024, "
+        LogMessage(print, "Warning: RHI: the raster sky pass needs a "
+                          + std::to_string(CUBEMAP_SIZE) + "x" + std::to_string(CUBEMAP_SIZE) + ", "
                           + std::to_string(CUBEMAP_FACE_COUNT) + "-face, "
                           + std::to_string(CUBEMAP_MIP_LEVELS) + "-mip RGBA16_FLOAT render-target cube "
                           "(RhiProceduralSkyPass::GetCubemapTexture()), the raster sky is skipped");

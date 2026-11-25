@@ -248,8 +248,8 @@ bool RhiProceduralSkyPass::Create(nvrhi::IDevice *pDevice,
         return false;
     }
 
-    cubemapTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass cubemap (RGBA16F 1024, 6x11)");
-    environmentTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass env cubemap (RGBA16F 1024, 6x11)");
+    cubemapTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass cubemap (RGBA16F 2048, 6x12)");
+    environmentTexture = CreateCubemapTexture(device, "RhiProceduralSkyPass env cubemap (RGBA16F 2048, 6x12)");
 
     if (cubemapTexture == nullptr || environmentTexture == nullptr)
     {
@@ -402,12 +402,25 @@ void RhiProceduralSkyPass::Render(nvrhi::ICommandList *pCommandList,
         params.cloudParams[3] = 0.0f;
     }
 
-    // Clouds off: freeze the animation time so the cached sky is not re-rendered every frame (only
-    // when the sun/sky params change). Clouds on: keep the raw time, so the sky re-renders every
-    // frame (RenderCubemap.cpp:896-902).
-    if (params.cloudParams[3] <= 0.5f || params.skyParams[1] <= 0.0f || params.cloudParams[2] == 0.0f)
+    // Freeze dynamic clock/anchor fields when clouds or stars are not animating so static skies
+    // hit the cached cubemap across frames and camera movement.
+    if (params.cloudParams[3] <= 0.5f || params.skyParams[1] <= 0.0f)
     {
         params.cloudColor[3] = 0.0f;
+        params.cloudAnchor[0] = 0.0f;
+        params.cloudAnchor[1] = 0.0f;
+        params.cloudAnchor[2] = 0.0f;
+        params.cloudAnchor[3] = 0.0f;
+    }
+    else if (params.cloudParams[2] == 0.0f)
+    {
+        params.cloudColor[3] = 0.0f;
+    }
+
+    if (params.starParams[0] <= 0.5f || params.starParams[1] <= 0.0f ||
+        params.starParams[2] <= 0.0f || params.sunDirection[2] >= 0.08f)
+    {
+        params.starParams[3] = 0.0f;
     }
 
     // No changes since the last dispatch: keep the cached cubemap, exactly like the legacy's memcmp

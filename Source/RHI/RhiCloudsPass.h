@@ -64,9 +64,14 @@ public:
         float cloudColor[4];
         float cloudParams[4];
         float sunDiscColor[4];
+        float sunTint[4];
+        float moonDirection[4];
+        float moonParams[4];
+        float atmosphereParams[4];
+        float starParams[4];
         float cloudLayer[4];
-        float cloudMarch[4];
         float cloudAnchor[4];
+        float cloudMarch[4];
         float cloudShadowPlacement[4];
     };
 
@@ -149,8 +154,8 @@ private:
     uint32_t nextLayerFacePhase = 0;
 };
 
-static_assert(sizeof(RhiCloudsPass::LayerParams) == 448,
-              "CmSkyCloudsParams_BT is 28 float4");
+static_assert(sizeof(RhiCloudsPass::LayerParams) == 528,
+              "CmSkyCloudsParams_BT is 33 float4");
 static_assert(offsetof(RhiCloudsPass::LayerParams, faceBasis) == 0, "measured member offset");
 static_assert(offsetof(RhiCloudsPass::LayerParams, sunDirection) == 288, "measured member offset");
 static_assert(offsetof(RhiCloudsPass::LayerParams, skyColor) == 304, "measured member offset");
@@ -158,10 +163,15 @@ static_assert(offsetof(RhiCloudsPass::LayerParams, skyParams) == 320, "measured 
 static_assert(offsetof(RhiCloudsPass::LayerParams, cloudColor) == 336, "measured member offset");
 static_assert(offsetof(RhiCloudsPass::LayerParams, cloudParams) == 352, "measured member offset");
 static_assert(offsetof(RhiCloudsPass::LayerParams, sunDiscColor) == 368, "measured member offset");
-static_assert(offsetof(RhiCloudsPass::LayerParams, cloudLayer) == 384, "measured member offset");
-static_assert(offsetof(RhiCloudsPass::LayerParams, cloudMarch) == 400, "measured member offset");
-static_assert(offsetof(RhiCloudsPass::LayerParams, cloudAnchor) == 416, "measured member offset");
-static_assert(offsetof(RhiCloudsPass::LayerParams, cloudShadowPlacement) == 432, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, sunTint) == 384, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, moonDirection) == 400, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, moonParams) == 416, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, atmosphereParams) == 432, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, starParams) == 448, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, cloudLayer) == 464, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, cloudAnchor) == 480, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, cloudMarch) == 496, "measured member offset");
+static_assert(offsetof(RhiCloudsPass::LayerParams, cloudShadowPlacement) == 512, "measured member offset");
 
 static_assert(sizeof(RhiCloudsPass::ShadowParams) == 64,
               "CmCloudShadowParams_BT is 4 float4");

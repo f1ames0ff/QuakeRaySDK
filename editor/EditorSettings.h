@@ -68,6 +68,23 @@ struct EditorRenderSettings
     float sunColor[3] = { 1.0f, 0.933f, 0.749f };
     float sunDiscSize = 1.0f;
 
+    // Procedural sky: time of day, atmosphere, moon and night starfield.
+    bool timeOfDayEnable = false;           // rt_sky_time_enable
+    float timeOfDay = 14.0f;                // rt_sky_time (0..24 h)
+    float timeOfDaySpeed = 0.0f;            // rt_sky_time_speed (hours per real minute)
+    float skyLatitude = 35.0f;              // rt_sky_latitude (-80..80 deg)
+    float skyAzimuth = 0.0f;                // rt_sky_azimuth (-180..180 deg)
+    float atmosphereDensity = 1.0f;         // rt_sky_atmosphere_density (0..4)
+    float atmosphereMie = 1.0f;             // rt_sky_mie (0..4)
+    float atmosphereOzone = 1.0f;           // rt_sky_ozone (0..4)
+    bool starsEnabled = true;               // rt_sky_stars_enable
+    float starDensity = 1.0f;               // rt_sky_stars_density (0..4)
+    float starIntensity = 1.0f;             // rt_sky_stars (0..5)
+    float moonIntensity = 1.0f;             // rt_sky_moon (0..4)
+    float moonColor[3] = { 190.0f / 255.0f, 210.0f / 255.0f, 1.0f }; // rt_sky_moon_color
+    float moonSize = 1.0f;                  // rt_sky_moon_size (0..10)
+    float moonPhase = 0.85f;                // rt_sky_moon_phase (0..1, <0 auto)
+
     // God rays
     bool godRays = true;
     float godRaysIntensity = 1.0f;
@@ -312,8 +329,19 @@ struct EditorFrameParams
 // fog's ambient, and a scene without a sky texture -- or a null pointer -- falls back to
 // the authored sky colour, which is the only colour such a scene has to stand for its sky.
 void BuildEditorFrameParams(const EditorRenderSettings &settings, const float sunDirection[3],
+                            const float moonDirection[3], float celestialRotationRad,
                             float sunIntensity, const float viewerPosition[3],
                             const float *skyFlatColor, EditorFrameParams &out);
+
+// Computes celestial sun/moon unit directions (pointing toward the bodies) and diurnal rotation
+// from time-of-day settings or manual pitch/yaw.
+void ComputeEditorCelestialFrame(const EditorRenderSettings &settings, const EditorSunState &sun,
+                                 double elapsedSeconds, float outSunDir[3], float outMoonDir[3],
+                                 float &outCelestialRotationRad);
+
+// Evaluates ground-level atmospheric transmittance for directional world sun lighting.
+void EvalEditorSunGroundTransmittance(const EditorRenderSettings &settings,
+                                      const float sunDirection[3], float outTrans[3]);
 
 // The vertical field of view the game draws `settings` at in a window of this size, ported
 // from AdaptFovx and CalcFovy (Quake/gl_screen.c). The game states a 4:3 horizontal `fov`,

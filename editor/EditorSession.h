@@ -89,7 +89,7 @@ struct EditorLevelFog
 // and the level's own overrides -- so a value here is the console text of one
 // rt_sky_* cvar rather than a parsed field: the game compares those strings to
 // decide what a level still overrides.
-constexpr int32_t kEditorSkyKeyCount = 25;
+constexpr int32_t kEditorSkyKeyCount = 40;
 extern const char *const kEditorSkyKeyNames[kEditorSkyKeyCount];
 
 // The slot `name` occupies in kEditorSkyKeyNames, or -1 when the sky does not own it.

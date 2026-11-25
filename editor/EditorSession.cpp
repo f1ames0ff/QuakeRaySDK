@@ -2039,6 +2039,21 @@ const char *const kEditorSkyKeyNames[kEditorSkyKeyCount] = {
     "rt_sky_godrays",
     "rt_sky_godrays_intensity",
     "rt_sky_godrays_sky_threshold",
+    "rt_sky_time_enable",
+    "rt_sky_time",
+    "rt_sky_time_speed",
+    "rt_sky_latitude",
+    "rt_sky_azimuth",
+    "rt_sky_atmosphere_density",
+    "rt_sky_mie",
+    "rt_sky_ozone",
+    "rt_sky_stars_enable",
+    "rt_sky_stars_density",
+    "rt_sky_stars",
+    "rt_sky_moon",
+    "rt_sky_moon_color",
+    "rt_sky_moon_size",
+    "rt_sky_moon_phase",
 };
 
 // One value as the block spells it: the console's own text, so the game's cvar parser and the

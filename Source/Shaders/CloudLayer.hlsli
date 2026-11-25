@@ -255,6 +255,38 @@ float cloudSunDepth(CloudLayer layer, float3 p, float3 sunDir, int steps, int sl
     steps = clamp(steps, 1, CLOUD_SUN_STEPS_MAX);
     slices = max(slices, 2);
 
+    if (sunDir.z < -0.055)
+    {
+        return 0.0;
+    }
+
+    if (sunDir.z < 0.12)
+    {
+        int grazingSteps = min(steps, 16);
+        float maxLen = sunDir.z > 0.02
+            ? min((layer.altitude + layer.thickness - p.z) / sunDir.z, layer.thickness * 4.5)
+            : layer.thickness * 4.5;
+        maxLen = max(maxLen, 0.0);
+        float dt = maxLen / (float)grazingSteps;
+        float3 tangent;
+        float3 bitangent;
+        float sampleStep;
+        cloudSunSampleBasis(sunDir, dt, tangent, bitangent, sampleStep);
+
+        float column = 0.0;
+        for (int i = 0; i < grazingSteps; i++)
+        {
+            float3 samplePos = cloudSunSample(p, sunDir, ((float)i + 0.5) * dt,
+                                              tangent, bitangent, sampleStep, i);
+            if (samplePos.z <= layer.altitude || samplePos.z >= layer.altitude + layer.thickness)
+            {
+                continue;
+            }
+            column += cloudDensity(layer, samplePos, false) * dt;
+        }
+        return cloudOpticalDepth(layer, column);
+    }
+
     float height = clamp((p.z - layer.altitude) / layer.thickness, 0.0, 1.0);
 
     float dt = layer.thickness / max(sunDir.z, 1.0e-3) / (float)steps;
@@ -284,4 +316,40 @@ float cloudSunDepth(CloudLayer layer, float3 p, float3 sunDir, int steps, int sl
     }
 
     return cloudOpticalDepth(layer, lerp(columnLow, columnHigh, through));
+}
+
+float cloudLineOfSightTransmittance(CloudLayer layer, float3 origin, float3 dir)
+{
+    if (dir.z <= 0.0 || layer.coverage >= 1.0 || layer.density <= 0.0)
+    {
+        return 1.0;
+    }
+
+    float tIn = layer.altitude / dir.z;
+    float tOut = min((layer.altitude + layer.thickness) / dir.z, tIn + layer.thickness * 12.0);
+    const int DISC_STEPS = 28;
+    const float GROWTH = 1.045;
+    float span = (pow(GROWTH, (float)DISC_STEPS) - 1.0) / (GROWTH - 1.0);
+    float step = (tOut - tIn) / span;
+    float t = tIn;
+    float tau = 0.0;
+
+    for (int i = 0; i < DISC_STEPS; i++)
+    {
+        float ts = t + step * 0.5;
+        float3 p = float3(dir.x * ts + origin.x, dir.y * ts + origin.y, dir.z * ts);
+        float d = cloudDensity(layer, p, true);
+        if (d > 1.0e-3)
+        {
+            tau += cloudOpticalDepth(layer, d) * step;
+            if (tau > 10.0)
+            {
+                return 0.0;
+            }
+        }
+        t += step;
+        step *= GROWTH;
+    }
+
+    return exp(-tau);
 }

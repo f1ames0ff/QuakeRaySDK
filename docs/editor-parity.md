@@ -49,7 +49,7 @@ no implementation.
 | Selection overlay | done | `DrawSelectionOverlay` |
 | Map light `light` key authoring | done | `SetEditorLightIntensity` via `kEditorLightIntensityScale` |
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
-| Sun intensity, azimuth, elevation, angular size | done | `Sun` group: `Light` (`rt_physical_sun`), `Light strength` (`rt_sky_sun`), `Pitch` / `Yaw` (`rt_sky_sun_pitch` / `rt_sky_sun_yaw`) and `Disc scale` / `Disc colour` / `Disc size`; the direction reaches `QrDrawFrameVolumetricParams::volume.sourceDirection` as the game's `+forward` |
+| Sun intensity, azimuth, elevation, angular size, time of day, atmosphere, moon & stars | done | `Sun`, `Time of Day`, `Atmosphere`, `Moon & Stars` groups (`DrawGlobalSkySection` / `DrawGlobalTimeAndNightSection` in `editor/EditorPanels.cpp`): manual `rt_physical_sun` / `rt_sky_sun*`, 24-hour `rt_sky_time_enable` / `rt_sky_time` / speed / latitude / azimuth with dawn/noon/sunset/twilight/night presets, `atmosphere_density` / `mie` / `ozone`, and `rt_sky_stars*` / `rt_sky_moon*`; `ComputeEditorCelestialFrame` and `EvalEditorSunGroundTransmittance` match host sun/moon ephemeris and sunset transmittance |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
 | Material parameters (32 of them, per animation frame) | done | `EditorMaterial.{h,cpp}`; all 32 of the game's parameters, one material per texture name, applied by re-uploading the static scene. The six that need a texture the SDK cannot carry are baked by `EditorMaterialBakes`, which synthesises the albedo/normal/roughness-metallic-emission triplet the way `gl_texmgr.c` does, and `texture_overlay` is composited into that same albedo. The six `light_*` keys are authored as data rather than uploaded: the panel shows them read-only and `Regenerate from map` writes them, because a light a material casts is the game's, not the SDK's. `force_rasterize` is the one key nothing in the tracer reads -- it picks the game's rasterizer path for alias models and sprites -- so it is carried as data the same way. [Materials](#materials) lists every key against the field it reaches |
 | Texture browser with previews and search | done | `DrawTextureBrowser`; a grid of the scene's own textures with a name filter, the picked texture outlined in the game's orange, and `Select` / `NONE` writing `texture_base` |
@@ -274,7 +274,7 @@ keyed by level name (`e1m1`) and the editor owns three blocks inside the level's
 
 | Block | Keys | Scale |
 | --- | --- | --- |
-| `sky:` | the 25 `rt_sky_names[]` cvars, see [Sky block](#sky-block) | the value text the game's own writer produces |
+| `sky:` | the 40 `rt_sky_names[]` cvars, see [Sky block](#sky-block) | the value text the game's own writer produces |
 | `fog:` | `color:` as `rrggbb`, `density:`, `enabled:` | `density` is the authored value; the frame divides it by 64 |
 | `lights:` | `- origin:` x y z, `radius:`, `intensity:`, `color:`, `spot:`, `dir:`, `angle_inner:`, `angle_outer:`, `style:` | `origin` in scene units (40 per metre), `radius` in metres, `intensity` in file units of 100 editor points |
 

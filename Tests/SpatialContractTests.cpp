@@ -143,7 +143,7 @@ bool TestGeometrySpatialContracts(const qray::SpatialFrame &upY, const QrTransfo
 
 int main()
 {
-    if (!Check(std::strcmp(QR_API_VERSION, "1.06.0000") == 0, "unexpected QR_API_VERSION") ||
+    if (!Check(std::strcmp(QR_API_VERSION, "1.07.0000") == 0, "unexpected QR_API_VERSION") ||
         !Check(sizeof(QrSpatialConvention) == 44, "unexpected QrSpatialConvention size") ||
         !Check(offsetof(QrSpatialConvention, reserved0) == 24, "unexpected QrSpatialConvention layout"))
     {

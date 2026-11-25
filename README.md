@@ -15,9 +15,9 @@ Its meter conversion and generic authoring core remain future editor work.
 
 ## Package contents
 
-- Package version `0.2.0`; the independently versioned C ABI is
-  `QR_API_VERSION 1.06.0000`.
-- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.06.0000`.
+- Package version `0.60.0`; the independently versioned C ABI is
+  `QR_API_VERSION 1.07.0000`.
+- `Include/qray/qray.h` — public C ABI, `QR_API_VERSION 1.07.0000`.
 - `Include/qray/host_contract.h` — C++20 scene/frame/update/host/sidecar
   contracts over the C ABI.
 - `Include/qray/gpu_context.h` — SDK-owned shared NVRHI/Vulkan context,
