@@ -342,8 +342,15 @@ if(QR_BUILD_TESTS)
                 "$<TARGET_FILE_DIR:qray_spatial_twin_gpu>/libamd_fidelityfx_vk.so"
             VERBATIM)
     endif()
+    if(DEFINED QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}/BlueNoise_LDR_RGBA_128.png")
+        set(QR_TEST_TEXTURE_DIR "${QR_EDITOR_TEXTURE_DIR}")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../gfx/textures/BlueNoise_LDR_RGBA_128.png")
+        set(QR_TEST_TEXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../gfx/textures")
+    else()
+        set(QR_TEST_TEXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Assets/textures")
+    endif()
     add_test(NAME qray_spatial_twin_gpu COMMAND qray_spatial_twin_gpu
-        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${CMAKE_CURRENT_SOURCE_DIR}/../gfx/textures")
+        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_TEST_TEXTURE_DIR}")
     set_tests_properties(qray_spatial_twin_gpu PROPERTIES TIMEOUT 180
         ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 
@@ -369,7 +376,7 @@ if(QR_BUILD_TESTS)
             VERBATIM)
     endif()
     add_test(NAME qray_emissive_denoiser_gpu COMMAND qray_emissive_denoiser_benchmark
-        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_EDITOR_TEXTURE_DIR}")
+        "${CMAKE_CURRENT_SOURCE_DIR}/Build" "${QR_TEST_TEXTURE_DIR}")
     set_tests_properties(qray_emissive_denoiser_gpu PROPERTIES TIMEOUT 180
         ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 

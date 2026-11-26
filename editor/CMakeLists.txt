@@ -124,15 +124,33 @@ if(QR_BUILD_TESTS)
     add_test(NAME qray_editor_multiselect_tests COMMAND qray_editor_multiselect_tests)
 endif()
 
-if(QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}")
+set(QR_EDITOR_BLUE_NOISE_FILE "")
+if(QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}/BlueNoise_LDR_RGBA_128.png")
+    set(QR_EDITOR_BLUE_NOISE_FILE "${QR_EDITOR_TEXTURE_DIR}/BlueNoise_LDR_RGBA_128.png")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../Assets/textures/BlueNoise_LDR_RGBA_128.png")
+    set(QR_EDITOR_BLUE_NOISE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../Assets/textures/BlueNoise_LDR_RGBA_128.png")
+endif()
+
+set(QR_EDITOR_WATER_NORMAL_FILE "")
+if(QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}/WaterNormal_n.png")
+    set(QR_EDITOR_WATER_NORMAL_FILE "${QR_EDITOR_TEXTURE_DIR}/WaterNormal_n.png")
+endif()
+
+if(QR_EDITOR_BLUE_NOISE_FILE OR QR_EDITOR_WATER_NORMAL_FILE)
     list(APPEND QR_EDITOR_DEPLOY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:quakerayeditor>/textures"
+            "$<TARGET_FILE_DIR:quakerayeditor>/textures")
+endif()
+if(QR_EDITOR_BLUE_NOISE_FILE)
+    list(APPEND QR_EDITOR_DEPLOY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${QR_EDITOR_TEXTURE_DIR}/BlueNoise_LDR_RGBA_128.png"
-            "$<TARGET_FILE_DIR:quakerayeditor>/textures/BlueNoise_LDR_RGBA_128.png"
+            "${QR_EDITOR_BLUE_NOISE_FILE}"
+            "$<TARGET_FILE_DIR:quakerayeditor>/textures/BlueNoise_LDR_RGBA_128.png")
+endif()
+if(QR_EDITOR_WATER_NORMAL_FILE)
+    list(APPEND QR_EDITOR_DEPLOY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${QR_EDITOR_TEXTURE_DIR}/WaterNormal_n.png"
+            "${QR_EDITOR_WATER_NORMAL_FILE}"
             "$<TARGET_FILE_DIR:quakerayeditor>/textures/WaterNormal_n.png")
 endif()
 
