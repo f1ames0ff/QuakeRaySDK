@@ -130,21 +130,28 @@ filter_image(
         field_right = width;
     }
 
-    if(Q2_FLT_ATROUS_LUM_HF != 0 && hist_len_hf > 1)
-    {
-        // Pre-filter per-pixel temporal HF variance over a bilateral 3x3 checkerboard neighbourhood
-        // so an isolated noisy emissive pixel cannot stall filtering, while keeping lum_mean_hf at
-        // moments_center.x so sharp static contact shadow edges do not blur.
-        static const float kGauss3x3[3] = { 0.25, 0.5, 0.25 };
-        const float center_w = kGauss3x3[1] * kGauss3x3[1];
-        const float center_var_hf = max(1e-8, moments_center.y - moments_center.x * moments_center.x);
-        float sum_var_hf = center_var_hf * center_w;
-        float sum_var_w = center_w;
-        const float center_l_hf = getLuminance(color_center_hf);
-        float spatial_s1 = center_l_hf * center_w;
-        float spatial_s2 = center_l_hf * center_l_hf * center_w;
-        float spatial_w = center_w;
+    // Pre-filter per-pixel temporal HF and SPEC variance over a bilateral 3x3 checkerboard
+    // neighbourhood so isolated noisy pixels cannot lock out filtering on themselves.
+    static const float kGauss3x3[3] = { 0.25, 0.5, 0.25 };
+    const float center_gw = kGauss3x3[1] * kGauss3x3[1];
+    const float center_var_hf = max(1e-8, moments_center.y - moments_center.x * moments_center.x);
+    const float center_l_hf = getLuminance(color_center_hf);
+    float sum_var_hf = center_var_hf * center_gw;
+    float sum_var_w = center_gw;
+    float spatial_s1 = center_l_hf * center_gw;
+    float spatial_s2 = center_l_hf * center_l_hf * center_gw;
+    float spatial_w = center_gw;
 
+    const float center_var_spec = max(1e-8, moments_center.w - moments_center.z * moments_center.z);
+    const float center_l_spec = getLuminance(color_center_spec);
+    float sum_var_spec = center_var_spec * center_gw;
+    float sum_var_spec_w = center_gw;
+    float sp_spec_s1 = 0.0;
+    float sp_spec_s2 = 0.0;
+    float sp_spec_w = 0.0;
+
+    if ((Q2_FLT_ATROUS_LUM_HF != 0 && hist_len_hf > 1) || Q2_FLT_ATROUS_LUM_SPEC != 0.0)
+    {
         [unroll]
         for(int dy = -1; dy <= 1; dy++)
         {
@@ -165,7 +172,7 @@ filter_image(
                     continue;
 
                 const float gw = kGauss3x3[dx + 1] * kGauss3x3[dy + 1] * exp(-dist_z_n);
-                const float2 nMom = img_moments.Load(np).xy;
+                const float4 nMom = img_moments.Load(np);
                 const float nVar = max(1e-8, nMom.y - nMom.x * nMom.x);
                 sum_var_hf += nVar * gw;
                 sum_var_w += gw;
@@ -174,9 +181,25 @@ filter_image(
                 spatial_s1 += nLum * gw;
                 spatial_s2 += nLum * nLum * gw;
                 spatial_w += gw;
+
+                const float nRough = framebufMetallicRoughness_Sampled.Load(int3(np, 0)).y;
+                if(abs(nRough - roughness_center) <= 0.20)
+                {
+                    const float nVarSpec = max(1e-8, nMom.w - nMom.z * nMom.z);
+                    sum_var_spec += nVarSpec * gw;
+                    sum_var_spec_w += gw;
+
+                    const float nLumSpec = getLuminance(q2UnpackRGBE(img_spec.Load(np).r));
+                    sp_spec_s1 += nLumSpec * gw;
+                    sp_spec_s2 += nLumSpec * nLumSpec * gw;
+                    sp_spec_w += gw;
+                }
             }
         }
+    }
 
+    if(Q2_FLT_ATROUS_LUM_HF != 0 && hist_len_hf > 1)
+    {
         lum_mean_hf = moments_center.x;
         float lum_variance_hf = max(1e-8, sum_var_hf / max(sum_var_w, 1e-6));
 
@@ -203,13 +226,26 @@ filter_image(
         sigma_l_hf = 0;
     }
 
-    const float lum_mean_spec = moments_center.z;
-    const float var_spec = max(0.0, moments_center.w - moments_center.z * moments_center.z);
+    const float sp_spec_mean = (sp_spec_w > 1e-6) ? (sp_spec_s1 / sp_spec_w) : center_l_spec;
+    const float sp_spec_var = (sp_spec_w > 1e-6)
+        ? max(0.0, sp_spec_s2 / sp_spec_w - sp_spec_mean * sp_spec_mean)
+        : 0.0;
+    const float rough_relax_spec = smoothstep(0.05, 0.35, roughness_center);
+    const float outlier_pull = (center_l_spec > 2.5 * max(sp_spec_mean, 0.05)) ? rough_relax_spec : 0.0;
+    const float lum_mean_spec = lerp(moments_center.z, sp_spec_mean, outlier_pull);
+    float var_spec = max(1e-8, sum_var_spec / max(sum_var_spec_w, 1e-6));
+    if(hist_len_spec < 8.0)
+    {
+        const float short_hist_spec_w = lerp(1.0, 0.15, saturate((hist_len_spec - 1.0) / 7.0));
+        var_spec = max(var_spec, sp_spec_var * short_hist_spec_w);
+    }
     const float hist_var_scale = (hist_len_spec < 4.0)
         ? lerp(4.0, 1.0, saturate((hist_len_spec - 1.0) / 3.0))
         : (1.0 / clamp(hist_len_spec * 0.25, 1.0, 8.0));
+    const float base_lum_tol = (Q2_FLT_ATROUS_LUM_SPEC * 0.15) * sqrt(var_spec * hist_var_scale) + 0.06;
+    const float rough_lum_tol = rough_relax_spec * (0.25 + 1.25 * max(lum_mean_spec, 0.0));
     const float inv_lum_scale_spec = (Q2_FLT_ATROUS_LUM_SPEC != 0.0)
-        ? (1.0 / ((Q2_FLT_ATROUS_LUM_SPEC * 0.125) * sqrt(var_spec * hist_var_scale) + 0.05))
+        ? (1.0 / (base_lum_tol + rough_lum_tol))
         : 0.0;
 
     // Reduce filter sensitivity to normals independently for HF and SPEC when history is invalidated
@@ -217,10 +253,10 @@ filter_image(
     float normal_weight_scale_spec = clamp(hist_len_spec / 8.0, 0.0, 1.0);
 
     float normal_weight_hf = (Q2_FLT_ATROUS_NORMAL_HF > 0.0)
-        ? max(4.0, Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf)
+        ? max(8.0, Q2_FLT_ATROUS_NORMAL_HF * normal_weight_scale_hf)
         : 0.0;
     float normal_weight_spec = roughnessSquaredToSpecPower(square(roughness_center)) * Q2_FLT_ATROUS_NORMAL_SPEC;
-    normal_weight_spec = clamp(normal_weight_spec, 8.0, 1024.0) * normal_weight_scale_spec;
+    normal_weight_spec = clamp(normal_weight_spec, 24.0, 1024.0) * normal_weight_scale_spec;
 
     const int step_size = (int)(1u << q2AtrousIteration);
 
@@ -275,7 +311,7 @@ filter_image(
     const float spec_filter_width_scale = depth_center > 0.0
         ? saturate(eff_spec_radius / float(step_size))
         : clamp(roughness_center * 30.0 - (float)q2AtrousIteration, 0.0, 1.0);
-    const float rough_sharpness = lerp(4.0, 12.0, saturate(hist_len_spec / 16.0));
+    const float rough_sharpness = lerp(8.0, 20.0, saturate(hist_len_spec / 16.0));
 
     // Zero-mean centrosymmetric 2x2 Bayer tap rotation for HF on coarser iterations
     // breaks dyadic square grid ringing without adding temporal jitter; SPEC stays exact
@@ -531,10 +567,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             const float3 diffuse = filtered_hf;
             const float3 indirect = q2SHToIrradiance(filtered_lf, normal);
 
-            // to prevent noise, specular will be replaced with SH, if the surface is too rough
+            // Blend ultra-rough specular into total irradiance (direct + indirect) near 1.0
+            // so direct highlights stay crisp through 0..0.82 and rough metals retain direct light.
             const float3 specular = lerp(
                 filtered_spec,
-                indirect,
+                diffuse + indirect,
                 smoothstep(
                         FAKE_ROUGH_SPECULAR_THRESHOLD,
                         FAKE_ROUGH_SPECULAR_THRESHOLD + FAKE_ROUGH_SPECULAR_LENGTH,

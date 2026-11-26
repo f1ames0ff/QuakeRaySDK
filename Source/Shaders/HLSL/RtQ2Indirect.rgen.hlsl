@@ -304,7 +304,7 @@ void q2ShadeIndirect(const Surface surf, const float3 hitPos, const float3 hitRa
 
     // Path-space firefly clamping for 1-spp specular: preserve crisp bright peaks on mirrors
     // while bounding high-variance emissive/radiance spikes on rougher surfaces.
-    const float  specMaxRadiance = lerp( 50.0, 10.0, smoothstep( 0.08, 0.40, surf.roughness ) );
+    const float  specMaxRadiance = lerp( 50.0, 12.0, smoothstep( 0.06, 0.45, surf.roughness ) );
     const float  specLum         = getLuminance( radiance );
     const float3 specRadiance    = ( specLum > specMaxRadiance ) ? radiance * ( specMaxRadiance / specLum ) : radiance;
 
@@ -582,7 +582,8 @@ void main()
 
     {
         const float3 direct = texelFetchUnfilteredSpecular( pix );
-        const float3 demodIndir = min( demodulateSpecular( specular, surf.specularColor ), (float3)32768.0 );
+        const float3 demodIndir = q2RegularizeDemodulatedSpecular(
+            demodulateSpecular( specular, surf.specularColor ), surf.roughness );
         const float indirLum = getLuminance( demodIndir );
         const float4 prevViewDir = framebufViewDirection.Load( pix );
         if ( indirLum > 1e-5 && ( prevViewDir.w < 0.0 || getLuminance( direct ) < indirLum ) )

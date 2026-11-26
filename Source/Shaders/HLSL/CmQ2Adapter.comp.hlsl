@@ -134,6 +134,90 @@ float3 q2AntiFirefly(const int2 pix, const float3 center, const Texture2D<uint4>
     return center;
 }
 
+void q2TrackSecondMax(float lum, inout float max1, inout float max2)
+{
+    if (lum > max1)
+    {
+        max2 = max1;
+        max1 = lum;
+    }
+    else if (lum > max2)
+    {
+        max2 = lum;
+    }
+}
+
+float3 q2ApplyRank2SpecularLimit(const float3 center, float centerLum, float rough, float surfMax2,
+                                 float allMax2, int surfCount)
+{
+    const float roughT = smoothstep(0.04, 0.35, rough);
+    const float floorLum = lerp(0.50, 0.20, roughT);
+    if (centerLum <= floorLum)
+    {
+        return center;
+    }
+    const float refMax2 = (surfCount >= 2) ? surfMax2 : allMax2;
+    const float factor = lerp(6.0, 2.2, roughT);
+    const float limit = max(floorLum, refMax2 * factor);
+    return (centerLum > limit) ? (center * (limit / centerLum)) : center;
+}
+
+float3 q2AntiFireflySpec(const int2 pix, const float3 center, const Texture2D<uint4> buf,
+                         const int width, const int height)
+{
+    const float centerLum = getLuminance(center);
+    if (!isfinite(centerLum))
+    {
+        return (float3)0.0;
+    }
+
+    const float rough = framebufMetallicRoughness_Sampled.Load(int3(pix, 0)).y;
+    const int halfWidth = width / 2;
+    const int field_left = (pix.x >= halfWidth) ? halfWidth : 0;
+    const int field_right = (pix.x >= halfWidth) ? width : halfWidth;
+    const float depth_c = framebufQ2ViewDepth_Sampled.Load(int3(pix, 0)).r;
+    const float3 normal_c = texelFetchNormal(pix);
+
+    float surfMax1 = 0.0;
+    float surfMax2 = 0.0;
+    float allMax1 = 0.0;
+    float allMax2 = 0.0;
+    int surfCount = 0;
+
+    for (int yy = -1; yy <= 1; yy++)
+    {
+        for (int xx = -1; xx <= 1; xx++)
+        {
+            if (xx == 0 && yy == 0)
+            {
+                continue;
+            }
+            const int2 p = pix + int2(xx, yy);
+            if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= height)
+            {
+                continue;
+            }
+            const float lum = getLuminance(decodeE5B9G9R9(buf.Load(int3(p, 0)).r));
+            if (!isfinite(lum))
+            {
+                continue;
+            }
+            q2TrackSecondMax(lum, allMax1, allMax2);
+
+            const float depth_n = framebufQ2ViewDepth_Sampled.Load(int3(p, 0)).r;
+            const float3 normal_n = texelFetchNormal(p);
+            if (dot(normal_n, normal_c) > 0.6 &&
+                abs(depth_n - depth_c) <= 0.15 * max(abs(depth_c), 1e-3))
+            {
+                surfCount++;
+                q2TrackSecondMax(lum, surfMax1, surfMax2);
+            }
+        }
+    }
+
+    return q2ApplyRank2SpecularLimit(center, centerLum, rough, surfMax2, allMax2, surfCount);
+}
+
 bool q2IsCurrGradientSample(const int2 p, const int width, const int height)
 {
     if (globalUniform.fltEnable.x < 0.5 || !q2InGradBounds(p, width, height))
@@ -302,13 +386,15 @@ float3 q2FetchReconstructedIndirectSpec(const int2 pix, const int width, const i
     {
         return (float3)0.0;
     }
-    if (centerLum < Q2_FIREFLY_MIN_LUM)
-    {
-        return center;
-    }
 
-    float max1 = 3.0f;
-    float max2 = 3.0f;
+    const float rough = framebufMetallicRoughness_Sampled.Load(int3(pix, 0)).y;
+    const float depth_c = framebufQ2ViewDepth_Sampled.Load(int3(pix, 0)).r;
+    const float3 normal_c = texelFetchNormal(pix);
+    float surfMax1 = 0.0f;
+    float surfMax2 = 0.0f;
+    float allMax1 = 0.0f;
+    float allMax2 = 0.0f;
+    int surfCount = 0;
     const int rY = halfRes ? 2 : 1;
     for (int yy = -rY; yy <= rY; yy++)
     {
@@ -341,27 +427,20 @@ float3 q2FetchReconstructedIndirectSpec(const int2 pix, const int width, const i
             {
                 continue;
             }
-            if (lum > max1)
+            q2TrackSecondMax(lum, allMax1, allMax2);
+
+            const float depth_n = framebufQ2ViewDepth_Sampled.Load(int3(p, 0)).r;
+            const float3 normal_n = texelFetchNormal(p);
+            if (dot(normal_n, normal_c) > 0.6 &&
+                abs(depth_n - depth_c) <= 0.15 * max(abs(depth_c), 1e-3))
             {
-                max2 = max1;
-                max1 = lum;
-            }
-            else if (lum > max2)
-            {
-                max2 = lum;
+                surfCount++;
+                q2TrackSecondMax(lum, surfMax1, surfMax2);
             }
         }
     }
 
-    const float rough = framebufMetallicRoughness_Sampled.Load(int3(pix, 0)).y;
-    const float factor = lerp(12.0, 6.0, smoothstep(0.06, 0.45, rough));
-    const float limit = max(Q2_FIREFLY_MIN_LUM, max2 * factor);
-    if (centerLum > limit)
-    {
-        return center * (limit / centerLum);
-    }
-
-    return center;
+    return q2ApplyRank2SpecularLimit(center, centerLum, rough, surfMax2, allMax2, surfCount);
 }
 
 SH q2FetchReconstructedIndirectSH(const int2 pix, const int width, const int height)
@@ -574,7 +653,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     const float3 diffuse = q2AntiFirefly(pix, texelFetchUnfilteredDirect(pix), framebufUnfilteredDirect_Sampled, width, height);
-    const float3 directSpec = q2AntiFirefly(pix, texelFetchUnfilteredSpecular(pix), framebufUnfilteredSpecular_Sampled, width, height);
+    const float3 directSpec = q2AntiFireflySpec(pix, texelFetchUnfilteredSpecular(pix), framebufUnfilteredSpecular_Sampled, width, height);
     const float3 indirectSpec = q2FetchReconstructedIndirectSpec(pix, width, height, true);
     const float3 specular = directSpec + indirectSpec;
     const SH indir = q2FetchReconstructedIndirectSH(pix, width, height);

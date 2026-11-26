@@ -210,7 +210,11 @@ void main()
     }
 
     imageStoreUnfilteredDirect(pix, directDiffuse);
-    imageStoreUnfilteredSpecular(pix, demodulateSpecular(directSpecular, surf.specularColor));
+    imageStoreUnfilteredSpecular(
+        pix,
+        q2RegularizeDemodulatedSpecular(
+            demodulateSpecular(directSpecular, surf.specularColor),
+            surf.roughness));
     const float directHitDist = directSpecHitLumSum > 1e-6
         ? clamp(directSpecHitDistSum / directSpecHitLumSum, 0.0, Q2_MAX_VIEW_DIR_HIT_DIST)
         : -1.0;

@@ -661,6 +661,22 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
             }
         }
 
+        // NRD-ReLAX / SVGF current-sample firefly clamp on non-mirror lobes: suppress isolated
+        // 1-spp outlier sparks against same-surface 3x3 spatial moments before temporal blend.
+        const float rough_clamp_t = smoothstep(0.04, 0.25, metal_rough.y);
+        if (rough_clamp_t > 0.0)
+        {
+            const float sp_mean_s = max(0.0, spatial_moments_spec.x);
+            const float sp_std_s = sqrt(max(0.0, spatial_moments_spec.y - sp_mean_s * sp_mean_s));
+            const float spec_sigma_k = lerp(6.0, 2.25, rough_clamp_t);
+            const float spec_cap = sp_mean_s + spec_sigma_k * max(sp_std_s, 0.12 * sp_mean_s + 0.04);
+            if (lum_curr_spec > spec_cap && lum_curr_spec > 0.08)
+            {
+                color_curr_spec *= (spec_cap / lum_curr_spec);
+                lum_curr_spec = spec_cap;
+            }
+        }
+
 
         // Load the gradients (produced by the Q2RTX-style gradient pipeline at
         // 1/3 res: CmQ2GradientReproject + Img + Atrous). After the 7 atrous
