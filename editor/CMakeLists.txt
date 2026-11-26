@@ -134,6 +134,8 @@ endif()
 set(QR_EDITOR_WATER_NORMAL_FILE "")
 if(QR_EDITOR_TEXTURE_DIR AND EXISTS "${QR_EDITOR_TEXTURE_DIR}/WaterNormal_n.png")
     set(QR_EDITOR_WATER_NORMAL_FILE "${QR_EDITOR_TEXTURE_DIR}/WaterNormal_n.png")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../Assets/textures/WaterNormal_n.png")
+    set(QR_EDITOR_WATER_NORMAL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../Assets/textures/WaterNormal_n.png")
 endif()
 
 if(QR_EDITOR_BLUE_NOISE_FILE OR QR_EDITOR_WATER_NORMAL_FILE)
