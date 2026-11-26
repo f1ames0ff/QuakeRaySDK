@@ -1100,12 +1100,13 @@ std::string_view TrimBrushWhitespace(std::string_view text)
 
 float ParseBlockFeather(std::string_view value, float fallback)
 {
+    const float maxFeather = float(kEditorMaskFeatherMax);
     const float pixels = FloatOf(value, fallback);
     if (!std::isfinite(pixels))
     {
-        return std::clamp(fallback, 0.0f, 16.0f);
+        return std::clamp(fallback, 0.0f, maxFeather);
     }
-    return float(std::lround(std::clamp(pixels, 0.0f, 16.0f)));
+    return float(std::lround(std::clamp(pixels, 0.0f, maxFeather)));
 }
 
 bool ParseBrushRleToken(std::string_view token, size_t remaining, size_t &outCount,

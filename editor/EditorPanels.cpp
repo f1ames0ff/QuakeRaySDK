@@ -931,9 +931,9 @@ bool DrawMaskBlockFeatherSlider(const char *label, Block &block, const Block *ba
     bool edited = false;
     const bool ftChanged = baseBlock != nullptr && !AlmostEq(block.feather, baseBlock->feather);
     bool ftReset = false;
-    int32_t feather = int32_t(std::lround(block.feather));
+    int32_t feather = std::clamp(int32_t(std::lround(block.feather)), 0, kEditorMaskFeatherMax);
 
-    if (EditorGuiSliderInt(label, &feather, 0, 16,
+    if (EditorGuiSliderInt(label, &feather, 0, kEditorMaskFeatherMax,
                            { ftChanged, true, "Outward mask edge blur radius in pixels.", "%d",
                              baseBlock ? &ftReset : nullptr }))
     {
@@ -3755,11 +3755,11 @@ bool IsSssLockedByMaterial(const EditorMaterialParams &params)
 }
 
 bool DrawUnitScalarRow(const char *label, float &value, float baseValue, bool enabled,
-                       const char *fmt, const char *tip)
+                       const char *fmt, const char *tip, float maxVal = 1.0f)
 {
     bool reset = false;
     bool edited = EditorGuiSliderFloat(
-        label, &value, 0.0f, 1.0f,
+        label, &value, 0.0f, maxVal,
         { !AlmostEq(value, baseValue), enabled, tip, fmt, &reset });
     edited |= ResetIfClicked(value, baseValue, &reset);
     return edited;
@@ -3789,8 +3789,9 @@ bool DrawMaterialSssSection(EditorMaterialParams &params, const EditorMaterialPa
 
     edited |= DrawUnitScalarRow("sss_threshold", params.sssThreshold, base.sssThreshold, enabled,
                                 "%.3f", "Default color distance threshold for new subsurface blocks.");
-    edited |= DrawUnitScalarRow("sss_feather", params.sssFeather, base.sssFeather, enabled, "%.3f",
-                                "Default edge feathering for new subsurface blocks.");
+    edited |= DrawUnitScalarRow("sss_feather", params.sssFeather, base.sssFeather, enabled, "%.1f",
+                                "Default edge feathering for new subsurface blocks.",
+                                float(kEditorMaskFeatherMax));
     return edited;
 }
 

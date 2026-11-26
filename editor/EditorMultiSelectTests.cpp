@@ -1709,6 +1709,163 @@ bool TestSmoothGlossFeathering()
                  "thin 1px highlight collapsed under gloss feathering");
 }
 
+std::vector<uint8_t> MakeVerticalWhiteStripRgba(uint32_t width, uint32_t height, uint32_t xStart,
+                                                uint32_t xEnd)
+{
+    std::vector<uint8_t> rgba(size_t(width) * size_t(height) * 4u, 0);
+    for (uint32_t y = 0; y < height; y++)
+    {
+        for (uint32_t x = 0; x < width; x++)
+        {
+            const uint8_t v = (x >= xStart && x <= xEnd) ? 255 : 0;
+            const size_t off = (size_t(y) * width + x) * 4u;
+            rgba[off + 0] = v;
+            rgba[off + 1] = v;
+            rgba[off + 2] = v;
+            rgba[off + 3] = 255;
+        }
+    }
+    return rgba;
+}
+
+bool VerifyLumaFeatherOneOnStrip(uint32_t xStart, uint32_t xEnd, const char *msg)
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    const std::vector<uint8_t> strip = MakeVerticalWhiteStripRgba(32, 32, xStart, xEnd);
+    std::vector<float> mask;
+    ComputeEditorMask({ white, 0.2f, 1.0f, 1.0f, nullptr, nullptr, 0, 0, false }, strip.data(), 32,
+                      32, mask, nullptr);
+    const size_t row = 16u * 32u;
+    bool ok = mask.size() == 1024;
+    for (uint32_t x = xStart; x <= xEnd; x++)
+    {
+        ok = ok && mask[row + x] >= 0.95f;
+    }
+    const bool edgesOk = mask[row + xStart - 1] > 0.05f && mask[row + xStart - 1] <= 0.30f &&
+                         mask[row + xEnd + 1] > 0.05f && mask[row + xEnd + 1] <= 0.30f &&
+                         Near(mask[row + xStart - 2], 0.0f, 1e-6f) &&
+                         Near(mask[row + xEnd + 2], 0.0f, 1e-6f);
+    return Check(ok && edgesOk, msg);
+}
+
+bool VerifyLumaFeatherRadiusOne()
+{
+    return VerifyLumaFeatherOneOnStrip(
+               15, 16, "luma feather=1 on 2px strip bled beyond 1px or over-inflated neighbors") &&
+           VerifyLumaFeatherOneOnStrip(
+               16, 16, "luma feather=1 on 1px strip bled beyond 1px or collapsed center");
+}
+
+bool VerifyLumaFeatherMonotonicForRadius(const std::vector<uint8_t> &strip1, int radius)
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    const size_t row = 16u * 32u;
+    std::vector<float> mask;
+    ComputeEditorMask({ white, 0.2f, float(radius), 1.0f, nullptr, nullptr, 0, 0, false },
+                      strip1.data(), 32, 32, mask, nullptr);
+    for (int d = 0; d < radius; d++)
+    {
+        if (!Check(mask[row + size_t(16 - d)] > mask[row + size_t(16 - d - 1)] &&
+                       mask[row + size_t(16 + d)] > mask[row + size_t(16 + d + 1)],
+                   "luma feather falloff must be strictly monotonic within radius"))
+        {
+            return false;
+        }
+    }
+    return Check(mask[row + size_t(16 - radius)] > 0.0f &&
+                     mask[row + size_t(16 + radius)] > 0.0f &&
+                     Near(mask[row + size_t(16 - radius - 1)], 0.0f, 1e-6f) &&
+                     Near(mask[row + size_t(16 + radius + 1)], 0.0f, 1e-6f),
+                 "luma feather must stop strictly at requested pixel radius");
+}
+
+bool VerifyLumaZeroAndInvalidFeather(const std::vector<uint8_t> &strip1)
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    const size_t row = 16u * 32u;
+    const float feathers[] = { 0.0f, -2.0f, std::numeric_limits<float>::quiet_NaN() };
+    for (float f : feathers)
+    {
+        std::vector<float> mask;
+        ComputeEditorMask({ white, 0.2f, f, 1.0f, nullptr, nullptr, 0, 0, false }, strip1.data(),
+                          32, 32, mask, nullptr);
+        if (!Check(mask.size() == 1024 && Near(mask[row + 16], 1.0f) &&
+                       Near(mask[row + 15], 0.0f, 1e-6f) && Near(mask[row + 17], 0.0f, 1e-6f),
+                   "luma zero/negative/NaN feather must not bleed into neighbor pixels"))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VerifyMaxFeatherRadius128()
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    const float maxFeather = float(kEditorMaskFeatherMax);
+    const std::vector<uint8_t> wide = MakeVerticalWhiteStripRgba(300, 4, 150, 150);
+    std::vector<float> mask;
+    ComputeEditorMask({ white, 0.2f, maxFeather, 1.0f, nullptr, nullptr, 0, 0, false }, wide.data(),
+                      300, 4, mask, nullptr);
+    const size_t row = 2u * 300u;
+    if (!Check(mask.size() == 1200 && mask[row + 150] > 0.0f, "feather=128 center collapsed"))
+    {
+        return false;
+    }
+    for (int d = 0; d < kEditorMaskFeatherMax; d++)
+    {
+        if (!Check(mask[row + size_t(150 - d)] > mask[row + size_t(150 - d - 1)] &&
+                       mask[row + size_t(150 + d)] > mask[row + size_t(150 + d + 1)],
+                   "feather=128 falloff must decrease monotonically across full 128px span"))
+        {
+            return false;
+        }
+    }
+    return Check(mask[row + size_t(150 - kEditorMaskFeatherMax)] > 0.0f &&
+                     mask[row + size_t(150 + kEditorMaskFeatherMax)] > 0.0f &&
+                     Near(mask[row + size_t(150 - kEditorMaskFeatherMax - 1)], 0.0f, 1e-6f) &&
+                     Near(mask[row + size_t(150 + kEditorMaskFeatherMax + 1)], 0.0f, 1e-6f),
+                 "feather=128 did not stop strictly at 128px");
+}
+
+bool VerifyFeather128OnSmallTextureAndGloss(const std::vector<uint8_t> &strip1)
+{
+    const float white[3] = { 1.0f, 1.0f, 1.0f };
+    const float maxFeather = float(kEditorMaskFeatherMax);
+    std::vector<float> small;
+    ComputeEditorMask({ white, 0.2f, maxFeather, 1.0f, nullptr, nullptr, 0, 0, false },
+                      strip1.data(), 32, 32, small, nullptr);
+    const bool boundsOk = small.size() == 1024 &&
+                          std::all_of(small.begin(), small.end(), [](float v) {
+                              return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
+                          }) &&
+                          small[16u * 32u + 16u] > 0.0f &&
+                          small[16u * 32u + 16u] >= small[16u * 32u];
+    if (!Check(boundsOk, "feather=128 on 32x32 texture exceeded bounds or collapsed"))
+    {
+        return false;
+    }
+
+    const std::vector<uint8_t> split = MakeSplitBlackWhiteRgba(64, 64, 32);
+    std::vector<float> gloss;
+    ComputeEditorMask({ white, 0.25f, maxFeather, 1.0f, nullptr, nullptr, 0, 0, true }, split.data(),
+                      64, 64, gloss, nullptr);
+    const bool glossFinite =
+        gloss.size() == 4096 &&
+        std::all_of(gloss.begin(), gloss.end(), [](float v) { return std::isfinite(v); });
+    return Check(glossFinite && gloss[32u * 64u + 63u] > gloss[32u * 64u + 0u],
+                 "gloss color cap failed at feather=128");
+}
+
+bool TestStrictLumaFeatherRadius()
+{
+    const std::vector<uint8_t> strip1 = MakeVerticalWhiteStripRgba(32, 32, 16, 16);
+    return VerifyLumaFeatherRadiusOne() && VerifyLumaFeatherMonotonicForRadius(strip1, 2) &&
+           VerifyLumaFeatherMonotonicForRadius(strip1, 4) &&
+           VerifyLumaZeroAndInvalidFeather(strip1) && VerifyMaxFeatherRadius128() &&
+           VerifyFeather128OnSmallTextureAndGloss(strip1);
+}
+
 bool VerifySoftAndHardBrushDabs()
 {
     const std::vector<uint8_t> empty(64u * 64u, 0);
@@ -1869,11 +2026,17 @@ bool VerifyMalformedBrushYamlRejected(const std::filesystem::path &tempDir)
     for (const EditorEmissiveBlock &blk : readBad.emissiveBlocks)
     {
         if (!Check(!IsBrushBlock(blk) && blk.brushMask.empty() && blk.feather >= 0.0f &&
-                       blk.feather <= 16.0f,
+                       blk.feather <= float(kEditorMaskFeatherMax),
                    "malformed luma brush YAML entry must be rejected cleanly"))
         {
             return false;
         }
+    }
+    if (!Check(!readBad.emissiveBlocks.empty() &&
+                   Near(readBad.emissiveBlocks.back().feather, float(kEditorMaskFeatherMax)),
+               "oversized YAML feather must clamp to kEditorMaskFeatherMax"))
+    {
+        return false;
     }
     for (const EditorGlossBlock &blk : readBad.glossBlocks)
     {
@@ -1884,6 +2047,36 @@ bool VerifyMalformedBrushYamlRejected(const std::filesystem::path &tempDir)
         }
     }
     return true;
+}
+
+bool VerifyLargeFeatherYamlRoundTrip(const std::filesystem::path &tempDir)
+{
+    EditorMaterialParams mat;
+    mat.hasColorEmissive = true;
+    EditorEmissiveBlock b64;
+    b64.color[0] = 1.0f;
+    b64.feather = 64.0f;
+    EditorEmissiveBlock b128;
+    b128.color[1] = 1.0f;
+    b128.feather = float(kEditorMaskFeatherMax);
+    mat.emissiveBlocks = { b64, b128 };
+
+    EditorMaterialsDocument doc;
+    const std::string yaml = doc.WriteMerged({ { "large_feather_mat", mat } });
+    const std::filesystem::path yamlPath = tempDir / "large_feather.materials.yaml";
+    std::string err;
+    EditorMaterialParams loaded;
+    if (!Check(WriteEditorFile(yamlPath.string(), yaml, err) &&
+                   doc.Load(yamlPath.string(), err) &&
+                   doc.ReadMaterial("large_feather_mat", loaded) &&
+                   loaded.emissiveBlocks.size() == 2,
+               "failed large feather YAML round-trip"))
+    {
+        return false;
+    }
+    return Check(Near(loaded.emissiveBlocks[0].feather, 64.0f) &&
+                     Near(loaded.emissiveBlocks[1].feather, float(kEditorMaskFeatherMax)),
+                 "feather 64/128 was unexpectedly clamped during YAML round-trip");
 }
 
 bool VerifyBrushRoundTripMatch(const EditorMaterialParams &expected,
@@ -1925,7 +2118,8 @@ bool TestBrushMaskYamlRoundTrip()
 
     const bool ok = Check(loaded, "failed to load round-trip brush yaml") &&
                     VerifyBrushRoundTripMatch(expected, actual) &&
-                    VerifyMalformedBrushYamlRejected(tempDir);
+                    VerifyMalformedBrushYamlRejected(tempDir) &&
+                    VerifyLargeFeatherYamlRoundTrip(tempDir);
     std::filesystem::remove_all(tempDir, ec);
     return ok;
 }
@@ -3064,6 +3258,7 @@ int main()
         TestBaselineCustomAndMapLightGuards,
         TestColocatedExtraClaimPrefersClassName,
         TestSmoothGlossFeathering,
+        TestStrictLumaFeatherRadius,
         TestBrushStrokeEvaluation,
         TestBrushMaskYamlRoundTrip,
         TestGlossMultiBlockBlendAndBakeInvalidation,
