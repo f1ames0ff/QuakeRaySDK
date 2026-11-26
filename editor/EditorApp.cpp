@@ -7630,8 +7630,8 @@ void EditorApp::DrawMaterials()
             changed |= ImGui::SliderFloat("Luma threshold##lumadef", &material.lumaThreshold, 0.0f, 1.0f,
                                           "%.3f");
             LogRect("material luma threshold");
-            changed |= ImGui::SliderFloat("Luma feather##lumadef", &material.lumaFeather, 0.0f, 16.0f,
-                                          "%.1f");
+            changed |= ImGui::SliderFloat("Luma feather##lumadef", &material.lumaFeather, 0.0f,
+                                          float(kEditorMaskFeatherMax), "%.1f");
             LogRect("material luma feather");
 
             int32_t removeIndex = -1;
@@ -7754,9 +7754,11 @@ void EditorApp::DrawMaterials()
                     }
 
                     {
-                        int32_t feather = int32_t(std::lround(block.feather));
+                        int32_t feather = std::clamp(int32_t(std::lround(block.feather)), 0,
+                                                     kEditorMaskFeatherMax);
 
-                        if (ImGui::SliderInt("Luma feather##lumablk", &feather, 0, 16, "%d"))
+                        if (ImGui::SliderInt("Luma feather##lumablk", &feather, 0,
+                                             kEditorMaskFeatherMax, "%d"))
                         {
                             // The game rounds the stored value, so the slider owns an integer.
                             block.feather = float(feather);

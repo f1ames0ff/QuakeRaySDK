@@ -90,6 +90,7 @@ struct EditorGlossBlock
 };
 
 inline constexpr size_t kEditorGlossBlockMax = 10;
+inline constexpr int32_t kEditorMaskFeatherMax = 128;
 
 template <typename Block>
 bool IsBrushBlock(const Block &block)

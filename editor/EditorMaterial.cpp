@@ -18,6 +18,7 @@
 #include "EditorMaterial.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 
@@ -211,63 +212,99 @@ bool NeedsFullbrightBake(const EditorTexture *texture, const EditorMaterialParam
 // The falloff of a colour block's threshold mask, gl_texmgr.c RT_COLOR_EMISSIVE_FALLOFF.
 constexpr float kColorEmissiveFalloff = 2.0f;
 
+constexpr int kMaxFeatherRadius = kEditorMaskFeatherMax;
+constexpr float kGlossColorFeatherCap = 16.0f;
+constexpr float kFeatherSigmaPerPixel = 0.6f;
+constexpr float kFeatherMinSigma = 0.15f;
+constexpr float kFeatherMaxPeakGain = 1.5f;
+
+std::array<float, kMaxFeatherRadius + 1> BuildFeatherKernel(int radius, float sigma)
+{
+    std::array<float, kMaxFeatherRadius + 1> weights{};
+    const float invTwoSigma2 = 0.5f / (sigma * sigma);
+    weights[0] = 1.0f;
+    float weightSum = 1.0f;
+
+    for (int d = 1; d <= radius; d++)
+    {
+        const float dist = float(d);
+        const float w = std::exp(-dist * dist * invTwoSigma2);
+        weights[size_t(d)] = w;
+        weightSum += 2.0f * w;
+    }
+
+    for (int d = 0; d <= radius; d++)
+    {
+        weights[size_t(d)] /= weightSum;
+    }
+
+    return weights;
+}
+
 void FeatherMaskHorizontal(const std::vector<float> &src, uint32_t width, uint32_t height,
-                           int radius, std::vector<float> &dst)
+                           int radius, const std::array<float, kMaxFeatherRadius + 1> &kernel,
+                           std::vector<float> &dst)
 {
     const int w = int(width);
     const int h = int(height);
-    const float window = float(radius * 2 + 1);
+    const size_t pad = size_t(radius);
+    const float centerWeight = kernel[0];
+    std::vector<float> padded(size_t(w) + pad * 2u, 0.0f);
 
     for (int y = 0; y < h; y++)
     {
-        const size_t row = size_t(y) * width;
-        float sum = 0.0f;
+        const float *srcRow = src.data() + size_t(y) * size_t(width);
+        float *dstRow = dst.data() + size_t(y) * size_t(width);
+        std::fill_n(padded.data(), pad, srcRow[0]);
+        std::copy_n(srcRow, size_t(w), padded.data() + pad);
+        std::fill_n(padded.data() + pad + size_t(w), pad, srcRow[w - 1]);
 
-        for (int i = -radius; i <= radius; i++)
-        {
-            sum += src[row + size_t(std::clamp(i, 0, w - 1))];
-        }
-
+        const float *center = padded.data() + pad;
         for (int x = 0; x < w; x++)
         {
-            dst[row + size_t(x)] = sum / window;
-            sum += src[row + size_t(std::min(x + radius + 1, w - 1))];
-            sum -= src[row + size_t(std::max(x - radius, 0))];
+            dstRow[x] = center[x] * centerWeight;
+        }
+        for (int d = 1; d <= radius; d++)
+        {
+            const float wd = kernel[size_t(d)];
+            const float *left = center - d;
+            const float *right = center + d;
+            for (int x = 0; x < w; x++)
+            {
+                dstRow[x] += (left[x] + right[x]) * wd;
+            }
         }
     }
 }
 
 void FeatherMaskVertical(const std::vector<float> &src, uint32_t width, uint32_t height, int radius,
+                         const std::array<float, kMaxFeatherRadius + 1> &kernel,
                          std::vector<float> &dst)
 {
     const int w = int(width);
     const int h = int(height);
-    const float window = float(radius * 2 + 1);
+    const size_t rowStride = size_t(width);
+    const float centerWeight = kernel[0];
 
-    for (int x = 0; x < w; x++)
+    for (int y = 0; y < h; y++)
     {
-        float sum = 0.0f;
-
-        for (int i = -radius; i <= radius; i++)
+        const float *srcRow = src.data() + size_t(y) * rowStride;
+        float *dstRow = dst.data() + size_t(y) * rowStride;
+        for (int x = 0; x < w; x++)
         {
-            sum += src[size_t(std::clamp(i, 0, h - 1)) * width + size_t(x)];
+            dstRow[x] = srcRow[x] * centerWeight;
         }
-
-        for (int y = 0; y < h; y++)
+        for (int d = 1; d <= radius; d++)
         {
-            const size_t index = size_t(y) * width + size_t(x);
-            dst[index] = sum / window;
-            sum += src[size_t(std::min(y + radius + 1, h - 1)) * width + size_t(x)];
-            sum -= src[size_t(std::max(y - radius, 0)) * width + size_t(x)];
+            const float wd = kernel[size_t(d)];
+            const float *top = src.data() + size_t(std::max(0, y - d)) * rowStride;
+            const float *bot = src.data() + size_t(std::min(h - 1, y + d)) * rowStride;
+            for (int x = 0; x < w; x++)
+            {
+                dstRow[x] += (top[x] + bot[x]) * wd;
+            }
         }
     }
-}
-
-void ApplyBoxBlurPass(std::vector<float> &mask, std::vector<float> &tmp, uint32_t width,
-                      uint32_t height, int radius)
-{
-    FeatherMaskHorizontal(mask, width, height, radius, tmp);
-    FeatherMaskVertical(tmp, width, height, radius, mask);
 }
 
 float PeakMaskValue(const std::vector<float> &mask)
@@ -280,12 +317,13 @@ float PeakMaskValue(const std::vector<float> &mask)
     return peak;
 }
 
-// Softens a scalar mask: outward dilation pre-pass so thin highlights survive, followed by
-// symmetric 3-pass Gaussian-like smoothing and peak preservation.
+// Softens a scalar mask with a separable Gaussian clamped to the exact requested pixel radius,
+// avoiding outward box dilation bleed on thin features while preserving peak highlights.
 void FeatherMask(std::vector<float> &mask, uint32_t width, uint32_t height, float feather,
                  float maxScale)
 {
-    if (feather < 0.5f || width == 0 || height == 0 || mask.empty())
+    if (!std::isfinite(feather) || feather <= 1e-4f || width == 0 || height == 0 ||
+        mask.size() != size_t(width) * size_t(height))
     {
         return;
     }
@@ -296,32 +334,19 @@ void FeatherMask(std::vector<float> &mask, uint32_t width, uint32_t height, floa
         return;
     }
 
-    const int radius = std::clamp(int(std::lround(feather)), 1, 16);
-    const int dilateR = std::max(1, radius / 2);
+    const float clampedFeather = std::clamp(feather, 0.0f, float(kMaxFeatherRadius));
+    const int radius = std::clamp(int(std::ceil(clampedFeather)), 1, kMaxFeatherRadius);
+    const float sigma = std::max(kFeatherMinSigma, kFeatherSigmaPerPixel * clampedFeather);
+    const std::array<float, kMaxFeatherRadius + 1> kernel = BuildFeatherKernel(radius, sigma);
+
     std::vector<float> tmp(mask.size(), 0.0f);
-    std::vector<float> dilated(mask.size(), 0.0f);
-
-    FeatherMaskHorizontal(mask, width, height, dilateR, tmp);
-    FeatherMaskVertical(tmp, width, height, dilateR, dilated);
-    for (size_t i = 0; i < mask.size(); i++)
-    {
-        mask[i] = std::max(mask[i], dilated[i]);
-    }
-
-    const int budget = std::max(2, radius * 2 - 1);
-    const int passes[3] = { (budget + 2) / 3, (budget + 1) / 3, budget / 3 };
-    for (int passRadius : passes)
-    {
-        if (passRadius > 0)
-        {
-            ApplyBoxBlurPass(mask, tmp, width, height, passRadius);
-        }
-    }
+    FeatherMaskHorizontal(mask, width, height, radius, kernel, tmp);
+    FeatherMaskVertical(tmp, width, height, radius, kernel, mask);
 
     const float peakAfter = PeakMaskValue(mask);
     if (peakAfter > 1e-5f && peakAfter < peakBefore)
     {
-        const float gain = std::min(2.0f, peakBefore / peakAfter);
+        const float gain = std::min(kFeatherMaxPeakGain, peakBefore / peakAfter);
         const float ceiling = std::max(0.0f, maxScale);
         for (float &value : mask)
         {
@@ -422,7 +447,9 @@ float EvaluateColorMaskValue(const EditorMaskEvalSpec &spec, float d2)
 {
     if (spec.isGloss)
     {
-        const float feather = std::max(0.0f, spec.feather);
+        const float feather = std::isfinite(spec.feather)
+                                  ? std::clamp(spec.feather, 0.0f, kGlossColorFeatherCap)
+                                  : 0.0f;
         const float dnorm = std::sqrt(d2 / 3.0f) / std::max(spec.threshold, 1e-4f);
         const float innerEnd = std::max(0.15f, 0.72f - 0.03f * feather);
         const float outerEnd = 1.0f + 0.06f * feather;
