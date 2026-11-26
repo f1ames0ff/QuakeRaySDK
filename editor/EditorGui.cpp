@@ -685,6 +685,63 @@ bool EditorGuiComboFiltered(const char *label, int32_t *selected, const EditorGu
     return edited;
 }
 
+namespace
+{
+
+void DrawRobotIcon(ImDrawList *drawList, ImVec2 bMin, ImVec2 bMax, ImU32 color)
+{
+    const float w = bMax.x - bMin.x;
+    const float h = bMax.y - bMin.y;
+    const float s = std::min(w, h);
+    const float cx = 0.5f * (bMin.x + bMax.x);
+    const float cy = 0.5f * (bMin.y + bMax.y);
+    const float u = s * 0.042f;
+    const float t = std::max(1.2f, 1.35f * g_uiScale);
+
+    // Antenna stem and ball tip.
+    drawList->AddLine(ImVec2(cx, cy - 4.2f * u), ImVec2(cx, cy - 8.2f * u), color, t);
+    drawList->AddCircleFilled(ImVec2(cx, cy - 8.8f * u), std::max(1.4f, 1.4f * u), color, 10);
+
+    // Side ear tabs.
+    drawList->AddRectFilled(ImVec2(cx - 9.0f * u, cy - 1.5f * u),
+                            ImVec2(cx - 6.8f * u, cy + 3.0f * u), color, 1.0f);
+    drawList->AddRectFilled(ImVec2(cx + 6.8f * u, cy - 1.5f * u),
+                            ImVec2(cx + 9.0f * u, cy + 3.0f * u), color, 1.0f);
+
+    // Rounded head outline, eyes, and mouth.
+    drawList->AddRect(ImVec2(cx - 6.8f * u, cy - 4.2f * u),
+                      ImVec2(cx + 6.8f * u, cy + 6.8f * u), color, 2.5f * u, 0, t);
+    const float eyeRadius = std::max(1.3f, 1.35f * u);
+    drawList->AddCircleFilled(ImVec2(cx - 2.6f * u, cy + 0.2f * u), eyeRadius, color, 10);
+    drawList->AddCircleFilled(ImVec2(cx + 2.6f * u, cy + 0.2f * u), eyeRadius, color, 10);
+    drawList->AddLine(ImVec2(cx - 3.0f * u, cy + 3.8f * u),
+                      ImVec2(cx + 3.0f * u, cy + 3.8f * u), color, t);
+}
+
+bool DrawOptionalAiGenerateButton(bool enabled, float aiW, bool *generateAiClicked)
+{
+    if (generateAiClicked == nullptr)
+    {
+        return false;
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!enabled);
+    ImGui::PushStyleColor(ImGuiCol_Button, ColorU8(42, 74, 108, 240));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorU8(58, 98, 140, 250));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorU8(70, 118, 168, 255));
+    const bool clicked = ImGui::Button("##ai_gen", ImVec2(aiW, 0.0f));
+    const ImVec2 bMin = ImGui::GetItemRectMin();
+    const ImVec2 bMax = ImGui::GetItemRectMax();
+    DrawRobotIcon(ImGui::GetWindowDrawList(), bMin, bMax,
+                  enabled ? ColorImU32(182, 226, 255) : ColorImU32(112, 120, 132));
+    ImGui::PopStyleColor(3);
+    ImGui::EndDisabled();
+    ShowTooltip("Generate with AI", true);
+    return clicked;
+}
+
+} // namespace
+
 bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClicked,
                           const EditorGuiRowOpts &opts, bool *generateAiClicked)
 {
@@ -700,10 +757,7 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
     ImGui::PushID(label);
     const float spacingX = ImGui::GetStyle().ItemSpacing.x;
     const float browseW = Scaled(kEditorGuiBrowseWidth);
-    static constexpr const char *kAiLabel = "Generate with AI";
-    const float aiW = generateAiClicked != nullptr
-                          ? (ImGui::CalcTextSize(kAiLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f)
-                          : 0.0f;
+    const float aiW = generateAiClicked != nullptr ? Scaled(kEditorGuiBrowseWidth) : 0.0f;
     const float extraReserve = (generateAiClicked != nullptr) ? (aiW + spacingX) : 0.0f;
     BeginTwoColumnRow(label, opts, browseW + spacingX + extraReserve);
 
@@ -723,6 +777,7 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
     {
         ImGui::PopStyleColor();
     }
+    ShowTooltip(path.c_str());
     if (edited)
     {
         path = buffer;
@@ -734,21 +789,12 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
         *browseClicked = true;
     }
     ShowTooltip("Browse texture assets");
-
-    if (generateAiClicked != nullptr)
-    {
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Button, ColorU8(42, 74, 108, 240));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorU8(58, 98, 140, 250));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorU8(70, 118, 168, 255));
-        if (ImGui::Button(kAiLabel, ImVec2(aiW, 0.0f)))
-        {
-            *generateAiClicked = true;
-        }
-        ImGui::PopStyleColor(3);
-        ShowTooltip("Generate this texture map from the current diffuse texture using AI.");
-    }
     ImGui::EndDisabled();
+
+    if (DrawOptionalAiGenerateButton(opts.enabled, aiW, generateAiClicked))
+    {
+        *generateAiClicked = true;
+    }
 
     EndTwoColumnRow("##rst_tex", opts);
     ImGui::PopID();

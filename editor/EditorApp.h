@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +39,12 @@
 #include "Scene.h"
 
 struct ImDrawList;
+struct EditorAiDialogState;
+
+struct EditorAiDialogDeleter
+{
+    void operator()(EditorAiDialogState *ptr) const;
+};
 
 class EditorApp
 {
@@ -499,7 +506,11 @@ private:
     void SetSingleLightSelection(int32_t light, bool lightCustom);
     void HandleLightModePick(const float direction[3], float surfaceDistance, bool hitSurface);
     void OpenTextureBrowserForSlot(const std::string &materialName, EditorTextureSlot slot);
-    bool GenerateMaterialTextureWithAi(int32_t materialIndex, EditorTextureSlot slot);
+    void OpenAiTextureGeneratorDialog(int32_t materialIndex, EditorTextureSlot slot);
+    void DrawAiTextureGeneratorDialog();
+    bool IsAiTextureDialogOpen() const;
+    bool CancelAiTextureGeneratorDialog();
+    void ShutdownAiTextureGeneratorDialog();
     int32_t RegisterOrUpdateGeneratedTexture(const std::string &relPath, uint32_t width,
                                              uint32_t height, const std::vector<uint8_t> &rgba);
     void MarkMaterialsEdited();
@@ -679,6 +690,7 @@ private:
     char m_textureBrowserSearch[64] = {};
     std::vector<TextureBrowserItem> m_textureBrowserCatalog;
     std::vector<TextureBrowserFolder> m_textureBrowserFolders;
+    std::unique_ptr<EditorAiDialogState, EditorAiDialogDeleter> m_aiDialog;
     // Set by an edit, cleared once the scene has been re-uploaded with the new values. The
     // rebuild waits for the pointer to leave the control so a drag does not rebuild per frame.
     bool m_materialsChanged = false;

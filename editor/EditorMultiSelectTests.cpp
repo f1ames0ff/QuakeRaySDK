@@ -16,6 +16,8 @@
 //
 
 #include "Assets.h"
+#include "EditorAiModelDownload.h"
+#include "EditorAiTexture.h"
 #include "EditorGui.h"
 #include "EditorLightSelection.h"
 #include "EditorMaterial.h"
@@ -31,8 +33,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -118,6 +122,16 @@ void EditorWindow::SetCursorVisible(bool visible)
 void EditorWindow::SetMouseCapture(bool capture)
 {
     (void)capture;
+}
+
+std::string EditorWindow::GetClipboardText()
+{
+    return {};
+}
+
+void EditorWindow::SetClipboardText(const char *text)
+{
+    (void)text;
 }
 
 namespace
@@ -3240,6 +3254,460 @@ bool TestLightClipboardPaste()
     return Check(inPlaceOk && movedOk, "BuildPastedLights stepping / group placement failed");
 }
 
+struct ScopedTempTestDir
+{
+    std::filesystem::path dir;
+
+    explicit ScopedTempTestDir(const char *suffix)
+        : dir(std::filesystem::temp_directory_path() / suffix)
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+    }
+
+    ~ScopedTempTestDir()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+bool VerifyAiUpscaleFitDimensions()
+{
+    uint32_t fitW = 0;
+    uint32_t fitH = 0;
+    ComputeEditorAiUpscaleFitDimensions(64u, 64u, 768u, fitW, fitH);
+    const bool sqOk = (fitW == 768u && fitH == 768u);
+    ComputeEditorAiUpscaleFitDimensions(128u, 64u, 768u, fitW, fitH);
+    const bool wideOk = (fitW == 768u && fitH == 384u);
+    ComputeEditorAiUpscaleFitDimensions(32u, 64u, 256u, fitW, fitH);
+    const bool minOk = (fitW == 256u && fitH == 512u);
+    ComputeEditorAiUpscaleFitDimensions(16u, 128u, 768u, fitW, fitH);
+    const bool skinnyOk = (fitW == 128u && fitH == 768u && (fitW % 64u) == 0u &&
+                           (fitH % 64u) == 0u);
+    return Check(sqOk && wideOk && minOk && skinnyOk,
+                 "ComputeEditorAiUpscaleFitDimensions mismatch");
+}
+
+bool TestAiLocalConfigAndUpscaleFit()
+{
+    ScopedTempTestDir tmp("qray_test_ai_local");
+    const std::filesystem::path cfgPath = tmp.dir / "ai_local.json";
+
+    EditorAiLocalConfig cfg;
+    std::string err;
+    if (!Check(LoadEditorAiLocalConfig(cfgPath, cfg, err) &&
+                   cfg.activeBackend == EditorAiBackend::LotusNormalD && cfg.processingRes == 768u,
+               "missing ai_local.json should default to LotusNormalD at 768 px"))
+    {
+        return false;
+    }
+
+    cfg.activeBackend = EditorAiBackend::LotusDepthD;
+    cfg.processingRes = 128u; // Should clamp to >= 512.
+    cfg.modelsDir = tmp.dir.string();
+    if (!Check(SaveEditorAiLocalConfig(cfgPath, cfg, err) &&
+                   LoadEditorAiLocalConfig(cfgPath, cfg, err) &&
+                   cfg.activeBackend == EditorAiBackend::LotusDepthD &&
+                   cfg.processingRes == 512u && cfg.modelsDir == tmp.dir.string(),
+               "ai_local.json save/reload or processingRes clamping failed"))
+    {
+        return false;
+    }
+
+    cfg.activeBackend = EditorAiBackend::DeepBump;
+    cfg.processingRes = 1024u;
+    if (!Check(SaveEditorAiLocalConfig(cfgPath, cfg, err) &&
+                   LoadEditorAiLocalConfig(cfgPath, cfg, err) &&
+                   cfg.activeBackend == EditorAiBackend::DeepBump && cfg.processingRes == 1024u,
+               "ai_local.json 1024 px round-trip failed"))
+    {
+        return false;
+    }
+
+    const std::filesystem::path dummyModel = tmp.dir / "lotus-normal-d-v1-1.onnx";
+    {
+        std::ofstream mf(dummyModel, std::ios::binary);
+        mf << "onnx";
+    }
+    const std::filesystem::path resolved =
+        ResolveEditorAiModelPath(EditorAiBackend::LotusNormalD, "", tmp.dir.string());
+    if (!Check(resolved == dummyModel.lexically_normal(),
+               "ResolveEditorAiModelPath failed finding modelsDir ONNX file"))
+    {
+        return false;
+    }
+
+    return VerifyAiUpscaleFitDimensions();
+}
+
+void BuildTestBumpField(uint32_t size, std::vector<float> &height, std::vector<uint8_t> &diffuse)
+{
+    height.assign(size_t(size) * size, 0.0f);
+    diffuse.assign(size_t(size) * size * 4u, 140u);
+    for (uint32_t y = 0; y < size; y++)
+    {
+        for (uint32_t x = 0; x < size; x++)
+        {
+            diffuse[(size_t(y) * size + x) * 4u + 3u] = 255u;
+            if (x >= 10u && x < 22u && y >= 10u && y < 22u)
+            {
+                height[size_t(y) * size + x] = 1.0f;
+            }
+        }
+    }
+}
+
+bool VerifyTgaWriteDecodeRoundTrip(uint32_t size, const std::vector<uint8_t> &norm)
+{
+    ScopedTempTestDir tmp("qray_test_ai_tga");
+    const std::filesystem::path tgaPath = tmp.dir / "sub" / "normal.tga";
+    if (!Check(WriteEditorRgbaTga(tgaPath, size, size, norm), "WriteEditorRgbaTga failed"))
+    {
+        return false;
+    }
+    std::ifstream f(tgaPath, std::ios::binary);
+    const std::vector<uint8_t> encoded{ std::istreambuf_iterator<char>(f),
+                                        std::istreambuf_iterator<char>() };
+    uint32_t decW = 0;
+    uint32_t decH = 0;
+    std::vector<uint8_t> decoded;
+    return Check(DecodeEditorImageRgba(encoded, decW, decH, decoded) && decW == size &&
+                     decH == size && decoded == norm,
+                 "TGA write/decode round-trip mismatch");
+}
+
+bool TestAiHeightToNormalAndInvertHeight()
+{
+    constexpr uint32_t kSize = 32u;
+    std::vector<float> height;
+    std::vector<uint8_t> diffuse;
+    BuildTestBumpField(kSize, height, diffuse);
+
+    EditorAiNormalParams p;
+    p.strength = 1.2f;
+    p.microDetail = 0.0f;
+    p.invertHeight = false;
+    std::vector<uint8_t> norm;
+    BuildEditorNormalMapFromHeight(height, kSize, kSize, &diffuse, p, norm);
+
+    p.invertHeight = true;
+    std::vector<uint8_t> inv;
+    BuildEditorNormalMapFromHeight(height, kSize, kSize, &diffuse, p, inv);
+
+    const size_t flatIdx = (size_t(16) * kSize + 16u) * 4u;
+    const size_t leftIdx = (size_t(16) * kSize + 10u) * 4u;
+    const size_t topIdx = (size_t(10) * kSize + 16u) * 4u;
+    const bool centerFlat =
+        norm[flatIdx + 0] == 128u && norm[flatIdx + 1] == 128u && norm[flatIdx + 2] == 255u;
+    const bool signFlipped = norm[leftIdx + 0] < 128u && inv[leftIdx + 0] > 128u &&
+                             norm[topIdx + 1] < 128u && inv[topIdx + 1] > 128u;
+    if (!Check(centerFlat && signFlipped,
+               "Invert Height must flip convex bump into concave recess"))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> adjInv;
+    p.strength = 1.0f;
+    p.invertHeight = true;
+    AdjustEditorNormalMap(norm, kSize, kSize, &diffuse, p, adjInv);
+
+    p.invertHeight = false;
+    p.invertY = true;
+    std::vector<uint8_t> adjFlipY;
+    AdjustEditorNormalMap(norm, kSize, kSize, &diffuse, p, adjFlipY);
+    if (!Check(adjInv[leftIdx + 0] > 128u && adjFlipY[leftIdx + 0] < 128u &&
+                   adjFlipY[topIdx + 1] > 128u,
+               "AdjustEditorNormalMap must support invertHeight and invertY directly"))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> litPos;
+    std::vector<uint8_t> litInv;
+    BuildEditorNormalLitPreviewRgba(diffuse, norm, kSize, kSize, -90.0f, litPos);
+    BuildEditorNormalLitPreviewRgba(diffuse, inv, kSize, kSize, -90.0f, litInv);
+    const size_t botIdx = (size_t(21) * kSize + 16u) * 4u;
+    if (!Check(litPos[topIdx] > litPos[botIdx] && litInv[botIdx] > litInv[topIdx],
+               "Lit Preview shading must invert top vs bottom rim luminance on Invert Height"))
+    {
+        return false;
+    }
+
+    return VerifyTgaWriteDecodeRoundTrip(kSize, norm);
+}
+
+bool TestAiGlossAndEmissiveAdjustments()
+{
+    std::vector<uint8_t> rawGloss = { 64, 64, 64, 255, 192, 192, 192, 255 };
+    std::vector<uint8_t> adjGloss;
+    ApplyEditorGlossAdjustments(rawGloss, 2u, 1u, EditorAiToneParams{ 2.0f, 0.1f }, adjGloss);
+    if (!Check(adjGloss.size() == 8u && adjGloss[0] < 64u && adjGloss[4] > 192u,
+               "ApplyEditorGlossAdjustments failed contrast scaling"))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> rawEmiss = { 20, 20, 20, 255, 220, 80, 30, 255 };
+    std::vector<uint8_t> adjEmiss;
+    ApplyEditorEmissiveAdjustments(rawEmiss, 2u, 1u, EditorAiToneParams{ 1.5f, 0.25f }, adjEmiss);
+    return Check(adjEmiss.size() == 8u && adjEmiss[0] == 0u && adjEmiss[4] > 180u,
+                 "ApplyEditorEmissiveAdjustments failed threshold clipping");
+}
+
+bool VerifyLotusPrepAndDownsample()
+{
+    std::vector<uint8_t> diffuse(size_t(64) * 64 * 4u, 153u);
+    for (size_t i = 0; i < size_t(64) * 64; i++)
+    {
+        diffuse[i * 4u + 3u] = 255u;
+    }
+
+    EditorAiLotusPrep prep;
+    PrepareEditorLotusInputNchw(diffuse, 64u, 64u, 512u, true, prep);
+    if (!Check(prep.fitW == 512u && prep.fitH == 512u && prep.halo == 64u &&
+                   prep.tensor.channels == 3 && prep.tensor.width == 640 &&
+                   prep.tensor.height == 640 && (prep.tensor.width % 8) == 0,
+               "PrepareEditorLotusInputNchw generated wrong dimensions or halo"))
+    {
+        return false;
+    }
+
+    EditorOnnxTensorNchw pred = prep.tensor;
+    const size_t plane = size_t(pred.width) * size_t(pred.height);
+    for (size_t i = 0; i < plane; i++)
+    {
+        pred.data[0u * plane + i] = 0.2f;
+        pred.data[1u * plane + i] = 0.6f;
+        pred.data[2u * plane + i] = 0.8f;
+    }
+
+    std::vector<float> down;
+    DownsampleEditorLotusOutputNchw(pred, prep, 64u, 64u, down);
+    return Check(down.size() == size_t(64) * 64 * 3u && std::abs(down[0] - 0.2f) < 0.01f &&
+                     std::abs(down[1] - 0.6f) < 0.01f && std::abs(down[2] - 0.8f) < 0.01f,
+                 "DownsampleEditorLotusOutputNchw value mismatch");
+}
+
+bool VerifySkinnyLotusTrimAlignment()
+{
+    EditorAiLotusPrep skinnyPrep;
+    const std::vector<uint8_t> skinnyDiff(size_t(16) * 128 * 4u, 180u);
+    PrepareEditorLotusInputNchw(skinnyDiff, 16u, 128u, 768u, true, skinnyPrep);
+    return Check(skinnyPrep.fitW == 128u && skinnyPrep.fitH == 768u && skinnyPrep.halo == 64u &&
+                     (skinnyPrep.tensor.width % 64) == 0 && (skinnyPrep.tensor.height % 64) == 0,
+                 "PrepareEditorLotusInputNchw must pad skinny 16x128 trims to multiples of 64");
+}
+
+bool VerifyNormalAxisAndPoisson()
+{
+    const std::vector<float> lotusSample = { 0.25f, 0.25f, 0.9f };
+    const std::vector<float> deepbumpSample = { 0.75f, 0.25f, 0.9f };
+    std::vector<uint8_t> lotusOut;
+    std::vector<uint8_t> dbOut;
+    ConvertEditorNormals01ToQuakeRayRgba(lotusSample, 1u, 1u, true, true, lotusOut);
+    ConvertEditorNormals01ToQuakeRayRgba(deepbumpSample, 1u, 1u, false, true, dbOut);
+    if (!Check(lotusOut.size() == 4u && lotusOut == dbOut && lotusOut[0] > 180u &&
+                   lotusOut[1] > 180u && lotusOut[2] > 180u,
+               "Lotus vs DeepBump normal axis orientation mismatch"))
+    {
+        return false;
+    }
+
+    constexpr uint32_t kSize = 32u;
+    std::vector<float> height;
+    std::vector<uint8_t> diffuse;
+    BuildTestBumpField(kSize, height, diffuse);
+    EditorAiNormalParams p;
+    p.strength = 1.0f;
+    p.microDetail = 0.0f;
+    std::vector<uint8_t> norm;
+    BuildEditorNormalMapFromHeight(height, kSize, kSize, &diffuse, p, norm);
+
+    std::vector<float> integrated;
+    IntegrateEditorNormalMapHeight(norm, kSize, kSize, true, integrated);
+    const float centerH = integrated[size_t(16) * kSize + 16u];
+    const float cornerH = integrated[size_t(2) * kSize + 2u];
+    return Check(integrated.size() == size_t(kSize) * kSize && centerH > cornerH + 0.25f,
+                 "IntegrateEditorNormalMapHeight must reconstruct convex bump higher at center");
+}
+
+void BuildSyntheticAiDiffuseTile(uint32_t size, std::vector<uint8_t> &diffuse)
+{
+    diffuse.assign(size_t(size) * size * 4u, 48u);
+    for (uint32_t y = 0; y < size; y++)
+    {
+        for (uint32_t x = 0; x < size; x++)
+        {
+            uint8_t *px = diffuse.data() + (size_t(y) * size + x) * 4u;
+            px[3] = 255u;
+            if (x >= 16u && x < 48u && y >= 16u && y < 48u)
+            {
+                px[0] = 200u;
+                px[1] = 200u;
+                px[2] = 200u;
+            }
+            if (x >= 28u && x < 36u && y >= 28u && y < 36u)
+            {
+                px[0] = 255u;
+                px[1] = 220u;
+                px[2] = 80u;
+            }
+        }
+    }
+}
+
+bool VerifyLiveOnnxModelForTest(EditorAiBackend backend, const std::vector<uint8_t> &diffuse,
+                                uint32_t size, const char *label)
+{
+    if (!IsEditorOnnxRuntimeAvailable(".") || ResolveEditorAiModelPath(backend, ".").empty())
+    {
+        return true;
+    }
+    EditorAiInferenceRequest req;
+    req.backend = backend;
+    req.mapKind = EditorAiMapKind::Normals;
+    req.width = size;
+    req.height = size;
+    req.processingRes = 512u;
+    req.diffuseRgba = diffuse;
+    const EditorAiInferenceResult res = RunEditorAiTextureInference(req);
+    return Check(res.ok && res.rawNormalRgba.size() == size_t(size) * size * 4u &&
+                     res.rawHeight.size() == size_t(size) * size,
+                 (std::string(label) + ": " + res.errorMessage).c_str());
+}
+
+bool VerifyNativeAndLiveOnnxInference()
+{
+    constexpr uint32_t kSize = 64u;
+    std::vector<uint8_t> diffuse;
+    BuildSyntheticAiDiffuseTile(kSize, diffuse);
+
+    EditorAiInferenceRequest emissiveReq;
+    emissiveReq.mapKind = EditorAiMapKind::Emissive;
+    emissiveReq.width = kSize;
+    emissiveReq.height = kSize;
+    emissiveReq.diffuseRgba = diffuse;
+    const EditorAiInferenceResult emRes = RunEditorAiTextureInference(emissiveReq);
+    const size_t hotIdx = (size_t(32) * kSize + 32u) * 4u;
+    if (!Check(emRes.ok && emRes.rawColorRgba[0] == 0u && emRes.rawColorRgba[hotIdx] > 64u,
+               "Native Emissive extraction failed"))
+    {
+        return false;
+    }
+
+    if (!VerifyLiveOnnxModelForTest(EditorAiBackend::DeepBump, diffuse, kSize,
+                                    "Live C++ DeepBump ONNX inference failed"))
+    {
+        return false;
+    }
+
+    const char *testLotusEnv = std::getenv("QRAY_TEST_LOTUS_ONNX");
+    if (testLotusEnv != nullptr && std::string(testLotusEnv) == "1" &&
+        !VerifyLiveOnnxModelForTest(EditorAiBackend::LotusNormalD, diffuse, kSize,
+                                    "Live C++ Lotus ONNX inference failed"))
+    {
+        return false;
+    }
+
+    ShutdownEditorOnnxRuntime();
+    return true;
+}
+
+bool TestAiCppLotusPrepPoissonAndOnnx()
+{
+    return VerifyLotusPrepAndDownsample() && VerifySkinnyLotusTrimAlignment() &&
+           VerifyNormalAxisAndPoisson() && VerifyNativeAndLiveOnnxInference();
+}
+
+bool VerifyOnlineDownloadBehavior()
+{
+    const char *onlineEnv = std::getenv("QRAY_TEST_ONLINE_DOWNLOAD");
+    if (onlineEnv == nullptr || std::string(onlineEnv) != "1")
+    {
+        return true;
+    }
+
+    ScopedTempTestDir tmp("qray_test_ai_online_dl");
+    const std::string testUrl =
+        "https://huggingface.co/f13d/lotus-onnx/resolve/main/README.md";
+    const std::filesystem::path goodPath = tmp.dir / "README.md";
+    EditorAiDownloadProgress progress;
+    const EditorAiDownloadResult okRes =
+        DownloadEditorAiFile(testUrl, goodPath, "", 70u, &progress, nullptr);
+    if (!Check(okRes.ok && std::filesystem::is_regular_file(goodPath) &&
+                   progress.bytesDownloaded.load() == 70u && !okRes.actualSha256.empty(),
+               ("Online model download probe failed: " + okRes.errorMessage).c_str()))
+    {
+        return false;
+    }
+
+    const std::filesystem::path badPath = tmp.dir / "bad_README.md";
+    const EditorAiDownloadResult badRes = DownloadEditorAiFile(
+        testUrl, badPath, "0000000000000000000000000000000000000000000000000000000000000000", 70u,
+        nullptr, nullptr);
+    const std::filesystem::path partPath = badPath.string() + ".part";
+    return Check(!badRes.ok && badRes.errorMessage.find("SHA-256") != std::string::npos &&
+                     !std::filesystem::exists(badPath) && !std::filesystem::exists(partPath),
+                 "SHA-256 mismatch must reject file and delete temporary .part");
+}
+
+bool TestAiModelDownloadSpecsAndSha256()
+{
+    const std::string emptyHash = ComputeEditorBufferSha256Hex(nullptr, 0u);
+    if (!Check(emptyHash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+               "SHA-256 empty vector mismatch"))
+    {
+        return false;
+    }
+
+    static constexpr uint8_t kAbc[] = { 'a', 'b', 'c' };
+    const std::string abcHash = ComputeEditorBufferSha256Hex(kAbc, sizeof(kAbc));
+    if (!Check(abcHash == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+               "SHA-256 'abc' vector mismatch"))
+    {
+        return false;
+    }
+
+    ScopedTempTestDir tmp("qray_test_sha_file");
+    const std::filesystem::path p = tmp.dir / "abc.bin";
+    {
+        std::ofstream f(p, std::ios::binary);
+        f.write("abc", 3);
+    }
+    std::string fileHash;
+    if (!Check(ComputeEditorFileSha256Hex(p, fileHash) && fileHash == abcHash,
+               "ComputeEditorFileSha256Hex mismatch"))
+    {
+        return false;
+    }
+
+    const EditorAiModelDownloadSpec normSpec =
+        GetEditorAiModelDownloadSpec(EditorAiBackend::LotusNormalD);
+    const EditorAiModelDownloadSpec depthSpec =
+        GetEditorAiModelDownloadSpec(EditorAiBackend::LotusDepthD);
+    const EditorAiModelDownloadSpec dbSpec = GetEditorAiModelDownloadSpec(EditorAiBackend::DeepBump);
+    const bool specsOk =
+        std::string(normSpec.filename) == "lotus-normal-d-v1-1.onnx" &&
+        std::string(normSpec.url) ==
+            "https://huggingface.co/f13d/lotus-onnx/resolve/main/lotus-normal-d-v1-1.onnx" &&
+        normSpec.expectedBytes == 1904363005ULL &&
+        std::string(depthSpec.filename) == "lotus-depth-d-v2-0-disparity.onnx" &&
+        std::string(depthSpec.url) ==
+            "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+            "lotus-depth-d-v2-0-disparity.onnx" &&
+        depthSpec.expectedBytes == 1904363005ULL &&
+        std::string(dbSpec.filename) == "deepbump256.onnx" && dbSpec.expectedBytes == 26706979ULL;
+    if (!Check(specsOk, "GetEditorAiModelDownloadSpec metadata mismatch"))
+    {
+        return false;
+    }
+
+    return VerifyOnlineDownloadBehavior();
+}
+
 } // namespace
 
 int main()
@@ -3274,6 +3742,11 @@ int main()
         TestMaterialYamlClearAndDefaultResetRoundTrip,
         TestLightClipboardCopy,
         TestLightClipboardPaste,
+        TestAiLocalConfigAndUpscaleFit,
+        TestAiHeightToNormalAndInvertHeight,
+        TestAiGlossAndEmissiveAdjustments,
+        TestAiCppLotusPrepPoissonAndOnnx,
+        TestAiModelDownloadSpecsAndSha256,
     };
 
     for (TestFn test : kTests)

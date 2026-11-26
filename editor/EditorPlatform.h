@@ -135,6 +135,8 @@ public:
     void SetMouseCapture(bool capture);
     bool HasFocus() const;
     bool IsMouseCaptured() const;
+    std::string GetClipboardText();
+    void SetClipboardText(const char *text);
     void BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const;
 
 private:

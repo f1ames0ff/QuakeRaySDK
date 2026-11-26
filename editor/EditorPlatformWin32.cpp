@@ -503,6 +503,62 @@ bool EditorWindow::IsMouseCaptured() const
     return IsValid() && GetCapture() == m_impl->hwnd;
 }
 
+std::string EditorWindow::GetClipboardText()
+{
+    if (!IsValid() || OpenClipboard(m_impl->hwnd) == FALSE)
+    {
+        return {};
+    }
+
+    std::string result;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data != nullptr)
+    {
+        const auto *wide = static_cast<const wchar_t *>(GlobalLock(data));
+        if (wide != nullptr)
+        {
+            result = Utf8FromWide(wide);
+            GlobalUnlock(data);
+        }
+    }
+    CloseClipboard();
+    return result;
+}
+
+void EditorWindow::SetClipboardText(const char *text)
+{
+    if (!IsValid() || OpenClipboard(m_impl->hwnd) == FALSE)
+    {
+        return;
+    }
+
+    EmptyClipboard();
+    const char *safe = text != nullptr ? text : "";
+    const int wideLen = MultiByteToWideChar(CP_UTF8, 0, safe, -1, nullptr, 0);
+    if (wideLen > 0)
+    {
+        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, size_t(wideLen) * sizeof(wchar_t));
+        if (mem != nullptr)
+        {
+            auto *dst = static_cast<wchar_t *>(GlobalLock(mem));
+            if (dst != nullptr)
+            {
+                MultiByteToWideChar(CP_UTF8, 0, safe, -1, dst, wideLen);
+                GlobalUnlock(mem);
+                if (SetClipboardData(CF_UNICODETEXT, mem) == nullptr)
+                {
+                    GlobalFree(mem);
+                }
+            }
+            else
+            {
+                GlobalFree(mem);
+            }
+        }
+    }
+    CloseClipboard();
+}
+
 void EditorWindow::BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const
 {
     storage.win32 = {
