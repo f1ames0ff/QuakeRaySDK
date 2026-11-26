@@ -246,7 +246,7 @@ bool DrawMaterialEnabledRow(EditorMaterialParams &params, const EditorMaterialPa
 
 bool DrawMaterialTexturesSection(
     const std::function<void(EditorApp::EditorTextureSlot)> &onBrowse,
-    const std::function<bool(EditorApp::EditorTextureSlot)> &onGenerateAi,
+    const std::function<void(EditorApp::EditorTextureSlot)> &onGenerateAi,
     EditorMaterialParams &params, const EditorMaterialParams &base,
     const EditorMaterialParams *baseModParams, bool inheritedFromBaseMod)
 {
@@ -302,7 +302,7 @@ bool DrawMaterialTexturesSection(
         }
         if (generateAi && onGenerateAi)
         {
-            edited |= onGenerateAi(row.slot);
+            onGenerateAi(row.slot);
         }
     }
 
@@ -2005,6 +2005,10 @@ void EditorApp::BackToChooser()
 
 bool EditorApp::CancelActivePlacementOrDialog()
 {
+    if (CancelAiTextureGeneratorDialog())
+    {
+        return true;
+    }
     if (m_openLevelDialog)
     {
         m_openLevelDialog = false;
@@ -3210,6 +3214,7 @@ void EditorApp::DrawEditorOverlay(float deltaSeconds)
     }
 
     DrawTextureBrowser();
+    DrawAiTextureGeneratorDialog();
 }
 
 void EditorApp::DrawModeChooser()
@@ -4560,7 +4565,7 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
     edited |= DrawMaterialTexturesSection(
         [this, &matName](EditorTextureSlot slot) { OpenTextureBrowserForSlot(matName, slot); },
         [this, materialIndex](EditorTextureSlot slot) {
-            return GenerateMaterialTextureWithAi(materialIndex, slot);
+            OpenAiTextureGeneratorDialog(materialIndex, slot);
         },
         params, base, hasBaseModEntry ? &baseModParams : nullptr, inheritedFromBaseMod);
     edited |= DrawMaterialEditorShaderStages(matName, params);

@@ -17,6 +17,8 @@
 
 #include "EditorPlatform.h"
 
+#include <X11/XKBlib.h>
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -40,11 +42,13 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <climits>
 #include <clocale>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <poll.h>
 #include <string_view>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -55,6 +59,7 @@ namespace
 {
 
 constexpr unsigned long kX11None = 0L;
+constexpr int kX11Success = 0;
 
 struct KeysymEntry
 {
@@ -99,6 +104,31 @@ constexpr std::array<KeysymEntry, 34> kKeysymTable = { {
     { XK_Alt_R, EditorKey::Alt },
 } };
 
+constexpr std::array<KeysymEntry, 22> kCyrillicShortcutTable = { {
+    { XK_Cyrillic_em, EditorKey::V },
+    { XK_Cyrillic_EM, EditorKey::V },
+    { XK_Cyrillic_es, EditorKey::C },
+    { XK_Cyrillic_ES, EditorKey::C },
+    { XK_Cyrillic_che, EditorKey::X },
+    { XK_Cyrillic_CHE, EditorKey::X },
+    { XK_Cyrillic_ef, EditorKey::A },
+    { XK_Cyrillic_EF, EditorKey::A },
+    { XK_Cyrillic_ya, EditorKey::Z },
+    { XK_Cyrillic_YA, EditorKey::Z },
+    { XK_Cyrillic_yeru, EditorKey::S },
+    { XK_Cyrillic_YERU, EditorKey::S },
+    { XK_Cyrillic_en, EditorKey::Y },
+    { XK_Cyrillic_EN, EditorKey::Y },
+    { XK_Cyrillic_ka, EditorKey::R },
+    { XK_Cyrillic_KA, EditorKey::R },
+    { XK_Cyrillic_tse, EditorKey::W },
+    { XK_Cyrillic_TSE, EditorKey::W },
+    { XK_Cyrillic_shcha, EditorKey::O },
+    { XK_Cyrillic_SHCHA, EditorKey::O },
+    { XK_Cyrillic_softsign, EditorKey::M },
+    { XK_Cyrillic_SOFTSIGN, EditorKey::M },
+} };
+
 EditorKey MapKeysymToEditorKey(KeySym keysym)
 {
     if (keysym >= XK_a && keysym <= XK_z)
@@ -119,6 +149,38 @@ EditorKey MapKeysymToEditorKey(KeySym keysym)
     for (const KeysymEntry &entry : kKeysymTable)
     {
         if (entry.keysym == keysym)
+        {
+            return entry.key;
+        }
+    }
+
+    return EditorKey::Unknown;
+}
+
+EditorKey ResolveX11EditorKey(Display *display, XKeyEvent &keyEvent)
+{
+    const KeySym primary = XLookupKeysym(&keyEvent, 0);
+    if (const EditorKey mapped = MapKeysymToEditorKey(primary); mapped != EditorKey::Unknown)
+    {
+        return mapped;
+    }
+
+    if (display != nullptr)
+    {
+        const KeyCode kc = KeyCode(keyEvent.keycode);
+        for (unsigned int group = 0; group < 4; ++group)
+        {
+            const KeySym sym = XkbKeycodeToKeysym(display, kc, group, 0);
+            if (const EditorKey mapped = MapKeysymToEditorKey(sym); mapped != EditorKey::Unknown)
+            {
+                return mapped;
+            }
+        }
+    }
+
+    for (const KeysymEntry &entry : kCyrillicShortcutTable)
+    {
+        if (entry.keysym == primary)
         {
             return entry.key;
         }
@@ -198,6 +260,11 @@ struct EditorWindow::Impl
     Display *display = nullptr;
     ::Window window = kX11None;
     Atom wmDeleteWindow = kX11None;
+    Atom atomClipboard = kX11None;
+    Atom atomUtf8String = kX11None;
+    Atom atomTargets = kX11None;
+    Atom atomIncr = kX11None;
+    Atom atomClipProp = kX11None;
     Cursor invisibleCursor = kX11None;
     XIM xim = nullptr;
     XIC xic = nullptr;
@@ -209,6 +276,129 @@ struct EditorWindow::Impl
     bool mouseCaptured = false;
     bool pendingRepeat = false;
     unsigned int repeatKeycode = 0;
+    std::string ownedClipboardText;
+
+    void HandleSelectionRequest(const XSelectionRequestEvent &req) const
+    {
+        XSelectionEvent reply = {};
+        reply.type = SelectionNotify;
+        reply.display = req.display;
+        reply.requestor = req.requestor;
+        reply.selection = req.selection;
+        reply.target = req.target;
+        reply.time = req.time;
+        reply.property = kX11None;
+
+        if (req.selection == atomClipboard || req.selection == XA_PRIMARY)
+        {
+            const Atom destProp = req.property != kX11None ? req.property : req.target;
+            if (req.target == atomTargets)
+            {
+                const Atom supported[] = { atomTargets, atomUtf8String, XA_STRING };
+                XChangeProperty(req.display, req.requestor, destProp, XA_ATOM, 32, PropModeReplace,
+                                reinterpret_cast<const unsigned char *>(supported), 3);
+                reply.property = destProp;
+            }
+            else if (req.target == atomUtf8String || req.target == XA_STRING)
+            {
+                XChangeProperty(req.display, req.requestor, destProp, req.target, 8, PropModeReplace,
+                                reinterpret_cast<const unsigned char *>(ownedClipboardText.data()),
+                                int(ownedClipboardText.size()));
+                reply.property = destProp;
+            }
+        }
+
+        XSendEvent(req.display, req.requestor, 0, NoEventMask, reinterpret_cast<XEvent *>(&reply));
+        XFlush(req.display);
+    }
+
+    bool ReadSelectionProperty(std::string &out) const
+    {
+        Atom actualType = kX11None;
+        int actualFormat = 0;
+        unsigned long itemCount = 0;
+        unsigned long bytesAfter = 0;
+        unsigned char *propData = nullptr;
+        if (XGetWindowProperty(display, window, atomClipProp, 0, LONG_MAX / 4, 1, AnyPropertyType,
+                               &actualType, &actualFormat, &itemCount, &bytesAfter,
+                               &propData) != kX11Success)
+        {
+            return false;
+        }
+
+        bool ok = false;
+        if (propData != nullptr && actualType != atomIncr && actualFormat == 8 && itemCount > 0)
+        {
+            out.assign(reinterpret_cast<const char *>(propData), size_t(itemCount));
+            ok = true;
+        }
+        if (propData != nullptr)
+        {
+            XFree(propData);
+        }
+        return ok;
+    }
+
+    bool RequestSelectionBytes(Atom selection, Atom target, std::string &out) const
+    {
+        if (selection == kX11None || target == kX11None)
+        {
+            return false;
+        }
+
+        XEvent stale = {};
+        while (XCheckTypedWindowEvent(display, window, SelectionNotify, &stale) != 0)
+        {
+        }
+
+        XDeleteProperty(display, window, atomClipProp);
+        XConvertSelection(display, selection, target, atomClipProp, window, CurrentTime);
+        XFlush(display);
+
+        const int fd = ConnectionNumber(display);
+        for (int attempt = 0; attempt < 15; ++attempt)
+        {
+            XEvent ev = {};
+            if (XCheckTypedWindowEvent(display, window, SelectionNotify, &ev) != 0)
+            {
+                if (ev.xselection.property == kX11None)
+                {
+                    return false;
+                }
+                return ReadSelectionProperty(out);
+            }
+
+            pollfd pfd = { fd, POLLIN, 0 };
+            if (poll(&pfd, 1, 10) > 0)
+            {
+                XEventsQueued(display, QueuedAfterReading);
+            }
+        }
+
+        XEvent ev = {};
+        if (XCheckTypedWindowEvent(display, window, SelectionNotify, &ev) != 0 &&
+            ev.xselection.property != kX11None)
+        {
+            return ReadSelectionProperty(out);
+        }
+        return false;
+    }
+
+    bool ReadSelectionWithFallbacks(Atom selection, std::string &out) const
+    {
+        const ::Window owner = XGetSelectionOwner(display, selection);
+        if (owner == kX11None)
+        {
+            return false;
+        }
+        if (owner == window && selection == atomClipboard)
+        {
+            out = ownedClipboardText;
+            return !out.empty();
+        }
+        return RequestSelectionBytes(selection, atomUtf8String, out) ||
+               RequestSelectionBytes(selection, XA_STRING, out);
+    }
 
     bool IsAutoRepeatRelease(const XKeyEvent &release) const
     {
@@ -280,8 +470,7 @@ struct EditorWindow::Impl
         pendingRepeat = false;
         repeatKeycode = 0;
 
-        const KeySym keysym = XLookupKeysym(&keyEvent, 0);
-        const EditorKey key = MapKeysymToEditorKey(keysym);
+        const EditorKey key = ResolveX11EditorKey(display, keyEvent);
         const EditorModifiers mods = ModifiersFromX11State(keyEvent.state, key, down);
 
         EditorEvent event = {};
@@ -303,6 +492,36 @@ struct EditorWindow::Impl
         }
     }
 
+    void EmitConfigureEvent(const XConfigureEvent &configure, const EventHandler &handler)
+    {
+        const uint32_t newWidth = uint32_t(std::max(0, configure.width));
+        const uint32_t newHeight = uint32_t(std::max(0, configure.height));
+        if (newWidth == width && newHeight == height)
+        {
+            return;
+        }
+        width = newWidth;
+        height = newHeight;
+        EditorEvent event = {};
+        event.type = EditorEventType::Resize;
+        event.width = newWidth;
+        event.height = newHeight;
+        handler(event);
+    }
+
+    void EmitFocusEvent(const XFocusChangeEvent &focus, bool focused,
+                        const EventHandler &handler) const
+    {
+        if (focus.mode == NotifyGrab || focus.mode == NotifyUngrab)
+        {
+            return;
+        }
+        EditorEvent event = {};
+        event.type = EditorEventType::Focus;
+        event.down = focused;
+        handler(event);
+    }
+
     void DispatchEvent(const XEvent &xevent, const EventHandler &handler)
     {
         switch (xevent.type)
@@ -317,21 +536,8 @@ struct EditorWindow::Impl
             break;
 
         case ConfigureNotify:
-        {
-            const uint32_t newWidth = uint32_t(std::max(0, xevent.xconfigure.width));
-            const uint32_t newHeight = uint32_t(std::max(0, xevent.xconfigure.height));
-            if (newWidth != width || newHeight != height)
-            {
-                width = newWidth;
-                height = newHeight;
-                EditorEvent event = {};
-                event.type = EditorEventType::Resize;
-                event.width = newWidth;
-                event.height = newHeight;
-                handler(event);
-            }
+            EmitConfigureEvent(xevent.xconfigure, handler);
             break;
-        }
 
         case MotionNotify:
         {
@@ -356,17 +562,12 @@ struct EditorWindow::Impl
 
         case FocusIn:
         case FocusOut:
-        {
-            if (xevent.xfocus.mode == NotifyGrab || xevent.xfocus.mode == NotifyUngrab)
-            {
-                break;
-            }
-            EditorEvent event = {};
-            event.type = EditorEventType::Focus;
-            event.down = (xevent.type == FocusIn);
-            handler(event);
+            EmitFocusEvent(xevent.xfocus, xevent.type == FocusIn, handler);
             break;
-        }
+
+        case SelectionRequest:
+            HandleSelectionRequest(xevent.xselectionrequest);
+            break;
 
         default:
             break;
@@ -421,6 +622,12 @@ bool EditorWindow::Create(const char *title, uint32_t width, uint32_t height, vo
     {
         XSetWMProtocols(m_impl->display, m_impl->window, &m_impl->wmDeleteWindow, 1);
     }
+
+    m_impl->atomClipboard = XInternAtom(m_impl->display, "CLIPBOARD", 0);
+    m_impl->atomUtf8String = XInternAtom(m_impl->display, "UTF8_STRING", 0);
+    m_impl->atomTargets = XInternAtom(m_impl->display, "TARGETS", 0);
+    m_impl->atomIncr = XInternAtom(m_impl->display, "INCR", 0);
+    m_impl->atomClipProp = XInternAtom(m_impl->display, "QRAY_CLIPBOARD_DATA", 0);
 
     XSelectInput(m_impl->display, m_impl->window,
                  ExposureMask | StructureNotifyMask | KeyPressMask | KeyReleaseMask |
@@ -504,6 +711,13 @@ void EditorWindow::Destroy()
     m_impl->height = 0;
     m_impl->cursorVisible = true;
     m_impl->mouseCaptured = false;
+    m_impl->wmDeleteWindow = kX11None;
+    m_impl->atomClipboard = kX11None;
+    m_impl->atomUtf8String = kX11None;
+    m_impl->atomTargets = kX11None;
+    m_impl->atomIncr = kX11None;
+    m_impl->atomClipProp = kX11None;
+    m_impl->ownedClipboardText.clear();
 }
 
 bool EditorWindow::IsValid() const
@@ -657,6 +871,38 @@ bool EditorWindow::HasFocus() const
 bool EditorWindow::IsMouseCaptured() const
 {
     return IsValid() && m_impl->mouseCaptured;
+}
+
+std::string EditorWindow::GetClipboardText()
+{
+    if (!IsValid())
+    {
+        return {};
+    }
+
+    std::string text;
+    if (m_impl->ReadSelectionWithFallbacks(m_impl->atomClipboard, text))
+    {
+        return text;
+    }
+
+    m_impl->ReadSelectionWithFallbacks(XA_PRIMARY, text);
+    return text;
+}
+
+void EditorWindow::SetClipboardText(const char *text)
+{
+    if (!IsValid())
+    {
+        return;
+    }
+
+    m_impl->ownedClipboardText = text != nullptr ? text : "";
+    if (m_impl->atomClipboard != kX11None)
+    {
+        XSetSelectionOwner(m_impl->display, m_impl->atomClipboard, m_impl->window, CurrentTime);
+        XFlush(m_impl->display);
+    }
 }
 
 void EditorWindow::BindSurface(QrInstanceCreateInfo &createInfo, EditorSurfaceStorage &storage) const

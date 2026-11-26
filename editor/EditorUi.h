@@ -25,6 +25,8 @@
 
 #include "EditorPlatform.h"
 
+struct ImGuiContext;
+
 // The game's QR_GUI_ImagePick: the image a colour is taken from, at the panel's full width and the
 // texture's aspect, with Ctrl+wheel zoom. Returns true when the author clicked it, with outU/outV
 // carrying the position in [0,1] as it is drawn on screen.
@@ -81,6 +83,9 @@ public:
     float DisplayScale() const { return m_scale; }
 
 private:
+    static const char *GetClipboardTextCallback(ImGuiContext *ctx);
+    static void SetClipboardTextCallback(ImGuiContext *ctx, const char *text);
+
     void AddKey(EditorKey editorKey, bool down, const EditorModifiers &modifiers);
     void UpdateModifiers(const EditorModifiers &modifiers);
 
@@ -93,6 +98,7 @@ private:
     float m_mouseX = 0.0f;
     float m_mouseY = 0.0f;
     uint32_t m_mouseButtons = 0;
+    std::string m_clipboardCache;
     std::vector<QrVertex> m_vertices;
     std::vector<uint32_t> m_indices;
 };

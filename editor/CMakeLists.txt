@@ -6,6 +6,8 @@ set(QR_EDITOR_ADAPTER_SOURCES "" CACHE STRING
     "Optional external format adapter source files compiled into quakerayeditor")
 set(QR_EDITOR_ADAPTER_INCLUDE_DIRS "" CACHE STRING
     "Optional include directories for external format adapter sources")
+set(QR_ONNXRUNTIME_LIB "" CACHE FILEPATH
+    "Optional path to ONNX Runtime shared library copied next to quakerayeditor")
 
 set(QR_EDITOR_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imgui")
 
@@ -27,6 +29,10 @@ endif()
 set(QR_EDITOR_COMMON_SOURCES
     Main.cpp
     EditorApp.cpp
+    EditorAiDialog.cpp
+    EditorAiModelDownload.cpp
+    EditorAiTexture.cpp
+    EditorOnnxRuntime.cpp
     EditorDtalPipeline.cpp
     EditorGui.cpp
     EditorOverlayPipeline.cpp
@@ -46,7 +52,7 @@ set(QR_EDITOR_COMMON_SOURCES
 if(WIN32)
     add_executable(quakerayeditor WIN32 ${QR_EDITOR_COMMON_SOURCES} EditorPlatformWin32.cpp)
     target_compile_definitions(quakerayeditor PRIVATE QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
-    target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui user32 gdi32 shell32)
+    target_link_libraries(quakerayeditor PRIVATE qray::renderer quakerayeditor_imgui user32 gdi32 shell32 winhttp)
 else()
     find_package(X11 REQUIRED)
     find_package(Threads REQUIRED)
@@ -65,7 +71,8 @@ endif()
 target_compile_features(quakerayeditor PRIVATE cxx_std_20)
 target_include_directories(quakerayeditor PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/onnxruntime/include")
 if(QR_EDITOR_ADAPTER_INCLUDE_DIRS)
     target_include_directories(quakerayeditor PRIVATE ${QR_EDITOR_ADAPTER_INCLUDE_DIRS})
 endif()
@@ -82,6 +89,21 @@ set(QR_EDITOR_DEPLOY_COMMANDS
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${QR_EDITOR_IMGUI_DIR}/fonts/fa-solid-900.ttf"
         "$<TARGET_FILE_DIR:quakerayeditor>/fonts/fa-solid-900.ttf")
+
+if(QR_ONNXRUNTIME_LIB AND EXISTS "${QR_ONNXRUNTIME_LIB}")
+    get_filename_component(QR_ORT_LIB_NAME "${QR_ONNXRUNTIME_LIB}" NAME)
+    get_filename_component(QR_ORT_LIB_DIR "${QR_ONNXRUNTIME_LIB}" DIRECTORY)
+    list(APPEND QR_EDITOR_DEPLOY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QR_ONNXRUNTIME_LIB}"
+            "$<TARGET_FILE_DIR:quakerayeditor>/${QR_ORT_LIB_NAME}")
+    if(EXISTS "${QR_ORT_LIB_DIR}/libonnxruntime_providers_shared.so")
+        list(APPEND QR_EDITOR_DEPLOY_COMMANDS
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_ORT_LIB_DIR}/libonnxruntime_providers_shared.so"
+                "$<TARGET_FILE_DIR:quakerayeditor>/libonnxruntime_providers_shared.so")
+    endif()
+endif()
 
 if(WIN32)
     list(APPEND QR_EDITOR_DEPLOY_COMMANDS
@@ -105,6 +127,9 @@ endif()
 if(QR_BUILD_TESTS)
     add_executable(qray_editor_multiselect_tests
         EditorMultiSelectTests.cpp
+        EditorAiModelDownload.cpp
+        EditorAiTexture.cpp
+        EditorOnnxRuntime.cpp
         EditorLightSelection.cpp
         EditorGui.cpp
         EditorSession.cpp
@@ -119,8 +144,13 @@ if(QR_BUILD_TESTS)
     target_include_directories(qray_editor_multiselect_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/../Include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
-    target_link_libraries(qray_editor_multiselect_tests PRIVATE quakerayeditor_imgui)
+        "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/onnxruntime/include")
+    if(WIN32)
+        target_link_libraries(qray_editor_multiselect_tests PRIVATE quakerayeditor_imgui winhttp)
+    else()
+        target_link_libraries(qray_editor_multiselect_tests PRIVATE quakerayeditor_imgui Threads::Threads ${CMAKE_DL_LIBS})
+    endif()
     add_test(NAME qray_editor_multiselect_tests COMMAND qray_editor_multiselect_tests)
 endif()
 

@@ -27,6 +27,7 @@
 #include <filesystem>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace
 {
@@ -120,6 +121,41 @@ void ApplyEditorStyle()
     colors[ImGuiCol_Text] = ImVec4(0.90f, 0.91f, 0.92f, 1.00f);
 }
 
+bool LoadEditorIconFont(ImGuiIO &io, const std::string &fontPath,
+                        const std::string &iconFontPath)
+{
+    std::string resolvedIconPath = iconFontPath;
+    if (resolvedIconPath.empty() && !fontPath.empty())
+    {
+        const std::filesystem::path sibling =
+            std::filesystem::path(fontPath).parent_path() / "fa-solid-900.ttf";
+        std::error_code ec;
+        if (std::filesystem::exists(sibling, ec))
+        {
+            resolvedIconPath = sibling.string();
+        }
+    }
+
+    if (resolvedIconPath.empty())
+    {
+        return false;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(resolvedIconPath, ec))
+    {
+        return false;
+    }
+
+    static constexpr ImWchar kFaRanges[] = { 0xF000, 0xF8FF, 0 };
+    ImFontConfig iconCfg;
+    iconCfg.MergeMode = true;
+    iconCfg.PixelSnapH = true;
+    ImFont *merged =
+        io.Fonts->AddFontFromFileTTF(resolvedIconPath.c_str(), 14.5f, &iconCfg, kFaRanges);
+    return merged != nullptr;
+}
+
 } // namespace
 
 bool EditorUi::Initialize(EditorWindow *window, QrInstance instance, const std::string &fontPath,
@@ -143,6 +179,16 @@ bool EditorUi::Initialize(EditorWindow *window, QrInstance instance, const std::
     // field is easy to miss, and a stray drag used to slide the whole panel off screen.
     io.ConfigWindowsMoveFromTitleBarOnly = true;
 
+#if !defined(_WIN32)
+    if (m_window != nullptr)
+    {
+        ImGuiPlatformIO &platformIo = ImGui::GetPlatformIO();
+        platformIo.Platform_ClipboardUserData = this;
+        platformIo.Platform_GetClipboardTextFn = &EditorUi::GetClipboardTextCallback;
+        platformIo.Platform_SetClipboardTextFn = &EditorUi::SetClipboardTextCallback;
+    }
+#endif
+
     ApplyEditorStyle();
 
     ImFont *font = nullptr;
@@ -159,34 +205,7 @@ bool EditorUi::Initialize(EditorWindow *window, QrInstance instance, const std::
         font = io.Fonts->AddFontDefault(&config);
     }
 
-    std::string resolvedIconPath = iconFontPath;
-    if (resolvedIconPath.empty() && !fontPath.empty())
-    {
-        const std::filesystem::path sibling =
-            std::filesystem::path(fontPath).parent_path() / "fa-solid-900.ttf";
-        std::error_code ec;
-        if (std::filesystem::exists(sibling, ec))
-        {
-            resolvedIconPath = sibling.string();
-        }
-    }
-
-    bool iconFontLoaded = false;
-    if (!resolvedIconPath.empty())
-    {
-        std::error_code ec;
-        if (std::filesystem::exists(resolvedIconPath, ec))
-        {
-            static constexpr ImWchar kFaRanges[] = { 0xF000, 0xF8FF, 0 };
-            ImFontConfig iconCfg;
-            iconCfg.MergeMode = true;
-            iconCfg.PixelSnapH = true;
-            ImFont *merged = io.Fonts->AddFontFromFileTTF(resolvedIconPath.c_str(), 14.5f,
-                                                          &iconCfg, kFaRanges);
-            iconFontLoaded = (merged != nullptr);
-        }
-    }
-    EditorGuiSetIconFontLoaded(iconFontLoaded);
+    EditorGuiSetIconFontLoaded(LoadEditorIconFont(io, fontPath, iconFontPath));
 
     unsigned char *pixels = nullptr;
     int width = 0;
@@ -291,6 +310,39 @@ void EditorUi::SetCursorVisible(bool visible)
     {
         m_window->SetCursorVisible(visible);
     }
+}
+
+const char *EditorUi::GetClipboardTextCallback(ImGuiContext *ctx)
+{
+    if (ctx == nullptr)
+    {
+        return nullptr;
+    }
+
+    auto *self = static_cast<EditorUi *>(ctx->PlatformIO.Platform_ClipboardUserData);
+    if (self == nullptr || self->m_window == nullptr)
+    {
+        return nullptr;
+    }
+
+    self->m_clipboardCache = self->m_window->GetClipboardText();
+    return self->m_clipboardCache.empty() ? nullptr : self->m_clipboardCache.c_str();
+}
+
+void EditorUi::SetClipboardTextCallback(ImGuiContext *ctx, const char *text)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+
+    auto *self = static_cast<EditorUi *>(ctx->PlatformIO.Platform_ClipboardUserData);
+    if (self == nullptr || self->m_window == nullptr)
+    {
+        return;
+    }
+
+    self->m_window->SetClipboardText(text);
 }
 
 void EditorUi::UpdateModifiers(const EditorModifiers &modifiers)
