@@ -268,7 +268,7 @@ filter_image(
         : 0.0;
     const float bump_amt = smoothstep(0.002, 0.04, 1.0 - saturate(dot(normal_center, geo_normal_center)));
     float base_n_spec = clamp(roughnessSquaredToSpecPower(roughness_center), 4.0, 64.0) * Q2_FLT_ATROUS_NORMAL_SPEC;
-    float normal_weight_spec = lerp(base_n_spec, min(base_n_spec, 12.0), bump_amt) * normal_weight_scale_spec;
+    float normal_weight_spec = lerp(base_n_spec, min(base_n_spec, 28.0), bump_amt * active_noise_t) * normal_weight_scale_spec;
 
     const int step_size = (int)(1u << q2AtrousIteration);
 

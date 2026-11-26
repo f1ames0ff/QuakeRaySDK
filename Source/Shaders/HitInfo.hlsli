@@ -455,7 +455,7 @@ ShHitInfo getHitInfoBounce(
     if (tr.materials[0][MATERIAL_NORMAL_INDEX] != MATERIAL_NO_TEXTURE)
     {
         const bool isGlassNormal = (tr.geometryInstanceFlags & GEOM_INST_FLAG_MEDIA_TYPE_GLASS) != 0u;
-        const float suppressDetails = isGlassNormal ? 1.0 : 2.0;
+        const float suppressDetails = 1.0;
 
         const float4 nrmSample =
     #if defined(HITINFO_INL_PRIM)
@@ -480,7 +480,7 @@ ShHitInfo getHitInfoBounce(
     #else
         sssMaskAlpha = nrmSample.a;
     #endif
-        nrm.xy = nrm.xy * 2.0 - (float2)1.0;
+        nrm.xy = (nrmSample.xy * 255.0 - 128.0) / 127.0;
 
         const float3 bitangent = cross(h.normalGeom, tr.tangent.xyz) * tr.tangent.w;
         if (isGlassNormal)
@@ -496,11 +496,19 @@ ShHitInfo getHitInfoBounce(
             const float nrmZ = sqrt(max(0.02, 1.0 - min(nrmLenSq, 0.98)));
             float2 scaledSlope = (nrm.xy / nrmZ) * globalUniform.normalMapStrength;
             const float slopeLen = length(scaledSlope);
-            if (slopeLen > 1.75)
+            if (slopeLen > 3.5)
             {
-                scaledSlope *= (1.75 / slopeLen);
+                scaledSlope *= (3.5 / slopeLen);
             }
             h.normal = safeNormalize(tr.tangent.xyz * scaledSlope.x + bitangent * scaledSlope.y + h.normalGeom);
+            const float3 toCam = safeNormalize(rayOrigin - h.hitPosition);
+            const float geomNdotV = dot(h.normalGeom, toCam);
+            const float shadeNdotV = dot(h.normal, toCam);
+            if (geomNdotV > 0.05 && shadeNdotV < 0.05)
+            {
+                const float t = saturate((0.05 - shadeNdotV) / max(geomNdotV - shadeNdotV, 1e-4));
+                h.normal = safeNormalize(lerp(h.normal, h.normalGeom, t));
+            }
         }
 
     #if defined(HITINFO_INL_PRIM)
@@ -510,25 +518,29 @@ ShHitInfo getHitInfoBounce(
             || h.roughness < globalUniform.minRoughness;
         if (!skipNormalRoughReg && globalUniform.normalMapStrength > 0.0 && (any(dTdx[0] != 0.0) || any(dTdy[0] != 0.0)))
         {
-            // Toksvig/LEADR bump-to-roughness regularization: gentle near-field anti-shimmering
-            // plus stronger sub-pixel minification broadening on bump-mapped glossy surfaces.
+            // Toksvig/LEADR bump-to-roughness regularization: apply only when normal texels are
+            // minified below pixel resolution so resolved close-up bump details keep crisp gloss.
             const uint nrmTex = tr.materials[0][MATERIAL_NORMAL_INDEX];
             const int2 nrmSize = getTextureSize(nrmTex, 0);
             const float2 nrmPxX = dTdx[0] * (float2)nrmSize;
             const float2 nrmPxY = dTdy[0] * (float2)nrmSize;
             const float nrmFootprint = sqrt(max(dot(nrmPxX, nrmPxX), dot(nrmPxY, nrmPxY)));
             const float nrmSubpixel = saturate((nrmFootprint - 1.0) * 0.5);
-            const float2 nrmFine0 = nrm.xy;
-            const float2 nrmFineDx = getTextureSampleGrad(nrmTex, texCoords[0] + dTdx[0], dTdx[0], dTdy[0]).xy * 2.0 - (float2)1.0;
-            const float2 nrmFineDy = getTextureSampleGrad(nrmTex, texCoords[0] + dTdy[0], dTdx[0], dTdy[0]).xy * 2.0 - (float2)1.0;
-            const float2 diffDx = nrmFineDx - nrmFine0;
-            const float2 diffDy = nrmFineDy - nrmFine0;
-            const float slopeVar = square(globalUniform.normalMapStrength) *
-                                   0.25 * (dot(diffDx, diffDx) + dot(diffDy, diffDy));
-            const float regGain = lerp(0.06, 0.14, nrmSubpixel);
-            const float alpha0 = square(h.roughness);
-            const float alphaReg = sqrt(clamp(square(alpha0) + regGain * slopeVar, 0.0, 1.0));
-            h.roughness = clamp(max(h.roughness, sqrt(alphaReg)), MIN_GGX_ROUGHNESS, 1.0);
+            if (nrmSubpixel > 0.0)
+            {
+                const float2 nrmFine0 = nrm.xy;
+                const float2 nrmFineDx = (getTextureSampleGrad(nrmTex, texCoords[0] + dTdx[0], dTdx[0], dTdy[0]).xy * 255.0 - 128.0) / 127.0;
+                const float2 nrmFineDy = (getTextureSampleGrad(nrmTex, texCoords[0] + dTdy[0], dTdx[0], dTdy[0]).xy * 255.0 - 128.0) / 127.0;
+                const float2 diffDx = nrmFineDx - nrmFine0;
+                const float2 diffDy = nrmFineDy - nrmFine0;
+                const float toksvigStrength = min(globalUniform.normalMapStrength, 1.5);
+                const float slopeVar = square(toksvigStrength) *
+                                       0.25 * (dot(diffDx, diffDx) + dot(diffDy, diffDy));
+                const float regGain = 0.08 * nrmSubpixel;
+                const float alpha0 = square(h.roughness);
+                const float alphaReg = sqrt(clamp(square(alpha0) + regGain * slopeVar, 0.0, 1.0));
+                h.roughness = clamp(max(h.roughness, sqrt(alphaReg)), MIN_GGX_ROUGHNESS, 1.0);
+            }
         }
     #endif
     }
