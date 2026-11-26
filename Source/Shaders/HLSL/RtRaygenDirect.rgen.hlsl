@@ -61,12 +61,15 @@ void main()
     const bool isGradient = useGlobalRestir ? false : q2GetIsGradient(pix);
     const uint cluster = framebufQ2Cluster_Sampled.Load(int3(pix, 0)).r;
 
+    const float metallic = framebufMetallicRoughness_Sampled.Load(int3(pix, 0)).x;
+    const float ndotv = max(dot(surf.normal, surf.toViewerDir), 0.0);
+    const float f0Lum = lerp(BRDF_MIN_SPECULAR_COLOR, 0.85, metallic);
+    const float fresnelLum = f0Lum + (1.0 - f0Lum) * pow(1.0 - ndotv, 5.0);
+    const float diffLum = (1.0 - metallic) * 0.5;
     const float alpha = square(surf.roughness);
     const float phongExp = q2RoughnessSquareToSpecPower(alpha);
     const float phongScale = min(100.0, 1.0 / (M_PI * max(alpha * alpha, 1e-4)));
-    const float phongWeight = clamp(
-        getLuminance(surf.specularColor) / (getLuminance(surf.specularColor) + getLuminance(surf.albedo)),
-        0.0, 0.9);
+    const float phongWeight = clamp(fresnelLum / max(fresnelLum + diffLum, 1e-4), 0.05, 0.92);
 
     float3 directDiffuse = (float3)0.0;
     float3 directSpecular = (float3)0.0;
@@ -210,11 +213,11 @@ void main()
     }
 
     imageStoreUnfilteredDirect(pix, directDiffuse);
-    imageStoreUnfilteredSpecular(
-        pix,
-        q2RegularizeDemodulatedSpecular(
-            demodulateSpecular(directSpecular, surf.specularColor),
-            surf.roughness));
+    const float3 demodDirectSpec = demodulateSpecular(directSpecular, surf.specularColor);
+    const float3 safeDirectSpec = (globalUniform.antiFireflyEnabled != 0u)
+        ? q2RegularizeDemodulatedSpecular(demodDirectSpec, surf.roughness)
+        : min(max(demodDirectSpec, (float3)0.0), (float3)32768.0);
+    imageStoreUnfilteredSpecular(pix, safeDirectSpec);
     const float directHitDist = directSpecHitLumSum > 1e-6
         ? clamp(directSpecHitDistSum / directSpecHitLumSum, 0.0, Q2_MAX_VIEW_DIR_HIT_DIST)
         : -1.0;

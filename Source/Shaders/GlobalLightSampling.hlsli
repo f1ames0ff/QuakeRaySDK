@@ -72,6 +72,14 @@ float globalLightSolidAngleProxy(const ShLightEncoded encoded, const float3 p)
         return calcSolidAngleForSphere(r, max(distance(center, p), r));
     }
 
+    else if (encoded.lightType == LIGHT_TYPE_DTAL_GROUP)
+    {
+        const DtalGroupLight g = decodeAsDtalGroupLight(encoded);
+        const float r = max(g.boundsRadius, 2.5e-6);
+
+        return calcSolidAngleForSphere(r, max(distance(g.center, p), r));
+    }
+
     return calcSolidAngleForSphere(encoded.data_0.w, max(length(encoded.data_0.xyz - p), encoded.data_0.w));
 }
 
@@ -83,12 +91,14 @@ float globalLightTarget(const ShLightEncoded encoded, const float3 p, const floa
         return 0.0;
     }
 
-    const float mass  = q2LightSelectionMass(encoded, p, n, V, phongExp, phongScale, phongWeight);
-    const float proxy = globalLightSolidAngleProxy(encoded, p);
-    const float scale = (encoded.lightType == LIGHT_TYPE_TEXTURED_AREA)
-        ? max(decodeAsTexturedAreaLight(encoded).meanEmiss, 0.0) : 1.0;
+    const float mass = q2LightSelectionMass(encoded, p, n, V, phongExp, phongScale, phongWeight);
+    if (mass <= 0.0)
+    {
+        return 0.0;
+    }
 
-    return max(mass, proxy * kGlobalLightTargetFloor) * max(getLuminance(encoded.color), 0.0) * scale;
+    const float proxy = globalLightSolidAngleProxy(encoded, p);
+    return max(mass, proxy * kGlobalLightTargetFloor) * max(getLuminance(encoded.color), 0.0);
 }
 
 void q2SampleGlobalLightsRIS(const uint seed, const uint sampleIndex,

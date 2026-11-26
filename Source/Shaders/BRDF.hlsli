@@ -69,12 +69,12 @@ float3 q2RegularizeDemodulatedSpecular(const float3 demodSpec, float roughness)
     {
         return (float3)0.0;
     }
-    const float roughT = smoothstep(0.05, 0.45, roughness);
+    const float roughT = smoothstep(0.05, 0.40, roughness);
     if (roughT <= 0.0)
     {
         return min(demodSpec, (float3)32768.0);
     }
-    const float cap = lerp(96.0, 14.0, roughT);
+    const float cap = lerp(48.0, 8.0, roughT);
     if (lum <= cap)
     {
         return demodSpec;
