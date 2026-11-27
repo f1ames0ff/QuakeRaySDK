@@ -60,7 +60,7 @@ God rays use these `QrDrawFrameSkyParams` fields:
 |---|---|
 | `godRaysEnabled` | Non-zero enables shafts when a sun source and scene bounds exist. |
 | `godRaysIntensity` | Multiplier; values below zero are clamped to zero. |
-| `godRaysQuality` | Present in the API, but the current RHI god-rays path does not consume it. |
+| `godRaysQuality` | Actively wired per frame: clamped to `0..4` (defaults to `2` when `pSkyParams` is null) and mapped in `VulkanDevice.cpp` to `sunStepScale` (`{2.0, 1.5, 1.0, 0.75, 0.5}`) for `CmGodRays.comp.hlsl` (smaller scale = finer ray-march steps, higher quality). Note that `QrInstanceCreateInfo.godRaysQuality` is not consumed; set `pSkyParams->godRaysQuality` per frame. |
 | `godRaysFromSkyTexture` | Use `RASTERIZED_GEOMETRY` sky's precomputed bright point instead of the directional light. |
 | `godRaysSkyDirection`, `godRaysSkyColor` | Host-computed bright-point direction/color for raster sky shafts. |
 
@@ -69,6 +69,15 @@ directional light. If no directional light exists, shafts are disabled. The
 raster-sky path can instead supply `godRaysFromSkyTexture` and the corresponding
 direction/color. God rays also require scene AABB data; an empty scene cannot
 create a shadow-map depth source.
+
+Host inputs follow the SDK meter convention (40 Quake units per meter,
+`0.025 m/unit`, matching `VulkanDevice.cpp` and `EditorSpatial`). Note that
+`CmGodRays.comp.hlsl` still retains Q2RTX's internal `Q2_UNIT_IN_METERS = 0.0254`
+constant for its internal march-step heuristic (`getStep`); hosts should still
+convert all public API lengths at `0.025 m/unit` (40 u/m). Also note that for
+`QrDrawFrameVolumetricParams`, only `volumetricFar` (meters) is active under
+`coreQ2RTX = 1u` (bounding the froxel light-shaft frustum), while the remaining
+legacy volumetric fog fields are bypassed in `CmPrepareFinal.comp.hlsl`.
 
 Quake's `rt_sky_godrays`, `rt_sky_godrays_intensity` and
 `rt_sky_godrays_quality` map to the first three fields. Its
@@ -95,10 +104,11 @@ sky.sunDiscColor = sunDiscColor;
 sky.sunDiscSize = 1.0f;
 sky.godRaysEnabled = QR_TRUE;
 sky.godRaysIntensity = 1.0f;
+sky.godRaysQuality = 2u;
 
 QrDrawFrameIlluminationParams illumination = {0};
 illumination.giBounceRays = 1.0f;
-illumination.sunBounceRange = 50.8f; /* 2000 Quake units */
+illumination.sunBounceRange = 50.0f; /* 2000 Quake units at 40 u/m (0.025 m/unit) */
 illumination.sunBounceScale = 1.0f;
 
 drawInfo.pSkyParams = &sky;

@@ -2,7 +2,8 @@
 
 See [README.md](README.md) for the complete documentation map.
 
-This guide is for a Win32 host that links `qray::renderer` and owns its window,
+This guide is for a Windows (Win32) or Linux (X11/Xlib via
+`QR_USE_SURFACE_XLIB`) host that links `qray::renderer` and owns its window,
 assets and scene. The SDK owns the Vulkan/NVRHI device, swapchain and
 presentation. The host may use a right-handed or left-handed
 Z-up or Y-up frame, but it must convert all spatial values to meters before
@@ -36,7 +37,8 @@ GPU context.
 
 ## 1. Build and link
 
-The SDK is a static library on Windows. The host provides NVRHI and Vulkan:
+The SDK is built as a static library on Windows and Linux. The host provides
+NVRHI and Vulkan:
 
 ```cmake
 find_package(Vulkan REQUIRED)
@@ -46,24 +48,28 @@ target_link_libraries(my_host PRIVATE qray::renderer)
 ```
 
 The SDK owns the shader sources/build script and installs the FidelityFX
-headers, import library and `qray::ffx` provider target. The host integration
-step is deployment: copy the FSR provider DLL, compiled shaders and blue-noise
-texture next to the executable and pass their paths to instance creation.
+headers, provider library (`amd_fidelityfx_vk.lib`/`.dll` plus `qray::ffx` on
+Windows, `libamd_fidelityfx_vk.so` on Linux when present), and SDK docs. The
+host integration step is deployment: copy the FSR provider shared library
+(`amd_fidelityfx_vk.dll` on Windows or `libamd_fidelityfx_vk.so` on Linux),
+compiled shaders and blue-noise texture next to the executable and pass their
+paths to instance creation.
 An installed SDK package therefore does not require the host to implement
 NVRHI, shader compilation or FidelityFX tooling; the host must only provide
-compatible `nvrhi`/`nvrhi_vk` build targets. The `qray::renderer` target exports `QR_STATIC` and
-`QR_USE_SURFACE_WIN32`, plus `NOMINMAX` for the Win32 declarations; keep those
-switches on the target instead of copying them into unrelated host-wide
-definitions.
+compatible `nvrhi`/`nvrhi_vk` build targets. The `qray::renderer` target exports
+`QR_STATIC` plus `QR_USE_SURFACE_WIN32` and `NOMINMAX` on Windows, or
+`QR_USE_SURFACE_XLIB` on Linux; keep those switches on the target instead of
+copying them into unrelated host-wide definitions.
 
 ## 2. Create the instance
 
-Fill `QrInstanceCreateInfo`, including the Win32 surface, file callbacks,
-shader folder, blue-noise path, texture limits and optional overridden texture
-paths. A C host or scene-only consumer creates the instance with
-`qrCreateInstance`. A C++ NVRHI host that needs custom device requirements uses
-`qray::qrCreateInstanceWithGpuRequirements` with the requirements described in
-[gpu-context.md](gpu-context.md).
+Fill `QrInstanceCreateInfo`, including the platform surface
+(`pWin32SurfaceInfo` on Windows or `pXlibSurfaceCreateInfo` on Linux), file
+callbacks, shader folder, blue-noise path, texture limits and optional
+overridden texture paths. A C host or scene-only consumer creates the instance
+with `qrCreateInstance`. A C++ NVRHI host that needs custom device requirements
+uses `qray::qrCreateInstanceWithGpuRequirements` with the requirements described
+in [gpu-context.md](gpu-context.md).
 
 Immediately after creation, declare the host frame:
 
@@ -205,10 +211,12 @@ the legacy positional-light calibration. `SWAPCHAIN` UI geometry remains in
 pixels. Treat the adapter and its identity-frame output as a regression oracle,
 not as the definition of the public spatial contract.
 
-The standalone `quakerayeditor` is independent of renderer embedding. It
-currently previews OBJ/BSP29 scenes and authors material, light and render
-settings; its remaining meter conversion and generic authoring work are separate
-from the host integration contract.
+The standalone `quakerayeditor` is an independent host built on
+`qray::renderer`. It converts native units to meters at one boundary
+(`EditorSpatial.{h,cpp}`, 40 units/m), loads OBJ/BSP scenes and archives via
+`EditorAssetSource` and pluggable `EditorFormatAdapter` hooks, authors
+materials/lights/render settings/local Vulkan AI PBR textures, and shares
+`EditorSceneRuntime` with runtime hosts.
 
 ## 6. Sprite and effect adapter pattern
 
@@ -224,18 +232,30 @@ parse the effect / select the animation frame
   -> optionally register an emitter light
 ```
 
-- **Traced path:** `qrUploadGeometry` with
-  `QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED` gives alpha-tested visibility,
-  cutout shadows and GI. The Quake adapter also sets
-  `QR_GEOMETRY_UPLOAD_ALPHA_TRANSMISSION_BIT` for its alpha-tested textures.
-  The cutout is binary at the alpha threshold; that bit adds stochastic alpha
-  transmission, not ordered smooth blending in primary RT rays.
-- **Raster path:** `qrUploadRasterizedGeometry` with
+- **Traced path (`ALPHA_TESTED` cutouts):** `qrUploadGeometry` with
+  `QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED` gives binary cutout visibility,
+  cutout shadows, and GI for solid silhouette geometry (grates, fences,
+  foliage, ironwork). In `RtAlphaTest.rahit.hlsl` and
+  `RtAlphaTestShadow.rahit.hlsl`, default cutout rejection tests
+  `(color.r + color.g + color.b) / 3 * color.a + color.a < 0.5`
+  (`ALPHA_THRESHOLD = 0.5`, where `color` is the sampled layer-0 albedo/alpha
+  multiplied by `layerColors[0]`) — note that bright RGB pixels pass down to
+  `alpha = 0.25`, while black pixels cut off at `alpha = 0.5`. Setting
+  `QR_GEOMETRY_UPLOAD_ALPHA_TRANSMISSION_BIT` (mapped to
+  `GEOM_INST_FLAG_ALPHA_TRANSMISSION` in `VertexCollector.cpp`) switches the
+  any-hit shader to stochastic per-primitive/frame-hashed binary transmission
+  (`rand < 1.0 - color.a`), NOT smooth ordered alpha blending. Because
+  stochastic alpha transmission introduces noise and cannot represent additive
+  or modulate blends, avoid routing soft translucent FX, decals, beams, or
+  blended sprites through `qrUploadGeometry`.
+- **Raster path (preferred for translucent FX, decals, and soft sprites):**
+  `qrUploadRasterizedGeometry` with
   `QR_RASTERIZED_GEOMETRY_STATE_BLEND_ENABLE` and
-  `QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST` (no depth write) gives soft alpha
-  blending for smoke, fire, explosions and screen overlays. These draws do not
-  participate in GI or sun shadows; add a light with `qrUploadSphericalLight`
-  (or the host's own emitter path) if the effect should illuminate the scene.
+  `QR_RASTERIZED_GEOMETRY_STATE_DEPTH_TEST` (no depth write) gives clean soft
+  alpha, additive, and modulate blending for smoke, fire, explosions, beams,
+  decals, soft sprites, and screen overlays. These draws do not participate in
+  GI or sun shadows; add a light with `qrUploadSphericalLight` (or the host's
+  own emitter path) if the effect should illuminate the scene.
   Use `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN` for screen-space effects
   and upload them in painter's order.
 - **Particles:** `qrUploadParticles` builds camera-facing point sprites in one
@@ -259,12 +279,13 @@ parse the effect / select the animation frame
   subtract/min/max or a separate alpha equation; approximate a legacy mode
   with the supported factors or keep it out of the SDK raster path.
 
-The Quake adapter in `Quake/r_sprite.c` is an example: an oriented or
-force-rasterized sprite becomes a raster quad with alpha test and depth write;
-the other sprites use the traced `qrUploadGeometry` path, whose pass-through
-type is alpha-tested unless the material is glass or water. Smoke is sorted by
-the host before upload. The SDK does not parse `.spr`, choose animation frames,
-build billboards or create emitter lights for the host.
+As an adapter example, a host can route oriented, translucent, or
+force-rasterized sprites, decals, and beams to `qrUploadRasterizedGeometry`
+with the matching blend and depth state, reserving `qrUploadGeometry`
+(`ALPHA_TESTED`) for hard-edged cutouts that need RT shadows and GI (or glass /
+water pass-through). Smoke is sorted by the host before upload. The SDK does
+not parse `.spr`, choose animation frames, build billboards or create emitter
+lights for the host.
 
 ## 7. Validation checklist
 

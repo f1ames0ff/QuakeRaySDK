@@ -742,10 +742,20 @@ else()
     )
     install(FILES Include/qray/qray.h Include/qray/host_contract.h Include/qray/gpu_context.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qray)
+    if(EXISTS "${QR_FFX_SDK_ROOT}/ffx-api/include/ffx_api")
+        install(DIRECTORY "${QR_FFX_SDK_ROOT}/ffx-api/include/ffx_api"
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffx)
+    endif()
+    if(EXISTS "${QR_FFX_VK_SO}")
+        install(PROGRAMS "${QR_FFX_VK_SO}"
+            DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    endif()
 endif()
 
 install(FILES
+    AGENTS.md
     docs/README.md
+    docs/agent-integration-guide.md
     docs/api.md
     docs/editor-parity.md
     docs/gpu-context.md

@@ -76,7 +76,9 @@ pass reads that field.
 
 Quake reference defaults are `rt_gi_level=1`, `rt_nee_samples=2`,
 `rt_restir=0`, `rt_restir_candidates=8`, `rt_denoiser=1` and
-`rt_sky_sun_bounce_range=2000` Quake units (`50.8 m`). These are host defaults.
+`rt_sky_sun_bounce_range=2000` Quake units (`50.0 m` at the SDK/editor
+convention of 40 units/m = `0.025 m/unit`, matching `VulkanDevice.cpp`'s
+fallback `sunBounceRange = 50.0f`). These are host defaults.
 
 ## Minimal frame setup
 
@@ -89,7 +91,7 @@ illumination.neeLightSamples = 2u;
 illumination.restirEnabled = QR_FALSE;
 illumination.restirCandidates = 8u;
 illumination.denoiserEnabled = QR_TRUE;
-illumination.sunBounceRange = 50.8f; /* 2000 Quake units */
+illumination.sunBounceRange = 50.0f; /* 2000 Quake units at 40 u/m (0.025 m/unit) */
 illumination.sunBounceScale = 1.0f;
 
 drawInfo.pIlluminationParams = &illumination;

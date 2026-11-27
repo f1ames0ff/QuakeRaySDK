@@ -115,23 +115,41 @@ prompt dismissed` around the prompt. The bar logs its three button
 rectangles as `panel session: Apply …` and the prompt logs its two as
 `panel prompt: Yes … No …`, both whenever the layout moves.
 
-The writer never loses a line it did not write. It owns twenty-four keys -
-`texture_base`, `texture_normals`, `texture_emissive`, `texture_gloss`,
-`texture_scale_u/v`, `texture_offset_u/v`, `bump_scale`, `roughness_override`,
-`metalness_factor`, `metalness_from_normal_alpha`, `emissive_factor`,
-`luma_blend`, `base_factor`, `is_light`, `mirror`, `material_glass`,
-`material_water`, `transparency`, `glass_ior`, `glass_thickness`,
-`glass_color` and `exact_normals` - and rewrites only those in the entries the
-session touched, dropping a key that equals its default. Comments,
-`texture_overlay`, nested `luma:` blocks, the entries the session never opened and
-unrelated root keys are copied through verbatim at the indent they came with. A
-`luma_blend` is written by name (`off`, `normal`, `screen`, `overlay`,
-`hard light`, `color dodge`), the same spellings `RT_MAT_EmissiveBlendName`
-writes. A file whose root still says `materials:` or `lights:` is
-migrated to `qray_materials:` / `qray_lights:`, an existing target is copied to
-`qray.backup_materials.yaml` first, and a missing final newline is added before
-a new entry so an append cannot glue two records together. `Apply` reloads the
-document afterwards, so the list markers follow the file it just wrote.
+The writer never loses a line it did not write. It owns the full set of
+panel-managed material keys (`OwnedValues` / `IsEmittedMaterialKey` in
+`EditorSession.cpp`):
+
+- **Textures & UVs:** `texture_base`, `texture_normals`, `texture_height`,
+  `texture_emissive`, `texture_overlay`, `texture_gloss`, `texture_sss`,
+  `texture_scale_u/v`, `texture_offset_u/v`
+- **Surface, relief, glass, water & mirror:** `bump_scale`, `parallax_scale`,
+  `roughness_override`, `metalness_factor`, `metalness_from_normal_alpha`,
+  `base_factor`, `mirror`, `material_glass`, `material_water`, `glass_ior`,
+  `glass_thickness`, `transparency`, `glass_color`, `exact_normals`,
+  `force_rasterize`, `disabled_stages`
+- **Emission, gloss & subsurface blocks and non-destructive toggles:**
+  `enabled`, `emissive_enabled`, `gloss_enabled`, `sss_enabled`,
+  `emissive_factor`, `luma_blend`, `is_light`, `luma`, `luma_threshold`,
+  `luma_feather`, `gloss`, `gloss_threshold`, `gloss_feather`, `sss_strength`,
+  `sss_color`, `sss_radius`, `sss`, `sss_threshold`, `sss_feather`
+- **Emissive DTAL & light shafts:** `light_styles`, `light_color`,
+  `light_brightness`, `light_focus`, `light_focus_soft`, `light_projector`,
+  `light_min_area`, `light_shafts`, `light_shafts_power`,
+  `light_shafts_distance`, `light_shafts_falloff`
+
+It rewrites only those owned keys in the entries the session touched, dropping
+any key that equals its default (while emitting explicit override markers such
+as `texture_emissive: NONE` or `mirror: false` when clearing a surface's
+built-in default). Comments, unrecognized keys, the entries the session never
+touched and unrelated root keys are copied through verbatim at the indent they
+came with. A `luma_blend` is written by name (`off`, `normal`, `screen`,
+`overlay`, `hard light`, `color dodge`), the same spellings
+`RT_MAT_EmissiveBlendName` writes. A file whose root still says `materials:` or
+`lights:` is migrated to `qray_materials:` / `qray_lights:`, an existing target
+is copied to `qray.backup_materials.yaml` first, and a missing final newline is
+added before a new entry so an append cannot glue two records together. `Apply`
+reloads the document afterwards, so the list markers follow the file it just
+wrote.
 
 The level half of the session writes `qray.lights.yaml`, the root-mapping file
 the game reads by level name. Inside the level's own section the editor owns
@@ -154,11 +172,14 @@ colour starts white, which is what the engine shows for a level whose section
 has no `color:` key. `enabled:` follows the density, because the panel has one
 slider and no second switch.
 
-A level whose last custom light was removed keeps its `fog:` block and loses
-`lights:`, which is how the game reads "no custom lights here". The read side is
-the same: an existing `lights:` block replaces the panel's custom store, a
-missing one leaves it alone, so a level the file does not know yet keeps the
-lights added before its first save.
+When a level carries predefined map lights (or already had a `lights:` block)
+and every light is removed, the writer emits an explicit `lights: []` entry
+alongside its `fog:` and `sky:` blocks (`ShouldWriteEmptyLightsBlock` in
+`EditorApp.cpp` / `EditorLevelDocument::WriteMerged` in `EditorSession.cpp`)
+so reloading the map preserves the empty light set instead of resurrecting
+deleted predefined map lights (`Regenerate from map` restores
+`m_scene.bspLights`). A level section with no `lights:` block at all leaves the
+map's predefined lights intact on load.
 
 `Entities` holds the two light tables the game builds. The `Map` table lists the
 lights the BSP spawned, the `Custom` table the ones added in the session; both
@@ -319,26 +340,30 @@ lines that let a script find the widgets without reading pixels.
 `--max-frames <N>` exits cleanly after rendering `N` frames, useful for
 automated smoke checks.
 
-The BSP loader currently accepts Quake BSP29 files directly. Extracting a map
-from a PAK remains an adapter step.
+The built-in loader reads Wavefront OBJ, Quake BSP29, and IDPO v6 `.mdl` files
+directly from loose directories as well as `.pak`, `.pkz`, `.pk3`, and `.zip`
+archives mounted via `EditorAssetSource` (`AddPak`, `AddZip`,
+`MountEditorGameDirectory`). Engine-specific map, model, and texture formats
+(such as alternate BSP versions, skeletal/morph models, or `.wal` textures)
+plug in through `EditorFormatAdapter` (`QR_EDITOR_ADAPTER_SOURCES`).
 
 ## Next work
 
-The remaining gap against the in-game editor is tracked in
-[`docs/editor-parity.md`](../docs/editor-parity.md); that list, not this section,
-is the source of truth for what is left. The global settings block, the
-material parameter table, light authoring - colour, position, the spot cone,
-the aim-and-drop placement and both drags with the axis gizmo - and the session
-lifecycle that writes `qray.materials.yaml` and the level's `fog:`, `sky:` and
-`lights:` records back are done, including the scope switch that decides whether
-the sky, sun and cloud settings belong to the level or to the global store.
-What is left of the material table is the handful of parameters the SDK has no
-field for - `texture_overlay`, `force_rasterize`, the `luma:` colour blocks and
-the `light_*` emitter group - which need new upload fields first.
+The feature parity checklist and evidence against the in-game editor live in
+[`docs/editor-parity.md`](../docs/editor-parity.md); that document is the
+source of truth for editor capabilities. Global settings, the complete material
+authoring table (including `texture_overlay`, `texture_height`/`parallax_scale`
+Relief POM, `luma`/`gloss`/`sss` colour-key/polygon/brush blocks, non-destructive
+`*_enabled` toggles, `force_rasterize`, and `light_*` / `light_shafts*` DTAL
+controls), light authoring (colour, position, spot cone, aim-and-drop placement,
+axis gizmo, marker drag), archive mounting (`.pak`/`.pk3`/`.pkz`/`.zip`), local
+Vulkan AI PBR generation, and the session lifecycle (`qray.materials.yaml`,
+`qray.lights.yaml` with explicit `lights: []` empty persistence, `sky:`/`fog:`
+blocks, and scope switching) are implemented.
 
-PAK handling and WAL textures from the game archive also remain. The current
-loader uses Quake units and Z-up. API 1.06 accepts the Z-up orientation, but
-every spatial input reaches the SDK in meters, so the editor converts at one
-boundary: `EditorSpatial.{h,cpp}` is the editor's own counterpart of
+The current loader uses Quake units and Z-up (`kEditorUnitsPerMeter = 40.0f`).
+`QR_API_VERSION 1.07.0000` accepts the Z-up orientation via
+`qrSetSpatialConvention`, and every spatial input reaches the SDK in meters
+through one boundary: `EditorSpatial.{h,cpp}` is the editor's counterpart of
 `Quake/qr_spatial_adapter.cpp`, and no other file divides a length by
 `kEditorUnitsPerMeter` on its way to the renderer.

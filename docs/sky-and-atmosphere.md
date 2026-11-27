@@ -54,8 +54,8 @@ cloud[3] = 0.20f;      /* coverage */
 cloud[4] = 0.80f;      /* density */
 cloud[5] = 0.30f;      /* wind/motion rate */
 cloud[6] = 1.0f;       /* draw enabled */
-cloud[7] = 3556.0f;    /* base height, meters */
-cloud[8] = 2286.0f;    /* thickness, meters */
+cloud[7] = 3500.0f;    /* base height, meters (140000 Quake units at 40 u/m) */
+cloud[8] = 2250.0f;    /* thickness, meters (90000 Quake units at 40 u/m) */
 
 /* For procedural sky this slot is cloud opacity. */
 sky.skyColorSaturation = 1.0f;
@@ -65,8 +65,10 @@ drawInfo.pSkyParams = &sky; /* drawInfo is the frame's existing QrDrawFrameInfo 
 
 The values above are the QuakeRay reference profile, not a mandatory SDK
 preset. Quake stores the reference height and thickness as 140000 and 90000
-Quake units; its adapter converts them to meters. Every other host must send
-meters directly.
+Quake units; at the SDK/editor reference scale of 40 units/m (`0.025 m/unit`,
+matching `VulkanDevice.cpp`'s `3500.0 m` / `2250.0 m` defaults and
+`EditorSpatial`), those convert to `3500.0 m` and `2250.0 m`. Every other host
+must send meters directly.
 
 | Cloud input | Range / meaning |
 |---|---|
@@ -93,7 +95,7 @@ the scene light itself.
 | `sunDiscColor`, `sunDiscSize` | Visible sun disc; size is relative to the SDK's baseline angular radius. |
 | `skyViewerPosition` | Camera/eye position in meters; important for clouds and atmosphere. |
 | `skyAmbientLod`, `skyLightMultiplier`, `skyNee` | Sky lighting and direct-sampling controls. |
-| `godRaysEnabled`, `godRaysIntensity`, `godRaysQuality` | Optional sun shafts. |
+| `godRaysEnabled`, `godRaysIntensity`, `godRaysQuality` | Optional sun shafts; `godRaysQuality` (`0..4`, clamped, default `2`) actively maps to `sunStepScale` (`{2.0, 1.5, 1.0, 0.75, 0.5}`). |
 | `godRaysFromSkyTexture`, `godRaysSkyDirection`, `godRaysSkyColor` | Destination of a host-provided sky-texture sun estimate. |
 | `proceduralAtmosphereConfigured` | Non-zero enables Rayleigh/Mie/ozone atmosphere, 3-tier starfield, phased moon, elevation-driven cloud sunset/night lighting and exact 3D cloud eclipse of solar/lunar discs. |
 | `proceduralSunEnabled`, `proceduralSunDirection`, `proceduralSunTint`, `proceduralSunStrength` | Explicit procedural sun direction toward the sun, pure linear star spectrum tint, and cloud/sky illumination strength (independent of whether directional world light is uploaded). |
@@ -101,8 +103,12 @@ the scene light itself.
 | `proceduralStarsEnabled`, `proceduralStarDensity`, `proceduralStarIntensity`, `celestialRotationRadians` | Toggle, density (`0..4`), brightness (`0..5`), and diurnal celestial sphere rotation for the 3-tier night starfield. |
 | `atmosphereDensity`, `atmosphereMie`, `atmosphereOzone` | Rayleigh/ozone thickness (`0..4`, `0` gives a dark void for space skies), aerosol haze/aureole (`0..4`), and Chappuis ozone crimson-blue sunset separation (`0..4`). |
 
-`QrDrawFrameVolumetricParams` is atmospheric in-scattering/fog, not the cloud
-layer. Configure it separately from `QrDrawFrameSkyParams`.
+`QrDrawFrameVolumetricParams` is separate from the procedural cloud layer.
+Because `VulkanDevice.cpp` runs with `coreQ2RTX = 1u`, `applyVolumetrics()` in
+`CmPrepareFinal.comp.hlsl` early-returns: only `volumetricFar` (meters, used by
+`ResolveVolumetricCameraFar` to bound volumetric / froxel light shafts) is
+active, while `enable`, `useSimpleDepthBased`, `ambientColor`, `scaterring`,
+`sourceColor`, `sourceDirection`, and `sourceAssymetry` are currently bypassed.
 
 ## 4. Volumetric cloud occlusion in light shafts
 

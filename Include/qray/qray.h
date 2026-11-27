@@ -398,8 +398,21 @@ typedef struct QrGeometryUploadInfo
     QrFloat4D                       layerColors[3];
     QrGeometryMaterialBlendType     layerBlendingTypes[3];
 
-    /* Glass reflect/refract uses layerColors[2].data[1] as the pane thickness
-       in meters. The slot is unused for other pass-through types. */
+    /* Layer color multipliers and pass-through / relief parameters:
+       - layerColors[0]: layer-0 RGBA tint/factor multiplied with albedo/alpha.
+       - layerColors[1]: layer-1 color multiplier, or for
+         QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT,
+         layerColors[1].data[0..2] (.xyz) carries the linear RGB glass
+         transmission color (glassColor).
+       - layerColors[2]: layer-2 color multiplier when a layer-2 albedo texture
+         is bound; otherwise:
+           * For QR_GEOMETRY_PASS_THROUGH_TYPE_GLASS_REFLECT_REFRACT:
+             data[0] is per-pane glassIor (> 0 overrides the frame glass IOR,
+             clamped to [1.0, 5.0]; 0 uses the frame IOR) and data[1] is pane
+             glassThickness in meters.
+           * For non-glass, non-water, non-subsurface geometry with a layer-0
+             normal map bound and no layer-2 albedo texture: data[2] is the
+             Relief POM parallax_scale (clamped to [0.0, 0.25]). */
 
     float                           texCoordScale[2];
     float                           texCoordOffset[2];
