@@ -3833,23 +3833,24 @@ bool VerifyOnlineDownloadBehavior()
     }
 
     ScopedTempTestDir tmp("qray_test_ai_online_dl");
-    const std::string testUrl =
-        "https://huggingface.co/f13d/lotus-onnx/resolve/main/README.md";
-    const std::filesystem::path goodPath = tmp.dir / "README.md";
+    const EditorAiModelDownloadSpec dbSpec = GetEditorAiModelDownloadSpec(EditorAiBackend::DeepBump);
+    const std::filesystem::path goodPath = tmp.dir / dbSpec.filename;
     EditorAiDownloadProgress progress;
-    const EditorAiDownloadResult okRes =
-        DownloadEditorAiFile(testUrl, goodPath, "", 70u, &progress, nullptr);
+    const EditorAiDownloadResult okRes = DownloadEditorAiFile(
+        dbSpec.url, goodPath, dbSpec.sha256Hex, dbSpec.expectedBytes, &progress, nullptr);
     if (!Check(okRes.ok && std::filesystem::is_regular_file(goodPath) &&
-                   progress.bytesDownloaded.load() == 70u && !okRes.actualSha256.empty(),
+                   progress.bytesDownloaded.load() == dbSpec.expectedBytes &&
+                   okRes.actualSha256 == dbSpec.sha256Hex,
                ("Online model download probe failed: " + okRes.errorMessage).c_str()))
     {
         return false;
     }
 
-    const std::filesystem::path badPath = tmp.dir / "bad_README.md";
+    const std::filesystem::path badPath = tmp.dir / "bad_deepbump.gguf";
     const EditorAiDownloadResult badRes = DownloadEditorAiFile(
-        testUrl, badPath, "0000000000000000000000000000000000000000000000000000000000000000", 70u,
-        nullptr, nullptr);
+        dbSpec.url, badPath,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        dbSpec.expectedBytes, nullptr, nullptr);
     const std::filesystem::path partPath = badPath.string() + ".part";
     return Check(!badRes.ok && badRes.errorMessage.find("SHA-256") != std::string::npos &&
                      !std::filesystem::exists(badPath) && !std::filesystem::exists(partPath),
@@ -3863,6 +3864,8 @@ bool VerifyExpectedGgufDownloadSpecs()
     const EditorAiModelDownloadSpec depthSpec =
         GetEditorAiModelDownloadSpec(EditorAiBackend::LotusDepthD);
     const EditorAiModelDownloadSpec dbSpec = GetEditorAiModelDownloadSpec(EditorAiBackend::DeepBump);
+    const EditorAiModelDownloadSpec delightSpec =
+        GetEditorAiModelDownloadSpec(EditorAiBackend::StableDelight);
     const EditorAiModelDownloadSpec upSpec =
         GetEditorAiModelDownloadSpec(EditorAiBackend::RealPlksrPbrify);
 
@@ -3876,17 +3879,23 @@ bool VerifyExpectedGgufDownloadSpecs()
     };
     const ExpectedSpec cases[] = {
         { normSpec, "lotus-normal-d-v1-1-fp16.gguf",
-          "https://huggingface.co/f13d/lotus-onnx/resolve/main/lotus-normal-d-v1-1-fp16.gguf",
+          "https://huggingface.co/f13d/lotus-normal-d-v1-1-fp16.gguf/resolve/main/"
+          "lotus-normal-d-v1-1-fp16.gguf",
           "5be392eed0cf3bf6d3ad18b621896517764955a012f91ee99e149fb1c19edbc1", 1896418592ULL },
         { depthSpec, "lotus-depth-d-v2-0-disparity-fp16.gguf",
-          "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+          "https://huggingface.co/f13d/lotus-depth-d-v2-0-disparity-fp16.gguf/resolve/main/"
           "lotus-depth-d-v2-0-disparity-fp16.gguf",
           "8a6833f61391e97e3a33eb3a0fb9fda5243e83f7bacde1660a13bd418b0110c4", 1896418592ULL },
         { dbSpec, "deepbump256-fp16.gguf",
-          "https://huggingface.co/f13d/lotus-onnx/resolve/main/deepbump256-fp16.gguf",
+          "https://huggingface.co/f13d/deepbump256-fp16.gguf/resolve/main/"
+          "deepbump256-fp16.gguf",
           "dafc52f7219ec38b085c54a460017605b8b1eab4b6de274e6a584c4de839490d", 13267104ULL },
+        { delightSpec, "yoso-delight-v0-4-base-fp16.gguf",
+          "https://huggingface.co/f13d/yoso-delight-v0-4-base-fp16.gguf/resolve/main/"
+          "yoso-delight-v0-4-base-fp16.gguf",
+          "5abe8aa64ec7ccf94110fb154ca7d9f1ad94256eb24f5e5c8aec03daf3ed754d", 2596045792ULL },
         { upSpec, "4x-pbrify-rplksrd-v3-fp16.gguf",
-          "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+          "https://huggingface.co/f13d/4x-pbrify-rplksrd-v3-fp16.gguf/resolve/main/"
           "4x-pbrify-rplksrd-v3-fp16.gguf",
           "492af1d06fb024a55fb3a744fe560bb2bdcca72ef7606355c8c99b325b8a3cbf", 14854656ULL },
     };

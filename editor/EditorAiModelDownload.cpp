@@ -546,14 +546,15 @@ EditorAiModelDownloadSpec GetEditorAiModelDownloadSpec(EditorAiBackend backend)
     case EditorAiBackend::LotusNormalD:
         return {
             "lotus-normal-d-v1-1-fp16.gguf",
-            "https://huggingface.co/f13d/lotus-onnx/resolve/main/lotus-normal-d-v1-1-fp16.gguf",
+            "https://huggingface.co/f13d/lotus-normal-d-v1-1-fp16.gguf/resolve/main/"
+            "lotus-normal-d-v1-1-fp16.gguf",
             "5be392eed0cf3bf6d3ad18b621896517764955a012f91ee99e149fb1c19edbc1",
             1896418592ULL,
         };
     case EditorAiBackend::LotusDepthD:
         return {
             "lotus-depth-d-v2-0-disparity-fp16.gguf",
-            "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+            "https://huggingface.co/f13d/lotus-depth-d-v2-0-disparity-fp16.gguf/resolve/main/"
             "lotus-depth-d-v2-0-disparity-fp16.gguf",
             "8a6833f61391e97e3a33eb3a0fb9fda5243e83f7bacde1660a13bd418b0110c4",
             1896418592ULL,
@@ -561,14 +562,15 @@ EditorAiModelDownloadSpec GetEditorAiModelDownloadSpec(EditorAiBackend backend)
     case EditorAiBackend::DeepBump:
         return {
             "deepbump256-fp16.gguf",
-            "https://huggingface.co/f13d/lotus-onnx/resolve/main/deepbump256-fp16.gguf",
+            "https://huggingface.co/f13d/deepbump256-fp16.gguf/resolve/main/"
+            "deepbump256-fp16.gguf",
             "dafc52f7219ec38b085c54a460017605b8b1eab4b6de274e6a584c4de839490d",
             13267104ULL,
         };
     case EditorAiBackend::StableDelight:
         return {
             "yoso-delight-v0-4-base-fp16.gguf",
-            "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+            "https://huggingface.co/f13d/yoso-delight-v0-4-base-fp16.gguf/resolve/main/"
             "yoso-delight-v0-4-base-fp16.gguf",
             "5abe8aa64ec7ccf94110fb154ca7d9f1ad94256eb24f5e5c8aec03daf3ed754d",
             2596045792ULL,
@@ -576,13 +578,13 @@ EditorAiModelDownloadSpec GetEditorAiModelDownloadSpec(EditorAiBackend backend)
     case EditorAiBackend::RealPlksrPbrify:
         return {
             "4x-pbrify-rplksrd-v3-fp16.gguf",
-            "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+            "https://huggingface.co/f13d/4x-pbrify-rplksrd-v3-fp16.gguf/resolve/main/"
             "4x-pbrify-rplksrd-v3-fp16.gguf",
             "492af1d06fb024a55fb3a744fe560bb2bdcca72ef7606355c8c99b325b8a3cbf",
             14854656ULL,
         };
     }
-    return GetEditorAiModelDownloadSpec(EditorAiBackend::LotusNormalD);
+    return GetEditorAiModelDownloadSpec(EditorAiBackend::DeepBump);
 }
 
 std::string ComputeEditorBufferSha256Hex(const uint8_t *data, size_t size)
