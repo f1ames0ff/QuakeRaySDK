@@ -220,11 +220,59 @@ The NVRHI source tree needs the pinned QuakeRay patch
 `build_win.ps1` applies it automatically; a standalone editor build must apply
 it before configuring or building NVRHI.
 
+The optional target is `-DQR_GGML_SOURCE_DIR=/path/to/ggml`, which builds the isolated
+`quakeray_ai_worker` executable beside `quakerayeditor` with Vulkan Compute support
+(`ggml-vulkan`).
+
 The executable is `quakerayeditor.exe` on Windows and `quakerayeditor` on Linux.
 The FSR provider (`amd_fidelityfx_vk.dll` / `libamd_fidelityfx_vk.so`), the
-default OBJ, the fonts, the shader directory and the blue-noise texture are
-copied next to it by the build when the corresponding source directories are
-configured.
+default OBJ, the fonts, the shader directory, `quakeray_ai_worker` (when configured)
+and the blue-noise texture are copied next to it by the build when the corresponding
+source directories are configured.
+
+## Local AI PBR Texture Pipeline & Parallax Mapping
+
+Old games ship low-resolution diffuse textures (often `64x64` or `128x128`) with
+baked light and shadows, no normal maps, and no surface height or roughness data.
+Instead of writing external Python batch scripts or relying on CUDA-only tools,
+`quakerayeditor` includes an in-panel **Generate with AI** workflow built around
+`quakeray_ai_worker` on pure Vulkan Compute (`ggml-vulkan`). The idea is straightforward:
+you click the icon next to `texture_base`, `texture_normals`, `texture_height`, or
+`texture_gloss` right while inspecting a wall in the level, generate updated maps
+locally, tweak strength/contrast/orientation in real time, and apply them as
+non-destructive override TGAs under `textures/ai_generated/`.
+
+Everything runs locally on any Vulkan 1.2+ desktop GPU (tested on AMD Radeon
+graphics cards with 16 GB VRAM, with CPU fallback when needed). Because diffusion
+models can spike VRAM if kept resident alongside the ray-traced viewport,
+inference runs out-of-process with stage-by-stage loading (encode -> unload ->
+UNet/ControlNet -> unload -> decode) and automatic tiling capped at 75% VRAM.
+Canceling frees memory immediately by terminating the worker without risking unsaved
+scene edits.
+
+Inside **AI Texture Generator**, four tabs follow the natural order for upgrading a
+legacy surface:
+
+1. **Upscale (`4x-PBRify_RPLKSRd_V3`):** Enlarges small or DXT-compressed diffuse
+   textures `2x` or `4x` while cleaning block artifacts. You can inspect a
+   split before/after view or detail diff, blend strength against the original,
+   and pass the result straight into the next tabs (*Use Upscaled diffuse*).
+2. **De-lighting (`StableDelight`):** Removes baked directional highlights and
+   shadows from `texture_base` while keeping albedo detail intact, so relit
+   materials do not double-shade under ray-traced lights.
+3. **Normals (`DeepBump`):** Produces crisp tangent-space detail normals from
+   high-frequency edges (with optional Poisson height integration for lit
+   previews and `texture_normals`).
+4. **Depth (`Lotus Depth v2`):** Estimates relative surface relief using a single-tile
+   FlashAttention pass on a wide seamless/mirror border canvas and halo-based tilt
+   removal so de-lit or low-contrast textures keep solid interior relief without
+   washed-out borders. Output can be applied as `texture_height` (Relief POM
+   parallax occlusion mapping), `texture_normals`, or synthesized `texture_gloss`.
+
+Applied `texture_height` maps and the `parallax_scale` slider drive Relief Parallax
+Occlusion Mapping (linear ray march + binary search + cavity micro-AO) in primary
+and reflection rays by packing height into the baked normal map alpha channel when
+subsurface scattering and glass transparency are inactive.
 
 ## Run
 

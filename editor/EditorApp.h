@@ -514,6 +514,7 @@ private:
     void ApplyTextureBrowserSelection();
     void OpenAiTextureGeneratorDialog(int32_t materialIndex, EditorTextureSlot slot);
     void DrawAiTextureGeneratorDialog();
+    void ApplyGeneratedAiTextureToMaterial(EditorAiDialogState &state);
     bool IsAiTextureDialogOpen() const;
     bool CancelAiTextureGeneratorDialog();
     void ShutdownAiTextureGeneratorDialog();

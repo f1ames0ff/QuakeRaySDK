@@ -6,8 +6,8 @@ set(QR_EDITOR_ADAPTER_SOURCES "" CACHE STRING
     "Optional external format adapter source files compiled into quakerayeditor")
 set(QR_EDITOR_ADAPTER_INCLUDE_DIRS "" CACHE STRING
     "Optional include directories for external format adapter sources")
-set(QR_ONNXRUNTIME_LIB "" CACHE FILEPATH
-    "Optional path to ONNX Runtime shared library copied next to quakerayeditor")
+set(QR_GGML_SOURCE_DIR "" CACHE PATH
+    "Optional path to ggml source tree for building quakeray_ai_worker")
 
 set(QR_EDITOR_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imgui")
 
@@ -32,7 +32,8 @@ set(QR_EDITOR_COMMON_SOURCES
     EditorAiDialog.cpp
     EditorAiModelDownload.cpp
     EditorAiTexture.cpp
-    EditorOnnxRuntime.cpp
+    EditorAiWorkerClient.cpp
+    EditorAiWorkerProtocol.cpp
     EditorDtalPipeline.cpp
     EditorGui.cpp
     EditorOverlayPipeline.cpp
@@ -71,8 +72,7 @@ endif()
 target_compile_features(quakerayeditor PRIVATE cxx_std_20)
 target_include_directories(quakerayeditor PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/onnxruntime/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
 if(QR_EDITOR_ADAPTER_INCLUDE_DIRS)
     target_include_directories(quakerayeditor PRIVATE ${QR_EDITOR_ADAPTER_INCLUDE_DIRS})
 endif()
@@ -90,19 +90,49 @@ set(QR_EDITOR_DEPLOY_COMMANDS
         "${QR_EDITOR_IMGUI_DIR}/fonts/fa-solid-900.ttf"
         "$<TARGET_FILE_DIR:quakerayeditor>/fonts/fa-solid-900.ttf")
 
-if(QR_ONNXRUNTIME_LIB AND EXISTS "${QR_ONNXRUNTIME_LIB}")
-    get_filename_component(QR_ORT_LIB_NAME "${QR_ONNXRUNTIME_LIB}" NAME)
-    get_filename_component(QR_ORT_LIB_DIR "${QR_ONNXRUNTIME_LIB}" DIRECTORY)
+if(QR_GGML_SOURCE_DIR AND EXISTS "${QR_GGML_SOURCE_DIR}/CMakeLists.txt")
+    if(NOT TARGET ggml)
+        set(QR_PREV_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        set(GGML_STATIC ON CACHE BOOL "" FORCE)
+        set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+        set(GGML_CPU ON CACHE BOOL "" FORCE)
+        set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+        set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+        set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
+        set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
+        set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${QR_GGML_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
+        set(BUILD_SHARED_LIBS ${QR_PREV_BUILD_SHARED_LIBS} CACHE BOOL "" FORCE)
+    endif()
+
+    add_executable(quakeray_ai_worker
+        ai_worker/Main.cpp
+        ai_worker/AiWorkerVram.cpp
+        ai_worker/GgufLoader.cpp
+        ai_worker/GgmlOps.cpp
+        ai_worker/DeepBumpPipeline.cpp
+        ai_worker/LotusPipeline.cpp
+        ai_worker/RealPlksrPipeline.cpp
+        EditorAiWorkerProtocol.cpp)
+    target_compile_features(quakeray_ai_worker PRIVATE cxx_std_20)
+    target_include_directories(quakeray_ai_worker PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ai_worker")
+    if(WIN32)
+        target_link_libraries(quakeray_ai_worker PRIVATE ggml)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(quakeray_ai_worker PRIVATE ggml Threads::Threads)
+    endif()
+    add_dependencies(quakerayeditor quakeray_ai_worker)
     list(APPEND QR_EDITOR_DEPLOY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${QR_ONNXRUNTIME_LIB}"
-            "$<TARGET_FILE_DIR:quakerayeditor>/${QR_ORT_LIB_NAME}")
-    if(EXISTS "${QR_ORT_LIB_DIR}/libonnxruntime_providers_shared.so")
-        list(APPEND QR_EDITOR_DEPLOY_COMMANDS
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${QR_ORT_LIB_DIR}/libonnxruntime_providers_shared.so"
-                "$<TARGET_FILE_DIR:quakerayeditor>/libonnxruntime_providers_shared.so")
-    endif()
+            "$<TARGET_FILE:quakeray_ai_worker>"
+            "$<TARGET_FILE_DIR:quakerayeditor>/$<TARGET_FILE_NAME:quakeray_ai_worker>")
+    install(TARGETS quakeray_ai_worker RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if(WIN32)
@@ -129,7 +159,8 @@ if(QR_BUILD_TESTS)
         EditorMultiSelectTests.cpp
         EditorAiModelDownload.cpp
         EditorAiTexture.cpp
-        EditorOnnxRuntime.cpp
+        EditorAiWorkerClient.cpp
+        EditorAiWorkerProtocol.cpp
         EditorLightSelection.cpp
         EditorGui.cpp
         EditorSession.cpp
@@ -144,12 +175,19 @@ if(QR_BUILD_TESTS)
     target_include_directories(qray_editor_multiselect_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/../Include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/onnxruntime/include")
+        "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Stb")
     if(WIN32)
         target_link_libraries(qray_editor_multiselect_tests PRIVATE quakerayeditor_imgui winhttp)
     else()
         target_link_libraries(qray_editor_multiselect_tests PRIVATE quakerayeditor_imgui Threads::Threads ${CMAKE_DL_LIBS})
+    endif()
+    if(TARGET quakeray_ai_worker)
+        add_dependencies(qray_editor_multiselect_tests quakeray_ai_worker)
+        add_custom_command(TARGET qray_editor_multiselect_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:quakeray_ai_worker>"
+                "$<TARGET_FILE_DIR:qray_editor_multiselect_tests>/$<TARGET_FILE_NAME:quakeray_ai_worker>"
+            VERBATIM)
     endif()
     add_test(NAME qray_editor_multiselect_tests COMMAND qray_editor_multiselect_tests)
 endif()

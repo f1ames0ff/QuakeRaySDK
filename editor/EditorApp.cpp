@@ -19,7 +19,6 @@
 
 #include "EditorGui.h"
 #include "EditorLightSelection.h"
-#include "EditorOnnxRuntime.h"
 #include "EditorSpatial.h"
 
 #include <algorithm>
@@ -10719,7 +10718,6 @@ int EditorApp::Run(const std::vector<std::string> &args, int showCommand)
 void EditorApp::Shutdown()
 {
     ShutdownAiTextureGeneratorDialog();
-    ShutdownEditorOnnxRuntime();
     EditorDetachProcess(m_playProcess);
     m_window.SetMouseCapture(false);
     m_ui.SetCursorVisible(true);

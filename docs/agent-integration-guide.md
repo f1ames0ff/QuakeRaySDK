@@ -152,10 +152,10 @@ Mount `QuakeRaySDK` inside the host repository (for example as a submodule at `c
    ```bash
    git -C /path/to/nvrhi apply /path/to/QuakeRaySDK/cmake/nvrhi-max-binding-layouts.patch
    ```
-2. **Build FidelityFX Provider:** Build `libamd_fidelityfx_vk.so` (Linux) via `Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh` or `amd_fidelityfx_vk.dll` (Windows) via `Source/FidelityFX_SDK_1.1.4/windows/build_provider.ps1`, and pass `-DQR_FFX_VK_SO=...` / `-DQR_FFX_VK_RUNTIME_DLL=...`.
+2. **Build FidelityFX Provider:** Build `libamd_fidelityfx_vk.so` (Linux) via `Source/FidelityFX_SDK_1.1.4/linux/build_provider.sh` or `amd_fidelityfx_vk.dll` (Windows) via `Source/FidelityFX_SDK_1.1.4/windows/build_provider.ps1`, and pass `-DQR_FFX_VK_SO=...` / `-DQR_FFX_VK_RUNTIME_DLL=...`. Whenever any FidelityFX header under `Source/FidelityFX_SDK_1.1.4/` changes, rebuild this provider shared library and redeploy it beside both binaries—recompiling only the C++ host or renderer does not update it.
 3. **Preserve PIC and Disable Cross-Target IPO:** When linking `qray::renderer` into a dynamically loaded renderer module (like `renderer_qray.so` / `renderer_qray.dll`), enable `CMAKE_POSITION_INDEPENDENT_CODE ON` and temporarily set `CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF` around `nvrhi` and `QuakeRaySDK`.
-4. **Configure Editor Adapter Injection (when `QR_BUILD_EDITOR=ON`):** Set `QR_EDITOR_ADAPTER_SOURCES`, `QR_EDITOR_ADAPTER_INCLUDE_DIRS`, `QR_EDITOR_SHADER_DIR`, and `QR_EDITOR_TEXTURE_DIR` before `add_subdirectory("${QUAKERAY_SDK_DIR}" ...)` so `quakerayeditor` compiles with your host adapter sources directly into its executable without putting adapter files inside `QuakeRaySDK`.
-5. **Deploy Runtime Assets Next to Binaries:** Ensure `shaders/`, `textures/BlueNoise_LDR_RGBA_128.png`, `textures/WaterNormal_n.png`, and `libamd_fidelityfx_vk.so` / `amd_fidelityfx_vk.dll` sit beside both your renderer executable and `quakerayeditor`.
+4. **Configure Editor Adapter & AI Worker (when `QR_BUILD_EDITOR=ON`):** Set `QR_EDITOR_ADAPTER_SOURCES`, `QR_EDITOR_ADAPTER_INCLUDE_DIRS`, and `QR_EDITOR_SHADER_DIR` (and optionally `-DQR_GGML_SOURCE_DIR=/path/to/ggml` to build the isolated `quakeray_ai_worker` executable linked statically against `ggml-vulkan` + `ggml-cpu`) before `add_subdirectory("${QUAKERAY_SDK_DIR}" ...)` so `quakerayeditor` compiles cleanly without putting game-specific files inside `QuakeRaySDK`.
+5. **Deploy Bundled Runtime Assets Next to Binaries:** `BlueNoise_LDR_RGBA_128.png` and `WaterNormal_n.png` are bundled under `QuakeRaySDK/Assets/textures/`, with automatic per-file fallback in `CMakeLists.txt` (`QR_TEST_TEXTURE_DIR`) and `editor/CMakeLists.txt` (alongside `fonts/Roboto-Regular.ttf` and `fonts/fa-solid-900.ttf`). You no longer need an external `../gfx/textures` sibling layout; ensure `shaders/`, `textures/`, `fonts/`, `libamd_fidelityfx_vk.so` / `amd_fidelityfx_vk.dll`, and (if enabled) `quakeray_ai_worker` sit beside your executables. (For game builds distributing engine packs, include `BlueNoise_LDR_RGBA_128.png` and `WaterNormal_n.png` inside `qray.pkz` / mounted game data as well.)
 
 ### 1.2 Instance Ownership & Spatial Boundary
 
@@ -190,9 +190,10 @@ This is one of the most subtle runtime requirements:
 |---|---|---|
 | **Static World Geometry** | `qrBeginStaticGeometries` -> `qrUploadGeometry` -> `qrSubmitStaticGeometries` | Group draws by material/pass-through type (`OPAQUE`, `ALPHA_TESTED`, `GLASS`, `WATER`, etc.). Guard `Begin`/`Submit` with RAII (`StaticGeometryGuard`) so early returns never leave static upload open. |
 | **Inline Brush Submodels** (`*1`, `*2`, `func_door`, `func_plat`, `func_rotating`, `func_train`, `func_bobbing`, `func_pendulum`) | Static BLAS slots + `qrUpdateGeometryTransform` per frame | Upload submodel geometry in local space once during map load; every frame compute the entity's interpolated world origin/rotation (in meters in the `QrTransform` translation) and call `qrUpdateGeometryTransform`. Skip editor/runtime upload for invisible `func_areaportal` / trigger / origin brush models only. |
-| **Multi-Stage Overlays & HUD** | `qrUploadRasterizedGeometry` | Use `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT` for world animated/additive/blended shader passes (upload opaque/cutout before blended, far-to-near), `..._SKY` for sky passes, and `..._SWAPCHAIN` for 2D HUD/console/menu quads with pixel viewport/orthographic matrix. |
+| **Multi-Stage Overlays, Stage Toggles & Mirror Promotion** | `qrUploadRasterizedGeometry` + `EditorMaterialParams` (`disabledStagesMask`, `mirror`) | Use `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_DEFAULT` for world animated/additive/blended passes, `..._SKY` for sky passes, and `..._SWAPCHAIN` for 2D HUD/console/menu quads. `disabledStagesMask` (`disabled_stages` in `qray.materials.yaml`) disables individual shader stages across both `EditorOverlayPipeline` and `EditorSceneRuntime`; `mirror = true` promotes cubemap (`tcGen environment`) / `isOverlayOnly` surfaces into traced mirror surfaces. |
 | **Animated Material Frames** | `qrCreateAnimatedMaterial` / `qrChangeAnimatedMaterialFrame` | Use SDK animated materials or dynamic per-frame texture selection for `animMap` stages. |
-| **Sky & Directional Sun** | `QR_GEOMETRY_VISIBILITY_TYPE_SKY` + `qrCreateCubemap` / procedural sky | Mark sky surfaces so primary rays read sky/cubemap/sun rather than blocking world geometry or casting unwanted solid shadows. |
+| **Sky, Sun & Volumetric Light Shafts** | `QR_GEOMETRY_VISIBILITY_TYPE_SKY` + procedural sky + `RhiLightShaftVolumePass` | Mark sky surfaces so primary rays read the procedural AAA sky/celestial system (`docs/sky-and-atmosphere.md`) or cubemap/sun without blocking geometry. Froxel volumetric light shafts use depth-bounds culling (`CmLightShaftDepthBounds`), tightened froxel grids (`128x72x64` / `192x108x96` / `256x144x128`), and stochastic multi-light selection. |
+| **Transparency Policy** | `EditorMaterialType::Glass`, `alphaTested`, `SSS` | Use physical Glass, binary `alphaTested` cutouts, or subsurface scattering (`SSS`). Do **not** inject stochastic per-pixel alpha transparency masks into primary/secondary rays (previously prototyped and removed due to extreme path-tracing noise). |
 
 ---
 
@@ -254,7 +255,7 @@ void RegisterMyGameEditorFormatAdapter() {
 When implementing `loadBspSceneMemory(bytes, sourceName, scene, error, options)`:
 
 1. **Detect Magic/Version Strictly in `canLoadBspMemory`:** Verify header size, 4-byte magic (e.g. `IBSP`), and version (`46` for Q3; return `false` for Q1 BSP29/BSP2 so the built-in loader continues working cleanly).
-2. **Tessellate Curved Surfaces (`MST_PATCH`):** Convert biquadratic Bezier 3x3 control patches into indexed triangles (`EditorSurface`), computing smooth vertex normals and continuous UVs so curved archways, domes, and pipes reflect and trace accurately.
+2. **Tessellate Curved Surfaces (`MST_PATCH`):** Convert biquadratic Bezier 3x3 control patches into indexed triangles (`EditorSurface`), computing smooth vertex normals and continuous UVs so curved archways, domes, and pipes reflect and trace accurately. Never validate patch winding using a global sum of radial vertex normals: on closed 360-degree cylinders/columns (e.g., `q3dm1` pillars and `q3dm2` arches), symmetric normals cancel to `(0, 0, 0)` and rounding noise flips triangles inside-out under backface culling—validate winding locally per quad/triangle against authored normals.
 3. **Preserve `faces` on `EditorSurface`:** Populate `EditorSurfaceFace` (`normal`, `cluster`, `positions`, `texCoords`) in addition to the merged `vertices`/`indices`. The editor uses `faces` for triangle/surface picking, cluster resolution, and DTAL area-light bounds.
 4. **Skip Invisible Utility Surfaces, Keep Inline Map Submodels:**
    - Exclude compiler-only brush surfaces (`nodraw`, `clip`, `playerclip`, `hint`, `skip`, `areaportal`, `origin`, `caulk` where appropriate, unless meant for sky).
@@ -317,6 +318,21 @@ For complex engines like Quake 3 where a player character is composed of `lower.
    - Concatenate `lower.md3` -> `upper.md3` (via `tag_torso` rigid 3x4 transform) -> `head.md3` (via `tag_head` rigid 3x4 transform) per `EditorPreviewModelFrame`.
    - Load `*.skin` files (`default`, `red`, `blue`, etc.) into `EditorPreviewModelSkinPreset` so the user can switch character skins inside the Models tab, and bind shader/texture prefixes via `resolveModelMaterialPrefix`.
 
+### 2.7 Isolated Native Vulkan AI Texture Worker (`ggml-vulkan`)
+
+The editor's local `Generate with AI` pipeline (`4x-PBRify RealPLKSR` Upscale, `StableDelight` De-lighting, `DeepBump` Normals, and `Lotus Depth v2` Depth/Height/Gloss) must never run heavy neural inference inside `quakerayeditor` or via ONNX Runtime / WebGPU (Dawn) (ONNX Runtime removed `ROCmExecutionProvider` in v1.23+, and Dawn WebGPU lacks strict VRAM caps):
+
+1. **Out-of-Process Child Worker (`quakeray_ai_worker`):**
+   - `editor/EditorAiDialog.cpp` invokes `quakeray_ai_worker` (`editor/ai_worker/`) via `EditorAiWorkerClient` and `EditorAiWorkerProtocol` (binary NCHW tensor temp files + line-delimited `PROGRESS`, `VRAM`, `PROVIDER`, `DONE`, `ERROR` messages on stdout).
+   - Process isolation guarantees 100% VRAM and host RAM reclamation on exit, instantaneous `Cancel` via child termination (`CancelActiveEditorAiWorker`), and survival of `quakerayeditor` with unsaved edits preserved if a driver reset or worker failure occurs.
+2. **Native `ggml-vulkan` Execution, FlashAttention, & Memory Discipline:**
+   - Models run in unquantized **FP16 GGUF v3** (`tools/export_ai_gguf.py` producing `*-fp16.gguf`) on `ggml-vulkan` with automatic `ggml-cpu` fallback.
+   - `GgmlOps::ExactMultiHeadAttention` uses `ggml_flash_attn_ext` with `F16` K/V casts and `GGML_PREC_F32` accumulation when `(dHead % 8) == 0 && dHead >= 8`, avoiding multi-gigabyte $O(N^2)$ attention matrices so `LotusDepth` and `StableDelight` run single-tile (`1/1`) even at `1024 px` within a 16 GB VRAM budget.
+   - Diffusion pipelines execute in sequential memory-isolated stages (`VAE Encode -> unload -> ControlNet/UNet -> unload -> VAE Decode -> cleanup`), query `VK_EXT_memory_budget` (`min(0.75 * totalVRAM, freeVRAM - safetyReserve)`), pre-measure exact `ggml` graph buffer bytes before allocation, and apply automatic tiling (or CPU fallback) whenever a stage exceeds budget.
+   - `LotusDepth` prep/extraction uses wide wrap/mirror context (`PrepareEditorLotusDepthInputNchw`) and halo-only bilinear tilt removal (`ExtractDetrendedEditorLotusDepthHeight`) so low-contrast/de-lit inputs preserve interior relief without border washouts.
+3. **Strict Manual UX Trigger:**
+   - Inference must start **only** when the user clicks **Generate** / **Regenerate**. Never auto-run generation on opening the dialog, changing tabs/combos, or finishing a model download. Display live percentage progress (`0–100%`) and stage status reported by the worker.
+
 ---
 
 ## Part 3 — Graveyard of Pitfalls (What Broke and How to Avoid It)
@@ -353,25 +369,67 @@ Every item below happened in real debugging sessions during the Quake III (`ioq3
 - **Root Cause:** On Linux/POSIX, `std::ifstream` succeeds in *opening* a directory path (such as `./textures/default/`), and only throws when attempting to read bytes from it!
 - **Fix:** Always verify `std::error_code ec; std::filesystem::is_regular_file(candidate, ec)` before opening or reading any candidate path on disk (in `Assets.cpp`, `EditorApp.cpp`, and any host adapter helper).
 
-### Pitfall 7: Stale `EditorMaterialBakes` GPU Cache After In-Place Texture Edits
-- **Symptom:** Clicking `Generate with AI` or painting procedural masks updates `scene.textures` on CPU (and writes TGA to disk), yet the viewport shows the old flat surface until restarting the editor.
-- **Root Cause:** `EditorMaterialBakes` (`materialBakes` in `EditorSceneRuntime`, `m_previewMaterialBakes` in `EditorApp`) caches baked `QrMaterial` handles keyed by texture index (`int32_t albedo/normal/gloss/emissive`) and scalar keys. Mutating an existing `EditorTexture`'s `rgba` bytes in place does not change its index, so `Get(...)` returns the stale GPU handle.
-- **Fix:** When replacing or creating a texture in place (`RegisterOrUpdateGeneratedTexture`), destroy the old pool `QrMaterial`, recreate it from the updated pixels via `EditorSceneRuntime::CreatePoolMaterial`, and call `m_runtime.materialBakes.Destroy(m_instance)` and `m_previewMaterialBakes.Destroy(m_instance)` before re-uploading static geometry / refreshing preview.
+### Pitfall 7: Stale `EditorMaterialBakes` GPU Cache or World Bake Wipe After In-Place Texture Edits
+- **Symptom:** Either clicking `Generate with AI` / painting procedural masks leaves the viewport showing the old flat surface until restarting, OR editing a model texture in the `Models` preview tab wipes every unrelated surface on the level white.
+- **Root Cause:** `EditorMaterialBakes` caches baked `QrMaterial` handles keyed by texture index (`int32_t albedo/normal/gloss/emissive`) and scalar keys. Mutating an existing `EditorTexture` in place does not change its index (leaving stale bakes active), whereas calling `m_materialBakes.Destroy(m_instance)` across the entire table destroys live `QrMaterial` handles still bound to static world geometry.
+- **Fix:** When replacing or updating a texture in place (`RegisterOrUpdateGeneratedTexture`), destroy and recreate only that slot's pool `QrMaterial` (`EditorSceneRuntime::CreatePoolMaterial`), call targeted `InvalidateTexture(m_instance, existing)` on both `m_materialBakes` and `m_previewMaterialBakes` (never global `Destroy()` while static geometry is live), and mark `m_materialsChanged = true` only if a scene surface actually references that texture index.
 
 ### Pitfall 8: Broken Multi-Part Models & `./` Path Mismatches in `Models` Tab
 - **Symptom:** Quake 3 characters show detached torsos/heads, missing skins, or fail to show up in the `Models` browser.
 - **Root Cause:** Zip/PK3 entries or loose filesystem scans with `./models/players/...`, backslash separators, or mixed case miss exact string comparisons, and hiding all `.md3` entries breaks standalone weapon/prop previews.
 - **Fix:** Run `NormalizeEditorAssetPath` consistently on catalog paths and `.skin`/shader lookups; synthesize `<dir>.character` entries only for multi-part directories (`lower.md3`/`upper.md3`/`head.md3`) inside `postProcessModelCatalog`.
 
-### Pitfall 9: Quality Gate Rejections (`check_quality.py --strict-tools`)
-- **Symptom:** CI fails with `clang-tidy`, `cppcheck`, `lizard`, or `ruff` errors even when the code compiles cleanly.
-- **Fix:** Follow `QuakeRaySDK`'s strict static-analysis rules from the start:
+### Pitfall 9: Quality Gate Rejections (`check_quality.py --strict-tools` & `check_local.sh`)
+- **Symptom:** CI fails with missing copyright headers, `clang-tidy`, `cppcheck`, `lizard`, `ruff`, or ASan/UBSan test errors even when a Release build compiles cleanly.
+- **Fix:** Follow `QuakeRaySDK`'s strict quality rules from the start and run `tools/check_local.sh --asan`:
+  - **GPL copyright headers:** Run `python3 -B tools/copyright_header.py --fix <files>` on every newly added C/C++/HLSL/Python/shell file.
   - **`lizard` limits:** Every modified/added C++ function must stay within `CCN <= 15`, `NLOC <= 120`, `params <= 7`. Split complex parsers/UI panels into small single-purpose helpers and factor test helpers cleanly.
   - **`clang-tidy` pitfalls:**
     - Never use `std::system()` (triggers `cert-env33-c`); use `fork`/`execv`/`waitpid` on POSIX (or `CreateProcessW` on Windows).
     - Never mark a local variable `const` if returning it or moving from it can block NRVO/move (`performance-no-automatic-move`).
+    - Never keep a redundant default member initializer in a struct/class aggregate if member construction or clang-tidy flags it; verify with `--compile-commands`.
     - Use `std::lround(...)` instead of `int(x + 0.5f)` (`bugprone-incorrect-roundings`).
   - **`ruff` rules:** Python scripts under `tools/` must pass `ruff check --select=E4,E7,E9,F,B`.
+
+### Pitfall 10: Closed 360° Bezier Patches Flipping Inside-Out & Truncated World Ray Length
+- **Symptom:** Cylindrical pillars and arched corridors (`q3dm1` towers, `q3dm2` arches) turn invisible from the outside and look X-rayed from behind, or large arena vistas clip halfway across the map.
+- **Root Cause:** Summing radial vertex normals over a symmetric 360-degree `MST_PATCH` produces `(0, 0, 0)`, so a global `dot(sumNormal, authoredNormal) < 0` check flips winding on floating-point `-0.0f` noise under backface culling (`qray_cullBackFaces`). Likewise, configuring primary/shadow `rayLength` too short in meters clips distant map geometry.
+- **Fix:** Validate `MST_PATCH` triangle winding locally per quad/triangle against authored normals, and set generous meter-scaled ray lengths matching full map extents.
+
+### Pitfall 11: Half-Res Indirect Noise (`giBounceRays = 0.5f`) & ReSTIR Whole-Scene Flashing
+- **Symptom:** Metallic/chrome reflections show heavy horizontal striping/noise, OR firing weapons flashes the entire map (`rt_restir 1`), OR host unit tests fail after changing emitter upload order.
+- **Root Cause:** Passing `giBounceRays = 0.5f` leaves half the rows of the specular indirect buffer unpopulated every frame. Separately, enabling global `rt_restir 1` with transient weapon/explosion dlights triggers unstable ASVGF temporal gradient resets across the whole scene.
+- **Fix:** Default host indirect resolution cleanly (`giBounceRays = 1.0f` when stability matters), keep clustered light lists (`rt_restir 0`) as the default host path, and write host tests (`TestZeroPowerClusterSourcesFiltered`) to assert **order-independent membership** across point and emissive cluster sources rather than rigid array indices.
+
+### Pitfall 12: Map-Wide Shadow Flickering (~10%) & Bright-Lamp Cluster Starvation (~7.5 Hz)
+- **Symptom:** The entire level pulses ~10% darker/brighter every second, or bright lamps right beside walls strobe at ~7.5 Hz.
+- **Root Cause:** Multiplying static DTAL emitters in `UploadEditorEmissiveLights` by fast `EvaluateEditorWave` shader animations pulses map lighting whenever a surface carries `rgbGen wave`. Meanwhile, emitting overlapping BSP `light` entities + `q3map_surfacelight` point lights + DTAL floods the per-cluster `Q2_LIGHT_LIST_MAX_PER_CELL` (`128`) fast-slot cap; partitioned `1/8` sampling in `q2SampleClusterLights` then hits nearby bright lamps only once every ~8 frames.
+- **Fix:** Treat map lighting consistently without multiplying static DTAL power by high-frequency overlay waves, cluster/deduplicate `q3map_surfacelight` fixture lights per lamp instead of emitting duplicates per polygon face, and ensure `q2SampleClusterLights` evaluates cluster slots and power weights cleanly.
+
+### Pitfall 13: FSR 3.1 "Heat Shimmer", Pixelated Scaling, & Unsynchronized Resolution Resets
+- **Symptom:** Enabling FSR Performance/Ultra Performance either blurs walls into shimmering "heat waves", turns low-res and un-upscaled (Lanczos pixelation), bands light across walls, or desyncs framebuffers on preset changes.
+- **Root Cause:** Zeroing `fHistoryWeight` and `jitter` disables temporal upscaling completely; restoring accumulation without tightened `RectifyHistory` clipping bounds, proper `jitterPrev`/`ComputeFrameJitter`, and releasing NVRHI targets (`PrepareFramebuffersForResolution` calling `nvrhiFrameSkeleton->ReleaseFramebufferTargets()` before `framebuffers->PrepareForSize`) leaves stale history, ghosting, or mismatched render targets.
+- **Fix:** Keep subpixel jitter, `RectifyHistory` bounds, and `PrepareFramebuffersForResolution` synchronized cleanly in `Source/FSR.cpp` and `Source/VulkanDevice.cpp`, and **always rebuild and redeploy `libamd_fidelityfx_vk.so` / `amd_fidelityfx_vk.dll`** whenever FidelityFX shader headers change.
+
+### Pitfall 14: 4K FPS Collapse From Unculled Froxel Volumetric Light Shafts
+- **Symptom:** Small arenas drop from ~200 FPS to ~45 FPS at 4K even with moderate triangle counts (~47k triangles).
+- **Root Cause:** Oversized volumetric froxel grids ray-march deep into occluded rooms behind solid geometry (`Compute` threads evaluating lights past primary hit depth).
+- **Fix:** Keep tightened volume resolutions in `Source/RHI/NvrhiFrameSkeleton.cpp` (`128x72x64` / `192x108x96` / `256x144x128`), use `CmLightShaftDepthBounds.comp.spv` depth-bounds culling in `RhiLightShaftVolumePass`, and avoid duplicating static light emitters.
+
+### Pitfall 15: Editor UX Regressions — Mirror Cubemaps, Disabled Stages, `Play Level`, & X11 `Tab` Focus
+- **Symptom:** Toggling `mirror` keeps the old static cubemap texture; shader stage checkboxes do not toggle individual stages; `Play Level` launches without edited materials/lights/cfg; closing the launched game leaves `Tab` fly-mode broken in X11.
+- **Root Cause:** Mirror promotion (`mirror && type == None`) and `disabledStagesMask` checks were bypassed by overlay-only (`isOverlayOnly`) or environment paths; `Play Level` launched outside the active editor/game config; returning from a child game window skipped X11 focus/pointer recovery.
+- **Fix:** Propagate `disabledStagesMask` and mirror promotion identically through `EditorSceneRuntime`, `EditorOverlayPipeline`, and `EditorMaterial`; build launch arguments via `EditorPlayLevelRequest` / `buildPlayLevelCommand`; and handle X11 `FocusIn` / pointer-capture recovery (`EditorPlatformX11.cpp` / `EditorApp.cpp`) so `Tab` reliably re-enters fly mode after closing `Play Level`.
+
+### Pitfall 16: Hardcoded `../gfx/textures` Breaking Standalone GPU Tests & Editor Deployment
+- **Symptom:** `qray_spatial_twin_gpu` fails with `QR_ERROR_CANT_FIND_BLUE_NOISE`, or `quakerayeditor` post-build fails trying to copy missing `WaterNormal_n.png`.
+- **Root Cause:** `CMakeLists.txt` and `editor/CMakeLists.txt` hardcoded `../gfx/textures` (valid only inside `vkquake-rt`) and unconditionally copied both textures whenever the directory matched.
+- **Fix:** `QuakeRaySDK/Assets/textures/` bundles `BlueNoise_LDR_RGBA_128.png` and `WaterNormal_n.png`; `CMakeLists.txt` resolves `QR_TEST_TEXTURE_DIR` and `editor/CMakeLists.txt` resolves/copies each texture independently with `Assets/textures` fallback. Keep this per-file fallback intact when editing CMake rules.
+
+### Pitfall 17: In-Process ML Inference (ONNX + WebGPU) Causing `earlyoom` & Vulkan `DeviceLostError`
+- **Symptom:** Opening `Generate with AI` or switching model/resolution immediately locks up memory, triggers Linux `earlyoom` (>30 GiB RAM + 16 GiB VRAM exhausted), causes `Not enough memory for command submission`, and crashes `quakerayeditor` with `vk::DeviceLostError`.
+- **Root Cause:** Auto-triggering ONNX Runtime `WebGPU Vulkan` (Dawn) inside `quakerayeditor` ran unchunked quadratic attention for `1.8 GB` `Lotus` models (`896x896` with seamless halo) concurrently with the 4K viewport renderer, with no VRAM budget enforcement in Dawn WebGPU and no crash boundary.
+- **Fix:** Follow Part 2.7 strictly—use isolated out-of-process `quakeray_ai_worker` on `ggml-vulkan` (`<= 75%` VRAM budget via `ComputeWorkerVramBudget`, 3-stage `LotusPipeline`, automatic tiling, strict manual `Generate` trigger only). Do **not** reintroduce ONNX Runtime, WebGPU, or auto-run inference inside the editor UI process.
 
 ---
 
@@ -379,35 +437,41 @@ Every item below happened in real debugging sessions during the Quake III (`ioq3
 
 Always run these checks before opening or updating any `QuakeRaySDK` PR or host-engine integration PR:
 
-### 1. QuakeRaySDK Unit Tests & Strict Static Analysis
+### 1. QuakeRaySDK Unit Tests, Standalone Builds & Strict Static Analysis
 ```bash
-# Build SDK + unit tests with compile_commands.json
+# Fast end-to-end local check (FidelityFX provider + Clang ASan/UBSan build + CPU tests + quality gate)
+bash tools/check_local.sh --asan --shaders
+
+# Or configure manually with editor + isolated ggml-vulkan AI worker + compile_commands.json
 cmake -S /path/to/QuakeRaySDK -B build/local-quality -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DQR_BUILD_TESTS=ON -DQR_BUILD_EDITOR=ON \
     -DQR_NVRHI_SOURCE_DIR=/path/to/nvrhi \
+    -DQR_GGML_SOURCE_DIR=/path/to/ggml \
     -DQR_FFX_VK_SO=/path/to/libamd_fidelityfx_vk.so
 cmake --build build/local-quality --parallel
 
-# Run all non-GPU unit tests (including qray_editor_multiselect_tests)
+# Run all non-GPU unit tests (and standalone GPU suites via bundled Assets/textures/)
 ctest --test-dir build/local-quality --output-on-failure -LE gpu
+ctest --test-dir build/local-quality --output-on-failure -L gpu
 
-# Run diff-gated quality gate against origin/main
+# Verify headers and diff-gated static analysis against origin/main
+python3 -B tools/copyright_header.py --check --base origin/main
 python3 -B tools/check_quality.py --strict-tools --base origin/main \
     --compile-commands build/local-quality/compile_commands.json
 ```
 
 ### 2. Host Engine Build, Adapter Tests & Editor-vs-Runtime Parity Tests (e.g. `ioq3-rt`)
 ```bash
-# Build host renderer + quakerayeditor + host adapter & parity tests
+# Build host renderer + quakerayeditor (+ quakeray_ai_worker) + adapter & parity tests
 cmake --build /path/to/host-build --target renderer_qray quakerayeditor qray_q3_editor_adapter_tests qray_authored_tests --parallel
-ctest --test-dir /path/to/host-build --output-on-failure -LE gpu
+ctest --test-dir /path/to/host-build --output-on-failure
 ```
-Verify that your parity suite (e.g. `qray_authored_tests` / `TestSteamQ3Tourney1Parity`) confirms identical `surfaces`, `worldClusters`, `emissiveLights` (DTAL), `overlaySurfaces`, `lights`, and `skybox` state between the editor and runtime `EditorSceneRuntime` instances on real game maps.
+Verify that your parity suite (e.g. `qray_authored_tests` / `TestSteamQ3Tourney1Parity`) confirms identical `surfaces`, `worldClusters`, `emissiveLights` (DTAL), `overlaySurfaces`, `lights`, and `skybox` state between the editor and runtime `EditorSceneRuntime` instances on real game maps, and that all GPU + CPU tests pass (`100%`).
 
 ### 3. Live Paired Smoke Test (`quakerayeditor` vs Runtime Game Executable)
 Before declaring an adapter or pipeline integration finished:
-1. Launch **both** `quakerayeditor --scene <map> --shaders <shaders>` and the runtime engine on the same real map (`q3tourney1`, `q3dm2`, etc.) and compare startup logs to verify **1-to-1 match** in static BLAS triangles/vertices, surfaces, DTAL area lights, material bakes, cluster count, and skybox faces (with the runtime only adding dynamic BLAS instances for moving submodels/entities).
-2. Verify multi-stage animated surfaces (jump pads, teleporters, banners, grates, flames, chrome) render cleanly with zero black/void cutouts.
-3. Verify predefined lights (`q3map_surfacelight` fixtures and entity lights) show cyan selection circles in the editor, can be edited/disabled/deleted, survive **Apply** -> map reload (without resurrecting deleted lights) in **both** editor and runtime, and restore on **Regenerate from map**.
-4. Verify the **Models** tab shows assembled characters with `.skin` switching alongside standalone props.
+1. Launch **both** `quakerayeditor --scene <map> --shaders <shaders>` and the runtime engine on the same real map (`q3tourney1`, `q3dm1`, `q3dm10`, etc.) and compare startup logs to verify **1-to-1 match** in static BLAS triangles/vertices, surfaces, DTAL area lights, material bakes, cluster count, and skybox faces (with the runtime only adding dynamic BLAS instances for moving submodels/entities).
+2. Verify multi-stage animated surfaces (jump pads, teleporters, banners, grates, flames, chrome), closed curved `MST_PATCH` cylinders (`q3dm1`), `mirror` promotion, and per-stage visibility toggles render cleanly with zero black/void cutouts.
+3. Verify FSR 3.1 presets scale crisply without "heat shimmer" walls or banding, volumetric light shafts hold target 4K frame times without light-cluster strobing, and predefined lights (`q3map_surfacelight` fixtures and entity lights) survive **Apply** -> map reload -> **Regenerate from map**.
+4. Verify the **Models** tab shows assembled characters with `.skin` switching without corrupting live world bakes, **Play Level** launches cleanly and restores `Tab` fly-mode after exiting back to the editor, and `Generate with AI` never auto-starts, shows worker progress without exhausting VRAM/RAM, and preserves editor stability on `Cancel` or error.

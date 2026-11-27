@@ -492,11 +492,14 @@ enum class EditorAiMapKind
     Normals,
     Emissive,
     Gloss,
+    Delight,
+    Height,
+    Upscale,
 };
 
-// Generates a seamless RGBA texture map (`Normals`, `Emissive`, or `Gloss`) from a diffuse RGBA
-// image (`width` x `height` x 4). Optionally incorporates `fullbrightMask` (`width` x `height` bytes)
-// for `Emissive` when available.
+// Generates a seamless RGBA texture map (`Normals`, `Emissive`, `Gloss`, `Delight`, `Height`, or
+// `Upscale`) from a diffuse RGBA image (`width` x `height` x 4). Optionally incorporates
+// `fullbrightMask` (`width` x `height` bytes) for `Emissive` when available.
 bool GenerateEditorAiTextureFromDiffuse(const uint8_t *diffuseRgba, uint32_t width, uint32_t height,
                                         const uint8_t *fullbrightMask, EditorAiMapKind kind,
                                         std::vector<uint8_t> &outRgba);

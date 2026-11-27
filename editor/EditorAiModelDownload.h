@@ -48,7 +48,7 @@ struct EditorAiDownloadResult
     std::string errorMessage;
 };
 
-// Returns verified URL, expected byte count, and SHA-256 digest for each local ONNX backend.
+// Returns filename, download URL, expected byte count, and SHA-256 digest for each local GGUF backend.
 EditorAiModelDownloadSpec GetEditorAiModelDownloadSpec(EditorAiBackend backend);
 
 // Computes lowercase hexadecimal FIPS 180-4 SHA-256 digests without external crypto libraries.
@@ -62,7 +62,7 @@ EditorAiDownloadResult DownloadEditorAiFile(
     EditorAiDownloadProgress *progress = nullptr,
     const std::atomic<bool> *cancelRequested = nullptr);
 
-// Downloads the ONNX model file for `backend` into `modelsDir` and verifies its SHA-256 checksum.
+// Downloads the GGUF model file for `backend` into `modelsDir` and verifies its SHA-256 checksum.
 EditorAiDownloadResult DownloadEditorAiBackendModel(
     EditorAiBackend backend, const std::filesystem::path &modelsDir,
     EditorAiDownloadProgress *progress = nullptr,
