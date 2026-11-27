@@ -17,26 +17,29 @@
 
 #pragma once
 
+#include "EditorAiWorkerProtocol.h"
 #include "EditorMaterial.h"
-#include "EditorOnnxRuntime.h"
 
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
 enum class EditorAiBackend
 {
-    LotusNormalD = 0, // lotus-normal-d-v1-1.onnx
-    LotusDepthD = 1,  // lotus-depth-d-v2-0-disparity.onnx
-    DeepBump = 2,     // deepbump256.onnx
+    LotusNormalD = 0,    // lotus-normal-d-v1-1-fp16.gguf
+    LotusDepthD = 1,     // lotus-depth-d-v2-0-disparity-fp16.gguf
+    DeepBump = 2,        // deepbump256-fp16.gguf
+    StableDelight = 3,   // yoso-delight-v0-4-base-fp16.gguf
+    RealPlksrPbrify = 4, // 4x-pbrify-rplksrd-v3-fp16.gguf
 };
 
 struct EditorAiLocalConfig
 {
-    EditorAiBackend activeBackend = EditorAiBackend::LotusNormalD;
-    uint32_t processingRes = 768; // Fit-by-longest-side before Lotus ONNX (>= 512)
+    EditorAiBackend activeBackend = EditorAiBackend::DeepBump;
+    uint32_t processingRes = 768; // Fit-by-longest-side before Lotus GGUF (>= 512)
     std::string modelsDir;
 
     bool operator==(const EditorAiLocalConfig &) const = default;
@@ -57,31 +60,81 @@ struct EditorAiToneParams
     float biasThreshold = 0.0f;
 };
 
+struct EditorAiDelightParams
+{
+    float strength = 1.0f;       // 0..1: blend from original diffuse to de-lit diffuse
+    float detailPreserve = 0.0f; // 0..1: high-frequency detail transfer from original diffuse
+    bool seamless = true;
+};
+
+struct EditorAiUpscaleInput
+{
+    const std::vector<uint8_t> &origDiffuseRgba;
+    uint32_t origW = 0;
+    uint32_t origH = 0;
+    const std::vector<uint8_t> &rawUpscaledRgba;
+    uint32_t rawW = 0;
+    uint32_t rawH = 0;
+};
+
+struct EditorAiLotusDepthDims
+{
+    uint32_t fitW = 0;
+    uint32_t fitH = 0;
+    uint32_t haloX = 0;
+    uint32_t haloY = 0;
+};
+
+struct EditorAiUpscaleParams
+{
+    int32_t outputScale = 4; // 4 (native 4x) or 2 (2x box-downsampled)
+    float strength = 1.0f;   // 0..1: blend between bilinear original and AI upscaled output
+    float sharpen = 0.0f;    // 0..1: mild unsharp detail boost
+    bool seamless = true;
+};
+
+struct EditorAiDiffusePrepParams
+{
+    float flattenLighting = 0.0f; // 0..1: flattens baked shadows/highlights in AI input only
+    float preSmooth = 0.0f;       // 0..1: mild pre-smoothing for pixelated diffuse inputs
+    bool seamless = true;
+};
+
 struct EditorAiLotusPrep
 {
     uint32_t fitW = 0;
     uint32_t fitH = 0;
     uint32_t halo = 0;
-    EditorOnnxTensorNchw tensor;
+    uint32_t haloX = 0;
+    uint32_t haloY = 0;
+    bool mirrorPad = false;
+    EditorAiTensorNchw tensor;
 };
+
+using EditorAiProgressCallback = std::function<void(int32_t percent, const std::string &stage)>;
 
 struct EditorAiInferenceRequest
 {
-    EditorAiBackend backend = EditorAiBackend::LotusNormalD;
+    EditorAiBackend backend = EditorAiBackend::DeepBump;
     EditorAiMapKind mapKind = EditorAiMapKind::Normals;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t processingRes = 768;
     bool seamless = true;
+    float flattenLighting = 0.0f;
+    float preSmooth = 0.0f;
     std::string modelsDir;
     std::string exeDir;
     std::vector<uint8_t> diffuseRgba;
+    EditorAiProgressCallback progressCb;
 };
 
 struct EditorAiInferenceResult
 {
     bool ok = false;
     bool cancelled = false;
+    uint32_t outputWidth = 0;
+    uint32_t outputHeight = 0;
     std::string providerLabel;
     std::string errorMessage;
     std::vector<uint8_t> rawNormalRgba;
@@ -94,16 +147,17 @@ struct EditorAiInferenceResult
 std::filesystem::path DefaultEditorAiLocalConfigPath();
 std::filesystem::path DefaultEditorAiModelsDir();
 
-// Returns identifiers, display labels, ONNX filenames, and disk lookup for AI backends.
+// Returns identifiers, display labels, GGUF filenames, and disk lookup for AI backends.
 const char *EditorAiBackendId(EditorAiBackend backend);
 const char *EditorAiBackendDisplayName(EditorAiBackend backend);
 const char *EditorAiBackendModelFilename(EditorAiBackend backend);
 bool IsEditorAiLotusBackend(EditorAiBackend backend);
+bool IsEditorAiDiffusionBackend(EditorAiBackend backend);
 const char *EditorAiMapKindId(EditorAiMapKind kind);
 std::filesystem::path ResolveEditorAiModelPath(EditorAiBackend backend, const std::string &exeDir = "",
                                                const std::string &modelsDir = "");
 
-// Loads/saves local AI preferences (active ONNX model, longest-side resolution, models dir).
+// Loads/saves local AI preferences (active GGUF model, longest-side resolution, models dir).
 bool LoadEditorAiLocalConfig(const std::filesystem::path &path, EditorAiLocalConfig &outConfig,
                              std::string &outError);
 bool SaveEditorAiLocalConfig(const std::filesystem::path &path, const EditorAiLocalConfig &config,
@@ -113,14 +167,28 @@ bool SaveEditorAiLocalConfig(const std::filesystem::path &path, const EditorAiLo
 void ComputeEditorAiUpscaleFitDimensions(uint32_t srcW, uint32_t srcH, uint32_t targetMaxSide,
                                          uint32_t &outFitW, uint32_t &outFitH);
 
+// Computes fit + wrap/mirror halo dimensions for Lotus Depth v2 aligned to 64-pixel multiples.
+void ComputeEditorAiLotusDepthDimensions(uint32_t srcW, uint32_t srcH, uint32_t targetMaxSide,
+                                         bool seamless, EditorAiLotusDepthDims &outDims);
+
 // Prepares [1, 3, H, W] float32 [0, 1] NCHW tensor for Lotus with seamless halo padding.
 void PrepareEditorLotusInputNchw(const std::vector<uint8_t> &diffuseRgba, uint32_t srcW,
                                  uint32_t srcH, uint32_t processingRes, bool seamless,
                                  EditorAiLotusPrep &outPrep);
 
+// Prepares [1, 3, H, W] float32 [0, 1] NCHW tensor for Lotus Depth v2 with wide wrap/mirror halo.
+void PrepareEditorLotusDepthInputNchw(const std::vector<uint8_t> &diffuseRgba, uint32_t srcW,
+                                      uint32_t srcH, uint32_t processingRes, bool seamless,
+                                      EditorAiLotusPrep &outPrep);
+
 // Crops halo and area/bilinear-downsamples [1, C, H, W] prediction to dstW x dstH HWC [0, 1].
-void DownsampleEditorLotusOutputNchw(const EditorOnnxTensorNchw &pred, const EditorAiLotusPrep &prep,
+void DownsampleEditorLotusOutputNchw(const EditorAiTensorNchw &pred, const EditorAiLotusPrep &prep,
                                      uint32_t dstW, uint32_t dstH, std::vector<float> &outHwc01);
+
+// Removes monocular perspective bias using halo overlaps, box-downsamples, and percentile-normalizes.
+void ExtractDetrendedEditorLotusDepthHeight(const EditorAiTensorNchw &pred,
+                                            const EditorAiLotusPrep &prep, uint32_t dstW,
+                                            uint32_t dstH, std::vector<float> &outHeight);
 
 // Converts [0, 1] HWC predicted normals into QuakeRay tangent-space RGBA8 (+T=+U, +B=+V, +N=+Z).
 void ConvertEditorNormals01ToQuakeRayRgba(const std::vector<float> &hwc01, uint32_t width,
@@ -131,7 +199,7 @@ void ConvertEditorNormals01ToQuakeRayRgba(const std::vector<float> &hwc01, uint3
 void IntegrateEditorNormalMapHeight(const std::vector<uint8_t> &baseNormalRgba, uint32_t width,
                                     uint32_t height, bool seamless, std::vector<float> &outHeight);
 
-// Executes end-to-end native C++ AI inference (Lotus ONNX, DeepBump ONNX, or local emissive).
+// Executes end-to-end native C++ AI inference (Lotus/DeepBump GGUF worker, or local emissive).
 EditorAiInferenceResult RunEditorAiTextureInference(
     const EditorAiInferenceRequest &req, const std::atomic<bool> *cancelRequested = nullptr);
 
@@ -174,6 +242,12 @@ void ApplyEditorGlossAdjustments(const std::vector<uint8_t> &rawRgba, uint32_t w
                                  uint32_t height, const EditorAiToneParams &tone,
                                  std::vector<uint8_t> &outGlossRgba);
 
+// Synthesizes a normalized base gloss RGBA8 map from diffuse RGB and integrated height.
+void SynthesizeEditorGlossFromDiffuseAndHeight(const std::vector<uint8_t> &diffuseRgba,
+                                               const std::vector<float> &height, uint32_t width,
+                                               uint32_t heightPx,
+                                               std::vector<uint8_t> &outGlossRgba);
+
 // Renders a quick 2D specular reflection preview from diffuse + adjusted gloss RGBA8.
 void BuildEditorGlossSpecularPreviewRgba(const std::vector<uint8_t> &diffuseRgba,
                                          const std::vector<uint8_t> &glossRgba, uint32_t width,
@@ -191,9 +265,48 @@ void BuildEditorEmissiveCompositePreviewRgba(const std::vector<uint8_t> &diffuse
                                              uint32_t width, uint32_t height,
                                              std::vector<uint8_t> &outRgba);
 
+// Blends original and de-lit diffuse textures with optional glare-masked detail transfer.
+void ApplyEditorDelightAdjustments(const std::vector<uint8_t> &diffuseRgba,
+                                   const std::vector<uint8_t> &rawDelitRgba, uint32_t width,
+                                   uint32_t height, const EditorAiDelightParams &params,
+                                   std::vector<uint8_t> &outRgba);
+
+// Renders a 2D difference visualization highlighting specular glare removed by de-lighting.
+void BuildEditorDelightRemovedGlarePreviewRgba(const std::vector<uint8_t> &diffuseRgba,
+                                               const std::vector<uint8_t> &delitRgba,
+                                               uint32_t width, uint32_t height,
+                                               std::vector<uint8_t> &outRgba);
+
+// Applies 4x/2x scaling, blend strength, and unsharp filtering to a raw RealPLKSR upscaled RGBA8 buffer.
+void ApplyEditorUpscaleAdjustments(const EditorAiUpscaleInput &in,
+                                   const EditorAiUpscaleParams &params,
+                                   std::vector<uint8_t> &outRgba, uint32_t &outW, uint32_t &outH);
+
+// Renders a split screen preview comparing bilinear upscaled original (left) vs AI upscaled (right).
+void BuildEditorUpscaleComparePreviewRgba(const std::vector<uint8_t> &origDiffuseRgba,
+                                          uint32_t origW, uint32_t origH,
+                                          const std::vector<uint8_t> &upscaledRgba, uint32_t outW,
+                                          uint32_t outH, std::vector<uint8_t> &outRgba);
+
+// Renders an amplified difference visualization showing detail reconstructed by AI upscaling.
+void BuildEditorUpscaleDetailPreviewRgba(const std::vector<uint8_t> &origDiffuseRgba,
+                                         uint32_t origW, uint32_t origH,
+                                         const std::vector<uint8_t> &upscaledRgba, uint32_t outW,
+                                         uint32_t outH, std::vector<uint8_t> &outRgba);
+
+// Applies optional pre-smoothing and low-frequency illumination flattening on a copy of diffuse.
+void PreprocessEditorAiDiffuse(const std::vector<uint8_t> &diffuseRgba, uint32_t width,
+                               uint32_t height, const EditorAiDiffusePrepParams &params,
+                               std::vector<uint8_t> &outRgba);
+
 // Writes a 32-bit uncompressed BGRA TGA file (creating parent directories if needed).
 bool WriteEditorRgbaTga(const std::filesystem::path &path, uint32_t width, uint32_t height,
                         const std::vector<uint8_t> &rgba);
 
 // Builds relative output path under textures/ai_generated/<material>_<kind>.tga.
 std::string BuildGeneratedTextureRelativePath(const std::string &materialName, EditorAiMapKind kind);
+
+// Returns a non-colliding relative path under textures/ai_generated/ (appending _2, _3, ... if taken).
+std::string BuildUniqueGeneratedTextureRelativePath(
+    const std::filesystem::path &outRoot, const std::string &materialName, EditorAiMapKind kind,
+    const std::function<bool(const std::string &)> &extraExists = {});

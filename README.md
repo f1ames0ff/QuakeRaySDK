@@ -97,12 +97,18 @@ loaded through the executable's `RUNPATH`; the `.so` carries the
 cmake -S . -B build `
     -DQR_BUILD_EDITOR=ON `
     -DQR_NVRHI_SOURCE_DIR=C:/path/to/nvrhi `
+    -DQR_GGML_SOURCE_DIR=C:/path/to/ggml `
     -DQR_EDITOR_SHADER_DIR=C:/path/to/shaders
-cmake --build build --config Debug --target quakerayeditor
+cmake --build build --config Debug --target quakerayeditor quakeray_ai_worker
 ```
 
 The editor target is `OFF` by default and does not change the renderer package.
-See [editor/README.md](editor/README.md) for its scene path and runtime options.
+Passing `-DQR_GGML_SOURCE_DIR` builds the standalone `quakeray_ai_worker` helper
+used by `quakerayeditor`'s Vulkan AI PBR texture pipeline (4x upscaling, diffuse
+de-lighting, normal generation, depth/height/gloss synthesis, and Relief POM
+authoring running locally on 16 GB desktop GPUs including AMD Radeon via
+`ggml-vulkan`). See [editor/README.md](editor/README.md) for its scene path,
+local AI workflow, and runtime options.
 
 ## Install and consume
 

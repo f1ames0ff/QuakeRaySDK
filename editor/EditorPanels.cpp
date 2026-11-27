@@ -305,11 +305,11 @@ bool DrawMaterialTexturesSection(
         const char *tip;
     };
     static constexpr SlotRow kSlots[] = {
-        { "texture_base", EditorApp::EditorTextureSlot::Base, false,
+        { "texture_base", EditorApp::EditorTextureSlot::Base, true,
           "Override base albedo texture." },
         { "texture_normals", EditorApp::EditorTextureSlot::Normals, true,
           "Override normal / bump map texture." },
-        { "texture_height", EditorApp::EditorTextureSlot::Height, false,
+        { "texture_height", EditorApp::EditorTextureSlot::Height, true,
           "Height / depth map for parallax occlusion mapping." },
         { "texture_emissive", EditorApp::EditorTextureSlot::Emissive, true,
           "Override explicit emissive mask texture (disables color_emissive blocks)." },

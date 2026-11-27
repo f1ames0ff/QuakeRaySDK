@@ -2887,6 +2887,13 @@ bool GenerateEditorAiTextureFromDiffuse(const uint8_t *diffuseRgba, uint32_t wid
         return false;
     }
 
+    if (kind == EditorAiMapKind::Delight || kind == EditorAiMapKind::Upscale)
+    {
+        const size_t bytes = size_t(width) * size_t(height) * 4u;
+        outRgba.assign(diffuseRgba, diffuseRgba + bytes);
+        return true;
+    }
+
     AiDiffuseFields fields;
     ExtractDiffuseFields(diffuseRgba, width, height, fields);
 

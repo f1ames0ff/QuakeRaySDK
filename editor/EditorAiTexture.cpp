@@ -16,6 +16,7 @@
 //
 
 #include "EditorAiTexture.h"
+#include "EditorAiWorkerClient.h"
 
 #include <algorithm>
 #include <array>
@@ -34,8 +35,6 @@ constexpr uint32_t kMinProcessingRes = 512u;
 constexpr uint32_t kMaxProcessingRes = 2048u;
 constexpr uint32_t kDefaultProcessingRes = 768u;
 constexpr uint32_t kSeamlessHaloMaxPx = 64u;
-constexpr uint32_t kDeepBumpTileSize = 256u;
-constexpr uint32_t kDeepBumpTileStride = 192u;
 
 std::string GetEnvString(const char *name)
 {
@@ -107,19 +106,35 @@ std::filesystem::path UserAiCacheBaseDir()
 
 EditorAiBackend ParseBackendName(const std::string &raw, EditorAiBackend fallback)
 {
+    struct BackendAlias
+    {
+        const char *name;
+        EditorAiBackend backend;
+    };
+    static constexpr BackendAlias kAliases[] = {
+        { "lotus_normal_d", EditorAiBackend::LotusNormalD },
+        { "lotus_normal", EditorAiBackend::LotusNormalD },
+        { "lotus", EditorAiBackend::LotusNormalD },
+        { "lotus_normal_g", EditorAiBackend::LotusNormalD },
+        { "lotus_depth_d", EditorAiBackend::LotusDepthD },
+        { "lotus_depth", EditorAiBackend::LotusDepthD },
+        { "deepbump", EditorAiBackend::DeepBump },
+        { "local", EditorAiBackend::DeepBump },
+        { "stable_delight", EditorAiBackend::StableDelight },
+        { "delight", EditorAiBackend::StableDelight },
+        { "yoso_delight", EditorAiBackend::StableDelight },
+        { "realplksr_pbrify", EditorAiBackend::RealPlksrPbrify },
+        { "realplksr", EditorAiBackend::RealPlksrPbrify },
+        { "pbrify", EditorAiBackend::RealPlksrPbrify },
+        { "4x-pbrify-rplksrd-v3", EditorAiBackend::RealPlksrPbrify },
+    };
     const std::string low = LowerAscii(TrimWhitespace(raw));
-    if (low == "lotus_normal_d" || low == "lotus_normal" || low == "lotus" ||
-        low == "lotus_normal_g")
+    for (const BackendAlias &entry : kAliases)
     {
-        return EditorAiBackend::LotusNormalD;
-    }
-    if (low == "lotus_depth_d" || low == "lotus_depth")
-    {
-        return EditorAiBackend::LotusDepthD;
-    }
-    if (low == "deepbump" || low == "local")
-    {
-        return EditorAiBackend::DeepBump;
+        if (low == entry.name)
+        {
+            return entry.backend;
+        }
     }
     return fallback;
 }
@@ -460,22 +475,56 @@ uint8_t FloatToByte(float v)
     return uint8_t(std::clamp(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f), 0l, 255l));
 }
 
-int WrapOrClampCoord(int coord, int limit, bool seamless)
+enum class EdgeSampleMode
+{
+    Clamp = 0,
+    Wrap = 1,
+    Mirror = 2,
+};
+
+int MirrorCoord(int coord, int limit)
+{
+    if (limit <= 1)
+    {
+        return 0;
+    }
+    const int period = 2 * limit;
+    int m = coord % period;
+    if (m < 0)
+    {
+        m += period;
+    }
+    return m >= limit ? (period - 1 - m) : m;
+}
+
+int ApplyEdgeSampleMode(int coord, int limit, EdgeSampleMode mode)
 {
     if (limit <= 0)
     {
         return 0;
     }
-    if (seamless)
+    switch (mode)
+    {
+    case EdgeSampleMode::Wrap:
     {
         const int rem = coord % limit;
         return rem < 0 ? rem + limit : rem;
     }
-    return std::clamp(coord, 0, limit - 1);
+    case EdgeSampleMode::Mirror:
+        return MirrorCoord(coord, limit);
+    case EdgeSampleMode::Clamp:
+    default:
+        return std::clamp(coord, 0, limit - 1);
+    }
 }
 
-void SampleRgbaBilinearWrapped(const uint8_t *src, uint32_t srcW, uint32_t srcH, float u, float v,
-                               bool seamless, float out[4])
+int WrapOrClampCoord(int coord, int limit, bool seamless)
+{
+    return ApplyEdgeSampleMode(coord, limit, seamless ? EdgeSampleMode::Wrap : EdgeSampleMode::Clamp);
+}
+
+void SampleRgbaBilinearWithMode(const uint8_t *src, uint32_t srcW, uint32_t srcH, float u, float v,
+                                EdgeSampleMode mode, float out[4])
 {
     const float rawFx = u * float(srcW) - 0.5f;
     const float rawFy = v * float(srcH) - 0.5f;
@@ -484,10 +533,10 @@ void SampleRgbaBilinearWrapped(const uint8_t *src, uint32_t srcW, uint32_t srcH,
     const float tx = rawFx - float(xBase);
     const float ty = rawFy - float(yBase);
 
-    const int x0 = WrapOrClampCoord(xBase, int(srcW), seamless);
-    const int y0 = WrapOrClampCoord(yBase, int(srcH), seamless);
-    const int x1 = WrapOrClampCoord(xBase + 1, int(srcW), seamless);
-    const int y1 = WrapOrClampCoord(yBase + 1, int(srcH), seamless);
+    const int x0 = ApplyEdgeSampleMode(xBase, int(srcW), mode);
+    const int y0 = ApplyEdgeSampleMode(yBase, int(srcH), mode);
+    const int x1 = ApplyEdgeSampleMode(xBase + 1, int(srcW), mode);
+    const int y1 = ApplyEdgeSampleMode(yBase + 1, int(srcH), mode);
 
     const uint8_t *p00 = src + (size_t(y0) * srcW + size_t(x0)) * 4u;
     const uint8_t *p10 = src + (size_t(y0) * srcW + size_t(x1)) * 4u;
@@ -500,6 +549,13 @@ void SampleRgbaBilinearWrapped(const uint8_t *src, uint32_t srcW, uint32_t srcH,
         const float bot = float(p01[c]) + (float(p11[c]) - float(p01[c])) * tx;
         out[c] = top + (bot - top) * ty;
     }
+}
+
+void SampleRgbaBilinearWrapped(const uint8_t *src, uint32_t srcW, uint32_t srcH, float u, float v,
+                               bool seamless, float out[4])
+{
+    SampleRgbaBilinearWithMode(
+        src, srcW, srcH, u, v, seamless ? EdgeSampleMode::Wrap : EdgeSampleMode::Clamp, out);
 }
 
 void SampleRgbaBilinear(const uint8_t *src, uint32_t srcW, uint32_t srcH, float u, float v,
@@ -622,6 +678,189 @@ void NormalizePercentile01(std::vector<float> &vals)
     for (float &v : vals)
     {
         v = std::clamp((v - lo) / span, 0.0f, 1.0f);
+    }
+}
+
+struct RgbFieldView
+{
+    const std::vector<float> &rgb;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool seamless = true;
+};
+
+void SmoothRgbHorizontal(const RgbFieldView &view, std::vector<float> &dst)
+{
+    dst.resize(view.rgb.size());
+    const int w = int(view.width);
+    for (uint32_t y = 0; y < view.height; y++)
+    {
+        const size_t row = size_t(y) * view.width;
+        for (int x = 0; x < w; x++)
+        {
+            const size_t iL = (row + size_t(WrapOrClampCoord(x - 1, w, view.seamless))) * 3u;
+            const size_t iC = (row + size_t(x)) * 3u;
+            const size_t iR = (row + size_t(WrapOrClampCoord(x + 1, w, view.seamless))) * 3u;
+            for (size_t c = 0; c < 3u; c++)
+            {
+                dst[iC + c] =
+                    0.25f * view.rgb[iL + c] + 0.5f * view.rgb[iC + c] + 0.25f * view.rgb[iR + c];
+            }
+        }
+    }
+}
+
+void SmoothRgbVertical(const RgbFieldView &view, std::vector<float> &dst)
+{
+    dst.resize(view.rgb.size());
+    const int h = int(view.height);
+    for (int y = 0; y < h; y++)
+    {
+        const size_t rT = size_t(WrapOrClampCoord(y - 1, h, view.seamless)) * view.width;
+        const size_t rC = size_t(y) * view.width;
+        const size_t rB = size_t(WrapOrClampCoord(y + 1, h, view.seamless)) * view.width;
+        for (uint32_t x = 0; x < view.width; x++)
+        {
+            const size_t iT = (rT + x) * 3u;
+            const size_t iC = (rC + x) * 3u;
+            const size_t iB = (rB + x) * 3u;
+            for (size_t c = 0; c < 3u; c++)
+            {
+                dst[iC + c] =
+                    0.25f * view.rgb[iT + c] + 0.5f * view.rgb[iC + c] + 0.25f * view.rgb[iB + c];
+            }
+        }
+    }
+}
+
+void SmoothRgb3x3Pass(const std::vector<float> &srcRgb, uint32_t w, uint32_t h, bool seamless,
+                      std::vector<float> &dstRgb)
+{
+    std::vector<float> horiz;
+    SmoothRgbHorizontal(RgbFieldView{ srcRgb, w, h, seamless }, horiz);
+    SmoothRgbVertical(RgbFieldView{ horiz, w, h, seamless }, dstRgb);
+}
+
+void BoxBlurScalarHoriz(const ScalarFieldView &view, int radius, std::vector<float> &dst)
+{
+    dst.resize(view.field.size());
+    const int w = int(view.width);
+    const float invSpan = 1.0f / float(2 * radius + 1);
+    for (uint32_t y = 0; y < view.height; y++)
+    {
+        const float *row = view.field.data() + size_t(y) * view.width;
+        float *outRow = dst.data() + size_t(y) * view.width;
+        float sum = 0.0f;
+        for (int k = -radius; k <= radius; k++)
+        {
+            sum += row[WrapOrClampCoord(k, w, view.seamless)];
+        }
+        outRow[0] = sum * invSpan;
+        for (int x = 1; x < w; x++)
+        {
+            const int xOut = WrapOrClampCoord(x - 1 - radius, w, view.seamless);
+            const int xIn = WrapOrClampCoord(x + radius, w, view.seamless);
+            sum = std::max(0.0f, sum + row[xIn] - row[xOut]);
+            outRow[x] = sum * invSpan;
+        }
+    }
+}
+
+void BoxBlurScalarVert(const ScalarFieldView &view, int radius, std::vector<float> &dst)
+{
+    dst.resize(view.field.size());
+    const int h = int(view.height);
+    const float invSpan = 1.0f / float(2 * radius + 1);
+    for (uint32_t x = 0; x < view.width; x++)
+    {
+        float sum = 0.0f;
+        for (int k = -radius; k <= radius; k++)
+        {
+            sum += view.field[size_t(WrapOrClampCoord(k, h, view.seamless)) * view.width + x];
+        }
+        dst[x] = sum * invSpan;
+        for (int y = 1; y < h; y++)
+        {
+            const int yOut = WrapOrClampCoord(y - 1 - radius, h, view.seamless);
+            const int yIn = WrapOrClampCoord(y + radius, h, view.seamless);
+            sum = std::max(0.0f, sum + view.field[size_t(yIn) * view.width + x] -
+                                         view.field[size_t(yOut) * view.width + x]);
+            dst[size_t(y) * view.width + x] = sum * invSpan;
+        }
+    }
+}
+
+void BoxBlurScalarPass(const std::vector<float> &src, uint32_t w, uint32_t h, int radius,
+                       bool seamless, std::vector<float> &dst)
+{
+    std::vector<float> horiz;
+    BoxBlurScalarHoriz(ScalarFieldView{ src, w, h, seamless }, radius, horiz);
+    BoxBlurScalarVert(ScalarFieldView{ horiz, w, h, seamless }, radius, dst);
+}
+
+void BlendRgbBuffers(const std::vector<float> &a, const std::vector<float> &b, float alpha,
+                     std::vector<float> &out)
+{
+    out.resize(a.size());
+    for (size_t i = 0; i < a.size(); i++)
+    {
+        out[i] = a[i] + alpha * (b[i] - a[i]);
+    }
+}
+
+void ApplyPreSmoothRgb(uint32_t w, uint32_t h, const EditorAiDiffusePrepParams &params,
+                       std::vector<float> &rgb)
+{
+    const float smooth = std::clamp(params.preSmooth, 0.0f, 1.0f);
+    if (!(smooth > 1e-4f))
+    {
+        return;
+    }
+    std::vector<float> pass1;
+    SmoothRgb3x3Pass(rgb, w, h, params.seamless, pass1);
+    if (smooth <= 0.5f)
+    {
+        std::vector<float> blended;
+        BlendRgbBuffers(rgb, pass1, smooth * 2.0f, blended);
+        rgb = std::move(blended);
+        return;
+    }
+    std::vector<float> pass2;
+    SmoothRgb3x3Pass(pass1, w, h, params.seamless, pass2);
+    BlendRgbBuffers(pass1, pass2, (smooth - 0.5f) * 2.0f, rgb);
+}
+
+void ApplyFlattenLightingRgb(uint32_t w, uint32_t h, const EditorAiDiffusePrepParams &params,
+                             std::vector<float> &rgb)
+{
+    const float flatten = std::clamp(params.flattenLighting, 0.0f, 1.0f);
+    if (!(flatten > 1e-4f))
+    {
+        return;
+    }
+    const size_t pixels = size_t(w) * size_t(h);
+    std::vector<float> luma(pixels);
+    double sumY = 0.0;
+    for (size_t i = 0; i < pixels; i++)
+    {
+        const float y =
+            0.2126f * rgb[i * 3u + 0u] + 0.7152f * rgb[i * 3u + 1u] + 0.0722f * rgb[i * 3u + 2u];
+        luma[i] = y;
+        sumY += double(y);
+    }
+    const float meanY = float(sumY / double(pixels));
+    const int radius = std::clamp(int(std::max(w, h) / 8u), 4, 48);
+    std::vector<float> tmpBlur;
+    std::vector<float> blurY;
+    BoxBlurScalarPass(luma, w, h, radius, params.seamless, tmpBlur);
+    BoxBlurScalarPass(tmpBlur, w, h, radius, params.seamless, blurY);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        const float rawGain = (meanY + 0.08f) / (blurY[i] + 0.08f);
+        const float gain = 1.0f + flatten * (std::clamp(rawGain, 0.45f, 2.2f) - 1.0f);
+        rgb[i * 3u + 0u] = std::clamp(rgb[i * 3u + 0u] * gain, 0.0f, 1.0f);
+        rgb[i * 3u + 1u] = std::clamp(rgb[i * 3u + 1u] * gain, 0.0f, 1.0f);
+        rgb[i * 3u + 2u] = std::clamp(rgb[i * 3u + 2u] * gain, 0.0f, 1.0f);
     }
 }
 
@@ -761,34 +1000,18 @@ void BuildPoissonDivergence(const std::vector<uint8_t> &baseNormalRgba, uint32_t
     SubtractZeroMean(outRhs);
 }
 
-std::vector<float> BuildDeepBumpTileWeights()
-{
-    constexpr uint32_t kMargin = kDeepBumpTileSize - kDeepBumpTileStride;
-    std::array<float, kDeepBumpTileSize> w1d{};
-    w1d.fill(1.0f);
-    for (uint32_t i = 0; i < kMargin; i++)
-    {
-        const float t = float(i + 1u) / float(kMargin + 1u);
-        w1d[i] = t;
-        w1d[kDeepBumpTileSize - 1u - i] = t;
-    }
-    std::vector<float> weights(size_t(kDeepBumpTileSize) * kDeepBumpTileSize);
-    for (uint32_t y = 0; y < kDeepBumpTileSize; y++)
-    {
-        for (uint32_t x = 0; x < kDeepBumpTileSize; x++)
-        {
-            weights[size_t(y) * kDeepBumpTileSize + x] = w1d[y] * w1d[x];
-        }
-    }
-    return weights;
-}
-
 void SynthesizeGlossFromDiffuseAndHeight(const std::vector<uint8_t> &diffuseRgba,
                                          const std::vector<float> &height, uint32_t width,
                                          uint32_t heightPx, std::vector<uint8_t> &outGlossRgba)
 {
     const size_t pixels = size_t(width) * size_t(heightPx);
-    outGlossRgba.resize(pixels * 4u);
+    if (pixels == 0 || diffuseRgba.size() < pixels * 4u)
+    {
+        outGlossRgba.clear();
+        return;
+    }
+
+    std::vector<float> raw(pixels);
     for (size_t i = 0; i < pixels; i++)
     {
         const uint8_t r = diffuseRgba[i * 4u + 0u];
@@ -800,9 +1023,23 @@ void SynthesizeGlossFromDiffuseAndHeight(const std::vector<uint8_t> &diffuseRgba
         const float sat = cmax > 1e-4f ? ((cmax - cmin) / cmax) : 0.0f;
         const float metallicCue = lum * (1.0f - 0.55f * sat);
         const float hVal = i < height.size() ? height[i] : 0.5f;
-        const float val = std::clamp(0.20f + 0.50f * metallicCue + 0.35f * (hVal - 0.5f),
-                                     0.06f, 0.92f);
-        const uint8_t gv = FloatToByte(val);
+        raw[i] = 0.55f * metallicCue + 0.45f * hVal;
+    }
+
+    std::vector<float> sorted = raw;
+    std::sort(sorted.begin(), sorted.end());
+    const float pLo = sorted[((pixels - 1u) * 2u) / 100u];
+    const float pHi = sorted[((pixels - 1u) * 98u) / 100u];
+    const float span = pHi - pLo;
+    const float normStrength = std::clamp((span - 0.03f) / 0.12f, 0.0f, 1.0f);
+
+    outGlossRgba.resize(pixels * 4u);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        const float absVal = std::clamp(0.25f + 0.65f * raw[i], 0.10f, 0.92f);
+        const float normVal =
+            0.10f + 0.82f * std::clamp((raw[i] - pLo) / std::max(span, 1e-4f), 0.0f, 1.0f);
+        const uint8_t gv = FloatToByte(absVal + normStrength * (normVal - absVal));
         outGlossRgba[i * 4u + 0u] = gv;
         outGlossRgba[i * 4u + 1u] = gv;
         outGlossRgba[i * 4u + 2u] = gv;
@@ -842,33 +1079,27 @@ void BuildLocalEmissiveMap(const std::vector<uint8_t> &diffuseRgba, uint32_t wid
     }
 }
 
-bool RunLotusPredictionPipeline(const EditorAiInferenceRequest &req,
-                                const std::filesystem::path &modelPath,
-                                const std::atomic<bool> *cancelRequested,
-                                EditorAiInferenceResult &out)
+void ExtractRgbaLumaNchw(const std::vector<uint8_t> &rgba, uint32_t width, uint32_t height,
+                         EditorAiTensorNchw &outLuma)
 {
-    EditorAiLotusPrep prep;
-    PrepareEditorLotusInputNchw(req.diffuseRgba, req.width, req.height, req.processingRes,
-                                req.seamless, prep);
-
-    EditorOnnxTensorNchw pred;
-    if (!RunEditorOnnxModelNchw(modelPath, req.exeDir, prep.tensor, pred, cancelRequested,
-                                out.providerLabel, out.errorMessage))
+    const size_t pixels = size_t(width) * size_t(height);
+    outLuma.channels = 1u;
+    outLuma.width = width;
+    outLuma.height = height;
+    outLuma.data.resize(pixels);
+    for (size_t i = 0; i < pixels; i++)
     {
-        out.cancelled = (cancelRequested != nullptr &&
-                         cancelRequested->load(std::memory_order_relaxed));
-        return false;
+        const float r = float(rgba[i * 4u + 0u]) / 255.0f;
+        const float g = float(rgba[i * 4u + 1u]) / 255.0f;
+        const float b = float(rgba[i * 4u + 2u]) / 255.0f;
+        outLuma.data[i] = 0.299f * r + 0.587f * g + 0.114f * b;
     }
+}
 
-    std::vector<float> hwc01;
-    DownsampleEditorLotusOutputNchw(pred, prep, req.width, req.height, hwc01);
+void FinalizeLotusHwcResult(const EditorAiInferenceRequest &req, const std::vector<float> &hwc01,
+                            EditorAiInferenceResult &out)
+{
     const size_t pixels = size_t(req.width) * size_t(req.height);
-    if (hwc01.size() != pixels * 3u)
-    {
-        out.errorMessage = "Lotus ONNX output dimensions mismatch.";
-        return false;
-    }
-
     if (req.backend == EditorAiBackend::LotusDepthD)
     {
         out.rawHeight.resize(pixels);
@@ -878,148 +1109,330 @@ bool RunLotusPredictionPipeline(const EditorAiInferenceRequest &req,
                 (hwc01[i * 3u + 0u] + hwc01[i * 3u + 1u] + hwc01[i * 3u + 2u]) * (1.0f / 3.0f);
         }
         NormalizePercentile01(out.rawHeight);
+        return;
     }
-    else
+    ConvertEditorNormals01ToQuakeRayRgba(hwc01, req.width, req.height, true, true,
+                                         out.rawNormalRgba);
+    IntegrateEditorNormalMapHeight(out.rawNormalRgba, req.width, req.height, req.seamless,
+                                   out.rawHeight);
+}
+
+struct DiffusionWorkerStageSpec
+{
+    const std::filesystem::path &workerExe;
+    const std::filesystem::path &modelPath;
+    const char *arch = nullptr;
+    const char *prepLabel = nullptr;
+    const char *postLabel = nullptr;
+    const std::atomic<bool> *cancelRequested = nullptr;
+};
+
+bool RunDiffusionWorkerAndDownsample(const EditorAiInferenceRequest &req,
+                                     const DiffusionWorkerStageSpec &spec,
+                                     std::vector<float> &outHwc01, EditorAiInferenceResult &out)
+{
+    if (req.progressCb)
     {
-        ConvertEditorNormals01ToQuakeRayRgba(hwc01, req.width, req.height, true, true,
-                                             out.rawNormalRgba);
-        IntegrateEditorNormalMapHeight(out.rawNormalRgba, req.width, req.height, req.seamless,
-                                       out.rawHeight);
+        req.progressCb(1, spec.prepLabel);
+    }
+    EditorAiLotusPrep prep;
+    PrepareEditorLotusInputNchw(req.diffuseRgba, req.width, req.height, req.processingRes,
+                                req.seamless, prep);
+
+    EditorAiWorkerInvokeRequest workerReq;
+    workerReq.workerExecutable = spec.workerExe;
+    workerReq.modelPath = spec.modelPath;
+    workerReq.arch = spec.arch;
+    workerReq.input = std::move(prep.tensor);
+    workerReq.cancelRequested = spec.cancelRequested;
+    workerReq.onProgress = req.progressCb;
+
+    EditorAiWorkerInvokeResult workerRes;
+    if (!RunEditorAiWorkerProcess(workerReq, workerRes))
+    {
+        out.cancelled = workerRes.cancelled;
+        out.errorMessage = workerRes.errorMessage;
+        return false;
+    }
+    out.providerLabel = workerRes.provider;
+
+    if (req.progressCb)
+    {
+        req.progressCb(99, spec.postLabel);
+    }
+    DownsampleEditorLotusOutputNchw(workerRes.output, prep, req.width, req.height, outHwc01);
+    if (outHwc01.size() != size_t(req.width) * size_t(req.height) * 3u)
+    {
+        out.errorMessage = std::string(spec.arch) + " GGUF output dimensions mismatch.";
+        return false;
     }
     return true;
 }
 
-struct DeepBumpAccumulator
+bool RunLotusDepthPipeline(const EditorAiInferenceRequest &req,
+                          const std::filesystem::path &workerExe,
+                          const std::filesystem::path &modelPath,
+                          const std::atomic<bool> *cancelRequested,
+                          EditorAiInferenceResult &out)
 {
-    const EditorAiInferenceRequest &req;
-    const std::filesystem::path &modelPath;
-    const std::vector<float> &luma;
-    const std::vector<float> &weights;
-    const std::atomic<bool> *cancelRequested = nullptr;
-    EditorAiInferenceResult &out;
-    std::vector<float> acc;
-    std::vector<float> wsum;
-};
-
-void FillDeepBumpTileInput(const DeepBumpAccumulator &ctx, uint32_t x0, uint32_t y0,
-                           EditorOnnxTensorNchw &tileIn)
-{
-    const uint32_t w = ctx.req.width;
-    const uint32_t h = ctx.req.height;
-    for (uint32_t dy = 0; dy < kDeepBumpTileSize; dy++)
+    if (req.progressCb)
     {
-        const int sy = WrapOrClampCoord(int(y0 + dy), int(h), ctx.req.seamless);
-        for (uint32_t dx = 0; dx < kDeepBumpTileSize; dx++)
-        {
-            const int sx = WrapOrClampCoord(int(x0 + dx), int(w), ctx.req.seamless);
-            tileIn.data[size_t(dy) * kDeepBumpTileSize + dx] =
-                ctx.luma[size_t(sy) * w + size_t(sx)];
-        }
+        req.progressCb(1, "Preparing Lotus Depth input");
     }
+    EditorAiLotusPrep prep;
+    PrepareEditorLotusDepthInputNchw(req.diffuseRgba, req.width, req.height, req.processingRes,
+                                     req.seamless, prep);
+
+    EditorAiWorkerInvokeRequest workerReq;
+    workerReq.workerExecutable = workerExe;
+    workerReq.modelPath = modelPath;
+    workerReq.arch = "lotus";
+    workerReq.input = std::move(prep.tensor);
+    workerReq.cancelRequested = cancelRequested;
+    workerReq.onProgress = req.progressCb;
+
+    EditorAiWorkerInvokeResult workerRes;
+    if (!RunEditorAiWorkerProcess(workerReq, workerRes))
+    {
+        out.cancelled = workerRes.cancelled;
+        out.errorMessage = workerRes.errorMessage;
+        return false;
+    }
+    out.providerLabel = workerRes.provider;
+
+    if (req.progressCb)
+    {
+        req.progressCb(99, "Detrending & normalizing depth");
+    }
+    ExtractDetrendedEditorLotusDepthHeight(workerRes.output, prep, req.width, req.height,
+                                           out.rawHeight);
+    if (out.rawHeight.size() != size_t(req.width) * size_t(req.height))
+    {
+        out.errorMessage = "lotus GGUF depth output dimensions mismatch.";
+        return false;
+    }
+    return true;
 }
 
-void AccumulateDeepBumpTileOutput(DeepBumpAccumulator &ctx, uint32_t x0, uint32_t y0,
-                                  const EditorOnnxTensorNchw &tileOut)
+bool RunLotusPredictionPipeline(const EditorAiInferenceRequest &req,
+                                const std::filesystem::path &workerExe,
+                                const std::filesystem::path &modelPath,
+                                const std::atomic<bool> *cancelRequested,
+                                EditorAiInferenceResult &out)
 {
-    constexpr size_t kPlane = size_t(kDeepBumpTileSize) * kDeepBumpTileSize;
-    const uint32_t w = ctx.req.width;
-    const uint32_t h = ctx.req.height;
-    for (uint32_t dy = 0; dy < kDeepBumpTileSize; dy++)
+    if (req.backend == EditorAiBackend::LotusDepthD)
     {
-        const int sy = WrapOrClampCoord(int(y0 + dy), int(h), ctx.req.seamless);
-        for (uint32_t dx = 0; dx < kDeepBumpTileSize; dx++)
-        {
-            const int sx = WrapOrClampCoord(int(x0 + dx), int(w), ctx.req.seamless);
-            const size_t srcIdx = size_t(dy) * kDeepBumpTileSize + dx;
-            const size_t dstIdx = size_t(sy) * w + size_t(sx);
-            const float wt = ctx.weights[srcIdx];
-            ctx.acc[dstIdx * 3u + 0u] += tileOut.data[srcIdx] * wt;
-            ctx.acc[dstIdx * 3u + 1u] += tileOut.data[kPlane + srcIdx] * wt;
-            ctx.acc[dstIdx * 3u + 2u] += tileOut.data[2u * kPlane + srcIdx] * wt;
-            ctx.wsum[dstIdx] += wt;
-        }
+        return RunLotusDepthPipeline(req, workerExe, modelPath, cancelRequested, out);
     }
+    std::vector<float> hwc01;
+    const DiffusionWorkerStageSpec spec{ workerExe,
+                                         modelPath,
+                                         "lotus",
+                                         "Preparing Lotus input",
+                                         "Post-processing normal map",
+                                         cancelRequested };
+    if (!RunDiffusionWorkerAndDownsample(req, spec, hwc01, out))
+    {
+        return false;
+    }
+    FinalizeLotusHwcResult(req, hwc01, out);
+    return true;
 }
 
-bool ProcessSingleDeepBumpTile(DeepBumpAccumulator &ctx, uint32_t x0, uint32_t y0,
-                               EditorOnnxTensorNchw &tileIn)
+bool RunDelightPredictionPipeline(const EditorAiInferenceRequest &req,
+                                  const std::filesystem::path &workerExe,
+                                  const std::filesystem::path &modelPath,
+                                  const std::atomic<bool> *cancelRequested,
+                                  EditorAiInferenceResult &out)
 {
-    if (ctx.cancelRequested != nullptr && ctx.cancelRequested->load(std::memory_order_relaxed))
+    std::vector<float> hwc01;
+    const DiffusionWorkerStageSpec spec{ workerExe,
+                                         modelPath,
+                                         "delight",
+                                         "Preparing StableDelight input",
+                                         "Finalizing de-lit diffuse",
+                                         cancelRequested };
+    if (!RunDiffusionWorkerAndDownsample(req, spec, hwc01, out))
     {
-        ctx.out.cancelled = true;
         return false;
     }
-    FillDeepBumpTileInput(ctx, x0, y0, tileIn);
-
-    EditorOnnxTensorNchw tileOut;
-    if (!RunEditorOnnxModelNchw(ctx.modelPath, ctx.req.exeDir, tileIn, tileOut, ctx.cancelRequested,
-                                ctx.out.providerLabel, ctx.out.errorMessage))
+    const size_t pixels = size_t(req.width) * size_t(req.height);
+    out.rawColorRgba.resize(pixels * 4u);
+    for (size_t i = 0; i < pixels; i++)
     {
-        ctx.out.cancelled = (ctx.cancelRequested != nullptr &&
-                             ctx.cancelRequested->load(std::memory_order_relaxed));
-        return false;
+        out.rawColorRgba[i * 4u + 0u] = FloatToByte(hwc01[i * 3u + 0u]);
+        out.rawColorRgba[i * 4u + 1u] = FloatToByte(hwc01[i * 3u + 1u]);
+        out.rawColorRgba[i * 4u + 2u] = FloatToByte(hwc01[i * 3u + 2u]);
+        out.rawColorRgba[i * 4u + 3u] = req.diffuseRgba[i * 4u + 3u];
     }
-    if (tileOut.channels != 3 || tileOut.height != int64_t(kDeepBumpTileSize) ||
-        tileOut.width != int64_t(kDeepBumpTileSize))
-    {
-        ctx.out.errorMessage = "Unexpected DeepBump tile output shape.";
-        return false;
-    }
-
-    AccumulateDeepBumpTileOutput(ctx, x0, y0, tileOut);
     return true;
 }
 
 bool RunDeepBumpPredictionPipeline(const EditorAiInferenceRequest &req,
+                                   const std::filesystem::path &workerExe,
                                    const std::filesystem::path &modelPath,
                                    const std::atomic<bool> *cancelRequested,
                                    EditorAiInferenceResult &out)
 {
+    if (req.progressCb)
+    {
+        req.progressCb(1, "Preparing DeepBump input");
+    }
+    EditorAiWorkerInvokeRequest workerReq;
+    workerReq.workerExecutable = workerExe;
+    workerReq.modelPath = modelPath;
+    workerReq.arch = "deepbump";
+    workerReq.clampEdge = !req.seamless;
+    ExtractRgbaLumaNchw(req.diffuseRgba, req.width, req.height, workerReq.input);
+    workerReq.cancelRequested = cancelRequested;
+    workerReq.onProgress = req.progressCb;
+
+    EditorAiWorkerInvokeResult workerRes;
+    if (!RunEditorAiWorkerProcess(workerReq, workerRes))
+    {
+        out.cancelled = workerRes.cancelled;
+        out.errorMessage = workerRes.errorMessage;
+        return false;
+    }
+    out.providerLabel = workerRes.provider;
     const size_t pixels = size_t(req.width) * size_t(req.height);
-    std::vector<float> luma(pixels);
+    if (workerRes.output.channels != 3u || workerRes.output.width != req.width ||
+        workerRes.output.height != req.height || workerRes.output.data.size() != pixels * 3u)
+    {
+        out.errorMessage = "DeepBump GGUF output dimensions mismatch.";
+        return false;
+    }
+
+    if (req.progressCb)
+    {
+        req.progressCb(99, "Integrating height map");
+    }
+    std::vector<float> hwc01(pixels * 3u);
     for (size_t i = 0; i < pixels; i++)
     {
-        const float r = float(req.diffuseRgba[i * 4u + 0u]) / 255.0f;
-        const float g = float(req.diffuseRgba[i * 4u + 1u]) / 255.0f;
-        const float b = float(req.diffuseRgba[i * 4u + 2u]) / 255.0f;
-        luma[i] = 0.299f * r + 0.587f * g + 0.114f * b;
+        hwc01[i * 3u + 0u] = workerRes.output.data[0u * pixels + i];
+        hwc01[i * 3u + 1u] = workerRes.output.data[1u * pixels + i];
+        hwc01[i * 3u + 2u] = workerRes.output.data[2u * pixels + i];
     }
 
-    const std::vector<float> weights = BuildDeepBumpTileWeights();
-    DeepBumpAccumulator ctx{ req, modelPath, luma, weights, cancelRequested, out, {}, {} };
-    ctx.acc.assign(pixels * 3u, 0.0f);
-    ctx.wsum.assign(pixels, 0.0f);
-
-    EditorOnnxTensorNchw tileIn;
-    tileIn.channels = 1;
-    tileIn.height = int64_t(kDeepBumpTileSize);
-    tileIn.width = int64_t(kDeepBumpTileSize);
-    tileIn.data.resize(size_t(kDeepBumpTileSize) * kDeepBumpTileSize);
-
-    for (uint32_t y0 = 0; y0 < req.height; y0 += kDeepBumpTileStride)
-    {
-        for (uint32_t x0 = 0; x0 < req.width; x0 += kDeepBumpTileStride)
-        {
-            if (!ProcessSingleDeepBumpTile(ctx, x0, y0, tileIn))
-            {
-                return false;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < pixels; i++)
-    {
-        const float invW = 1.0f / std::max(ctx.wsum[i], 1e-6f);
-        ctx.acc[i * 3u + 0u] *= invW;
-        ctx.acc[i * 3u + 1u] *= invW;
-        ctx.acc[i * 3u + 2u] *= invW;
-    }
-
-    ConvertEditorNormals01ToQuakeRayRgba(ctx.acc, req.width, req.height, false, true,
+    ConvertEditorNormals01ToQuakeRayRgba(hwc01, req.width, req.height, false, true,
                                          out.rawNormalRgba);
     IntegrateEditorNormalMapHeight(out.rawNormalRgba, req.width, req.height, req.seamless,
                                    out.rawHeight);
     return true;
+}
+
+void ExtractRgbaRgbNchw(const std::vector<uint8_t> &rgba, uint32_t width, uint32_t height,
+                        EditorAiTensorNchw &outRgb, bool &outAllOpaque)
+{
+    const size_t pixels = size_t(width) * size_t(height);
+    outRgb.channels = 3u;
+    outRgb.width = width;
+    outRgb.height = height;
+    outRgb.data.resize(pixels * 3u);
+    outAllOpaque = true;
+    for (size_t i = 0; i < pixels; i++)
+    {
+        outRgb.data[0u * pixels + i] = float(rgba[i * 4u + 0u]) / 255.0f;
+        outRgb.data[1u * pixels + i] = float(rgba[i * 4u + 1u]) / 255.0f;
+        outRgb.data[2u * pixels + i] = float(rgba[i * 4u + 2u]) / 255.0f;
+        if (rgba[i * 4u + 3u] != 255u)
+        {
+            outAllOpaque = false;
+        }
+    }
+}
+
+bool RunRealPlksrUpscalePipeline(const EditorAiInferenceRequest &req,
+                                 const std::filesystem::path &workerExe,
+                                 const std::filesystem::path &modelPath,
+                                 const std::atomic<bool> *cancelRequested,
+                                 EditorAiInferenceResult &out)
+{
+    if (req.progressCb)
+    {
+        req.progressCb(1, "Preparing RealPLKSR input");
+    }
+    EditorAiWorkerInvokeRequest workerReq;
+    workerReq.workerExecutable = workerExe;
+    workerReq.modelPath = modelPath;
+    workerReq.arch = "realplksr";
+    workerReq.clampEdge = !req.seamless;
+    bool allOpaque = true;
+    ExtractRgbaRgbNchw(req.diffuseRgba, req.width, req.height, workerReq.input, allOpaque);
+    workerReq.cancelRequested = cancelRequested;
+    workerReq.onProgress = req.progressCb;
+
+    EditorAiWorkerInvokeResult workerRes;
+    if (!RunEditorAiWorkerProcess(workerReq, workerRes))
+    {
+        out.cancelled = workerRes.cancelled;
+        out.errorMessage = workerRes.errorMessage;
+        return false;
+    }
+    out.providerLabel = workerRes.provider;
+
+    const uint32_t outW = req.width * 4u;
+    const uint32_t outH = req.height * 4u;
+    const size_t outPixels = size_t(outW) * size_t(outH);
+    if (workerRes.output.channels != 3u || workerRes.output.width != outW ||
+        workerRes.output.height != outH || workerRes.output.data.size() != outPixels * 3u)
+    {
+        out.errorMessage = "RealPLKSR GGUF output dimensions mismatch.";
+        return false;
+    }
+
+    if (req.progressCb)
+    {
+        req.progressCb(99, "Finalizing upscaled diffuse");
+    }
+    out.outputWidth = outW;
+    out.outputHeight = outH;
+    out.rawColorRgba.resize(outPixels * 4u);
+    for (uint32_t y = 0; y < outH; y++)
+    {
+        const float v = (float(y) + 0.5f) / float(outH);
+        for (uint32_t x = 0; x < outW; x++)
+        {
+            const size_t i = size_t(y) * outW + x;
+            out.rawColorRgba[i * 4u + 0u] = FloatToByte(workerRes.output.data[0u * outPixels + i]);
+            out.rawColorRgba[i * 4u + 1u] = FloatToByte(workerRes.output.data[1u * outPixels + i]);
+            out.rawColorRgba[i * 4u + 2u] = FloatToByte(workerRes.output.data[2u * outPixels + i]);
+            if (allOpaque)
+            {
+                out.rawColorRgba[i * 4u + 3u] = 255u;
+            }
+            else
+            {
+                const float u = (float(x) + 0.5f) / float(outW);
+                float sample[4] = {};
+                SampleRgbaBilinearWrapped(req.diffuseRgba.data(), req.width, req.height, u, v,
+                                          req.seamless, sample);
+                out.rawColorRgba[i * 4u + 3u] =
+                    uint8_t(std::clamp(std::lround(sample[3]), 0l, 255l));
+            }
+        }
+    }
+    return true;
+}
+
+const EditorAiInferenceRequest &SelectPreparedAiRequest(const EditorAiInferenceRequest &req,
+                                                        EditorAiInferenceRequest &storage)
+{
+    if (!(req.flattenLighting > 1e-4f) && !(req.preSmooth > 1e-4f))
+    {
+        return req;
+    }
+    storage = req;
+    storage.diffuseRgba.clear();
+    const EditorAiDiffusePrepParams prepParams{
+        req.flattenLighting,
+        req.preSmooth,
+        req.seamless,
+    };
+    PreprocessEditorAiDiffuse(req.diffuseRgba, req.width, req.height, prepParams,
+                              storage.diffuseRgba);
+    return storage;
 }
 
 } // namespace
@@ -1067,6 +1480,10 @@ const char *EditorAiBackendId(EditorAiBackend backend)
         return "lotus_depth_d";
     case EditorAiBackend::DeepBump:
         return "deepbump";
+    case EditorAiBackend::StableDelight:
+        return "stable_delight";
+    case EditorAiBackend::RealPlksrPbrify:
+        return "realplksr_pbrify";
     }
     return "lotus_normal_d";
 }
@@ -1076,13 +1493,17 @@ const char *EditorAiBackendDisplayName(EditorAiBackend backend)
     switch (backend)
     {
     case EditorAiBackend::LotusNormalD:
-        return "Lotus Normal (ONNX)";
+        return "Lotus Normal (GGUF)";
     case EditorAiBackend::LotusDepthD:
-        return "Lotus Depth (ONNX)";
+        return "Lotus Depth (GGUF)";
     case EditorAiBackend::DeepBump:
-        return "DeepBump (Fast ONNX)";
+        return "DeepBump (Fast GGUF)";
+    case EditorAiBackend::StableDelight:
+        return "StableDelight (GGUF)";
+    case EditorAiBackend::RealPlksrPbrify:
+        return "4x-PBRify RealPLKSR (GGUF)";
     }
-    return "Lotus Normal (ONNX)";
+    return "Lotus Normal (GGUF)";
 }
 
 const char *EditorAiBackendModelFilename(EditorAiBackend backend)
@@ -1090,18 +1511,27 @@ const char *EditorAiBackendModelFilename(EditorAiBackend backend)
     switch (backend)
     {
     case EditorAiBackend::LotusNormalD:
-        return "lotus-normal-d-v1-1.onnx";
+        return "lotus-normal-d-v1-1-fp16.gguf";
     case EditorAiBackend::LotusDepthD:
-        return "lotus-depth-d-v2-0-disparity.onnx";
+        return "lotus-depth-d-v2-0-disparity-fp16.gguf";
     case EditorAiBackend::DeepBump:
-        return "deepbump256.onnx";
+        return "deepbump256-fp16.gguf";
+    case EditorAiBackend::StableDelight:
+        return "yoso-delight-v0-4-base-fp16.gguf";
+    case EditorAiBackend::RealPlksrPbrify:
+        return "4x-pbrify-rplksrd-v3-fp16.gguf";
     }
-    return "lotus-normal-d-v1-1.onnx";
+    return "lotus-normal-d-v1-1-fp16.gguf";
 }
 
 bool IsEditorAiLotusBackend(EditorAiBackend backend)
 {
-    return backend != EditorAiBackend::DeepBump;
+    return backend == EditorAiBackend::LotusNormalD || backend == EditorAiBackend::LotusDepthD;
+}
+
+bool IsEditorAiDiffusionBackend(EditorAiBackend backend)
+{
+    return IsEditorAiLotusBackend(backend) || backend == EditorAiBackend::StableDelight;
 }
 
 const char *EditorAiMapKindId(EditorAiMapKind kind)
@@ -1114,6 +1544,12 @@ const char *EditorAiMapKindId(EditorAiMapKind kind)
         return "gloss";
     case EditorAiMapKind::Emissive:
         return "emissive";
+    case EditorAiMapKind::Delight:
+        return "delit";
+    case EditorAiMapKind::Height:
+        return "height";
+    case EditorAiMapKind::Upscale:
+        return "upscaled";
     }
     return "normals";
 }
@@ -1192,6 +1628,227 @@ bool SaveEditorAiLocalConfig(const std::filesystem::path &path, const EditorAiLo
     return WriteTextFileAtomic(path, json, outError);
 }
 
+namespace
+{
+
+uint32_t RoundToGridAtLeast64(double val, uint32_t step)
+{
+    const long stepL = long(step);
+    const long rounded = std::lround(val / double(step)) * stepL;
+    return uint32_t(std::max<long>(64l, rounded));
+}
+
+void FillPreparedLotusTensorNchw(const std::vector<uint8_t> &diffuseRgba, uint32_t srcW,
+                                 uint32_t srcH, EdgeSampleMode edgeMode,
+                                 EditorAiLotusPrep &outPrep)
+{
+    const uint32_t workW = outPrep.fitW + 2u * outPrep.haloX;
+    const uint32_t workH = outPrep.fitH + 2u * outPrep.haloY;
+    const size_t plane = size_t(workW) * size_t(workH);
+    outPrep.tensor.channels = 3;
+    outPrep.tensor.height = int64_t(workH);
+    outPrep.tensor.width = int64_t(workW);
+    outPrep.tensor.data.resize(3u * plane);
+
+    for (uint32_t y = 0; y < workH; y++)
+    {
+        const float v = (float(y) + 0.5f - float(outPrep.haloY)) / float(outPrep.fitH);
+        for (uint32_t x = 0; x < workW; x++)
+        {
+            const float u = (float(x) + 0.5f - float(outPrep.haloX)) / float(outPrep.fitW);
+            float sample[4] = {};
+            SampleRgbaBilinearWithMode(diffuseRgba.data(), srcW, srcH, u, v, edgeMode, sample);
+            const size_t idx = size_t(y) * workW + x;
+            outPrep.tensor.data[0u * plane + idx] = std::clamp(sample[0] / 255.0f, 0.0f, 1.0f);
+            outPrep.tensor.data[1u * plane + idx] = std::clamp(sample[1] / 255.0f, 0.0f, 1.0f);
+            outPrep.tensor.data[2u * plane + idx] = std::clamp(sample[2] / 255.0f, 0.0f, 1.0f);
+        }
+    }
+}
+
+void AccumulateNormalEq3x3(double (&AtA)[3][3], double (&Atb)[3], const double row[3], double rhs)
+{
+    for (int i = 0; i < 3; i++)
+    {
+        Atb[i] += row[i] * rhs;
+        for (int j = i; j < 3; j++)
+        {
+            AtA[i][j] += row[i] * row[j];
+        }
+    }
+}
+
+bool SolveLinearSystem3x3(double AtA[3][3], double Atb[3], double outCoef[3])
+{
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < i; j++)
+        {
+            AtA[i][j] = AtA[j][i];
+        }
+        AtA[i][i] += 1e-6;
+    }
+
+    for (int col = 0; col < 3; col++)
+    {
+        int pivot = col;
+        double bestVal = std::abs(AtA[col][col]);
+        for (int row = col + 1; row < 3; row++)
+        {
+            const double val = std::abs(AtA[row][col]);
+            if (val > bestVal)
+            {
+                bestVal = val;
+                pivot = row;
+            }
+        }
+        if (bestVal < 1e-12)
+        {
+            return false;
+        }
+        if (pivot != col)
+        {
+            for (int c = col; c < 3; c++)
+            {
+                std::swap(AtA[col][c], AtA[pivot][c]);
+            }
+            std::swap(Atb[col], Atb[pivot]);
+        }
+        const double invDiag = 1.0 / AtA[col][col];
+        for (int row = col + 1; row < 3; row++)
+        {
+            const double factor = AtA[row][col] * invDiag;
+            if (factor == 0.0)
+            {
+                continue;
+            }
+            for (int c = col; c < 3; c++)
+            {
+                AtA[row][c] -= factor * AtA[col][c];
+            }
+            Atb[row] -= factor * Atb[col];
+        }
+    }
+
+    for (int i = 2; i >= 0; i--)
+    {
+        double sum = Atb[i];
+        for (int c = i + 1; c < 3; c++)
+        {
+            sum -= AtA[i][c] * outCoef[c];
+        }
+        outCoef[i] = sum / AtA[i][i];
+    }
+    return true;
+}
+
+void AccumulateWrapHaloTiltEquations(const std::vector<float> &fullD, uint32_t workW,
+                                      uint32_t workH, const EditorAiLotusPrep &prep,
+                                      double (&AtA)[3][3], double (&Atb)[3])
+{
+    const uint32_t hx = prep.haloX > 0u ? prep.haloX : prep.halo;
+    const uint32_t hy = prep.haloY > 0u ? prep.haloY : prep.halo;
+    const uint32_t mX = std::min(hx, prep.fitW / 2u);
+    const uint32_t mY = std::min(hy, prep.fitH / 2u);
+
+    for (uint32_t y = hy; y < hy + prep.fitH && y < workH; y++)
+    {
+        const double vy = (double(y) + 0.5 - double(hy)) / double(prep.fitH) * 2.0 - 1.0;
+        for (uint32_t x = hx - mX; x < hx + mX && x + prep.fitW < workW; x++)
+        {
+            const double row[3] = { 2.0, 0.0, 2.0 * vy };
+            const double diff =
+                double(fullD[size_t(y) * workW + x + prep.fitW]) - double(fullD[size_t(y) * workW + x]);
+            AccumulateNormalEq3x3(AtA, Atb, row, diff);
+        }
+    }
+    for (uint32_t y = hy - mY; y < hy + mY && y + prep.fitH < workH; y++)
+    {
+        for (uint32_t x = hx; x < hx + prep.fitW && x < workW; x++)
+        {
+            const double ux = (double(x) + 0.5 - double(hx)) / double(prep.fitW) * 2.0 - 1.0;
+            const double row[3] = { 0.0, 2.0, 2.0 * ux };
+            const double diff =
+                double(fullD[size_t(y + prep.fitH) * workW + x]) - double(fullD[size_t(y) * workW + x]);
+            AccumulateNormalEq3x3(AtA, Atb, row, diff);
+        }
+    }
+}
+
+void AccumulateMirrorHaloTiltEquations(const std::vector<float> &fullD, uint32_t workW,
+                                        uint32_t workH, const EditorAiLotusPrep &prep,
+                                        double (&AtA)[3][3], double (&Atb)[3])
+{
+    const uint32_t hx = prep.haloX > 0u ? prep.haloX : prep.halo;
+    const uint32_t hy = prep.haloY > 0u ? prep.haloY : prep.halo;
+    const auto uCoord = [hx, &prep](uint32_t x) {
+        return (double(x) + 0.5 - double(hx)) / double(prep.fitW) * 2.0 - 1.0;
+    };
+    const auto vCoord = [hy, &prep](uint32_t y) {
+        return (double(y) + 0.5 - double(hy)) / double(prep.fitH) * 2.0 - 1.0;
+    };
+    const auto valAt = [&fullD, workW](uint32_t x, uint32_t y) {
+        return double(fullD[size_t(y) * workW + x]);
+    };
+
+    const uint32_t mX = std::max(1u, std::min(hx / 2u, prep.fitW / 4u));
+    const uint32_t mY = std::max(1u, std::min(hy / 2u, prep.fitH / 4u));
+    for (uint32_t y = hy; y < hy + prep.fitH && y < workH; y++)
+    {
+        const double vy = vCoord(y);
+        for (uint32_t k = 0; k < mX; k++)
+        {
+            const uint32_t xLIn = hx + k;
+            const uint32_t xLOut = hx - 1u - k;
+            const double tL = uCoord(xLIn) + 1.0;
+            const double rowL[3] = { 2.0 * tL, 0.0, 2.0 * tL * vy };
+            AccumulateNormalEq3x3(AtA, Atb, rowL, valAt(xLIn, y) - valAt(xLOut, y));
+
+            const uint32_t xROut = hx + prep.fitW + k;
+            const uint32_t xRIn = hx + prep.fitW - 1u - k;
+            const double tR = uCoord(xROut) - 1.0;
+            const double rowR[3] = { 2.0 * tR, 0.0, 2.0 * tR * vy };
+            AccumulateNormalEq3x3(AtA, Atb, rowR, valAt(xROut, y) - valAt(xRIn, y));
+        }
+    }
+    for (uint32_t k = 0; k < mY; k++)
+    {
+        const uint32_t yTIn = hy + k;
+        const uint32_t yTOut = hy - 1u - k;
+        const double sT = vCoord(yTIn) + 1.0;
+
+        const uint32_t yBOut = hy + prep.fitH + k;
+        const uint32_t yBIn = hy + prep.fitH - 1u - k;
+        const double sB = vCoord(yBOut) - 1.0;
+
+        for (uint32_t x = hx; x < hx + prep.fitW && x < workW; x++)
+        {
+            const double ux = uCoord(x);
+            const double rowT[3] = { 0.0, 2.0 * sT, 2.0 * sT * ux };
+            AccumulateNormalEq3x3(AtA, Atb, rowT, valAt(x, yTIn) - valAt(x, yTOut));
+
+            const double rowB[3] = { 0.0, 2.0 * sB, 2.0 * sB * ux };
+            AccumulateNormalEq3x3(AtA, Atb, rowB, valAt(x, yBOut) - valAt(x, yBIn));
+        }
+    }
+}
+
+void BuildHaloTiltNormalEquations(const std::vector<float> &fullD, uint32_t workW, uint32_t workH,
+                                  const EditorAiLotusPrep &prep, double (&AtA)[3][3],
+                                  double (&Atb)[3])
+{
+    if (!prep.mirrorPad)
+    {
+        AccumulateWrapHaloTiltEquations(fullD, workW, workH, prep, AtA, Atb);
+    }
+    else
+    {
+        AccumulateMirrorHaloTiltEquations(fullD, workW, workH, prep, AtA, Atb);
+    }
+}
+
+} // namespace
+
 void ComputeEditorAiUpscaleFitDimensions(uint32_t srcW, uint32_t srcH, uint32_t targetMaxSide,
                                          uint32_t &outFitW, uint32_t &outFitH)
 {
@@ -1204,12 +1861,57 @@ void ComputeEditorAiUpscaleFitDimensions(uint32_t srcW, uint32_t srcH, uint32_t 
     const uint32_t clampedTarget = std::clamp(targetMaxSide, kMinProcessingRes, kMaxProcessingRes);
     const uint32_t maxSrc = std::max(srcW, srcH);
     const double scale = double(clampedTarget) / double(maxSrc);
-    const auto roundTo64 = [](double val) -> uint32_t {
-        const long rounded = std::lround(val / 64.0) * 64l;
-        return uint32_t(std::max(64l, rounded));
-    };
-    outFitW = roundTo64(double(srcW) * scale);
-    outFitH = roundTo64(double(srcH) * scale);
+    outFitW = RoundToGridAtLeast64(double(srcW) * scale, 64u);
+    outFitH = RoundToGridAtLeast64(double(srcH) * scale, 64u);
+}
+
+void ComputeEditorAiLotusDepthDimensions(uint32_t srcW, uint32_t srcH, uint32_t targetMaxSide,
+                                         bool seamless, EditorAiLotusDepthDims &outDims)
+{
+    outDims = {};
+    if (srcW == 0 || srcH == 0)
+    {
+        return;
+    }
+    const uint32_t clampedTarget = std::clamp(targetMaxSide, kMinProcessingRes, kMaxProcessingRes);
+    const uint32_t workTarget = clampedTarget + 128u;
+    const uint32_t maxSrc = std::max(srcW, srcH);
+
+    if (seamless)
+    {
+        const uint32_t maxFit = workTarget / 2u;
+        const double scale = double(maxFit) / double(maxSrc);
+        outDims.fitW = RoundToGridAtLeast64(double(srcW) * scale, 32u);
+        outDims.fitH = RoundToGridAtLeast64(double(srcH) * scale, 32u);
+        outDims.haloX = outDims.fitW / 2u;
+        outDims.haloY = outDims.fitH / 2u;
+        while (outDims.fitW + 2u * outDims.haloX < 256u)
+        {
+            outDims.haloX += 32u;
+        }
+        while (outDims.fitH + 2u * outDims.haloY < 256u)
+        {
+            outDims.haloY += 32u;
+        }
+        return;
+    }
+
+    const uint32_t maxFit = RoundToGridAtLeast64(double(workTarget) * (2.0 / 3.0), 64u);
+    const double scale = double(maxFit) / double(maxSrc);
+    outDims.fitW = RoundToGridAtLeast64(double(srcW) * scale, 64u);
+    outDims.fitH = RoundToGridAtLeast64(double(srcH) * scale, 64u);
+    outDims.haloX =
+        std::max<uint32_t>(32u, uint32_t(std::floor(double(outDims.fitW) * 0.25 / 32.0)) * 32u);
+    outDims.haloY =
+        std::max<uint32_t>(32u, uint32_t(std::floor(double(outDims.fitH) * 0.25 / 32.0)) * 32u);
+    while (outDims.fitW + 2u * outDims.haloX < 192u)
+    {
+        outDims.haloX += 32u;
+    }
+    while (outDims.fitH + 2u * outDims.haloY < 192u)
+    {
+        outDims.haloY += 32u;
+    }
 }
 
 void PrepareEditorLotusInputNchw(const std::vector<uint8_t> &diffuseRgba, uint32_t srcW,
@@ -1232,34 +1934,40 @@ void PrepareEditorLotusInputNchw(const std::vector<uint8_t> &diffuseRgba, uint32
     {
         outPrep.halo = 0u;
     }
+    outPrep.haloX = outPrep.halo;
+    outPrep.haloY = outPrep.halo;
+    outPrep.mirrorPad = false;
 
-    const uint32_t workW = outPrep.fitW + 2u * outPrep.halo;
-    const uint32_t workH = outPrep.fitH + 2u * outPrep.halo;
-    const size_t plane = size_t(workW) * size_t(workH);
-    outPrep.tensor.channels = 3;
-    outPrep.tensor.height = int64_t(workH);
-    outPrep.tensor.width = int64_t(workW);
-    outPrep.tensor.data.resize(3u * plane);
+    FillPreparedLotusTensorNchw(diffuseRgba, srcW, srcH,
+                                seamless ? EdgeSampleMode::Wrap : EdgeSampleMode::Clamp, outPrep);
+}
 
-    for (uint32_t y = 0; y < workH; y++)
+void PrepareEditorLotusDepthInputNchw(const std::vector<uint8_t> &diffuseRgba, uint32_t srcW,
+                                      uint32_t srcH, uint32_t processingRes, bool seamless,
+                                      EditorAiLotusPrep &outPrep)
+{
+    outPrep = {};
+    if (srcW == 0 || srcH == 0 || diffuseRgba.size() != size_t(srcW) * size_t(srcH) * 4u)
     {
-        const float v = (float(y) + 0.5f - float(outPrep.halo)) / float(outPrep.fitH);
-        for (uint32_t x = 0; x < workW; x++)
-        {
-            const float u = (float(x) + 0.5f - float(outPrep.halo)) / float(outPrep.fitW);
-            float sample[4] = {};
-            SampleRgbaBilinearWrapped(diffuseRgba.data(), srcW, srcH, u, v, seamless, sample);
-            const size_t idx = size_t(y) * workW + x;
-            outPrep.tensor.data[0u * plane + idx] = std::clamp(sample[0] / 255.0f, 0.0f, 1.0f);
-            outPrep.tensor.data[1u * plane + idx] = std::clamp(sample[1] / 255.0f, 0.0f, 1.0f);
-            outPrep.tensor.data[2u * plane + idx] = std::clamp(sample[2] / 255.0f, 0.0f, 1.0f);
-        }
+        return;
     }
+
+    EditorAiLotusDepthDims dims;
+    ComputeEditorAiLotusDepthDimensions(srcW, srcH, processingRes, seamless, dims);
+    outPrep.fitW = dims.fitW;
+    outPrep.fitH = dims.fitH;
+    outPrep.haloX = dims.haloX;
+    outPrep.haloY = dims.haloY;
+    outPrep.halo = std::min(outPrep.haloX, outPrep.haloY);
+    outPrep.mirrorPad = !seamless;
+
+    FillPreparedLotusTensorNchw(
+        diffuseRgba, srcW, srcH, seamless ? EdgeSampleMode::Wrap : EdgeSampleMode::Mirror, outPrep);
 }
 
 namespace
 {
-void AverageNchwBoxToHwcPixel(const EditorOnnxTensorNchw &pred, uint32_t x0, uint32_t x1,
+void AverageNchwBoxToHwcPixel(const EditorAiTensorNchw &pred, uint32_t x0, uint32_t x1,
                               uint32_t y0, uint32_t y1, float *dstRgb)
 {
     const uint32_t predW = uint32_t(pred.width);
@@ -1284,10 +1992,12 @@ void AverageNchwBoxToHwcPixel(const EditorOnnxTensorNchw &pred, uint32_t x0, uin
 }
 } // namespace
 
-void DownsampleEditorLotusOutputNchw(const EditorOnnxTensorNchw &pred, const EditorAiLotusPrep &prep,
+void DownsampleEditorLotusOutputNchw(const EditorAiTensorNchw &pred, const EditorAiLotusPrep &prep,
                                      uint32_t dstW, uint32_t dstH, std::vector<float> &outHwc01)
 {
     outHwc01.clear();
+    const uint32_t hx = prep.haloX > 0u ? prep.haloX : prep.halo;
+    const uint32_t hy = prep.haloY > 0u ? prep.haloY : prep.halo;
     if (pred.channels < 3 || pred.height <= 0 || pred.width <= 0 || prep.fitW == 0 ||
         prep.fitH == 0 || dstW == 0 || dstH == 0)
     {
@@ -1296,8 +2006,8 @@ void DownsampleEditorLotusOutputNchw(const EditorOnnxTensorNchw &pred, const Edi
     const uint32_t predW = uint32_t(pred.width);
     const uint32_t predH = uint32_t(pred.height);
     const size_t plane = size_t(predW) * size_t(predH);
-    if (pred.data.size() < 3u * plane || predW < prep.fitW + 2u * prep.halo ||
-        predH < prep.fitH + 2u * prep.halo)
+    if (pred.data.size() < 3u * plane || predW < prep.fitW + 2u * hx ||
+        predH < prep.fitH + 2u * hy)
     {
         return;
     }
@@ -1308,20 +2018,121 @@ void DownsampleEditorLotusOutputNchw(const EditorOnnxTensorNchw &pred, const Edi
 
     for (uint32_t dy = 0; dy < dstH; dy++)
     {
-        const uint32_t sy0 = prep.halo + uint32_t(std::floor(float(dy) * scaleY));
+        const uint32_t sy0 = hy + uint32_t(std::floor(float(dy) * scaleY));
         const uint32_t sy1 = std::min(
-            prep.halo + prep.fitH,
-            std::max(sy0 + 1u, prep.halo + uint32_t(std::ceil(float(dy + 1u) * scaleY))));
+            hy + prep.fitH,
+            std::max(sy0 + 1u, hy + uint32_t(std::ceil(float(dy + 1u) * scaleY))));
         for (uint32_t dx = 0; dx < dstW; dx++)
         {
-            const uint32_t sx0 = prep.halo + uint32_t(std::floor(float(dx) * scaleX));
+            const uint32_t sx0 = hx + uint32_t(std::floor(float(dx) * scaleX));
             const uint32_t sx1 = std::min(
-                prep.halo + prep.fitW,
-                std::max(sx0 + 1u, prep.halo + uint32_t(std::ceil(float(dx + 1u) * scaleX))));
+                hx + prep.fitW,
+                std::max(sx0 + 1u, hx + uint32_t(std::ceil(float(dx + 1u) * scaleX))));
             const size_t dstIdx = (size_t(dy) * dstW + dx) * 3u;
             AverageNchwBoxToHwcPixel(pred, sx0, sx1, sy0, sy1, outHwc01.data() + dstIdx);
         }
     }
+}
+
+void ComputeMeanRgbPlane01(const EditorAiTensorNchw &pred, size_t plane,
+                           std::vector<float> &outPlane)
+{
+    outPlane.resize(plane);
+    for (size_t i = 0; i < plane; i++)
+    {
+        outPlane[i] =
+            (pred.data[0u * plane + i] + pred.data[1u * plane + i] + pred.data[2u * plane + i]) *
+            (1.0f / 3.0f);
+    }
+}
+
+void BoxDownsampleDetrendedHeight(const std::vector<float> &fullD, uint32_t workW,
+                                  const EditorAiLotusPrep &prep, const double coef[3],
+                                  uint32_t dstW, uint32_t dstH, std::vector<float> &outHeight)
+{
+    const uint32_t hx = prep.haloX > 0u ? prep.haloX : prep.halo;
+    const uint32_t hy = prep.haloY > 0u ? prep.haloY : prep.halo;
+    outHeight.resize(size_t(dstW) * size_t(dstH));
+    const float scaleX = float(prep.fitW) / float(dstW);
+    const float scaleY = float(prep.fitH) / float(dstH);
+    for (uint32_t dy = 0; dy < dstH; dy++)
+    {
+        const uint32_t sy0 = hy + uint32_t(std::floor(float(dy) * scaleY));
+        const uint32_t sy1 = std::min(
+            hy + prep.fitH,
+            std::max(sy0 + 1u, hy + uint32_t(std::ceil(float(dy + 1u) * scaleY))));
+        for (uint32_t dx = 0; dx < dstW; dx++)
+        {
+            const uint32_t sx0 = hx + uint32_t(std::floor(float(dx) * scaleX));
+            const uint32_t sx1 = std::min(
+                hx + prep.fitW,
+                std::max(sx0 + 1u, hx + uint32_t(std::ceil(float(dx + 1u) * scaleX))));
+            double sum = 0.0;
+            uint32_t count = 0u;
+            for (uint32_t sy = sy0; sy < sy1; sy++)
+            {
+                const double vy = (double(sy) + 0.5 - double(hy)) / double(prep.fitH) * 2.0 - 1.0;
+                for (uint32_t sx = sx0; sx < sx1; sx++)
+                {
+                    const double ux =
+                        (double(sx) + 0.5 - double(hx)) / double(prep.fitW) * 2.0 - 1.0;
+                    const double bias = coef[0] * ux + coef[1] * vy + coef[2] * ux * vy;
+                    sum += double(fullD[size_t(sy) * workW + sx]) - bias;
+                    count++;
+                }
+            }
+            outHeight[size_t(dy) * dstW + dx] = count > 0u ? float(sum / double(count)) : 0.0f;
+        }
+    }
+}
+
+void SolveHaloTiltCoefs(const std::vector<float> &fullD, uint32_t workW, uint32_t workH,
+                        const EditorAiLotusPrep &prep, double coef[3])
+{
+    std::fill(coef, coef + 3, 0.0);
+    const uint32_t hx = prep.haloX > 0u ? prep.haloX : prep.halo;
+    const uint32_t hy = prep.haloY > 0u ? prep.haloY : prep.halo;
+    if (hx == 0u || hy == 0u)
+    {
+        return;
+    }
+    double AtA[3][3] = {};
+    double Atb[3] = {};
+    BuildHaloTiltNormalEquations(fullD, workW, workH, prep, AtA, Atb);
+    if (!SolveLinearSystem3x3(AtA, Atb, coef))
+    {
+        std::fill(coef, coef + 3, 0.0);
+    }
+}
+
+void ExtractDetrendedEditorLotusDepthHeight(const EditorAiTensorNchw &pred,
+                                            const EditorAiLotusPrep &prep, uint32_t dstW,
+                                            uint32_t dstH, std::vector<float> &outHeight)
+{
+    outHeight.clear();
+    const uint32_t hx = prep.haloX > 0u ? prep.haloX : prep.halo;
+    const uint32_t hy = prep.haloY > 0u ? prep.haloY : prep.halo;
+    if (pred.channels < 3 || pred.height <= 0 || pred.width <= 0 || prep.fitW == 0u ||
+        prep.fitH == 0u || dstW == 0u || dstH == 0u)
+    {
+        return;
+    }
+    const uint32_t workW = uint32_t(pred.width);
+    const uint32_t workH = uint32_t(pred.height);
+    const size_t plane = size_t(workW) * size_t(workH);
+    if (pred.data.size() < 3u * plane || workW < prep.fitW + 2u * hx || workH < prep.fitH + 2u * hy)
+    {
+        return;
+    }
+
+    std::vector<float> fullD;
+    ComputeMeanRgbPlane01(pred, plane, fullD);
+
+    double coef[3] = {};
+    SolveHaloTiltCoefs(fullD, workW, workH, prep, coef);
+
+    BoxDownsampleDetrendedHeight(fullD, workW, prep, coef, dstW, dstH, outHeight);
+    NormalizePercentile01(outHeight);
 }
 
 void ConvertEditorNormals01ToQuakeRayRgba(const std::vector<float> &hwc01, uint32_t width,
@@ -1396,6 +2207,30 @@ void IntegrateEditorNormalMapHeight(const std::vector<uint8_t> &baseNormalRgba, 
     NormalizePercentile01(outHeight);
 }
 
+namespace
+{
+bool DispatchAiPredictionBackend(const EditorAiInferenceRequest &activeReq,
+                                 const std::filesystem::path &workerExe,
+                                 const std::filesystem::path &modelPath,
+                                 const std::atomic<bool> *cancelRequested,
+                                 EditorAiInferenceResult &res)
+{
+    if (activeReq.backend == EditorAiBackend::StableDelight)
+    {
+        return RunDelightPredictionPipeline(activeReq, workerExe, modelPath, cancelRequested, res);
+    }
+    if (activeReq.backend == EditorAiBackend::RealPlksrPbrify)
+    {
+        return RunRealPlksrUpscalePipeline(activeReq, workerExe, modelPath, cancelRequested, res);
+    }
+    if (IsEditorAiLotusBackend(activeReq.backend))
+    {
+        return RunLotusPredictionPipeline(activeReq, workerExe, modelPath, cancelRequested, res);
+    }
+    return RunDeepBumpPredictionPipeline(activeReq, workerExe, modelPath, cancelRequested, res);
+}
+} // namespace
+
 EditorAiInferenceResult RunEditorAiTextureInference(const EditorAiInferenceRequest &req,
                                                     const std::atomic<bool> *cancelRequested)
 {
@@ -1410,16 +2245,18 @@ EditorAiInferenceResult RunEditorAiTextureInference(const EditorAiInferenceReque
     if (req.mapKind == EditorAiMapKind::Emissive)
     {
         BuildLocalEmissiveMap(req.diffuseRgba, req.width, req.height, res.rawColorRgba);
+        res.outputWidth = req.width;
+        res.outputHeight = req.height;
         res.providerLabel = "Native C++";
         res.ok = true;
         return res;
     }
 
-    if (!IsEditorOnnxRuntimeAvailable(req.exeDir))
+    const std::filesystem::path workerExe = FindEditorAiWorkerExecutable(req.exeDir);
+    if (workerExe.empty())
     {
-        res.errorMessage =
-            "ONNX Runtime library missing (expected libonnxruntime next to executable or in "
-            "~/.cache/quakeray/onnx/lib).";
+        res.errorMessage = "AI inference worker missing (expected quakeray_ai_worker next to "
+                           "quakerayeditor).";
         return res;
     }
 
@@ -1427,29 +2264,37 @@ EditorAiInferenceResult RunEditorAiTextureInference(const EditorAiInferenceReque
         ResolveEditorAiModelPath(req.backend, req.exeDir, req.modelsDir);
     if (modelPath.empty())
     {
-        res.errorMessage = std::string("Missing ONNX model: ") +
+        res.errorMessage = std::string("Missing GGUF model: ") +
                            EditorAiBackendModelFilename(req.backend) + " in " +
                            DefaultEditorAiModelsDir().string();
         return res;
     }
 
-    if (IsEditorAiLotusBackend(req.backend))
-    {
-        res.ok = RunLotusPredictionPipeline(req, modelPath, cancelRequested, res);
-    }
-    else
-    {
-        res.ok = RunDeepBumpPredictionPipeline(req, modelPath, cancelRequested, res);
-    }
+    EditorAiInferenceRequest preparedStorage;
+    const bool skipPrep =
+        req.backend == EditorAiBackend::StableDelight ||
+        req.backend == EditorAiBackend::RealPlksrPbrify ||
+        req.mapKind == EditorAiMapKind::Delight || req.mapKind == EditorAiMapKind::Upscale;
+    const EditorAiInferenceRequest &activeReq =
+        skipPrep ? req : SelectPreparedAiRequest(req, preparedStorage);
+
+    res.ok =
+        DispatchAiPredictionBackend(activeReq, workerExe, modelPath, cancelRequested, res);
     if (!res.ok)
     {
         return res;
     }
 
+    if (res.outputWidth == 0u || res.outputHeight == 0u)
+    {
+        res.outputWidth = req.width;
+        res.outputHeight = req.height;
+    }
+
     if (req.mapKind == EditorAiMapKind::Gloss)
     {
-        SynthesizeGlossFromDiffuseAndHeight(req.diffuseRgba, res.rawHeight, req.width, req.height,
-                                            res.rawColorRgba);
+        SynthesizeEditorGlossFromDiffuseAndHeight(req.diffuseRgba, res.rawHeight, req.width,
+                                                  req.height, res.rawColorRgba);
     }
     return res;
 }
@@ -1686,6 +2531,13 @@ void BuildEditorNormalLitPreviewRgba(const std::vector<uint8_t> &diffuseRgba,
     }
 }
 
+void SynthesizeEditorGlossFromDiffuseAndHeight(const std::vector<uint8_t> &diffuseRgba,
+                                               const std::vector<float> &height, uint32_t width,
+                                               uint32_t heightPx, std::vector<uint8_t> &outGlossRgba)
+{
+    SynthesizeGlossFromDiffuseAndHeight(diffuseRgba, height, width, heightPx, outGlossRgba);
+}
+
 void ApplyEditorGlossAdjustments(const std::vector<uint8_t> &rawRgba, uint32_t width,
                                  uint32_t height, const EditorAiToneParams &tone,
                                  std::vector<uint8_t> &outGlossRgba)
@@ -1820,6 +2672,307 @@ void BuildEditorEmissiveCompositePreviewRgba(const std::vector<uint8_t> &diffuse
     }
 }
 
+void ApplyEditorDelightAdjustments(const std::vector<uint8_t> &diffuseRgba,
+                                   const std::vector<uint8_t> &rawDelitRgba, uint32_t width,
+                                   uint32_t height, const EditorAiDelightParams &params,
+                                   std::vector<uint8_t> &outRgba)
+{
+    const size_t pixels = size_t(width) * size_t(height);
+    if (width == 0 || height == 0 || diffuseRgba.size() != pixels * 4u ||
+        rawDelitRgba.size() != pixels * 4u)
+    {
+        outRgba.clear();
+        return;
+    }
+
+    const float strength = std::clamp(params.strength, 0.0f, 1.0f);
+    const float detailPreserve = std::clamp(params.detailPreserve, 0.0f, 1.0f);
+
+    std::vector<float> origRgb;
+    std::vector<float> origBlur;
+    if (detailPreserve > 1e-4f)
+    {
+        origRgb.resize(pixels * 3u);
+        for (size_t i = 0; i < pixels; i++)
+        {
+            origRgb[i * 3u + 0u] = float(diffuseRgba[i * 4u + 0u]) / 255.0f;
+            origRgb[i * 3u + 1u] = float(diffuseRgba[i * 4u + 1u]) / 255.0f;
+            origRgb[i * 3u + 2u] = float(diffuseRgba[i * 4u + 2u]) / 255.0f;
+        }
+        SmoothRgb3x3Pass(origRgb, width, height, params.seamless, origBlur);
+    }
+
+    outRgba.resize(pixels * 4u);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        const float origLum = RgbLuminance01(diffuseRgba[i * 4u + 0u], diffuseRgba[i * 4u + 1u],
+                                             diffuseRgba[i * 4u + 2u]);
+        const float delitLum = RgbLuminance01(rawDelitRgba[i * 4u + 0u], rawDelitRgba[i * 4u + 1u],
+                                              rawDelitRgba[i * 4u + 2u]);
+        // Reduce detail re-injection where bright highlights were stripped so glare stays cleanly removed.
+        const float glareAtten =
+            1.0f - std::clamp((origLum - delitLum) * 4.0f, 0.0f, 0.85f);
+        for (size_t c = 0; c < 3u; c++)
+        {
+            const float d0 = float(diffuseRgba[i * 4u + c]) / 255.0f;
+            const float d1 = float(rawDelitRgba[i * 4u + c]) / 255.0f;
+            float val = d0 + strength * (d1 - d0);
+            if (!origBlur.empty())
+            {
+                const float detail = d0 - origBlur[i * 3u + c];
+                val += detailPreserve * strength * glareAtten * detail;
+            }
+            outRgba[i * 4u + c] = FloatToByte(val);
+        }
+        outRgba[i * 4u + 3u] = diffuseRgba[i * 4u + 3u];
+    }
+}
+
+void BuildEditorDelightRemovedGlarePreviewRgba(const std::vector<uint8_t> &diffuseRgba,
+                                               const std::vector<uint8_t> &delitRgba,
+                                               uint32_t width, uint32_t height,
+                                               std::vector<uint8_t> &outRgba)
+{
+    const size_t pixels = size_t(width) * size_t(height);
+    if (width == 0 || height == 0 || diffuseRgba.size() != pixels * 4u ||
+        delitRgba.size() != pixels * 4u)
+    {
+        outRgba.clear();
+        return;
+    }
+
+    outRgba.resize(pixels * 4u);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        for (size_t c = 0; c < 3u; c++)
+        {
+            const float d0 = float(diffuseRgba[i * 4u + c]) / 255.0f;
+            const float d1 = float(delitRgba[i * 4u + c]) / 255.0f;
+            outRgba[i * 4u + c] = FloatToByte(std::abs(d0 - d1) * 2.0f);
+        }
+        outRgba[i * 4u + 3u] = 255u;
+    }
+}
+
+namespace
+{
+void BoxDownsample2xRgba(const std::vector<uint8_t> &rawRgba, uint32_t rawW, uint32_t rawH,
+                         std::vector<uint8_t> &outRgba, uint32_t &outW, uint32_t &outH)
+{
+    outW = rawW / 2u;
+    outH = rawH / 2u;
+    outRgba.resize(size_t(outW) * size_t(outH) * 4u);
+    for (uint32_t y = 0u; y < outH; y++)
+    {
+        const uint32_t sy = y * 2u;
+        for (uint32_t x = 0u; x < outW; x++)
+        {
+            const uint32_t sx = x * 2u;
+            const uint8_t *p00 = rawRgba.data() + (size_t(sy) * rawW + sx) * 4u;
+            const uint8_t *p10 = rawRgba.data() + (size_t(sy) * rawW + sx + 1u) * 4u;
+            const uint8_t *p01 = rawRgba.data() + (size_t(sy + 1u) * rawW + sx) * 4u;
+            const uint8_t *p11 = rawRgba.data() + (size_t(sy + 1u) * rawW + sx + 1u) * 4u;
+            uint8_t *dst = outRgba.data() + (size_t(y) * outW + x) * 4u;
+            for (int c = 0; c < 4; c++)
+            {
+                dst[c] = uint8_t(
+                    (uint32_t(p00[c]) + uint32_t(p10[c]) + uint32_t(p01[c]) + uint32_t(p11[c]) +
+                     2u) /
+                    4u);
+            }
+        }
+    }
+}
+
+void ApplyUpscaleUnsharpPass(uint32_t outW, uint32_t outH, bool seamless, float sharpen,
+                             std::vector<uint8_t> &outRgba)
+{
+    if (!(sharpen > 1e-4f))
+    {
+        return;
+    }
+    const size_t outPixels = size_t(outW) * size_t(outH);
+    std::vector<float> workRgb(outPixels * 3u);
+    for (size_t i = 0; i < outPixels; i++)
+    {
+        workRgb[i * 3u + 0u] = float(outRgba[i * 4u + 0u]) / 255.0f;
+        workRgb[i * 3u + 1u] = float(outRgba[i * 4u + 1u]) / 255.0f;
+        workRgb[i * 3u + 2u] = float(outRgba[i * 4u + 2u]) / 255.0f;
+    }
+    std::vector<float> blurredRgb;
+    SmoothRgb3x3Pass(workRgb, outW, outH, seamless, blurredRgb);
+    const float sharpAmt = sharpen * 0.6f;
+    for (size_t i = 0; i < outPixels; i++)
+    {
+        for (size_t c = 0; c < 3u; c++)
+        {
+            const float v = workRgb[i * 3u + c];
+            outRgba[i * 4u + c] = FloatToByte(v + sharpAmt * (v - blurredRgb[i * 3u + c]));
+        }
+    }
+}
+
+void BlendUpscaledWithOriginal(const EditorAiUpscaleInput &in, uint32_t outW, uint32_t outH,
+                               float strength, std::vector<uint8_t> &outRgba)
+{
+    if (!(strength < 0.999f))
+    {
+        return;
+    }
+    std::vector<uint8_t> baseResized;
+    ResizeEditorRgbaBilinear(in.origDiffuseRgba, in.origW, in.origH, outW, outH, baseResized);
+    const size_t outPixels = size_t(outW) * size_t(outH);
+    for (size_t i = 0; i < outPixels; i++)
+    {
+        for (size_t c = 0; c < 3u; c++)
+        {
+            const float o = float(baseResized[i * 4u + c]) / 255.0f;
+            const float u = float(outRgba[i * 4u + c]) / 255.0f;
+            outRgba[i * 4u + c] = FloatToByte(o + strength * (u - o));
+        }
+    }
+}
+} // namespace
+
+void ApplyEditorUpscaleAdjustments(const EditorAiUpscaleInput &in,
+                                   const EditorAiUpscaleParams &params,
+                                   std::vector<uint8_t> &outRgba, uint32_t &outW, uint32_t &outH)
+{
+    if (in.origW == 0u || in.origH == 0u || in.rawW == 0u || in.rawH == 0u ||
+        in.origDiffuseRgba.size() != size_t(in.origW) * size_t(in.origH) * 4u ||
+        in.rawUpscaledRgba.size() != size_t(in.rawW) * size_t(in.rawH) * 4u)
+    {
+        outRgba.clear();
+        outW = 0u;
+        outH = 0u;
+        return;
+    }
+
+    if (params.outputScale == 2 && in.rawW >= 2u && in.rawH >= 2u)
+    {
+        BoxDownsample2xRgba(in.rawUpscaledRgba, in.rawW, in.rawH, outRgba, outW, outH);
+    }
+    else
+    {
+        outW = in.rawW;
+        outH = in.rawH;
+        outRgba = in.rawUpscaledRgba;
+    }
+
+    ApplyUpscaleUnsharpPass(outW, outH, params.seamless, std::clamp(params.sharpen, 0.0f, 1.0f),
+                            outRgba);
+    BlendUpscaledWithOriginal(in, outW, outH, std::clamp(params.strength, 0.0f, 1.0f), outRgba);
+}
+
+void BuildEditorUpscaleComparePreviewRgba(const std::vector<uint8_t> &origDiffuseRgba,
+                                          uint32_t origW, uint32_t origH,
+                                          const std::vector<uint8_t> &upscaledRgba, uint32_t outW,
+                                          uint32_t outH, std::vector<uint8_t> &outRgba)
+{
+    if (origW == 0u || origH == 0u || outW == 0u || outH == 0u ||
+        origDiffuseRgba.size() != size_t(origW) * size_t(origH) * 4u ||
+        upscaledRgba.size() != size_t(outW) * size_t(outH) * 4u)
+    {
+        outRgba.clear();
+        return;
+    }
+
+    std::vector<uint8_t> origResized;
+    ResizeEditorRgbaBilinear(origDiffuseRgba, origW, origH, outW, outH, origResized);
+    const size_t pixels = size_t(outW) * size_t(outH);
+    outRgba.resize(pixels * 4u);
+    const uint32_t splitX = outW / 2u;
+    for (uint32_t y = 0u; y < outH; y++)
+    {
+        for (uint32_t x = 0u; x < outW; x++)
+        {
+            const size_t idx = (size_t(y) * outW + x) * 4u;
+            if (x == splitX || (splitX > 0u && x == splitX - 1u))
+            {
+                outRgba[idx + 0u] = 245u;
+                outRgba[idx + 1u] = 245u;
+                outRgba[idx + 2u] = 245u;
+                outRgba[idx + 3u] = 255u;
+                continue;
+            }
+            const std::vector<uint8_t> &src = (x < splitX) ? origResized : upscaledRgba;
+            outRgba[idx + 0u] = src[idx + 0u];
+            outRgba[idx + 1u] = src[idx + 1u];
+            outRgba[idx + 2u] = src[idx + 2u];
+            outRgba[idx + 3u] = 255u;
+        }
+    }
+}
+
+void BuildEditorUpscaleDetailPreviewRgba(const std::vector<uint8_t> &origDiffuseRgba,
+                                         uint32_t origW, uint32_t origH,
+                                         const std::vector<uint8_t> &upscaledRgba, uint32_t outW,
+                                         uint32_t outH, std::vector<uint8_t> &outRgba)
+{
+    if (origW == 0u || origH == 0u || outW == 0u || outH == 0u ||
+        origDiffuseRgba.size() != size_t(origW) * size_t(origH) * 4u ||
+        upscaledRgba.size() != size_t(outW) * size_t(outH) * 4u)
+    {
+        outRgba.clear();
+        return;
+    }
+
+    std::vector<uint8_t> origResized;
+    ResizeEditorRgbaBilinear(origDiffuseRgba, origW, origH, outW, outH, origResized);
+    const size_t pixels = size_t(outW) * size_t(outH);
+    outRgba.resize(pixels * 4u);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        for (size_t c = 0; c < 3u; c++)
+        {
+            const float o = float(origResized[i * 4u + c]) / 255.0f;
+            const float u = float(upscaledRgba[i * 4u + c]) / 255.0f;
+            outRgba[i * 4u + c] = FloatToByte(0.5f + 2.0f * (u - o));
+        }
+        outRgba[i * 4u + 3u] = 255u;
+    }
+}
+
+void PreprocessEditorAiDiffuse(const std::vector<uint8_t> &diffuseRgba, uint32_t width,
+                               uint32_t height, const EditorAiDiffusePrepParams &params,
+                               std::vector<uint8_t> &outRgba)
+{
+    const size_t pixels = size_t(width) * size_t(height);
+    if (width == 0 || height == 0 || diffuseRgba.size() != pixels * 4u)
+    {
+        outRgba.clear();
+        return;
+    }
+
+    const float flatten = std::clamp(params.flattenLighting, 0.0f, 1.0f);
+    const float smooth = std::clamp(params.preSmooth, 0.0f, 1.0f);
+    if (!(flatten > 1e-4f) && !(smooth > 1e-4f))
+    {
+        outRgba = diffuseRgba;
+        return;
+    }
+
+    std::vector<float> rgb(pixels * 3u);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        rgb[i * 3u + 0u] = float(diffuseRgba[i * 4u + 0u]) / 255.0f;
+        rgb[i * 3u + 1u] = float(diffuseRgba[i * 4u + 1u]) / 255.0f;
+        rgb[i * 3u + 2u] = float(diffuseRgba[i * 4u + 2u]) / 255.0f;
+    }
+
+    ApplyPreSmoothRgb(width, height, params, rgb);
+    ApplyFlattenLightingRgb(width, height, params, rgb);
+
+    outRgba.resize(pixels * 4u);
+    for (size_t i = 0; i < pixels; i++)
+    {
+        outRgba[i * 4u + 0u] = FloatToByte(rgb[i * 3u + 0u]);
+        outRgba[i * 4u + 1u] = FloatToByte(rgb[i * 3u + 1u]);
+        outRgba[i * 4u + 2u] = FloatToByte(rgb[i * 3u + 2u]);
+        outRgba[i * 4u + 3u] = diffuseRgba[i * 4u + 3u];
+    }
+}
+
 bool WriteEditorRgbaTga(const std::filesystem::path &path, uint32_t width, uint32_t height,
                         const std::vector<uint8_t> &rgba)
 {
@@ -1911,4 +3064,40 @@ std::string BuildGeneratedTextureRelativePath(const std::string &materialName, E
         stem = "material";
     }
     return "textures/ai_generated/" + stem + "_" + EditorAiMapKindId(kind) + ".tga";
+}
+
+std::string BuildUniqueGeneratedTextureRelativePath(
+    const std::filesystem::path &outRoot, const std::string &materialName, EditorAiMapKind kind,
+    const std::function<bool(const std::string &)> &extraExists)
+{
+    std::string base = BuildGeneratedTextureRelativePath(materialName, kind);
+    const auto isTaken = [&outRoot, &extraExists](const std::string &candidate) {
+        std::error_code ec;
+        if (std::filesystem::exists(outRoot / candidate, ec))
+        {
+            return true;
+        }
+        return extraExists && extraExists(candidate);
+    };
+
+    if (!isTaken(base))
+    {
+        return base;
+    }
+
+    const size_t dot = base.rfind(".tga");
+    const std::string prefix = (dot != std::string::npos) ? base.substr(0, dot) : base;
+    const std::string ext = (dot != std::string::npos) ? base.substr(dot) : ".tga";
+    for (uint32_t suffix = 2u; suffix < 100000u; suffix++)
+    {
+        std::string candidate = prefix;
+        candidate += '_';
+        candidate += std::to_string(suffix);
+        candidate += ext;
+        if (!isTaken(candidate))
+        {
+            return candidate;
+        }
+    }
+    return {};
 }

@@ -545,25 +545,41 @@ EditorAiModelDownloadSpec GetEditorAiModelDownloadSpec(EditorAiBackend backend)
     {
     case EditorAiBackend::LotusNormalD:
         return {
-            "lotus-normal-d-v1-1.onnx",
-            "https://huggingface.co/f13d/lotus-onnx/resolve/main/lotus-normal-d-v1-1.onnx",
-            "19e9b74fd75d32b5d54c2790ef3d844eab0009a59b42201072856019c389fadc",
-            1904363005ULL,
+            "lotus-normal-d-v1-1-fp16.gguf",
+            "https://huggingface.co/f13d/lotus-onnx/resolve/main/lotus-normal-d-v1-1-fp16.gguf",
+            "5be392eed0cf3bf6d3ad18b621896517764955a012f91ee99e149fb1c19edbc1",
+            1896418592ULL,
         };
     case EditorAiBackend::LotusDepthD:
         return {
-            "lotus-depth-d-v2-0-disparity.onnx",
+            "lotus-depth-d-v2-0-disparity-fp16.gguf",
             "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
-            "lotus-depth-d-v2-0-disparity.onnx",
-            "0918caff377306126e4a841260a1d20041d432584e26a37f6f8e2c87c2de1bc4",
-            1904363005ULL,
+            "lotus-depth-d-v2-0-disparity-fp16.gguf",
+            "8a6833f61391e97e3a33eb3a0fb9fda5243e83f7bacde1660a13bd418b0110c4",
+            1896418592ULL,
         };
     case EditorAiBackend::DeepBump:
         return {
-            "deepbump256.onnx",
-            "https://github.com/HugoTini/DeepBump/raw/master/deepbump256.onnx",
-            "3a2ababc5fa652b19040a0f3d639b71826368e52ad805cf70ffb0e7c96a54d67",
-            26706979ULL,
+            "deepbump256-fp16.gguf",
+            "https://huggingface.co/f13d/lotus-onnx/resolve/main/deepbump256-fp16.gguf",
+            "dafc52f7219ec38b085c54a460017605b8b1eab4b6de274e6a584c4de839490d",
+            13267104ULL,
+        };
+    case EditorAiBackend::StableDelight:
+        return {
+            "yoso-delight-v0-4-base-fp16.gguf",
+            "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+            "yoso-delight-v0-4-base-fp16.gguf",
+            "5abe8aa64ec7ccf94110fb154ca7d9f1ad94256eb24f5e5c8aec03daf3ed754d",
+            2596045792ULL,
+        };
+    case EditorAiBackend::RealPlksrPbrify:
+        return {
+            "4x-pbrify-rplksrd-v3-fp16.gguf",
+            "https://huggingface.co/f13d/lotus-onnx/resolve/main/"
+            "4x-pbrify-rplksrd-v3-fp16.gguf",
+            "492af1d06fb024a55fb3a744fe560bb2bdcca72ef7606355c8c99b325b8a3cbf",
+            14854656ULL,
         };
     }
     return GetEditorAiModelDownloadSpec(EditorAiBackend::LotusNormalD);
