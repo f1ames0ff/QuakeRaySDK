@@ -236,6 +236,7 @@ struct EditorMaterialParams
     // 1 (rt_material.c's rt_mat_reset), which is what a light material's colour is scaled by.
     float emissiveFactor = 1.0f;
     bool luma = false;
+    bool emissiveEnabled = false;
     bool hasColorEmissive = false;
 
     // Luma, luma_blend: -1 follows the global rt_emis_blend the way the game's cvar value does,
@@ -256,6 +257,7 @@ struct EditorMaterialParams
     float lumaFeather = 0.0f;
 
     // Gloss: procedural roughness/metalness mask blocks evaluated when texture_gloss is empty.
+    bool glossEnabled = false;
     bool hasColorGloss = false;
     std::vector<EditorGlossBlock> glossBlocks;
     float glossThreshold = 0.02f;
@@ -287,6 +289,7 @@ struct EditorMaterialParams
     // Subsurface scattering: optional explicit mask texture, global strength in [0, 1], linear
     // scatter tint, scatter radius in meters (clamped to [0, 1]), and colour-key / polygon
     // blocks that bake per-pixel SSS strength into Normal.a.
+    bool sssEnabled = false;
     std::string textureSss;
     float sssStrength = 0.0f;
     float sssColor[3] = { 1.0f, 0.35f, 0.2f };
@@ -451,6 +454,7 @@ private:
         int32_t lumaBlend = -1;
         bool metalnessFromNormalAlpha = false;
         bool hasRoughnessOverride = false;
+        bool useEmbeddedPbrMasks = false;
         bool mirror = false;
         bool neutralMirrorAlbedo = false;
         bool enabled = true;

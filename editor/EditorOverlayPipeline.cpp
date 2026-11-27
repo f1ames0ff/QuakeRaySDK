@@ -1386,7 +1386,8 @@ const EditorTexture *FindEditorSurfaceTexture(const EditorScene &scene,
 
 bool EditorTextureHasAutoEmissiveSource(const EditorTexture *tex, const EditorMaterialParams &params)
 {
-    if (!params.enabled || params.luma || params.emissiveFactor <= 1.0e-4f)
+    if (!params.enabled || !params.emissiveEnabled || params.luma ||
+        params.emissiveFactor <= 1.0e-4f)
     {
         return false;
     }
@@ -1453,7 +1454,7 @@ bool EditorSurfaceEmissiveBelongsToOverlayStage(const EditorScene &scene,
                                                 const EditorMaterialParams &params)
 {
     const EditorTexture *tex = FindEditorSurfaceTexture(scene, surface);
-    if (tex == nullptr || tex->shaderStages.empty())
+    if (!params.emissiveEnabled || tex == nullptr || tex->shaderStages.empty())
     {
         return false;
     }

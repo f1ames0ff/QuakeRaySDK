@@ -155,6 +155,7 @@ bool TestPassThroughAndInstanceLayout()
 EditorMaterialParams MakeSkinTestParams()
 {
     EditorMaterialParams params;
+    params.sssEnabled = true;
     params.sssStrength = 0.7f;
     params.sssRadius = 0.05f;
     params.sssColor[0] = 0.9f;
@@ -193,7 +194,18 @@ bool TestApplyEditorSubsurface()
     ApplyEditorMaterial(params, QR_GEOMETRY_PASS_THROUGH_TYPE_MIRROR, upload);
     const bool cleared = (upload.flags & QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT) == 0u &&
                          upload.subsurfaceRadius == 0.0f && upload.subsurfaceStrength == 0.0f;
-    return Check(cleared, "ApplyEditorMaterial failed to suppress SSS on mirror");
+    if (!Check(cleared, "ApplyEditorMaterial failed to suppress SSS on mirror"))
+    {
+        return false;
+    }
+
+    EditorMaterialParams disabledParams = params;
+    disabledParams.sssEnabled = false;
+    ApplyEditorMaterial(disabledParams, QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE, upload);
+    const bool toggleOffCleared =
+        (upload.flags & QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT) == 0u &&
+        upload.subsurfaceRadius == 0.0f && upload.subsurfaceStrength == 0.0f;
+    return Check(toggleOffCleared, "ApplyEditorMaterial failed to suppress SSS when sssEnabled=false");
 }
 
 bool TestColorKeyAndFeatherSssMask()
@@ -293,9 +305,11 @@ bool TestUniformSssBakePreservesMetalness(const EditorScene &scene, EditorMateri
     };
 
     EditorMaterialParams uniformSss;
+    uniformSss.glossEnabled = true;
     uniformSss.normalTexture = "skin_nrm";
     uniformSss.metalnessFromNormalAlpha = true;
     uniformSss.metalnessFactor = 1.0f;
+    uniformSss.sssEnabled = true;
     uniformSss.sssStrength = 1.0f;
     uniformSss.sssRadius = 0.03f;
 
@@ -314,6 +328,7 @@ bool TestMaskedSssBakeSynthesizesNormal(const EditorScene &scene, EditorMaterial
     };
 
     EditorMaterialParams maskedNoNormal;
+    maskedNoNormal.sssEnabled = true;
     maskedNoNormal.sssStrength = 1.0f;
     maskedNoNormal.sssRadius = 0.03f;
     EditorSssBlock topHalf;
@@ -426,6 +441,7 @@ bool TestMirrorEnvAndDiffuseBake()
         bakes.Get(fakeInstance, "plain_metal", envMirror, scene, {}, resolveTex);
 
     EditorMaterialParams bakedPlainMirror = envMirror;
+    bakedPlainMirror.glossEnabled = true;
     bakedPlainMirror.glossTexture = "env_glow";
     const QrMaterial bakedPlainMirrorMat =
         bakes.Get(fakeInstance, "plain_metal", bakedPlainMirror, scene, {}, resolveTex);
@@ -455,6 +471,7 @@ bool TestDisabledEmissiveStageSuppressesBake()
     const uint32_t destroyBefore = g_destroyCount;
 
     EditorMaterialParams maskedGlow;
+    maskedGlow.emissiveEnabled = true;
     maskedGlow.emissiveTexture = "env_glow";
     maskedGlow.disabledStagesMask = (1u << 1);
     const QrMaterial suppressedGlowMat =

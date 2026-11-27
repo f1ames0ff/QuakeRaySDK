@@ -73,6 +73,8 @@ public:
         Subsurface,
     };
 
+    static void AutoEnableMaterialSlot(EditorMaterialParams &params, EditorTextureSlot slot);
+
     enum class GizmoPart
     {
         None,
@@ -439,6 +441,8 @@ private:
     void DrawModeChooser();
     void DrawMaterialEditorPanel();
     void DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeader);
+    void DrawMaterialPbrSectionsTail(const std::string &matName, EditorMaterialParams &params,
+                                     const EditorMaterialParams &base, int32_t materialIndex);
     void DrawMaterialEditorMaterialsTab();
     void DrawMaterialEditorModelsTab();
     void DrawModelTabSkinSelector();
@@ -506,6 +510,7 @@ private:
     void SetSingleLightSelection(int32_t light, bool lightCustom);
     void HandleLightModePick(const float direction[3], float surfaceDistance, bool hitSurface);
     void OpenTextureBrowserForSlot(const std::string &materialName, EditorTextureSlot slot);
+    void ApplyTextureBrowserSelection();
     void OpenAiTextureGeneratorDialog(int32_t materialIndex, EditorTextureSlot slot);
     void DrawAiTextureGeneratorDialog();
     bool IsAiTextureDialogOpen() const;

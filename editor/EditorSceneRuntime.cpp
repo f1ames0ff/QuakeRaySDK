@@ -857,6 +857,11 @@ EditorMaterialParams EditorSceneRuntime::DefaultMaterialParamsFor(const std::str
         if (!tex->defaultEmissiveTexture.empty())
         {
             params.emissiveTexture = tex->defaultEmissiveTexture;
+            params.emissiveEnabled = true;
+        }
+        if (tex->isEmissiveShader || !tex->fullbright.empty())
+        {
+            params.emissiveEnabled = true;
         }
     }
     return params;

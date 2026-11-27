@@ -67,6 +67,27 @@ void EditorGuiApplyStyle(float displayWidth, float displayHeight);
 // Returns the active UI scale factor computed by EditorGuiApplyStyle (1.0 at <=1080p, 1.5 at 4K).
 float EditorGuiScale();
 
+// Returns the DPI-scaled square size for icon action buttons matching widget frame height.
+float EditorGuiIconButtonSize();
+
+// Computes a button width guaranteed to fit `label` with symmetric horizontal padding.
+float EditorGuiFitButtonWidth(const char *label, float minUnscaledWidth = 0.0f);
+
+// Computes a combo width wide enough for the longest entry in `items` plus the dropdown arrow.
+float EditorGuiComboWidth(const char *const *items, int32_t itemCount, float minUnscaledWidth = 0.0f);
+
+// Returns the exact horizontal width occupied by EditorGuiBlockActions(id, ..., canRemove).
+float EditorGuiBlockActionsWidth(bool canRemove);
+
+// Returns available content width on the current row, leaving clear breathing room before Y scrollbars.
+float EditorGuiRowAvailWidth();
+
+// Truncates `text` with "..." when its rendered width exceeds `maxWidth`.
+std::string EditorGuiEllipsize(const char *text, float maxWidth);
+
+// Lays out a row of buttons with guaranteed text fit; spans edge-to-edge or wraps gracefully.
+int32_t EditorGuiButtonRow(const char *const *labels, const bool *enabled, int32_t count);
+
 // Begins the right-docked inspector panel window with a styled header bar.
 bool EditorGuiBeginPanel(const char *title, float displayWidth, float displayHeight);
 
