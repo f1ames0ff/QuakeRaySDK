@@ -87,6 +87,7 @@ The C++ contracts lower to `qray.h`; they do not create a second scene path.
 - A host needing NVRHI resources must use the returned device and must not
   create a second device or separate swapchain for the same target.
 - Destroy host-created resources before `qrDestroyInstance`; destroy the
-  instance before the `HWND`.
+  instance before destroying the platform window (`HWND` on Windows, Xlib
+  `Window`/`Display` on Linux).
 - One `qrDrawFrame` represents one camera and one SDK present. Schedule
   additional views as additional frames or flatten them on the host.

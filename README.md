@@ -6,12 +6,16 @@ host engine.
 
 Start with [AGENTS.md](AGENTS.md) and [docs/agent-integration-guide.md](docs/agent-integration-guide.md) (**QuakeRaySDK Integration Guide for Agents**) for strict SDK vs. host boundaries and engine adapter integration rules, or [docs/README.md](docs/README.md) for the complete documentation map.
 
-The renderer core does not include Quake game logic, map loaders, or host
-assets. The QuakeRay engine is the reference host; textures, materials, and
-cursor artwork stay in the host repository under `gfx/`. The optional
-`quakerayeditor` target is a separate host around `qray::renderer`; it includes
-an OBJ/BSP29 preview path with picking and material/light/render authoring.
-Its meter conversion and generic authoring core remain future editor work.
+The renderer core does not include game logic, map loaders, or host-specific
+assets. Bundled SDK fallback textures (`BlueNoise_LDR_RGBA_128.png` and
+`WaterNormal_n.png`) ship under `Assets/textures/`, while host-specific game
+textures, materials, and UI artwork stay in the host repository. The optional
+`quakerayeditor` target is a standalone host around `qray::renderer`; it
+includes OBJ/BSP loading, archive mounting (`.pak`/`.pk3`/`.pkz`/`.zip`),
+pluggable `EditorFormatAdapter` hooks, meter conversion via `EditorSpatial`
+(`qrSetSpatialConvention` + 40 units/m boundary), picking, material/light/render
+authoring, local Vulkan AI PBR texture generation, and `EditorSceneRuntime`
+shared with runtime hosts.
 
 ## Package contents
 
@@ -22,6 +26,8 @@ Its meter conversion and generic authoring core remain future editor work.
   contracts over the C ABI.
 - `Include/qray/gpu_context.h` — SDK-owned shared NVRHI/Vulkan context,
   create-time requirements and render-frame host callbacks.
+- `Assets/textures/` — bundled fallback runtime textures
+  (`BlueNoise_LDR_RGBA_128.png`, `WaterNormal_n.png`).
 - `Source/` — renderer, RHI passes, lighting, shaders, and the FidelityFX API.
 - `cmake/qray_rendererConfig.cmake.in` — installed package config.
 - `cmake/nvrhi-max-binding-layouts.patch` — required NVRHI pin adjustment for the RT pipelines.
@@ -31,6 +37,7 @@ Its meter conversion and generic authoring core remain future editor work.
 - `docs/agent-integration-guide.md` — QuakeRaySDK Integration Guide for Agents (runtime & `EditorFormatAdapter` guide and pitfalls).
 - `docs/api.md` — concise catalogue of the complete public renderer API.
 - `docs/host-contract.md` — adapter boundary and legacy-renderer feature mapping.
+- `docs/host-driver-contract.md` — C++20 `QraySceneAsset`, frame views/updates, `IQrayHost`, and `QraySidecar` contracts.
 - `docs/gpu-context.md` — device ownership, requirements, shared handles and
   frame protocol for NVRHI hosts.
 - `docs/sky-and-atmosphere.md` — procedural sky, volumetric clouds, god rays and units.
@@ -40,11 +47,13 @@ Its meter conversion and generic authoring core remain future editor work.
 - `docs/host-feature-matrix.md` — feature-to-ABI cross-reference for new hosts.
 - `docs/spatial-contract.md` — meter-valued inputs, orientation, and conversion contract.
 - `docs/embedding.md` — host integration guide.
+- `docs/editor-parity.md` — standalone editor feature parity checklist and verification notes.
 
 ## Requirements
 
-- Windows with Visual Studio 2022 and CMake 3.23 or newer (the FidelityFX SDK
-  source build requires 3.23). The renderer's own minimum is 3.20.
+- Windows with Visual Studio 2022 (Win32 surface) or Linux with Clang/GCC and
+  X11/Xlib headers (`QR_USE_SURFACE_XLIB`), and CMake 3.23 or newer (the
+  FidelityFX SDK source build requires 3.23; the renderer's own minimum is 3.20).
 - Vulkan SDK with headers new enough for NVRHI (Vulkan 1.4.318 or newer).
 - NVRHI source compatible with pin `d0c8e30d5f8d58c3b838b06aa1d8d0a912bea076`,
   with `c_MaxBindingLayouts` raised to at least 13 (the patch sets it to 16),
@@ -123,15 +132,17 @@ include/qray/qray.h
 include/qray/host_contract.h
 include/qray/gpu_context.h
 include/ffx/ffx_api/...
-lib/renderer.lib
-lib/amd_fidelityfx_vk.lib
-bin/amd_fidelityfx_vk.dll
+lib/renderer.lib                 (Windows) / lib/librenderer.a (Linux)
+lib/amd_fidelityfx_vk.lib        (Windows)
+bin/amd_fidelityfx_vk.dll        (Windows)
+lib/libamd_fidelityfx_vk.so      (Linux, when present)
 lib/cmake/qray_renderer/qray_rendererConfig.cmake
-share/doc/quakeray/...
+share/doc/quakeray/...           (AGENTS.md, docs/*.md, NVRHI patch)
 ```
 
-The imported target carries `QR_STATIC`, `QR_USE_SURFACE_WIN32` and `NOMINMAX`,
-so a host includes the C ABI normally without redefining those switches:
+The imported target carries `QR_STATIC` plus `QR_USE_SURFACE_WIN32` and
+`NOMINMAX` on Windows, or `QR_USE_SURFACE_XLIB` on Linux, so a host includes
+the C ABI normally without redefining those switches:
 
 ```cmake
 find_package(Vulkan REQUIRED)
@@ -141,7 +152,7 @@ target_link_libraries(my_host PRIVATE qray::renderer)
 ```
 
 The package config checks for `nvrhi` and `nvrhi_vk`, resolves the installed
-FidelityFX provider, and exposes `qray::renderer`.
+Windows `qray::ffx` target, and exposes `qray::renderer`.
 
 ## Spatial contract
 
@@ -184,9 +195,13 @@ previous request is queued or pending. `includeUi = QR_FALSE` and
 
 ## Scope
 
-The SDK is a source-level package. It owns GPU resources and acceleration
-structures; a host supplies scene uploads through the `Qr*` contract in
-`qray.h`. Embedded/device-sharing integration and non-Windows targets are not
+The SDK is a source-level package supporting Windows (Win32) and Linux
+(X11/Xlib via `QR_USE_SURFACE_XLIB`). It owns the Vulkan/NVRHI device,
+swapchain, GPU resources, and acceleration structures; a host supplies scene
+uploads through the `Qr*` C ABI in `qray.h` (or the C++20 `host_contract.h`
+layer) and may share the SDK-owned Vulkan/NVRHI device and frame callbacks
+through `Include/qray/gpu_context.h` (see [docs/gpu-context.md](docs/gpu-context.md)).
+Host-owned external `VkDevice` injection and native Wayland surfaces are not
 part of the current package.
 
 `rayLength` is expressed in meters up to 250,000 m; the shader sky sentinel

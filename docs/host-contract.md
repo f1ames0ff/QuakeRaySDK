@@ -21,10 +21,11 @@ in [host-driver-contract.md](host-driver-contract.md).
 
 ## 1. Boundary
 
-QuakeRaySDK owns the Win32 surface integration, Vulkan/NVRHI device, render
-targets, acceleration structures, lighting runtime and presentation. A host
-owns the game loop, simulation, map/model/texture parsing, visibility,
-animation, audio, input and UI construction.
+QuakeRaySDK owns the platform surface integration (Win32 on Windows, X11/Xlib
+via `QR_USE_SURFACE_XLIB` on Linux), Vulkan/NVRHI device, render targets,
+acceleration structures, lighting runtime and presentation. A host owns the
+game loop, simulation, map/model/texture parsing, visibility, animation, audio,
+input and UI construction.
 
 A C++ NVRHI host can also use the SDK-owned device directly. It declares device
 requirements before creation, retrieves the borrowed shared context through
@@ -92,7 +93,7 @@ and early-shader pipelines of this period.
 | Source concept | Supported mapping |
 |---|---|
 | Opaque texture | `pDataAlbedoAlpha`; `QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE` |
-| Alpha-tested cutout | Albedo alpha plus `ALPHA_TESTED`; traced geometry may also set `QR_GEOMETRY_UPLOAD_ALPHA_TRANSMISSION_BIT` |
+| Alpha-tested cutout | Albedo alpha plus `QR_GEOMETRY_PASS_THROUGH_TYPE_ALPHA_TESTED` (`RtAlphaTest*.rahit.hlsl` rejects hits where `(r+g+b)/3 * a + a < 0.5`). Optional `QR_GEOMETRY_UPLOAD_ALPHA_TRANSMISSION_BIT` enables stochastic binary transmission (`rand < 1 - a`), not smooth ordered blending; prefer `qrUploadRasterizedGeometry` for translucent FX, decals, and soft sprites |
 | Roughness/metallic/emission | `pDataRoughnessMetallicEmission` using `QrTextureSwizzling`, or per-instance defaults |
 | Tangent-space normal map | `pDataNormal`; renderer preprocess derives the tangent basis |
 | Animated texture frames | `qrCreateAnimatedMaterial` and `qrChangeAnimatedMaterialFrame` |
@@ -190,7 +191,7 @@ evidence:
 
 | Check | Evidence |
 |---|---|
-| Package | A clean consumer links `qray::renderer` without adding `QR_STATIC`, `QR_USE_SURFACE_WIN32` or `NOMINMAX` manually |
+| Package | A clean consumer links `qray::renderer` without adding `QR_STATIC`, `QR_USE_SURFACE_WIN32` / `NOMINMAX` (Windows), or `QR_USE_SURFACE_XLIB` (Linux) manually |
 | Spatial | Identity, Y-up and mirrored meter scenes match the SDK's twin test |
 | Geometry | Indexed and non-indexed triangles, arbitrary instance transforms, UV layers and stable IDs render without validation errors |
 | Opaque/cutout | Alpha-tested silhouettes and depth behavior match the host reference |

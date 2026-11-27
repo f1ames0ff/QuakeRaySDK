@@ -52,11 +52,12 @@ QrSpatialConvention identity = {
 };
 ```
 
-`reserved0` and all entries of `reserved` must be zero. QuakeRay uses the
-identity orientation, but its host adapter converts Quake units to meters
-before each spatial API call. If the setter is not called, the SDK assumes
-identity axes and meter-valued inputs; it does not accept legacy Quake-unit
-values.
+`reserved0` and all entries of `reserved` must be zero. QuakeRay and
+`quakerayeditor` use the identity orientation and convert Quake units to meters
+at the SDK boundary using the reference scale of **40 Quake units per meter
+(`0.025 m/unit`, `kEditorUnitsPerMeter = 40.0f`)**, matching `VulkanDevice.cpp`
+and `EditorSpatial`. If the setter is not called, the SDK assumes identity axes
+and meter-valued inputs; it does not accept legacy Quake-unit values.
 
 The supported conventions are right-handed or left-handed, axis-aligned signed
 permutations of the host axes. Unit scale is fixed by the meter contract and is
@@ -216,7 +217,14 @@ twin frame cannot make the light visible.
 `halfExtinctionDistance` are meter-valued lengths.
 
 Level fog density and volumetric scattering are per meter; the SDK keeps them
-on that meter basis. Fog volume `pointA` and `pointB` keep their
+on that meter basis. Note that in the active Q2RTX composition path
+(`coreQ2RTX = 1u`), `CmPrepareFinal.comp.hlsl` early-returns from legacy
+volumetric fog, so `volumetricFar` (bounding the volumetric / froxel
+light-shaft frustum) is the only active `QrDrawFrameVolumetricParams` field;
+`Source/Shaders/HLSL/CmGodRays.comp.hlsl` also retains Q2RTX's internal
+`Q2_UNIT_IN_METERS = 0.0254` constant for its march-step heuristic (`getStep`),
+while public SDK inputs remain strictly metric (`0.025 m/unit` for 40 u/m
+Quake-scale hosts). Fog volume `pointA` and `pointB` keep their
 order; `softface` parity continues to name the `pointA`/`pointB` side while its
 axis is remapped to canonical space. The `acidDensity` coefficient is an
 artistic dimensionless density multiplier; it is not converted. Hosts that

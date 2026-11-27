@@ -41,8 +41,8 @@ no implementation.
 
 | Feature | State | Notes |
 | --- | --- | --- |
-| Metric boundary | done | The editor is a host, so `EditorSpatial.{h,cpp}` is the one place its Quake units become the meters API 1.06 takes: `EditorMetersGeometry`, `EditorMetersWorldLights`, `EditorMetersSphericalLight`/`EditorMetersSpotLight`, `EditorMetersClusterLightSource`, `EditorMetersAreaLight` and `EditorDrawFrame`. Every conversion is the one `Quake/qr_spatial_adapter.cpp` applies to the same field, so a level lit here is lit the way the game lights it |
-| Load a BSP map with per-surface textures | done | `LoadEditorSceneBsp` |
+| Metric boundary | done | The editor is a host, so `EditorSpatial.{h,cpp}` is the one place its Quake units (40 per meter, `kEditorUnitsPerMeter`) become the meters `QR_API_VERSION 1.07.0000` takes: `EditorMetersGeometry`, `EditorMetersWorldLights`, `EditorMetersSphericalLight`/`EditorMetersSpotLight`, `EditorMetersClusterLightSource`, `EditorMetersAreaLight` and `EditorDrawFrame`. Every conversion is the one `Quake/qr_spatial_adapter.cpp` applies to the same field, so a level lit here is lit the way the game lights it |
+| Load a BSP map with per-surface textures | done | `LoadEditorSceneBsp` / `EditorAssetSource` (loose directories, `.pak`, `.pkz`, `.pk3`, `.zip`, plus pluggable `EditorFormatAdapter` loaders) |
 | Free-fly camera and fly speed | done | `UpdateCamera` |
 | Pick a surface under the cursor | done | `PickSurface` |
 | Pick a light under the cursor | done | `PickLight` |
@@ -51,14 +51,14 @@ no implementation.
 | Map light radius authoring | done | `Radius` slider, reaches `qrUploadSphericalLight` every frame |
 | Sun intensity, azimuth, elevation, angular size, time of day, atmosphere, moon & stars | done | `Sun`, `Time of Day`, `Atmosphere`, `Moon & Stars` groups (`DrawGlobalSkySection` / `DrawGlobalTimeAndNightSection` in `editor/EditorPanels.cpp`): manual `rt_physical_sun` / `rt_sky_sun*`, 24-hour `rt_sky_time_enable` / `rt_sky_time` / speed / latitude / azimuth with dawn/noon/sunset/twilight/night presets, `atmosphere_density` / `mie` / `ozone`, and `rt_sky_stars*` / `rt_sky_moon*`; `ComputeEditorCelestialFrame` and `EvalEditorSunGroundTransmittance` match host sun/moon ephemeris and sunset transmittance |
 | Surface material read-out | done | texture name and pass-through kind; a surface pick also selects its material in the `Materials` tab |
-| Material parameters (32 of them, per animation frame) | done | `EditorMaterial.{h,cpp}`; all 32 of the game's parameters, one material per texture name, applied by re-uploading the static scene. The six that need a texture the SDK cannot carry are baked by `EditorMaterialBakes`, which synthesises the albedo/normal/roughness-metallic-emission triplet the way `gl_texmgr.c` does, and `texture_overlay` is composited into that same albedo. The six `light_*` keys are authored as data rather than uploaded: the panel shows them read-only and `Regenerate from map` writes them, because a light a material casts is the game's, not the SDK's. `force_rasterize` is the one key nothing in the tracer reads -- it picks the game's rasterizer path for alias models and sprites -- so it is carried as data the same way. [Materials](#materials) lists every key against the field it reaches |
+| Material parameters (full PBR, DTAL, SSS, POM & toggle schema) | done | `EditorMaterial.{h,cpp}` and `EditorPanels.cpp`; one material per texture name, applied by re-uploading the static scene and refreshing DTAL (`EditorDtalPipeline`). Synthesized channels (`texture_normals`, `texture_height`, `texture_emissive`, `texture_overlay`, `texture_gloss`, `texture_sss`, `bump_scale`, `metalness_from_normal_alpha`, `transparency`, `luma_blend`, and `luma`/`gloss`/`sss` colour-key/polygon/brush masks) are baked by `EditorMaterialBakes`. Emissive DTAL controls (`light_color`, `light_brightness`, `light_focus`, `light_focus_soft`, `light_projector`, `light_min_area`, `light_shafts*`) are editable in the inspector and feed `EditorDtalPipeline`, while `force_rasterize` is preserved as data for host alias/sprite raster paths. [Materials](#materials) lists every key against the field it reaches |
 | Texture browser with previews and search | done | `DrawTextureBrowser`; a grid of the scene's own textures with a name filter, the picked texture outlined in the game's orange, and `Select` / `NONE` writing `texture_base` |
 | HiDPI inspector panel scaling | done | `EditorGuiScale`, `EditorGuiFitButtonWidth`, `EditorGuiComboWidth`, `EditorGuiButtonRow` (`editor/EditorGui.h`) scale layout cleanly across 1080p (`1.0x`) and 4K (`1.5x`) displays |
 | Isolated 4-tab AI texture generation (`ggml-vulkan`) | done | `EditorAiDialog` + `quakeray_ai_worker` (`editor/ai_worker/`): Upscale (`4x-PBRify_RPLKSRd_V3`), De-lighting (`StableDelight`), Normals (`DeepBump`), Depth (`Lotus Depth v2`), plus `EditorAiModelDownload` HTTPS GGUF downloader |
 | Relief Parallax Occlusion Mapping (`texture_height` / `parallax_scale`) | done | `EditorTextureSlot::Height` + `parallax_scale` (`layerColors[2].data[2]`); `setupParallaxGeometry` / `computeParallaxOcclusionPrimary` / `computeParallaxOcclusionRefl` / `computeParallaxCavityAO` in `Source/Shaders/HitInfo.hlsli`; bypassed on glass, water, SSS, and overlay-alpha materials |
 | Non-destructive PBR section master toggles | done | `emissive_enabled`, `gloss_enabled`, and `sss_enabled` mute PBR sections cleanly in UI and YAML without discarding authored mask blocks |
 | Texture UV scale/offset authoring | done | `Scale U/V` and `Offset U/V` feed the layer-0 texcoord transform of the upload (`QR_GEOMETRY_UPLOAD_TEXCOORD_TRANSFORM_BIT`), which is one pass with the geometry it changes. `qrUpdateGeometryTexCoords` is implemented for an embedder that already has its vertices uploaded: it writes the layers into the collector's staging buffer, and the values reach the device at the next static submit, the same contract `qrUpdateGeometryTransform` has |
-| Luma mask authoring and preview | done | The game's `luma` key is a list of colour-keyed blocks, and `EditorMaterial.h` carries it as `EditorEmissiveBlock`: a colour, a `threshold` and a `feather` that key the mask, a `factor`, a `blend`, and an optional polygon mask in UV space, up to `kEditorEmissiveBlockMax` = 10 blocks per material. `EditorSession.cpp` reads the block list back out of a nested `luma:` block and writes it with the rest of the material, so a round trip through `Apply` reproduces the file byte for byte. The SDK still has no per-block field to upload, so `EditorMaterialBakes` synthesises the colour-keyed mask and the polygon into the emission texture the way `gl_texmgr.c` composites it, and re-uploads the static scene, which is also the preview: dragging a mask corner changes the traced glow of the surface. Two widgets do the authoring, both ported from `qr_gui.cpp`: `EditorPolygonEdit` draws the material's own texture under the outline and drags a point, a side or the whole outline with an 18 px grab radius, shifts a side along its normal with `Shift`, inserts a point on a side with `Ctrl`+click, removes one with a right click while more than three remain, and zooms with `Ctrl`+wheel around the cursor up to 5x; `EditorImagePick` is the eyedropper, a preview of the same texture that returns the UV under the click so `Luma` samples a `rgba` texel from `EditorTexture` and writes it as the block colour. `Luma` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` and `Emissive` sets the emission scale; the `Luma blend` combo picks the composite mode. Measured on `e1m1` material `*slime0`: a point drag rewrote `0.1754,0.1723`, a `Ctrl`+click on a side produced a fifth point, a right click took it back to four, an eyedropper click in the middle of the texture wrote `ab04ab` and one near a corner `221314` |
+| Luma mask authoring and preview | done | The game's `luma` key is a list of colour-keyed blocks, and `EditorMaterial.h` carries it as `EditorEmissiveBlock`: a colour, a `threshold` and a `feather` that key the mask, a `factor`, a `blend`, and an optional polygon mask in UV space, up to `kEditorEmissiveBlockMax` = 10 blocks per material. `EditorSession.cpp` reads the block list back out of a nested `luma:` block and writes it with the rest of the material, so a round trip through `Apply` reproduces the file byte for byte. The SDK still has no per-block field to upload, so `EditorMaterialBakes` synthesises the colour-keyed mask and the polygon into the emission texture the way `gl_texmgr.c` composites it, and re-uploads the static scene, which is also the preview: dragging a mask corner changes the traced glow of the surface. Two widgets do the authoring, both ported from `qr_gui.cpp`: `EditorPolygonEdit` draws the material's own texture under the outline and drags a point, a side or the whole outline with an 18 px grab radius, shifts a side along its normal with `Shift`, inserts a point on a side with `Ctrl`+click, removes one with a right click while more than three remain, and zooms with `Ctrl`+wheel around the cursor up to 5x; `EditorImagePick` is the eyedropper, a preview of the same texture that returns the UV under the click so `Luma` samples a `rgba` texel from `EditorTexture` and writes it as the block colour. Non-DTAL / non-overlay emissive surfaces receive `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` via `ResolveEditorSurfaceEmissionUploadMode` (while `is_light` promotes the surface to NEE/DTAL area lighting and clears that flag when `truelight > 0`); `Emissive` sets the emission scale and the `Luma blend` combo picks the composite mode. Measured on `e1m1` material `*slime0`: a point drag rewrote `0.1754,0.1723`, a `Ctrl`+click on a side produced a fifth point, a right click took it back to four, an eyedropper click in the middle of the texture wrote `ab04ab` and one near a corner `221314` |
 | Subsurface scattering authoring | done | `DrawMaterialSubsurface` / `DrawSssBlock` author `sss_strength`, `sss_radius`, `sss_color`, `texture_sss`, and up to `kEditorSssBlockMax` = 10 `EditorSssBlock` colour-key / UV polygon blocks using the same `EditorImagePick` eyedropper and `EditorPolygonEdit` polygon widgets as `Luma`. `ApplyEditorSubsurface` uploads `QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT`, `subsurfaceColor`, `subsurfaceRadius`, and `subsurfaceStrength` on opaque/cutout surfaces, while `BuildEditorSssMask` bakes per-pixel SSS strength into `Normal.a` |
 | Glass and water pass-through parameters | done | `PassThroughTypeForSurface` picks the type and, with `Material` set to `glass`, `Glass IOR`, `Glass thickness`, `Glass colour` and `Transparency` are the pane's own parameters; `Mirror` is the surface's. Water has no per-material parameters in the game either -- its look is the System tab's `Water / Acid` group, which the editor's `Water / Acid` group carries |
 | Light colour authoring | done | `Colour` (`ColorEdit3`) writes `EditorLight::tint`; `SetEditorLightTint` rebuilds radiance as `intensity * kEditorLightIntensityScale * tint` |
@@ -75,13 +75,13 @@ no implementation.
 | Cloud authoring | done | `Clouds` group, packed into `skyCubemapRotationTransform` per `QrDrawFrameSkyParams` |
 | God rays authoring | done | `God rays` group including `Sky threshold`; the shafts follow the authored sun and the panel no longer gates the effect on the procedural sky, which is the game's own condition on the sky texture rather than on the cvar |
 | Tonemap authoring | done | `Tonemap` group including the LPM percentiles the game hard-codes |
-| Volumetric fog authoring | done | `Volumetric fog` group; the scattering source follows the authored sun |
+| Volumetric fog authoring | done | `Volumetric fog` group fills `QrDrawFrameVolumetricParams`; in the active Q2RTX composition path (`coreQ2RTX = 1u`), `volumetricFar` controls the volumetric / froxel light-shaft far plane (`ResolveVolumetricCameraFar`) while the remaining legacy volumetric fields are bypassed in `CmPrepareFinal.comp.hlsl` |
 | Level/global scope switch | done | the `Sky` group's `Global settings` box selects the scope of the `sky:` block, which is written per key like the game's `CaptureScope`; see [Sky block](#sky-block) |
 | Apply / Cancel / Exit with a dirty prompt | done | `DrawSessionBar`, `ApplySession`, `DiscardSession`, `RequestExit` and `DrawSessionPrompt`. `WM_CLOSE` goes through the same prompt; `Yes` saves and exits, `No` exits without writing, `Escape` or the close box dismisses the prompt and keeps the session |
 | Save back to `qray.materials.yaml` | done | `EditorMaterialsDocument::WriteMerged` in `EditorSession.cpp`; `--materials <file>` picks the target, and the previous generation is copied to `qray.backup_materials.yaml` before a write |
 | Notify toast | done | `DrawNotification` under the viewport: `saved …`, `changes discarded`, `nothing to save` and `session reset, defaults restored`, held six seconds and faded over the last one |
 | Session reset | done | Clicking the tab that is already open asks first, the way `QR_GUI_Tabs` returns `reset = 1` for a re-click in `qr_editor.c`, and `ResetSession` then does what `QRE_ResetAll` does: the materials file, the lights file and both backups are removed, and the panel goes back to a first run's state. The panel's own values are replaced rather than "left alone", because an absent level section deliberately keeps what the panel holds -- fog, the sun and every `sky:` key would otherwise survive the file they came from. See [Reset](#reset) |
-| Modal dialogs | done | three prompts: the save-on-exit prompt (`DrawSessionPrompt`), the reset prompt (`DrawResetPrompt`) and the regenerate prompt (`DrawRegenPrompt`). All three fix the width and let ImGui fit the height, so the buttons cannot end up outside a window that clips them. `Regenerate from map` sits at the end of the `Level fog` group, which is where `qr_editor.c` puts it, and opens the game's own text: the level's light models come from `rt_level_light_models`, so the dialog carries an editable list pre-filled with its default (`flame.mdl flame2.mdl lavaball.mdl proj_balllava.mdl`) instead of a cvar read. `Yes` marks each model `flame.mdl`-style token as a light: the name becomes `progs/<token>:frame0` (a token with a `/` keeps its path), `is_light` is set, a `light_brightness` of zero or less becomes 1, and a material with neither a `light_color` nor an `texture_emissive` gets the global light colour, which is white. That is `QRE_RegenerateLights` field for field. An empty list notifies `rt_level_light_models is empty` and writes nothing; `No`, `Escape` and the close box return without touching the session. The limit is the one the game does not have: the editor loads no MDL, so there are no emissive world-light faces to preview, and the regeneration authors the keys the game reads rather than the traced glow it would derive |
+| Modal dialogs | done | three prompts: the save-on-exit prompt (`DrawSessionPrompt`), the reset prompt (`DrawResetPrompt`) and the regenerate prompt (`DrawRegenPrompt`). All three fix the width and let ImGui fit the height, so the buttons cannot end up outside a window that clips them. `Regenerate from map` (in the menu bar and Light Editor / Level panels) opens `DrawRegenPrompt` (`Yes`/`No`/`Escape`, with no hardcoded model-name filter list): `Yes` runs `RegenerateLightModels`, restoring all predefined map lights (`m_scene.lights = m_scene.bspLights`), clearing `m_emitterLightOverrides`, refreshing generated lights, and saving the level's lights to `qray.lights.yaml` (`session: regenerated <N> map lights`). Preview model loading is also supported via `LoadEditorAliasModel` / `LoadEditorPreviewModel` (`EditorFormatAdapter`) |
 | Crosshair and hint overlay | done | `DrawViewportOverlay` in `ImGui::GetForegroundDrawList()`: the game's four-tick crosshair with its shadow, the hint block and the drag prompt below. See [Viewport overlay](#viewport-overlay) |
 
 ## Materials
@@ -121,21 +121,20 @@ parameter block below it is a second scrolling child with the `Textures`, `Surfa
 | `glass_color` | `Glass colour` | `layerColors[1].xyz`, multiplied into the transmitted view |
 | `exact_normals` | `Exact normals` | `QR_GEOMETRY_UPLOAD_EXACT_NORMALS_BIT` |
 | `force_rasterize` | `Force rasterize` checkbox under `Model` | nothing; the game reads `glt->rtforcerasterize` in `r_alias.c` and `r_sprite.c` only, so the editor writes and preserves the key as data and the tooltip says which paths consume it |
-| `is_light` | `Luma` | `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT`; this is the one key the panel reaches the traced-glow flag through, so it writes the file's `is_light` |
+| `is_light` | `is_light` checkbox under `Light` ("Treat surfaces using this material as RT area light sources") | `EditorSurfaceUsesDtalLighting` / `ResolveEditorSurfaceEmissionUploadMode` (`editor/EditorOverlayPipeline.cpp`): when `is_light: true` (and `truelight > 0`), promotes the surface to NEE/DTAL area lighting (`usesDtalLight = true`, `emitRayOnly = false`), **clearing** `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT`; when `is_light: false` (and neither auto-emissive NEE nor an overlay stage owns emission), `EditorSceneRuntime` sets `QR_GEOMETRY_UPLOAD_EMISSION_RAY_ONLY_BIT` so indirect rays pick up baked emission |
 | `emissive_factor` | `Emissive` | `defaultEmission`, clamped to [0, 1] by the renderer |
-| `light_color` | the read-only line under `Light`: `casts a light: r g b, brightness N` or `no cast light: the material has no light_color`, which is the game's `casts a dlight (light_color)` / `no dlight` pair; `Regenerate from map` sets it | nothing; it is the colour of the light the game derives from the material, so it is authored for the file and not for the tracer |
-| `light_styles`, `light_brightness`, `light_focus`, `light_focus_soft`, `light_projector` | the same read-out shows the brightness and the animated styles; `Regenerate from map` writes the brightness, the rest survive a hand-written file | nothing; they pick the geometry's light behaviour in the game -- animation, intensity, the beam's half-angle and its soft edge, and whether the emissive mask is projected as a gobo |
+| `light_color` | Editable colour control under `Light` | feeds `EditorDtalPipeline` emissive area-light colour (and fallback uniform colour when `is_light` is active with `texture_emissive: NONE`) |
+| `light_styles`, `light_brightness`, `light_focus`, `light_focus_soft`, `light_projector`, `light_min_area` | Editable controls under `Light` | control emissive DTAL light animation, intensity, cone focus/softness, gobo projection, and minimum emitter area in `EditorDtalPipeline` |
+| `light_shafts`, `light_shafts_power`, `light_shafts_distance`, `light_shafts_falloff` | Editable controls under `Light` | enable and tune volumetric froxel light shafts emitted by DTAL surfaces (`EditorDtalPipeline` -> `QrDtalGroupUploadInfo`) |
+| `gloss` (block list), `gloss_threshold`, `gloss_feather` | `Gloss` section colour-key / polygon / brush blocks | baked into roughness/metallic channels of the RME texture when no external `texture_gloss` overrides them |
 | `texture_sss` | `Subsurface##tex` combo | luminance mask baked into `Normal.a` on non-glass SSS materials |
 | `sss_strength`, `sss_color`, `sss_radius` | `Strength##sss`, `Scatter colour##sss`, `Radius (m)##sss` | `QR_GEOMETRY_UPLOAD_SUBSURFACE_BIT`, `subsurfaceStrength`, `subsurfaceColor`, `subsurfaceRadius` packed into `ShGeometryInstance::subsurfacePacked` |
-| `sss` (block list), `sss_threshold`, `sss_feather` | `Subsurface` section: `Add colour block##sss` / `Add mask block##sss`, `EditorImagePick` eyedropper, `EditorPolygonEdit`, `Threshold`, `Feather`, `Factor` | `BuildEditorSssMask` synthesises colour-key / polygon masks into `Normal.a` (`std::max` with `texture_sss`), read by `HitInfo.hlsli` for `CmQ2SssBlur` and back-lit translucency |
-| `emissive_enabled`, `gloss_enabled`, `sss_enabled` | Master section checkboxes under `Luma`, `Gloss`, `Subsurface` | non-destructively gate active baking/uploads (`ResolveBakeContext`, `ApplyEditorSubsurface`) while preserving authored blocks on toggle-off |
+| `sss` (block list), `sss_threshold`, `sss_feather` | `Subsurface` section: `Add colour block##sss` / `Add mask block##sss`, `EditorImagePick` eyedropper, `EditorPolygonEdit`, `Threshold`, `Feather`, `Factor` | `BuildEditorSssMask` synthesises colour-key / polygon / brush masks into `Normal.a` (`std::max` with `texture_sss`), read by `HitInfo.hlsli` for `CmQ2SssBlur` and back-lit translucency |
+| `enabled`, `emissive_enabled`, `gloss_enabled`, `sss_enabled` | Master material / PBR section checkboxes | non-destructively gate active material overrides and PBR baking/uploads (`ResolveBakeContext`, `ApplyEditorSubsurface`) while preserving authored blocks on toggle-off |
+| `disabled_stages` | Stage mask toggles for multi-stage surfaces | disables selected engine shader stages in `EditorSceneRuntime` / `EditorOverlayPipeline` |
 
-`Regenerate from map` is the only widget that sets the six; a value somebody wrote by hand round
-trips, which was measured on `progs/flame.mdl:frame0`: seeding `light_styles`, `light_brightness: 2`,
-`light_focus: 0.5`, `light_focus_soft: 0.1` and `light_projector` and then regenerating and saving
-came back with all six keys under the material, the brightness still 2. `light_upoffset` is not
-authored -- the game exposes it in no param row either, only in its writer -- so it is preserved
-verbatim as a key the session does not own.
+`light_upoffset` is not authored by the inspector, so it is preserved verbatim
+as a key the session does not own.
 
 The three glass rows are gated on the material being `glass`, and they write nothing otherwise:
 the game's pane reads them out of the layer colors only under `material_glass`, and a stray
@@ -146,15 +145,14 @@ time, so an edit is published by rebuilding the static scene: `EditorApp::Frame`
 `m_materialsChanged`, waits until no widget is active, and calls `UploadStaticGeometry` once per
 change (`materials applied: static scene re-uploaded` in `editor.log`).
 
-No key is left out of the panel. The two the tracer cannot show are carried instead of uploaded:
-`force_rasterize` has no consumer outside the game's alias-model and sprite paths, and
-`texture_overlay` reaches the picture only through the bake because a glass pane hands it to
-`rtoverlaymaterial`, a layer the traced path never samples -- so on a glass material the combo
-changes the file and not the frame, which its tooltip states. The six `light_*` keys are the same
-kind of carry: they reach no upload field either, but their consumer is the level file rather than
-the tracer, since the game derives a light from them once the material is saved, so the editor
-shows them read-only and lets `Regenerate from map` set them. The game's emissive range is 0..5;
-the SDK clamps emission to [0, 1].
+No key is left out of the panel. `force_rasterize` has no consumer inside the
+ray-traced world path (it selects the host's alias-model and sprite rasterizer
+path), so the editor persists and preserves it as data; `texture_overlay` is
+composited into the baked albedo on non-glass surfaces (and preserved on glass,
+where the traced path reads only the base pane albedo). The `light_*` and
+`light_shafts*` keys are authored directly in the inspector and drive
+`EditorDtalPipeline`. The game's emissive range is 0..5; the SDK clamps scalar
+`defaultEmission` to [0, 1].
 
 ### Material bakes
 
@@ -262,16 +260,34 @@ the number to compare against the scene's texture list rather than against the f
 | File ends without a newline | one is added before the new entry, so an append cannot glue two records together |
 | Target file exists | copied to `qray.backup_materials.yaml` first |
 
-The owned keys are the fields the SDK upload info can express and the panel can edit:
-`texture_base`, `texture_normals`, `texture_emissive`, `texture_overlay`, `texture_gloss`,
-`texture_scale_u/v`, `texture_offset_u/v`, `bump_scale`, `roughness_override`, `metalness_factor`,
-`metalness_from_normal_alpha`, `emissive_factor`, `luma_blend`, `base_factor`, `is_light`,
-`mirror`, `material_glass`, `material_water`, `glass_ior`, `glass_thickness`, `transparency`,
-`glass_color`, `exact_normals`, `force_rasterize`, `light_styles`, `light_color`,
-`light_brightness`, `light_focus`, `light_focus_soft`, `light_projector` and the `luma` block list
-with its `luma_threshold` / `luma_feather` defaults. `luma` is the one key whose body is not a
-scalar: the list of colour blocks is laid out under it the way `QRE_WriteEmissiveBlocks` writes it,
-and a material whose block list is empty drops the key.
+The owned keys match `OwnedValues` and `IsEmittedMaterialKey` in
+`editor/EditorSession.cpp`:
+
+- **Textures & UVs:** `texture_base`, `texture_normals`, `texture_height`,
+  `texture_emissive`, `texture_overlay`, `texture_gloss`, `texture_sss`,
+  `texture_scale_u`, `texture_scale_v`, `texture_offset_u`, `texture_offset_v`
+- **Surface, relief, glass, water & mirror:** `bump_scale`, `parallax_scale`,
+  `roughness_override`, `metalness_factor`, `metalness_from_normal_alpha`,
+  `base_factor`, `mirror`, `material_glass`, `material_water`, `glass_ior`,
+  `glass_thickness`, `transparency`, `glass_color`, `exact_normals`,
+  `force_rasterize`, `disabled_stages`
+- **Emission, gloss & subsurface blocks and non-destructive toggles:**
+  `enabled`, `emissive_enabled`, `gloss_enabled`, `sss_enabled`,
+  `emissive_factor`, `luma_blend` (plus legacy alias `emissive_blend`),
+  `is_light`, `luma` (plus legacy alias `color_emissive`), `luma_threshold` /
+  `luma_feather`, `gloss` (plus legacy alias `color_gloss`),
+  `gloss_threshold` / `gloss_feather`, `sss_strength`, `sss_color`,
+  `sss_radius`, `sss`, `sss_threshold` / `sss_feather`
+- **Emissive DTAL & light shafts:** `light_styles`, `light_color`,
+  `light_brightness`, `light_focus`, `light_focus_soft`, `light_projector`,
+  `light_min_area`, `light_shafts`, `light_shafts_power`,
+  `light_shafts_distance`, `light_shafts_falloff`
+
+`luma`, `gloss`, and `sss` are nested block lists (supporting colour-key,
+UV polygon, and painted brush masks); an empty block list drops its key.
+Explicit override markers (`texture_emissive: NONE`, `mirror: false`) are
+emitted when clearing a surface's built-in default so saving persists the
+cleared state.
 
 ### Level document
 
@@ -295,10 +311,13 @@ level whose section carries no `color:` key.
 The level merge follows the material rules, with the level's own section as the unit of the
 write: every block it carries that the editor does not own (a hand-written `hint:`, comments, any
 key the panel has no field for) is copied verbatim at the indent it had, the other levels'
-sections are not touched, and a section the file does not have yet is appended. A level with no
-custom light left keeps its `fog:` and `sky:` blocks and loses `lights:`, which is how the game
-reads "no custom lights here"; the editor reads it the same way, where a missing `lights:` block
-leaves the panel's own lights alone and only an existing block replaces them.
+sections are not touched, and a section the file does not have yet is appended. When a level
+carries predefined map lights (or already had a `lights:` block) and all lights are removed,
+`WriteMerged` emits an explicit `lights: []` entry alongside `fog:` and `sky:`
+(`ShouldWriteEmptyLightsBlock` in `EditorApp.cpp`) so reloading the level preserves the empty
+light set instead of resurrecting deleted map lights (`Regenerate from map` restores
+`m_scene.bspLights`). A level section with no `lights:` block at all leaves the map's predefined
+lights intact on load.
 
 `Apply` writes both documents, reloads them and reports through the toast. The first Apply also
 creates a target that does not exist yet, even when only the level was edited, because the game's
@@ -387,10 +406,10 @@ cvar angles, so they round-trip without an angle conversion. `rt_sky_sun_disc`,
    block and the drag prompt are drawn over the viewport and the key list is no longer panel text.
 
 Global settings were the one mechanical block, and they are done: `EditorSettings.cpp` owns the
-table and `DrawGlobalSettings` draws it. The material parameter table is in place and the SDK
-fields it can express are wired; the texture browser is done as well, so a material's base texture
-is picked from a grid of previews rather than typed. What is left of the table is the list of
-unsupported parameters above, which needs SDK upload fields before it can be authored.
+table and `DrawGlobalSettings` draws it. The full material parameter table — including baked PBR
+channels, `texture_height`/`parallax_scale` Relief POM, `luma`/`gloss`/`sss` mask blocks,
+non-destructive section toggles, and `light_*`/`light_shafts*` DTAL controls — is wired alongside
+the texture browser, with `force_rasterize` persisted as data for host alias/sprite raster paths.
 
 ## Verification
 
@@ -512,9 +531,11 @@ The reader was then given a section the editor does not own: `sky: e1m1_sky` ins
 `ff8000` fog with `density: 0.5` and `enabled: true`, and a second level `e1m2`. A fresh launch
 logged `read, 1 lights for e1m1`, one more `Add light` plus `Apply` rewrote the fog with the values
 that were read rather than with the defaults, kept `sky:` and the whole `e1m2:` section verbatim
-and wrote `qray.backup_lights.yaml` as the previous generation. Removing the last light and
-applying again dropped the `lights:` block and left `fog:`, `sky:` and `e1m2:` in place, which is
-the empty-store shape the game reads back as "no custom lights on this level".
+and wrote `qray.backup_lights.yaml` as the previous generation. Removing all lights on a level with
+predefined map lights (or an existing `lights:` block) and applying writes an explicit `lights: []`
+block while leaving `fog:`, `sky:` and `e1m2:` in place, so reloading the level reports
+`hasLights == true` with 0 lights instead of restoring deleted map lights (covered by
+`EditorMultiSelectTests.cpp`).
 
 The sky block and its scope were accepted on a scratch level document whose `e1m1` section carried
 six `sky:` keys in non-canonical text (`1.5`, `140`, `0 169 255`) plus a `fog:` block, and an
@@ -554,17 +575,11 @@ the reset differs from the defaults-only launch by the fog and the emissive the 
 is only possible if the session was applied to the scene.
 
 
-The regenerate prompt was exercised on `e1m1` with `--materials bake_rt.yaml`, the panel scrolled to
-the `Level fog` group so the button is inside the 681 px client area (its logged rect moves from
-`22,1925` to `22,460` with the scroll):
+The regenerate prompt (`DrawRegenPrompt` / `RegenerateLightModels` in `editor/EditorApp.cpp`)
+restores predefined map lights without any hardcoded model-name filter:
 
-| Check | Measurement |
+| Check | Behaviour |
 | --- | --- |
-| Button opens the dialog | `panel regen prompt: window 352,234 912,446 models 362,380 902,403 Yes 362,415 628,438 No 636,415 902,438` -- the list field and both buttons inside the window |
-| `Yes` with the default list | `session: touched progs/flame.mdl:frame0` through `progs/proj_balllava.mdl:frame0`, then `session: regenerated 4 light materials` and `session: saved bake_rt.yaml` |
-| What the file gained | four `- name: progs/<model>.mdl:frame0` entries carrying `is_light: true` and `light_color: ffffff`; the file went from 24 to 36 lines and the existing `*slime0` luma blocks stayed |
-| A token with no path | typing `foo.mdl` into the field wrote `progs/foo.mdl:frame0`, so the `progs/` prefix and the `:frame0` suffix are the game's |
-| An emptied list | `Ctrl+A`, `Delete`, `Yes`: `panel regenerate: nothing to mark`, the toast `rt_level_light_models is empty`, and no write |
-| `Escape` | `session: regenerate dismissed` and nothing written |
-| Idempotence | a second `Yes` on the same list rewrote identical entries; `progs/flame.mdl:frame0` occurs once |
-| Hand-written `light_*` survive | seeding `light_styles`, `light_brightness: 2`, `light_focus: 0.5`, `light_focus_soft: 0.1` and `light_projector` under `progs/flame.mdl:frame0` and regenerating came back with `is_light`, `light_color: ffffff` and all five seeded keys under a single entry, brightness still 2 |
+| Button / menu opens the dialog | `panel regen prompt: window … Yes … No …` — confirmation dialog with `Yes` and `No` buttons inside the window |
+| `Yes` | copies `m_scene.bspLights` back into `m_scene.lights`, clears `m_emitterLightOverrides`, reapplies generated lights, saves `qray.lights.yaml`, and logs `session: regenerated <N> map lights` |
+| `No` / `Escape` / close box | logs `session: regenerate dismissed` and leaves the session and files untouched |

@@ -21,8 +21,11 @@ revision does not promise a binary plugin ABI.
 
 ## Supported integration model
 
-- The current package is a Win32, SDK-owned Vulkan/NVRHI renderer.
-- The host creates an `HWND` and supplies it through `QrInstanceCreateInfo`.
+- The current package is a Windows (Win32) and Linux (X11/Xlib via
+  `QR_USE_SURFACE_XLIB`), SDK-owned Vulkan/NVRHI renderer.
+- The host creates a platform window (`HWND` on Windows via
+  `pWin32SurfaceInfo`, or an Xlib `Display`/`Window` on Linux via
+  `pXlibSurfaceCreateInfo`) and supplies it through `QrInstanceCreateInfo`.
 - The SDK owns the Vulkan device, acceleration structures, render targets,
   swapchain and presentation. `qrDrawFrame` renders and presents.
 - A C++20 host can pass requirements before device creation and retrieve the
@@ -30,8 +33,8 @@ revision does not promise a binary plugin ABI.
   sole device owner. See [gpu-context.md](gpu-context.md).
 - The host owns game logic, scene extraction, assets, window lifetime, input
   and its application frame loop.
-- Non-Windows surfaces and host-owned Vulkan device/render-target embedding are
-  not part of this API revision.
+- Native Wayland surfaces and host-owned external Vulkan device / render-target
+  injection are not part of this API revision.
 - All spatial inputs are meters. See [spatial-contract.md](spatial-contract.md).
 
 ## Minimal lifecycle
@@ -54,7 +57,7 @@ repeat each frame:
   join host producer work
   qrDrawFrame
 
-qrDestroyInstance before destroying the HWND
+qrDestroyInstance before destroying the platform window (HWND / Xlib Window)
 ```
 
 Use only one creation path. A host that needs the shared NVRHI device must not
@@ -83,12 +86,14 @@ frame.
 
 The create-info struct itself is borrowed only for instance creation, through
 either `qrCreateInstance` or `qray::qrCreateInstanceWithGpuRequirements`. Its
-Win32 surface must describe an `HWND` that outlives the instance, and the file
-callbacks plus `pUserLoadFileData` must remain callable for the instance
-lifetime. Keep every string and path alive through the creation call; do not
-assume the SDK retains those character buffers.
+platform surface descriptor (`pWin32SurfaceInfo` on Windows or
+`pXlibSurfaceCreateInfo` on Linux) must describe a window that outlives the
+instance, and the file callbacks plus `pUserLoadFileData` must remain callable
+for the instance lifetime. Keep every string and path alive through the
+creation call; do not assume the SDK retains those character buffers.
 
-The create info must contain a valid Win32 surface and a non-zero
+The create info must contain a valid platform surface (`pWin32SurfaceInfo` on
+Windows or `pXlibSurfaceCreateInfo` on Linux) and a non-zero
 `rasterizedSkyCubemapSize`; both albedo-layer limits must not exceed the
 renderer's three-layer material limit. A host should also set an application
 name, shader folder, blue-noise file, file callbacks and sensible raster vertex
@@ -103,7 +108,7 @@ in-memory RGBA8 data or its own UTF-8 relative texture paths.
 
 | Item | Owner | Lifetime rule |
 |---|---|---|
-| `HWND` | Host | Must outlive `QrInstance`. Destroy the instance first. |
+| Platform window (`HWND` / Xlib `Window` & `Display`) | Host | Must outlive `QrInstance`. Destroy the instance first. |
 | Vulkan/NVRHI device, swapchain, render targets, BLAS/TLAS | SDK | Owned and released by `qrDestroyInstance`. |
 | Shared `QrayGpuContext` | SDK | Borrowed through `qrGetGpuContext`; invalid after `qrDestroyInstance`. |
 | Host-created NVRHI/Vulkan resources | Host | Use the returned device; release before `qrDestroyInstance`. |
@@ -111,7 +116,7 @@ in-memory RGBA8 data or its own UTF-8 relative texture paths.
 | Geometry `uniqueID` | Host-assigned | Stable for the object's rendered lifetime; changing winding sign requires re-upload. |
 | Upload pointers (`pVertices`, `pLights`, frame parameter pointers, readback `pDst`) | Host | Must remain valid for the duration of the call. The SDK copies scene uploads synchronously. |
 | Readback destination | Host | Must remain valid until `qrGetFrameReadbackStatus` reports done. |
-| Shaders, blue-noise asset, FSR DLL | Host deployment | Paths are supplied to instance creation; files must exist at runtime. |
+| Shaders, blue-noise asset, FSR provider (`.dll` / `.so`) | Host deployment | Paths are supplied to instance creation; files must exist at runtime. |
 
 Use one render/frame thread unless a narrower concurrency rule is explicitly
 documented. `qrAcquireFrame` is such a rule: after `qrStartFrame`, one caller
@@ -186,7 +191,7 @@ creation sequence.
 | Function | Purpose |
 |---|---|
 | `qrCreateInstance` | Create the renderer from `QrInstanceCreateInfo`. |
-| `qrDestroyInstance` | Destroy all SDK GPU resources; call before the `HWND`. |
+| `qrDestroyInstance` | Destroy all SDK GPU resources; call before destroying the platform window (`HWND` / Xlib `Window`). |
 | `qrSetSpatialConvention` | Declare host axes and handedness before spatial uploads. |
 | `qrGetSpatialConvention` | Read the active convention; initialize its `size` and `version` before the call. |
 | `qrSetSmokeWindDirection` | Set persistent smoke advection direction in host scene space. |
@@ -392,11 +397,11 @@ owns all output images. Optional pointer blocks select rendering features:
 |---|---|
 | `QrDrawFrameRenderResolutionParams` | Native/custom render size, upscaler and sharpen technique. |
 | `QrDrawFrameIlluminationParams` | Bounces, denoiser, light sampling, ReSTIR and GI controls. |
-| `QrDrawFrameVolumetricParams` | Optional atmospheric/volumetric in-scattering. |
+| `QrDrawFrameVolumetricParams` | Supplies `volumetricFar` (meters) for volumetric / froxel light-shaft range (`ResolveVolumetricCameraFar`). All other fields (`enable`, `useSimpleDepthBased`, `ambientColor`, `scaterring`, `sourceColor`, `sourceDirection`, `sourceAssymetry`) are currently bypassed while `coreQ2RTX = 1u` in `CmPrepareFinal.comp.hlsl`. |
 | `QrDrawFrameTonemappingParams` | Exposure and tone curve. |
 | `QrDrawFrameBloomParams` | Bloom intensity and threshold. |
 | `QrDrawFrameReflectRefractParams` | Water, acid, glass, portals and their media properties. |
-| `QrDrawFrameSkyParams` | Sky type, sun disc, clouds, god rays and cubemap rotation; see [sky-and-atmosphere.md](sky-and-atmosphere.md). |
+| `QrDrawFrameSkyParams` | Sky type, sun disc, clouds, god rays (`godRaysQuality` `0..4` scales `sunStepScale`) and cubemap rotation; see [sky-and-atmosphere.md](sky-and-atmosphere.md). |
 | `QrDrawFrameTexturesParams` | Normal strength, material sampling (`samplerMipmapMode`: trilinear linear / bilinear nearest; `samplerAnisotropy`: `0` = default 16x clamped to device limit, `1` = off, `2/4/8/16`), emission and light-style behavior. |
 | `QrDrawFrameLevelFogParams` | Global level fog color and density. |
 | `QrDrawFrameDebugParams` | Diagnostic visualization flags. |
@@ -453,12 +458,13 @@ They are not required for a first correct integration.
   returned device and use the documented frame callbacks.
 - Upload arrays are borrowed for the call. Do not free them while the call is
   executing.
-- Destroy the renderer instance before the Win32 window.
+- Destroy the renderer instance before destroying the platform window (`HWND` on
+  Windows, Xlib `Window`/`Display` on Linux).
 - Deploy compiled shaders, the blue-noise texture and the FidelityFX provider
   next to the executable or configure their paths explicitly.
-- Link through `qray::renderer`; the target exports the required `QR_STATIC`,
-  `QR_USE_SURFACE_WIN32` and `NOMINMAX` compile definitions. Do not mix a
-  DLL-style `qray.h` declaration with the static `renderer.lib`.
+- Link through `qray::renderer`; the target exports `QR_STATIC` plus
+  `QR_USE_SURFACE_WIN32` and `NOMINMAX` on Windows, or `QR_USE_SURFACE_XLIB` on
+  Linux. Do not mix a DLL-style `qray.h` declaration with the static library.
 
 ## Conformance expectations
 

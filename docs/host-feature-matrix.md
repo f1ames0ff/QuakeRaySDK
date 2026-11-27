@@ -13,7 +13,7 @@ by the SDK.
 | Clouds | Procedural cloud block | `rt_sky_clouds*`; values are packed into `skyCubemapRotationTransform`. |
 | Sun disc | `QrDrawFrameSkyParams.sunDisc*` | `rt_sky_sun_color`, `rt_sky_sun_disc`, `rt_sky_sun_size`; see [sun-and-god-rays.md](sun-and-god-rays.md). |
 | Sun lighting | `qrUploadDirectionalLight` | `rt_physical_sun`, `rt_sky_sun`, pitch/yaw; one directional light max. |
-| God rays | `QrDrawFrameSkyParams.godRays*` | `rt_sky_godrays*`; needs a directional light or raster-sky bright point. |
+| God rays | `QrDrawFrameSkyParams.godRays*` | `rt_sky_godrays*`; needs a directional light or raster-sky bright point. `godRaysQuality` (`0..4`) actively maps to `sunStepScale` (`{2.0, 1.5, 1.0, 0.75, 0.5}`). |
 | Spherical/spot lights | `qrUploadSphericalLight`, `qrUploadSpotLight` | `RT_UploadAllDlights`, custom lights; per-frame upload. |
 | Polygonal/textured area lights | `qrUploadPolygonalLight`, `qrUploadTexturedAreaLight(s)` | Geometry and material are host-supplied. |
 | DTAL | `qrUploadDtalGroups` | Group/member arrays, per-frame; see [lights-and-sampling.md](lights-and-sampling.md). |
@@ -25,7 +25,7 @@ by the SDK.
 | Sun in GI | `sunBounceRange`, `sunBounceScale` | `rt_sky_sun_bounce_range/scale`; range is meters. |
 | Reflection/refraction | `QrDrawFrameReflectRefractParams` | `rt_reflrefr_depth`, IOR, water/acid, glass flags. |
 | Fog | `QrDrawFrameLevelFogParams`, `qrSetFogVolumes` | Level fog in inverse meters; local volumes in meters. |
-| Volumetric fog | `QrDrawFrameVolumetricParams` | `rt_volume_*`; distinct from clouds. |
+| Volumetric fog | `QrDrawFrameVolumetricParams` | `rt_volume_*`; distinct from clouds. Only `volumetricFar` is active (controls volumetric / light-shaft far range via `ResolveVolumetricCameraFar`); remaining fields are bypassed while `coreQ2RTX = 1u` in `CmPrepareFinal.comp.hlsl`. |
 | Raster order | Upload order inside emitted categories | Transparent ordering is host-owned; see [api.md](api.md#rasterized-scene-overlays-particles-decals-and-portals). |
 | Screen effects | `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN`, post-effect blocks | Host builds UI/HUD geometry; painter order is preserved. |
 | Particles/smoke | `qrUploadParticles`, raster geometry | `r_particles_points`; alpha, ordering and emitter lights are host choices. |
@@ -55,8 +55,14 @@ frame-scoped. Materials, cubemaps and fog volumes are persistent handles.
 - Cvars are Quake configuration, not public renderer API.
 - `rt_enable_pvs=0` is a locked Quake host policy; it is not an SDK capability.
 - `r_tasks` is retired; the engine render frame is task-based.
-- `maxBounceShadows` and `godRaysQuality` are currently present but not consumed
-  by the active RHI paths.
+- `QrDrawFrameIlluminationParams::maxBounceShadows` and
+  `QrInstanceCreateInfo::godRaysQuality` are currently present but not consumed
+  by the active RHI paths; per-frame `QrDrawFrameSkyParams::godRaysQuality`
+  (`0..4`) IS actively wired to `sunStepScale` (`{2.0, 1.5, 1.0, 0.75, 0.5}`).
+- In `QrDrawFrameVolumetricParams`, only `volumetricFar` is active under
+  `coreQ2RTX = 1u` (`VulkanDevice.cpp`); `enable`, `useSimpleDepthBased`,
+  `ambientColor`, `scaterring`, `sourceColor`, `sourceDirection`, and
+  `sourceAssymetry` are bypassed in `CmPrepareFinal.comp.hlsl`.
 - There is no public general-purpose temporal-history reset.
 - The SDK is source-level; there is no promised binary plugin ABI.
 - Binary host-specific formats and asset decoders stay in the adapter.
