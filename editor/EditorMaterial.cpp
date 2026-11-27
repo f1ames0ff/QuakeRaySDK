@@ -1340,6 +1340,12 @@ void ApplyEditorMaterial(const EditorMaterialParams &material,
                                   material.glassColor[2], 0.0f };
         upload.layerColors[2] = { material.glassIor, material.glassThickness, 0.0f, 0.0f };
     }
+    else if (derivedPassThrough != QR_GEOMETRY_PASS_THROUGH_TYPE_WATER_REFLECT_REFRACT &&
+             !HasEditorSubsurface(material) && !material.heightTexture.empty() &&
+             material.parallaxScale > 0.0f)
+    {
+        upload.layerColors[2].data[2] = std::clamp(material.parallaxScale, 0.0f, 0.25f);
+    }
 
     upload.texCoordScale[0] = material.textureScaleU;
     upload.texCoordScale[1] = material.textureScaleV;
@@ -1561,6 +1567,7 @@ struct BakeNeedFlags
 {
     int32_t gloss = -1;
     bool wantsNormal = false;
+    int32_t heightTex = -1;
     int32_t emissive = -1;
     bool passesLight = false;
     bool blendsEmission = false;
@@ -1586,9 +1593,10 @@ bool ShouldBakeSss(const EditorMaterialParams &params, int32_t normal, int32_t s
 
 bool NeedsMaterialBake(const BakeNeedFlags &f)
 {
-    return f.gloss >= 0 || f.wantsNormal || f.emissive >= 0 || f.passesLight || f.blendsEmission ||
-           f.metalFromNormalAlpha || f.masksEmission || f.masksGloss || f.paintsOverlay ||
-           f.fullbright || f.uniformLightGlow || f.needsSss || f.neutralMirrorAlbedo;
+    return f.gloss >= 0 || f.wantsNormal || f.heightTex >= 0 || f.emissive >= 0 ||
+           f.passesLight || f.blendsEmission || f.metalFromNormalAlpha || f.masksEmission ||
+           f.masksGloss || f.paintsOverlay || f.fullbright || f.uniformLightGlow ||
+           f.needsSss || f.neutralMirrorAlbedo;
 }
 
 SourceImage SelectBakeFallbackImage(const SourceImage &albedo, const SourceImage &gloss,
@@ -1631,15 +1639,38 @@ std::vector<uint8_t> BuildEditorSssMaskIfNeeded(bool sssEnabled, const EditorMat
                               sssTexImage.rgba, sssTexImage.width, sssTexImage.height);
 }
 
-uint8_t ResolveBakedNormalAlpha(const std::vector<uint8_t> &sssMaskBytes, size_t pixelIndex,
-                                float glassAlpha)
+struct BakeNormalAlphaInputs
 {
-    if (pixelIndex < sssMaskBytes.size())
+    const SourceImage &heightImage;
+    const std::vector<uint8_t> &sssMaskBytes;
+    uint32_t targetWidth = 0;
+    uint32_t targetHeight = 0;
+    bool glass = false;
+    float glassAlpha = 1.0f;
+};
+
+uint8_t ResolveBakedNormalAlpha(const BakeNormalAlphaInputs &inputs, uint32_t x, uint32_t y,
+                                size_t pixelIndex)
+{
+    if (pixelIndex < inputs.sssMaskBytes.size())
     {
-        return sssMaskBytes[pixelIndex];
+        return inputs.sssMaskBytes[pixelIndex];
     }
 
-    return uint8_t(std::min(255.0f, std::max(0.0f, glassAlpha * 255.0f)));
+    if (inputs.glass)
+    {
+        return uint8_t(std::min(255.0f, std::max(0.0f, inputs.glassAlpha * 255.0f)));
+    }
+
+    if (inputs.heightImage.Valid())
+    {
+        uint8_t px[4] = {};
+        SampleSourceBilinear(inputs.heightImage, x, y, inputs.targetWidth, inputs.targetHeight, px);
+        const float lum = 0.299f * float(px[0]) + 0.587f * float(px[1]) + 0.114f * float(px[2]);
+        return uint8_t(std::clamp(std::lround(lum), 0l, 255l));
+    }
+
+    return 255u;
 }
 
 struct BakeRoughnessInputs
@@ -1963,6 +1994,7 @@ struct BakeResolvedContext
     int32_t albedo = -1;
     int32_t gloss = -1;
     int32_t normal = -1;
+    int32_t heightTex = -1;
     int32_t emissive = -1;
     int32_t overlay = -1;
     int32_t sssTex = -1;
@@ -1991,6 +2023,7 @@ struct BakeResolvedContext
     SourceImage overlayImage;
     SourceImage glossImage;
     SourceImage normalImage;
+    SourceImage heightImage;
     SourceImage emissiveImage;
     SourceImage sssImage;
     SourceImage albedoImage;
@@ -2125,8 +2158,8 @@ void ComputeBakeTargetDimensions(const BakeResolvedContext &ctx, uint32_t &outW,
 {
     uint32_t w = ctx.albedoImage.width;
     uint32_t h = ctx.albedoImage.height;
-    for (const SourceImage *img : { &ctx.normalImage, &ctx.glossImage, &ctx.emissiveImage,
-                                    &ctx.overlayImage, &ctx.sssImage })
+    for (const SourceImage *img : { &ctx.normalImage, &ctx.heightImage, &ctx.glossImage,
+                                    &ctx.emissiveImage, &ctx.overlayImage, &ctx.sssImage })
     {
         if (img->Valid())
         {
@@ -2264,15 +2297,22 @@ void LoadResolvedBakeSourceImages(const EditorScene &scene, BakeResolvedContext 
 {
     out.glossImage = SourceOf(scene, out.gloss);
     out.normalImage = SourceOf(scene, out.normal);
+    out.heightImage = SourceOf(scene, out.heightTex);
     out.emissiveImage = SourceOf(scene, out.emissive);
     out.sssImage = SourceOf(scene, out.sssTex);
     out.albedoImage = SelectBakeFallbackImage(SourceOf(scene, out.albedo), out.glossImage,
                                               out.normalImage, out.emissiveImage, out.overlayImage,
                                               out.sssImage);
+    if (!out.albedoImage.Valid() && out.heightImage.Valid())
+    {
+        out.albedoImage = out.heightImage;
+    }
 }
 
 void PopulateBakeFeatureFlags(
-    const EditorMaterialParams &params, BakeResolvedContext &out)
+    const EditorMaterialParams &params,
+    const std::function<int32_t(const std::string &)> &resolveTexture,
+    BakeResolvedContext &out)
 {
     out.masksEmission = ShouldMaskEmission(params, out.emissive);
     out.masksGloss = ShouldMaskGloss(params, out.gloss);
@@ -2280,6 +2320,7 @@ void PopulateBakeFeatureFlags(
     out.uniformLightGlow = ComputeUniformLightGlow(params, out.emissive, out.masksEmission,
                                                    out.activeFullbright);
     out.needsSss = ShouldBakeSss(params, out.normal, out.sssTex, out.glass);
+    out.heightTex = (!out.glass && !out.needsSss) ? resolveTexture(params.heightTexture) : -1;
 }
 
 bool ResolveBakeContext(const std::string &name, const EditorMaterialParams &params,
@@ -2306,10 +2347,11 @@ bool ResolveBakeContext(const std::string &name, const EditorMaterialParams &par
     ResolveBakePbrMaskSource(params, scene, origIdx, mirrorActive, out);
     out.overlayImage = SourceOf(scene, out.overlay);
     const bool paintsOverlay = out.overlayImage.Valid() && !out.glass;
-    PopulateBakeFeatureFlags(params, out);
+    PopulateBakeFeatureFlags(params, resolveTexture, out);
 
     const BakeNeedFlags needFlags{ out.gloss,
                                    out.normal >= 0,
+                                   out.heightTex,
                                    out.emissive,
                                    out.passesLight,
                                    ShouldBlendEmission(params),
@@ -2407,7 +2449,8 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
     BuildColorGlossIfNeeded(ctx.masksGloss, params, ctx.albedoImage, colorGloss);
     const std::vector<uint8_t> sssMaskBytes =
         BuildEditorSssMaskIfNeeded(ctx.sssEnabled, params, ctx.albedoImage, ctx.sssImage);
-    *out.bakeNormalSlot = ctx.normalImage.Valid() || ctx.passesLight || !sssMaskBytes.empty();
+    *out.bakeNormalSlot =
+        ctx.normalImage.Valid() || ctx.heightImage.Valid() || ctx.passesLight || !sssMaskBytes.empty();
     const BakeRoughnessInputs roughnessInputs{
         ctx.glossImage,           ctx.normalImage,        colorGloss,
         ctx.pbrMaskTex,           ctx.targetWidth,        ctx.targetHeight,
@@ -2428,6 +2471,10 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
         ctx.albedoImage,         ctx.overlayImage, params.baseFactor,
         ctx.compositeOverlay,    ctx.neutralMirrorAlbedo,
         ctx.targetWidth,         ctx.targetHeight,
+    };
+    const BakeNormalAlphaInputs normalAlphaInputs{
+        ctx.heightImage, sssMaskBytes, ctx.targetWidth, ctx.targetHeight, ctx.glass,
+        params.transparency,
     };
 
     for (uint32_t y = 0; y < ctx.targetHeight; y++)
@@ -2462,7 +2509,7 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
             SampleBakeNormal(ctx.normalImage, ctx.targetWidth, ctx.targetHeight, params.bumpScale,
                              x, y, normalData.data() + offset);
             normalData[offset + 3] =
-                ResolveBakedNormalAlpha(sssMaskBytes, maskPixelIndex, params.transparency);
+                ResolveBakedNormalAlpha(normalAlphaInputs, x, y, maskPixelIndex);
         }
     }
     emissAccum.mean *= double(ctx.underlayOpenFraction);
@@ -2487,6 +2534,7 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     key.albedo = ctx.albedo;
     key.gloss = ctx.gloss;
     key.normal = ctx.normal;
+    key.heightTex = ctx.heightTex;
     key.emissive = ctx.emissive;
     key.overlay = ctx.overlay;
     key.emissiveStageIndex = ctx.emissiveStageIndex;
@@ -2507,6 +2555,7 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     key.sssMask = ctx.sssMask;
     key.hasRoughnessOverride = ctx.hasRoughnessOverride;
     key.useEmbeddedPbrMasks = ctx.pbrMaskTex != nullptr;
+    key.hasParallaxHeight = ctx.heightImage.Valid();
     key.mirror = ctx.mirror;
     key.neutralMirrorAlbedo = ctx.neutralMirrorAlbedo;
     key.roughness = ctx.roughness;

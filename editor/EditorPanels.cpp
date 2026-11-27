@@ -86,6 +86,8 @@ std::string *SlotTexturePtr(EditorMaterialParams &params, EditorApp::EditorTextu
         return &params.baseTexture;
     case EditorApp::EditorTextureSlot::Normals:
         return &params.normalTexture;
+    case EditorApp::EditorTextureSlot::Height:
+        return &params.heightTexture;
     case EditorApp::EditorTextureSlot::Emissive:
         return &params.emissiveTexture;
     case EditorApp::EditorTextureSlot::Overlay:
@@ -274,6 +276,8 @@ bool DrawMaterialUvAndParallaxSliders(EditorMaterialParams &params, const Editor
           "Vertical UV shift." },
         { "bump_scale", &params.bumpScale, base.bumpScale, 0.0f, 4.0f, "%.2f",
           "Normal map xy strength factor." },
+        { "parallax_scale", &params.parallaxScale, base.parallaxScale, 0.0f, 0.15f, "%.3f",
+          "Parallax occlusion depth scale (requires texture_height)." },
     };
     bool edited = false;
     for (const FloatRow &f : floats)
@@ -305,6 +309,8 @@ bool DrawMaterialTexturesSection(
           "Override base albedo texture." },
         { "texture_normals", EditorApp::EditorTextureSlot::Normals, true,
           "Override normal / bump map texture." },
+        { "texture_height", EditorApp::EditorTextureSlot::Height, false,
+          "Height / depth map for parallax occlusion mapping." },
         { "texture_emissive", EditorApp::EditorTextureSlot::Emissive, true,
           "Override explicit emissive mask texture (disables color_emissive blocks)." },
         { "texture_overlay", EditorApp::EditorTextureSlot::Overlay, false,
@@ -3534,10 +3540,11 @@ void DrawMaterialTextureInfoHeader(const EditorScene &scene, const EditorMateria
     }
 
     const auto slotStr = [](const std::string &s) { return s.empty() ? "-" : s.c_str(); };
-    ImGui::Text("maps: base %s | normals %s | emissive %s | overlay %s | gloss %s | sss %s",
+    ImGui::Text("maps: base %s | normals %s | height %s | emissive %s | overlay %s | gloss %s | sss %s",
                 slotStr(params.baseTexture), slotStr(params.normalTexture),
-                slotStr(params.emissiveTexture), slotStr(params.overlayTexture),
-                slotStr(params.glossTexture), slotStr(params.textureSss));
+                slotStr(params.heightTexture), slotStr(params.emissiveTexture),
+                slotStr(params.overlayTexture), slotStr(params.glossTexture),
+                slotStr(params.textureSss));
     ImGui::Text("uv: scale %.2f x %.2f  offset %.2f, %.2f", double(params.textureScaleU),
                 double(params.textureScaleV), double(params.textureOffsetU),
                 double(params.textureOffsetV));

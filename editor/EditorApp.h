@@ -67,6 +67,7 @@ public:
     {
         Base,
         Normals,
+        Height,
         Emissive,
         Overlay,
         Gloss,

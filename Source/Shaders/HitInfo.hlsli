@@ -149,6 +149,290 @@ float3 intersectRayTriangle(const float3x3 positions, const float3 orig, const f
 #endif
 
 
+#if (defined(HITINFO_INL_PRIM) || defined(HITINFO_INL_RFL)) && !defined(HITINFO_PARALLAX_GEOM_DEFINED)
+#define HITINFO_PARALLAX_GEOM_DEFINED
+bool setupParallaxGeometry(
+    const ShTriangle tr,
+    const float3 hitPosition,
+    const float3 normalGeom,
+    const float3 rayOrigin,
+    out uint outNrmTex,
+    out float outEffScale,
+    out float3 outToCam,
+    out float3 outViewTS,
+    out float outMaxWorldDepth,
+    out float2 outMaxDeltaUV)
+{
+    outNrmTex = tr.materials[0][MATERIAL_NORMAL_INDEX];
+    outEffScale = 0.0;
+    outToCam = (float3)0.0;
+    outViewTS = float3(0.0, 0.0, 1.0);
+    outMaxWorldDepth = 0.0;
+    outMaxDeltaUV = (float2)0.0;
+
+    const float parallaxScale =
+        ((tr.geometryInstanceFlags & (GEOM_INST_FLAG_MEDIA_TYPE_GLASS |
+                                      GEOM_INST_FLAG_MEDIA_TYPE_WATER |
+                                      GEOM_INST_FLAG_SUBSURFACE)) == 0u
+         && tr.materials[2][MATERIAL_ALBEDO_ALPHA_INDEX] == MATERIAL_NO_TEXTURE
+         && outNrmTex != MATERIAL_NO_TEXTURE)
+        ? clamp(tr.materialColors[2].z, 0.0, 0.25)
+        : 0.0;
+    if (!(parallaxScale > 1e-4))
+    {
+        return false;
+    }
+
+    outToCam = safeNormalize(rayOrigin - hitPosition);
+    const float3 bitangent = cross(normalGeom, tr.tangent.xyz) * tr.tangent.w;
+    outViewTS = float3(
+        dot(outToCam, tr.tangent.xyz),
+        dot(outToCam, bitangent),
+        dot(outToCam, normalGeom));
+
+    const float grazingFade = smoothstep(0.08, 0.28, outViewTS.z);
+    outEffScale = parallaxScale * grazingFade;
+    if (!(outEffScale > 1e-4))
+    {
+        return false;
+    }
+
+    const float3 e1 = getColumn(tr.positions, 1) - getColumn(tr.positions, 0);
+    const float3 e2 = getColumn(tr.positions, 2) - getColumn(tr.positions, 0);
+    const float3x2 tc = transpose(tr.layerTexCoord[0]);
+    const float2 du1 = tc[1] - tc[0];
+    const float2 du2 = tc[2] - tc[0];
+    const float uvDet = du1.x * du2.y - du2.x * du1.y;
+    if (!(abs(uvDet) > 1e-10))
+    {
+        outEffScale = 0.0;
+        return false;
+    }
+
+    const float invDet = 1.0 / uvDet;
+    const float3 dPdu = (e1 * du2.y - e2 * du1.y) * invDet;
+    const float3 dPdv = (e2 * du1.x - e1 * du2.x) * invDet;
+    const float metersPerU = max(length(dPdu), 1e-3);
+    const float metersPerV = max(length(dPdv), 1e-3);
+    const float avgTileMeters = sqrt(metersPerU * metersPerV);
+
+    outMaxWorldDepth = outEffScale * avgTileMeters;
+    outMaxDeltaUV = (-outViewTS.xy / max(outViewTS.z, 0.25)) * outMaxWorldDepth / float2(metersPerU, metersPerV);
+    const float deltaLen = length(outMaxDeltaUV);
+    if (deltaLen > 0.35)
+    {
+        const float clampRatio = 0.35 / deltaLen;
+        outMaxDeltaUV *= clampRatio;
+        outMaxWorldDepth *= clampRatio;
+    }
+    return true;
+}
+#endif
+
+#if defined(HITINFO_INL_PRIM)
+void computeParallaxOcclusionPrimary(
+    const ShTriangle tr,
+    const float3 hitPosition,
+    const float3 normalGeom,
+    const float3 rayOrigin,
+    const float2 dTdx0,
+    const float2 dTdy0,
+    inout float2 uv,
+    out float3 outToCam,
+    out float outPomRayDist,
+    out float outEffScale,
+    out float outHitHeight)
+{
+    outPomRayDist = 0.0;
+    outHitHeight = 1.0;
+
+    uint nrmTex = MATERIAL_NO_TEXTURE;
+    float3 viewTS = float3(0.0, 0.0, 1.0);
+    float maxWorldDepth = 0.0;
+    float2 maxDeltaUV = (float2)0.0;
+    if (!setupParallaxGeometry(tr, hitPosition, normalGeom, rayOrigin, nrmTex, outEffScale, outToCam, viewTS, maxWorldDepth, maxDeltaUV))
+    {
+        return;
+    }
+
+    const float2 baseUV = uv;
+    const int numLayers = (int)round(lerp(24.0, 8.0, saturate(viewTS.z)));
+    float2 prevUV = baseUV;
+    float prevDepth = 0.0;
+    float2 curUV = baseUV;
+    float curDepth = 0.0;
+    float hVal = getTextureSampleGrad(nrmTex, baseUV, dTdx0, dTdy0).a;
+    int hitStep = -1;
+
+    for (int i = 0; i <= numLayers; i++)
+    {
+        curDepth = (i == numLayers) ? 1.0 : ((float)i / (float)numLayers);
+        curUV = baseUV + maxDeltaUV * curDepth;
+        hVal = getTextureSampleGrad(nrmTex, curUV, dTdx0, dTdy0).a;
+        const float surfDepth = 1.0 - hVal;
+        if (curDepth >= surfDepth)
+        {
+            hitStep = i;
+            break;
+        }
+        prevUV = curUV;
+        prevDepth = curDepth;
+    }
+
+    float hitDepth = curDepth;
+    if (hitStep > 0)
+    {
+        float2 loUV = prevUV;
+        float2 hiUV = curUV;
+        float loD = prevDepth;
+        float hiD = curDepth;
+        [unroll]
+        for (int b = 0; b < 5; b++)
+        {
+            const float2 midUV = 0.5 * (loUV + hiUV);
+            const float midD = 0.5 * (loD + hiD);
+            const float midH = getTextureSampleGrad(nrmTex, midUV, dTdx0, dTdy0).a;
+            if (midD >= (1.0 - midH))
+            {
+                hiUV = midUV;
+                hiD = midD;
+            }
+            else
+            {
+                loUV = midUV;
+                loD = midD;
+            }
+        }
+        uv = 0.5 * (loUV + hiUV);
+        hitDepth = 0.5 * (loD + hiD);
+        outHitHeight = getTextureSampleGrad(nrmTex, uv, dTdx0, dTdy0).a;
+    }
+    else if (hitStep == 0)
+    {
+        uv = baseUV;
+        hitDepth = 0.0;
+        outHitHeight = hVal;
+    }
+    else
+    {
+        uv = baseUV + maxDeltaUV;
+        hitDepth = 1.0;
+        outHitHeight = hVal;
+    }
+
+    const float pomWorldDepth = maxWorldDepth * hitDepth;
+    outPomRayDist = pomWorldDepth / max(viewTS.z, 0.25);
+}
+
+float computeParallaxCavityAO(
+    const uint nrmTex,
+    const float2 uv,
+    const float2 dTdx0,
+    const float2 dTdy0,
+    const float effScale,
+    const float hitHeight)
+{
+    if (!(effScale > 1e-4) || nrmTex == MATERIAL_NO_TEXTURE)
+    {
+        return 1.0;
+    }
+
+    const float2 texel = 1.0 / max((float2)getTextureSize(nrmTex, 0), (float2)1.0);
+    static const float2 kOffsets[8] = {
+        float2( 1.5,  0.0), float2(-1.5,  0.0), float2( 0.0,  1.5), float2( 0.0, -1.5),
+        float2( 2.5,  2.5), float2(-2.5,  2.5), float2( 2.5, -2.5), float2(-2.5, -2.5)
+    };
+    float occ = 0.0;
+    [unroll]
+    for (int k = 0; k < 8; k++)
+    {
+        const float nh = getTextureSampleGrad(nrmTex, uv + kOffsets[k] * texel, dTdx0, dTdy0).a;
+        occ += max(0.0, nh - hitHeight);
+    }
+    occ *= 0.125;
+    return clamp(1.0 - occ * saturate(effScale * 18.0) * 1.35, 0.35, 1.0);
+}
+#endif
+
+#if defined(HITINFO_INL_RFL)
+void computeParallaxOcclusionRefl(
+    const ShTriangle tr,
+    const float3 hitPosition,
+    const float3 normalGeom,
+    const float3 rayOrigin,
+    const DerivativeSet derivSet,
+    inout float2 uv)
+{
+    uint nrmTex = MATERIAL_NO_TEXTURE;
+    float effScale = 0.0;
+    float3 toCam = (float3)0.0;
+    float3 viewTS = float3(0.0, 0.0, 1.0);
+    float maxWorldDepth = 0.0;
+    float2 maxDeltaUV = (float2)0.0;
+    if (!setupParallaxGeometry(tr, hitPosition, normalGeom, rayOrigin, nrmTex, effScale, toCam, viewTS, maxWorldDepth, maxDeltaUV))
+    {
+        return;
+    }
+
+    const float2 baseUV = uv;
+    const int numLayers = 8;
+    float2 prevUV = baseUV;
+    float prevDepth = 0.0;
+    float2 curUV = baseUV;
+    float curDepth = 0.0;
+    int hitStep = -1;
+
+    for (int i = 0; i <= numLayers; i++)
+    {
+        curDepth = (i == numLayers) ? 1.0 : ((float)i / (float)numLayers);
+        curUV = baseUV + maxDeltaUV * curDepth;
+        const float hVal = getTextureSampleDerivSet(nrmTex, curUV, derivSet, 0).a;
+        if (curDepth >= (1.0 - hVal))
+        {
+            hitStep = i;
+            break;
+        }
+        prevUV = curUV;
+        prevDepth = curDepth;
+    }
+
+    if (hitStep > 0)
+    {
+        float2 loUV = prevUV;
+        float2 hiUV = curUV;
+        float loD = prevDepth;
+        float hiD = curDepth;
+        [unroll]
+        for (int b = 0; b < 3; b++)
+        {
+            const float2 midUV = 0.5 * (loUV + hiUV);
+            const float midD = 0.5 * (loD + hiD);
+            const float midH = getTextureSampleDerivSet(nrmTex, midUV, derivSet, 0).a;
+            if (midD >= (1.0 - midH))
+            {
+                hiUV = midUV;
+                hiD = midD;
+            }
+            else
+            {
+                loUV = midUV;
+                loD = midD;
+            }
+        }
+        uv = 0.5 * (loUV + hiUV);
+    }
+    else if (hitStep == 0)
+    {
+        uv = baseUV;
+    }
+    else
+    {
+        uv = baseUV + maxDeltaUV;
+    }
+}
+#endif
+
+
 #if defined(HITINFO_INL_PRIM)
 
 ShHitInfo getHitInfoPrimaryRay(
@@ -195,7 +479,7 @@ ShHitInfo getHitInfoBounce(
     const float2 inBaryCoords = pl.baryCoords;
     const float3 baryCoords = float3(1.0f - inBaryCoords.x - inBaryCoords.y, inBaryCoords.x, inBaryCoords.y);
 
-    const float2 texCoords[3] =
+    float2 texCoords[3] =
     {
         getSurfaceTexCoord(tr.geometryInstanceFlags, mul(tr.layerTexCoord[0], baryCoords)),
         mul(tr.layerTexCoord[1], baryCoords),
@@ -232,10 +516,37 @@ ShHitInfo getHitInfoBounce(
     const float3 baryCoordsAX = intersectRayTriangle(tr.positions, rayOrigin, rayDirAX);
     const float3 baryCoordsAY = intersectRayTriangle(tr.positions, rayOrigin, rayDirAY);
 
-    const float4 viewSpacePosCur   = mul(globalUniform.view, float4(h.hitPosition, 1.0));
-    const float4 viewSpacePosPrev  = mul(globalUniform.viewPrev, float4(mul(tr.prevPositions, baryCoords), 1.0));
-    const float4 viewSpacePosAX    = mul(globalUniform.view, float4(mul(tr.positions, baryCoordsAX), 1.0));
-    const float4 viewSpacePosAY    = mul(globalUniform.view, float4(mul(tr.positions, baryCoordsAY), 1.0));
+    const float2 dTdx[3] =
+    {
+        (getSurfaceTexCoord(tr.geometryInstanceFlags, mul(tr.layerTexCoord[0], baryCoordsAX)) - texCoords[0]),
+        (mul(tr.layerTexCoord[1], baryCoordsAX) - texCoords[1]),
+        (mul(tr.layerTexCoord[2], baryCoordsAX) - texCoords[2])
+    };
+
+    const float2 dTdy[3] =
+    {
+        (getSurfaceTexCoord(tr.geometryInstanceFlags, mul(tr.layerTexCoord[0], baryCoordsAY)) - texCoords[0]),
+        (mul(tr.layerTexCoord[1], baryCoordsAY) - texCoords[1]),
+        (mul(tr.layerTexCoord[2], baryCoordsAY) - texCoords[2])
+    };
+
+    float3 pomToCam = (float3)0.0;
+    float pomRayDist = 0.0;
+    float pomEffScale = 0.0;
+    float pomHitHeight = 1.0;
+    computeParallaxOcclusionPrimary(
+        tr, h.hitPosition, h.normalGeom, rayOrigin,
+        dTdx[0], dTdy[0], texCoords[0],
+        pomToCam, pomRayDist, pomEffScale, pomHitHeight);
+
+    const float3 pomDepthShift = pomToCam * pomRayDist;
+    const float3 pomPosCur = h.hitPosition - pomDepthShift;
+    const float3 pomPosPrev = mul(tr.prevPositions, baryCoords) - pomDepthShift;
+
+    const float4 viewSpacePosCur   = mul(globalUniform.view, float4(pomPosCur, 1.0));
+    const float4 viewSpacePosPrev  = mul(globalUniform.viewPrev, float4(pomPosPrev, 1.0));
+    const float4 viewSpacePosAX    = mul(globalUniform.view, float4(mul(tr.positions, baryCoordsAX) - pomDepthShift, 1.0));
+    const float4 viewSpacePosAY    = mul(globalUniform.view, float4(mul(tr.positions, baryCoordsAY) - pomDepthShift, 1.0));
 
     const float4 clipSpacePosCur   = mul(globalUniform.projection, viewSpacePosCur);
     const float4 clipSpacePosPrev  = mul(globalUniform.projectionPrev, viewSpacePosPrev);
@@ -301,24 +612,20 @@ ShHitInfo getHitInfoBounce(
 
 
 #if defined(HITINFO_INL_PRIM)
-    const float2 dTdx[3] =
-    {
-        (getSurfaceTexCoord(tr.geometryInstanceFlags, mul(tr.layerTexCoord[0], baryCoordsAX)) - texCoords[0]),
-        (mul(tr.layerTexCoord[1], baryCoordsAX) - texCoords[1]),
-        (mul(tr.layerTexCoord[2], baryCoordsAX) - texCoords[2])
-    };
-
-    const float2 dTdy[3] =
-    {
-        (getSurfaceTexCoord(tr.geometryInstanceFlags, mul(tr.layerTexCoord[0], baryCoordsAY)) - texCoords[0]),
-        (mul(tr.layerTexCoord[1], baryCoordsAY) - texCoords[1]),
-        (mul(tr.layerTexCoord[2], baryCoordsAY) - texCoords[2])
-    };
-
     h.albedo = processAlbedoGrad(
         tr.geometryInstanceFlags, texCoords,
             tr.materials, tr.materialColors,
             dTdx, dTdy);
+    if (pomEffScale > 1e-4)
+    {
+        h.albedo *= computeParallaxCavityAO(
+            tr.materials[0][MATERIAL_NORMAL_INDEX],
+            texCoords[0],
+            dTdx[0],
+            dTdy[0],
+            pomEffScale,
+            pomHitHeight);
+    }
 #endif
 
 
@@ -329,6 +636,10 @@ ShHitInfo getHitInfoBounce(
     blurredCone.width += roughnessBlur * rayLen;
 
     DerivativeSet derivSet = getTriangleUVDerivativesFromRayCone(tr, h.normalGeom, blurredCone, rayDir);
+
+    computeParallaxOcclusionRefl(
+        tr, h.hitPosition, h.normalGeom, rayOrigin,
+        derivSet, texCoords[0]);
 
     h.albedo = processAlbedoRayConeDeriv(
         tr.geometryInstanceFlags, texCoords,
@@ -466,8 +777,11 @@ ShHitInfo getHitInfoBounce(
             ;
 
         float2 nrm = nrmSample.xy;
-        // the normal map's alpha carries the material's glass transparency
-        h.transparency = nrmSample.a;
+        // the normal map's alpha carries the material's glass transparency (or POM height on opaque surfaces)
+        if (isGlassNormal)
+        {
+            h.transparency = nrmSample.a;
+        }
     #if defined(HITINFO_INL_PRIM)
         if ((tr.geometryInstanceFlags & GEOM_INST_FLAG_SUBSURFACE) != 0u)
         {

@@ -7052,6 +7052,7 @@ void EditorApp::DrawMaterials()
 
             textureCombo("Gloss##tex", material.glossTexture);
             textureCombo("Normal##tex", material.normalTexture);
+            textureCombo("Height##tex", material.heightTexture);
             textureCombo("Emissive##tex", material.emissiveTexture);
             textureCombo("Overlay##tex", material.overlayTexture);
             textureCombo("Subsurface##tex", material.textureSss);
@@ -7060,6 +7061,7 @@ void EditorApp::DrawMaterials()
             {
                 material.glossTexture.clear();
                 material.normalTexture.clear();
+                material.heightTexture.clear();
                 material.emissiveTexture.clear();
                 material.overlayTexture.clear();
                 material.textureSss.clear();
@@ -7104,6 +7106,8 @@ void EditorApp::DrawMaterials()
             // normal map's alpha channel instead of the scalar.
             changed |= ImGui::SliderFloat("Bump scale##surf", &material.bumpScale, 0.0f, 4.0f, "%.2f");
             LogRect("material bump scale");
+            changed |= ImGui::SliderFloat("Parallax scale##surf", &material.parallaxScale, 0.0f,
+                                          0.15f, "%.3f");
             changed |= ImGui::Checkbox("Metalness from normal alpha##surf",
                                        &material.metalnessFromNormalAlpha);
 
@@ -7458,6 +7462,8 @@ std::string &MaterialSlotRef(EditorMaterialParams &params, EditorApp::EditorText
     {
     case EditorApp::EditorTextureSlot::Normals:
         return params.normalTexture;
+    case EditorApp::EditorTextureSlot::Height:
+        return params.heightTexture;
     case EditorApp::EditorTextureSlot::Emissive:
         return params.emissiveTexture;
     case EditorApp::EditorTextureSlot::Overlay:
@@ -8139,6 +8145,10 @@ void EditorApp::AutoEnableMaterialSlot(EditorMaterialParams &params, EditorTextu
         {
             params.sssStrength = 1.0f;
         }
+    }
+    else if (slot == EditorTextureSlot::Height && params.parallaxScale <= 0.0f)
+    {
+        params.parallaxScale = 0.04f;
     }
 }
 

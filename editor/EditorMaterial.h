@@ -175,6 +175,7 @@ struct EditorMaterialParams
     // baseTexture. Empty leaves the packed slot to what the surface already carries: no gloss
     // image means the roughness slider decides, no emissive image means emissiveFactor does.
     std::string normalTexture;
+    std::string heightTexture;
     std::string emissiveTexture;
     std::string glossTexture;
 
@@ -195,6 +196,9 @@ struct EditorMaterialParams
     // Textures, bump_scale: how hard the normal image's xy is pushed away from flat, 1 leaving
     // it alone. Needs a normal image to act on, which is what the game's key does too.
     float bumpScale = 1.0f;
+
+    // Textures, parallax_scale: POM relief depth fraction relative to UV tile size (0 disables).
+    float parallaxScale = 0.0f;
 
     // Surface. roughnessOverride < 0 leaves the shading default (kEditorDefaultRoughness)
     // in charge, which is how the game's roughness_override slider at 0 behaves.
@@ -439,6 +443,7 @@ private:
         int32_t albedo = -1;
         int32_t gloss = -1;
         int32_t normal = -1;
+        int32_t heightTex = -1;
         int32_t emissive = -1;
         int32_t overlay = -1;
         int32_t emissiveStageIndex = -1;
@@ -455,6 +460,7 @@ private:
         bool metalnessFromNormalAlpha = false;
         bool hasRoughnessOverride = false;
         bool useEmbeddedPbrMasks = false;
+        bool hasParallaxHeight = false;
         bool mirror = false;
         bool neutralMirrorAlbedo = false;
         bool enabled = true;

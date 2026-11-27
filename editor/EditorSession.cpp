@@ -599,6 +599,10 @@ void AppendOwnedTextureAndBumpValues(
     {
         append("texture_normals", params.normalTexture);
     }
+    if (!params.heightTexture.empty())
+    {
+        append("texture_height", params.heightTexture);
+    }
     if (!params.emissiveTexture.empty())
     {
         append("texture_emissive", params.emissiveTexture);
@@ -630,6 +634,10 @@ void AppendOwnedTextureAndBumpValues(
     if (params.bumpScale != 1.0f)
     {
         append("bump_scale", FormatFloat(params.bumpScale));
+    }
+    if (params.parallaxScale != 0.0f)
+    {
+        append("parallax_scale", FormatFloat(params.parallaxScale));
     }
 }
 
@@ -2665,6 +2673,7 @@ bool IsEmittedMaterialKey(std::string_view key,
         "sss_enabled",
         "texture_base",
         "texture_normals",
+        "texture_height",
         "texture_emissive",
         "texture_overlay",
         "texture_gloss",
@@ -2673,6 +2682,7 @@ bool IsEmittedMaterialKey(std::string_view key,
         "texture_offset_u",
         "texture_offset_v",
         "bump_scale",
+        "parallax_scale",
         "roughness_override",
         "metalness_factor",
         "metalness_from_normal_alpha",
@@ -2977,6 +2987,11 @@ bool ApplyMaterialTextureAndBumpKey(std::string_view key, std::string_view value
         params.normalTexture = TextOf(value);
         return true;
     }
+    if (key == "texture_height")
+    {
+        params.heightTexture = TextOf(value);
+        return true;
+    }
     if (key == "texture_emissive")
     {
         params.emissiveTexture = TextOf(value);
@@ -3015,6 +3030,11 @@ bool ApplyMaterialTextureAndBumpKey(std::string_view key, std::string_view value
     if (key == "bump_scale")
     {
         params.bumpScale = FloatOf(value, params.bumpScale);
+        return true;
+    }
+    if (key == "parallax_scale")
+    {
+        params.parallaxScale = FloatOf(value, params.parallaxScale);
         return true;
     }
     return false;
