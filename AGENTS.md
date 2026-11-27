@@ -40,7 +40,7 @@ Never mix engine-specific game code with SDK/editor core code across PRs or repo
 
 ## 3. Top Pitfalls to Avoid Immediately
 
-See [docs/agent-integration-guide.md § Part 3](docs/agent-integration-guide.md#part-3--graveyard-of-pitfalls-what-broke-and-how-to-avoid-it) for the 1-screen triage table and full root causes / fixes (Pitfalls 1–30):
+See [docs/agent-integration-guide.md § Part 3](docs/agent-integration-guide.md#part-3--graveyard-of-pitfalls-what-broke-and-how-to-avoid-it) for the 1-screen triage table and full root causes / fixes (Pitfalls 1–32):
 
 - **Pitfalls 1–2 (Architecture):** Never duplicate static pipelines between editor and runtime; never commit game-specific adapters inside `QuakeRaySDK/editor/`.
 - **Pitfalls 3–4 (Lights & YAML):** Emit all `q3map_surfacelight`/`lights.rad` fixtures into `scene.lights` + `scene.bspLights`; never hardcode model filters; serialize empty lights as `lights: []`.
@@ -53,6 +53,7 @@ See [docs/agent-integration-guide.md § Part 3](docs/agent-integration-guide.md#
 - **Pitfall 20 (PVS & Multi-Engine Formats):** Keep RLE `visData` **0-based** (`visOffsets`/`skyVis` 1-shifted, no trailing `0xFF`), fold maps `<= 8191` clusters (`Q2_MAX_CLUSTERS = 8192`), use `QR_CLUSTER_LIGHT_NO_CLUSTER` (`~0u`), bleed opaque RGB into alpha-0 cutouts, and tag `SURF_SKY` portals `VISIBILITY_TYPE_SKY`.
 - **Pitfalls 21–24 (Runtime FX, Decals, Sprites, & Smoke):** Keep sprites/FX/decals off `qrUploadGeometry`, smooth normals `flags = 0`, filter fake blob shadows, clip decals with Sutherland–Hodgman prisms before explosions, check `any(alpha < 250)`, never CPU-dim sRGB shells, never combine `SMOKE` + `PARTICLE*`, populate non-zero `smokeLook`, and map `+left` to `u = 0`.
 - **Pitfalls 25–30 (Windowing, Frame Contracts, Readback, Double-Sided, Configs, Shaders, & Validation):** Use non-GL windows + `SDL_VIDEODRIVER=x11` + `VSYNC` fallback; pass explicit AgX tonemap/bloom/textures params and never copy `EditorFrameParams`; pump frames during `qrGetFrameReadbackStatus` and keep `readbackBuffer` alive past `qrDestroyInstance`; duplicate `twoSided` traced faces and register all YAML keys in `IsEmittedMaterialKey`; apply cvars with `onlyModified = true` and use Vulkan Y-down `SWAPCHAIN` + `TEXCOORD_TRANSFORM`; rebuild shaders strictly from `Source/Shaders/` using `getColumn(m, i)`, wrap storage images via `wrapEngineStorageImage`, and require `0` VUID errors under `VK_LAYER_KHRONOS_validation`.
+- **Pitfalls 31–32 (GI Chroma Fidelity, Depth Metrology, & LF Anti-Ghosting):** Preserve `Q2_LF_CHROMA_TO_RADIANCE` (`1 / 0.282095`), `Q2_DIRECT_MAX_SPHERE_SOLID_ANGLE` (`2*pi` vs indirect `0.02`), bounded `emissionMaxScreenColor` (`4.0f` / `1.5f`), and `chromaPreservation` (`0.8f`); keep `q2DepthGradMode = 1u` (`Q2_DEPTH_GRAD_MIN_STEP = 0.0025` m), bounds-before-load + depth/normal-validated `deflicker_image` (`2.0`), and temporal antilag / grazing tangent-plane / 5×5 disocclusion moment invariants.
 
 ---
 

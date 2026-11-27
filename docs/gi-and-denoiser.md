@@ -113,6 +113,15 @@ teleports without a UI or resolution transition) must be handled by the host:
 - keep camera positions/times consistent rather than injecting teleports as
   continuous motion.
 
+## Denoiser & Color-Fidelity Shader Invariants
+
+When customizing host lighting parameters or modifying denoiser / tonemap shaders, preserve these physical and numerical invariants (detailed in [agent-integration-guide.md Pitfalls 31–32](agent-integration-guide.md#pitfall-31-pale-pink-red-lights-washed-out-indirect-gi-chroma--over-driven-screen-emission)):
+
+1. **Indirect YCoCg SH chroma scaling (`CmQ2Adapter` / `Q2Asvgf`):** `q2IrradianceToSH` stores `L00` SH coefficients (carrying the `0.282095` SH basis factor), while `q2SHToIrradiance` expects radiance-scaled chroma before applying `0.282095`. `CmQ2Adapter.comp.hlsl` applies `Q2_LF_CHROMA_TO_RADIANCE = 1.0 / 0.282095` when writing `framebufQ2ColorLF_COCG` so colored bounces do not desaturate ~3.54× (e.g., red lights turning pale pink) and `LIGHT_CHROMA_BOOST` stays at `1.0` (`RaygenCommon.hlsli`).
+2. **Direct vs. indirect spherical solid-angle clamping & emission range:** Keep `Q2_DIRECT_MAX_SPHERE_SOLID_ANGLE = 2.0 * M_PI` (`RtRaygenDirect.rgen.hlsl`) and isolate the `0.02` firefly cap to indirect bounces (`Q2_INDIR_MAX_SPHERE_SOLID_ANGLE`, `RtQ2Indirect.rgen.hlsl`). Keep `pTexturesParams->emissionMaxScreenColor` physically bounded (`4.0f` editor/host default, `1.5f` SDK fallback; evaluated in `CmPrepareHdr.comp.hlsl`) and `pTonemappingParams->chromaPreservation` positive (`0.8f` default in `Source/Tonemapping.cpp`, evaluated in `CmPrepareFinal.comp.hlsl`).
+3. **Pixel-normalized view-space depth gradients (`fwidth_depth`):** Keep `q2DepthGradMode = 1u` so `HitInfo.hlsli` + `RaygenPrimary.hlsli` emit `depthGrad = 1.0 / max(Q2_DEPTH_GRAD_MIN_STEP, gradDepth.z)` (`Q2_DEPTH_GRAD_MIN_STEP = 0.0025` meters in `Q2Asvgf.hlsli`, equivalent to `0.1` Quake units at `40 u/m`). Keeping `dist_z` in pixels prevents distance/grazing edge breakdown around corners and viewmodels.
+4. **LF deflicker bounds-before-load & temporal anti-ghosting:** `CmQ2AtrousLF.comp.hlsl` (`deflicker_image`) requires `Q2_FLT_ATROUS_DEFLICKER_LF >= 1.0` (`2.0`), `[field_left, field_right)` / `[0, height)` bounds checks **before** reading neighbors (avoiding out-of-bounds black/`NaN` poisoning), relative-depth (`< 0.1`) + geometric-normal (`dot > 0.5`) neighbor validation against foreground weapon silhouettes, and trimming the brightest neighbor (`num_neighbors >= 3`). `CmQ2Temporal.comp.hlsl` pairs this with gradient-driven LF/HF motion antilag (`Q2_FLT_ANTILAG_LF = 0.2`, `Q2_FLT_ANTILAG_HF = 1.0`), grazing tangent-plane history validation (`diff_plane_dist < 0.025` m), and a 5×5 spatial moment fallback (`hist_len_hf < 4.0`) for disoccluded screen edges and uncovered pixels behind the weapon.
+
 ## Validation
 
 1. Compare GI `0`, `1`, and `2`.
