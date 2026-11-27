@@ -60,6 +60,30 @@ float3 demodulateSpecular(const float3 contrib, const float3 surfSpecularColor)
     return contrib / max((float3)0.01, surfSpecularColor);
 }
 
+// Path-space soft-knee firefly limiter on demodulated 1-spp specular: keeps mirrors (<= 0.05)
+// and moderate highlights intact while smoothly compressing rough grazing dielectric outliers.
+float3 q2RegularizeDemodulatedSpecular(const float3 demodSpec, float roughness)
+{
+    const float lum = dot(demodSpec, float3(0.2125, 0.7154, 0.0721));
+    if (!isfinite(lum) || lum <= 0.0)
+    {
+        return (float3)0.0;
+    }
+    const float roughT = smoothstep(0.05, 0.40, roughness);
+    if (roughT <= 0.0)
+    {
+        return min(demodSpec, (float3)32768.0);
+    }
+    const float cap = lerp(48.0, 8.0, roughT);
+    if (lum <= cap)
+    {
+        return demodSpec;
+    }
+    const float excess = lum - cap;
+    const float regLum = cap + (excess * cap) / (excess + cap * 2.0);
+    return demodSpec * (regLum / lum);
+}
+
 float3 getFresnelSchlick(float nl, const float3 specularColor)
 {
     return specularColor + ((float3)1.0 - specularColor) * pow(1 - max(nl, 0), 5);

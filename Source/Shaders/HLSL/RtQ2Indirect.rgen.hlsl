@@ -304,7 +304,9 @@ void q2ShadeIndirect(const Surface surf, const float3 hitPos, const float3 hitRa
 
     // Path-space firefly clamping for 1-spp specular: preserve crisp bright peaks on mirrors
     // while bounding high-variance emissive/radiance spikes on rougher surfaces.
-    const float  specMaxRadiance = lerp( 50.0, 10.0, smoothstep( 0.08, 0.40, surf.roughness ) );
+    const float  specMaxRadiance = ( globalUniform.antiFireflyEnabled != 0u )
+        ? lerp( 36.0, 8.0, smoothstep( 0.05, 0.40, surf.roughness ) )
+        : 50.0;
     const float  specLum         = getLuminance( radiance );
     const float3 specRadiance    = ( specLum > specMaxRadiance ) ? radiance * ( specMaxRadiance / specLum ) : radiance;
 
@@ -466,7 +468,7 @@ void main()
             uint  lightSlot  = 0u;
             float lightPdf   = 0.0;
             q2SampleClusterLights( cluster, hitSurf.position, hitSurf.normal, hitSurf.toViewerDir,
-                                   phongExp, phongScale, phongWeight, isGradient, rng,
+                                   1.0, 1.0, 0.0, isGradient, rng,
                                    lightIndex, lightSlot, lightPdf );
 
             if ( lightIndex != LIGHT_INDEX_NONE && lightPdf > 0.0 )
@@ -582,7 +584,10 @@ void main()
 
     {
         const float3 direct = texelFetchUnfilteredSpecular( pix );
-        const float3 demodIndir = min( demodulateSpecular( specular, surf.specularColor ), (float3)32768.0 );
+        const float3 rawDemodIndir = demodulateSpecular( specular, surf.specularColor );
+        const float3 demodIndir = ( globalUniform.antiFireflyEnabled != 0u )
+            ? q2RegularizeDemodulatedSpecular( rawDemodIndir, surf.roughness )
+            : min( max( rawDemodIndir, (float3)0.0 ), (float3)32768.0 );
         const float indirLum = getLuminance( demodIndir );
         const float4 prevViewDir = framebufViewDirection.Load( pix );
         if ( indirLum > 1e-5 && ( prevViewDir.w < 0.0 || getLuminance( direct ) < indirLum ) )

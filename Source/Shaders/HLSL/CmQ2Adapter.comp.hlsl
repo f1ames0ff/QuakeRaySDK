@@ -292,76 +292,8 @@ float3 q2FetchReconstructedIndirectSpec(const int2 pix, const int width, const i
         }
     }
 
-    if (!filterFireflies)
-    {
-        return center;
-    }
-
     const float centerLum = getLuminance(center);
-    if (!isfinite(centerLum))
-    {
-        return (float3)0.0;
-    }
-    if (centerLum < Q2_FIREFLY_MIN_LUM)
-    {
-        return center;
-    }
-
-    float max1 = 3.0f;
-    float max2 = 3.0f;
-    const int rY = halfRes ? 2 : 1;
-    for (int yy = -rY; yy <= rY; yy++)
-    {
-        for (int xx = -1; xx <= 1; xx++)
-        {
-            if (xx == 0 && yy == 0)
-            {
-                continue;
-            }
-
-            const int2 p = pix + int2(xx, yy);
-            if (p.x < field_left || p.x >= field_right || p.y < 0 || p.y >= height)
-            {
-                continue;
-            }
-
-            if (q2IsCurrGradientSample(p, width, height))
-            {
-                continue;
-            }
-
-            const float4 s = framebufUnfilteredIndirectSpecular_Sampled.Load(int3(p, 0));
-            if (halfRes && abs(s.a - expectedTag) > 0.25)
-            {
-                continue;
-            }
-
-            const float lum = getLuminance(s.rgb);
-            if (!isfinite(lum))
-            {
-                continue;
-            }
-            if (lum > max1)
-            {
-                max2 = max1;
-                max1 = lum;
-            }
-            else if (lum > max2)
-            {
-                max2 = lum;
-            }
-        }
-    }
-
-    const float rough = framebufMetallicRoughness_Sampled.Load(int3(pix, 0)).y;
-    const float factor = lerp(12.0, 6.0, smoothstep(0.06, 0.45, rough));
-    const float limit = max(Q2_FIREFLY_MIN_LUM, max2 * factor);
-    if (centerLum > limit)
-    {
-        return center * (limit / centerLum);
-    }
-
-    return center;
+    return isfinite(centerLum) ? max(center, (float3)0.0) : (float3)0.0;
 }
 
 SH q2FetchReconstructedIndirectSH(const int2 pix, const int width, const int height)
@@ -574,8 +506,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     const float3 diffuse = q2AntiFirefly(pix, texelFetchUnfilteredDirect(pix), framebufUnfilteredDirect_Sampled, width, height);
-    const float3 directSpec = q2AntiFirefly(pix, texelFetchUnfilteredSpecular(pix), framebufUnfilteredSpecular_Sampled, width, height);
-    const float3 indirectSpec = q2FetchReconstructedIndirectSpec(pix, width, height, true);
+    const float3 rawDirectSpec = texelFetchUnfilteredSpecular(pix);
+    const float3 directSpec = isfinite(getLuminance(rawDirectSpec)) ? max(rawDirectSpec, (float3)0.0) : (float3)0.0;
+    const float3 indirectSpec = q2FetchReconstructedIndirectSpec(pix, width, height, false);
     const float3 specular = directSpec + indirectSpec;
     const SH indir = q2FetchReconstructedIndirectSH(pix, width, height);
 

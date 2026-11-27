@@ -111,7 +111,7 @@
 #include "Light.hlsli"
 #include "Q2Asvgf.hlsli"
 
-#define Q2_MAX_BRUTEFORCE_SAMPLING 16
+#define Q2_MAX_BRUTEFORCE_SAMPLING 32
 
 // Light statistics modes, mirroring the rt_q2_lightstats cvar: they only affect how
 // often the statistics are accumulated and whether they are applied, so the modes can
@@ -231,7 +231,9 @@ float q2SphericalTriArea(float3x3 positions, float3 p, float3 n, float3 V, float
         return 0;
 
     float3 L = normalize(mul(positions, (float3)(1.0 / 3.0)));
-    float specular = q2Phong(n, L, V, phongExp) * phongScale;
+    const float selPhongExp = min(phongExp, 64.0);
+    const float selPhongScale = min(phongScale, 32.0);
+    float specular = q2Phong(n, L, V, selPhongExp) * selPhongScale;
     float brdf = lerp(1.0, specular, phongWeight);
 
     float3 A = normalize(positions0);
@@ -240,6 +242,54 @@ float q2SphericalTriArea(float3x3 positions, float3 p, float3 n, float3 V, float
 
     float area = 2 * atan2(abs(dot(A, cross(B, C))), 1 + dot(A, B) + dot(B, C) + dot(A, C));
     return max(area - 1e-5, 0.0) * brdf;
+}
+
+float q2EvalBrdfSelectionWeight(
+    const float3 p, const float3 n, const float3 V,
+    const float3 lightCenter, const float lightRadius,
+    const float phongExp, const float phongScale, const float phongWeight)
+{
+    const float r = max(lightRadius, 1e-4);
+    const float3 toLight = lightCenter - p;
+    const float nDotToLight = dot(n, toLight);
+    if (nDotToLight + r <= 0.0)
+    {
+        return 0.0;
+    }
+
+    const float dist = sqrt(max(dot(toLight, toLight), 1e-12));
+    const float3 L_center = toLight / dist;
+    const float ndlCenter = max(dot(n, L_center), 0.0);
+    const float diffuseTerm = max(ndlCenter, 0.15 * saturate((nDotToLight + r) / (2.0 * r)));
+
+    float specTerm = diffuseTerm;
+    if (phongWeight > 1e-4 && dot(V, V) > 0.5)
+    {
+        const float3 R = reflect(-V, n);
+        float3 L_spec = R;
+        if (dist > r)
+        {
+            const float3 centerToRay = max(dot(toLight, R), 0.0) * R - toLight;
+            const float centerToRayLen = length(centerToRay);
+            const float tClamp = (centerToRayLen > r) ? (r / centerToRayLen) : 1.0;
+            L_spec = safeNormalize(toLight + centerToRay * tClamp);
+        }
+        if (dot(n, L_spec) > 0.0)
+        {
+            const float sinTheta = saturate(r / max(dist, r));
+            const float baseAlpha = sqrt(2.0 / (max(phongExp, 0.0) + 2.0));
+            const float effAlpha = saturate(baseAlpha + 0.5 * sinTheta);
+            const float selExp = min(q2RoughnessSquareToSpecPower(effAlpha), 64.0);
+            const float selScale = min(phongScale, (selExp + 2.0) / (2.0 * M_PI));
+            specTerm = pow(max(dot(R, L_spec), 0.0), selExp) * selScale;
+        }
+        else
+        {
+            specTerm = 0.0;
+        }
+    }
+
+    return max(lerp(diffuseTerm, specTerm, phongWeight), diffuseTerm * 0.15);
 }
 
 float q2LightSelectionMass(const ShLightEncoded encoded, const float3 p, const float3 n, const float3 V,
@@ -255,6 +305,18 @@ float q2LightSelectionMass(const ShLightEncoded encoded, const float3 p, const f
     {
         const TexturedAreaLight l = decodeAsTexturedAreaLight(encoded);
         const float3 center = getTexturedAreaLightCenter(l);
+        float radius = 0.0;
+        for (int i = 0; i < l.numVerts; i++)
+        {
+            radius = max(radius, length(texturedAreaLightWorldPos(l, l.uvVerts[i]) - center));
+        }
+        radius = max(radius, max(sqrt(max(l.area, 0.0) / M_PI), 0.05));
+        const float brdfW = q2EvalBrdfSelectionWeight(p, n, V, center, radius, phongExp, phongScale, phongWeight);
+        if (brdfW <= 0.0)
+        {
+            return 0.0;
+        }
+
         const DirectionAndLength centerToSurf = calcDirectionAndLength(center, p);
         const float cosNL = max(dot(l.normal, centerToSurf.dir), 0.0);
         float mass = safeSolidAngle(l.area * getGeometryFactorClamped(l.normal, centerToSurf.dir, centerToSurf.len));
@@ -262,11 +324,18 @@ float q2LightSelectionMass(const ShLightEncoded encoded, const float3 p, const f
         if (l.coneCosOuter > 0.0)
             mass *= getSpotFactor(cosNL, l.coneCosInner, l.coneCosOuter);
 
-        return mass;
+        return mass * brdfW * max(l.meanEmiss, 0.05);
     }
     else if (encoded.lightType == LIGHT_TYPE_DTAL_GROUP)
     {
         const DtalGroupLight l = decodeAsDtalGroupLight(encoded);
+        const float radius = max(l.boundsRadius, 0.05);
+        const float brdfW = q2EvalBrdfSelectionWeight(p, n, V, l.center, radius, phongExp, phongScale, phongWeight);
+        if (brdfW <= 0.0)
+        {
+            return 0.0;
+        }
+
         const DirectionAndLength centerToSurf = calcDirectionAndLength(l.center, p);
         const float cosNL = max(dot(l.normal, centerToSurf.dir), 0.0);
         float mass = safeSolidAngle(l.area * getGeometryFactorClamped(l.normal, centerToSurf.dir, centerToSurf.len));
@@ -274,10 +343,17 @@ float q2LightSelectionMass(const ShLightEncoded encoded, const float3 p, const f
         if (l.coneCosOuter > 0.0)
             mass *= getSpotFactor(cosNL, l.coneCosInner, l.coneCosOuter);
 
-        return max(mass, 1e-6);
+        return max(mass * max(l.meanEmiss, 0.05), 1e-6) * brdfW;
     }
     else
     {
+        const float radius = max(encoded.data_0.w, 0.02);
+        const float brdfW = q2EvalBrdfSelectionWeight(p, n, V, encoded.data_0.xyz, radius, phongExp, phongScale, phongWeight);
+        if (brdfW <= 0.0)
+        {
+            return 0.0;
+        }
+
         const float dist = max(length(p - encoded.data_0.xyz), encoded.data_0.w);
         float sa = calcSolidAngleForSphere(encoded.data_0.w, dist);
 
@@ -288,7 +364,7 @@ float q2LightSelectionMass(const ShLightEncoded encoded, const float3 p, const f
             sa *= getSpotFactor(max(dot(l.direction, lightToSurf), 0.0), l.cosAngleInner, l.cosAngleOuter);
         }
 
-        return sa;
+        return sa * brdfW;
     }
 }
 
