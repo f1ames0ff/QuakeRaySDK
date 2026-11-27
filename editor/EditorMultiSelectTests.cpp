@@ -3951,6 +3951,126 @@ bool TestBakeNormalPreservesEmbeddedPbrMasks()
                  "stage is disabled or gloss override is active");
 }
 
+void BuildParallaxTestScene(EditorScene &scene)
+{
+    EditorTexture albedo;
+    albedo.name = "wall_albedo";
+    albedo.width = 4;
+    albedo.height = 4;
+    albedo.rgba.assign(16u * 4u, 200u);
+    scene.textures.push_back(std::move(albedo));
+
+    EditorTexture normal;
+    normal.name = "wall_norm";
+    normal.width = 4;
+    normal.height = 4;
+    normal.rgba.assign(16u * 4u, 128u);
+    for (size_t i = 0; i < 16u; ++i)
+    {
+        normal.rgba[i * 4u + 0u] = 160u;
+        normal.rgba[i * 4u + 2u] = 250u;
+        normal.rgba[i * 4u + 3u] = 255u;
+    }
+    scene.textures.push_back(std::move(normal));
+
+    EditorTexture heightTex;
+    heightTex.name = "wall_height";
+    heightTex.width = 4;
+    heightTex.height = 4;
+    heightTex.rgba.resize(16u * 4u, 255u);
+    for (size_t i = 0; i < 16u; ++i)
+    {
+        heightTex.rgba[i * 4u + 0u] = 72u;
+        heightTex.rgba[i * 4u + 1u] = 72u;
+        heightTex.rgba[i * 4u + 2u] = 72u;
+    }
+    scene.textures.push_back(std::move(heightTex));
+}
+
+bool VerifyParallaxUploadAndYaml(const EditorMaterialParams &withNormals)
+{
+    QrGeometryUploadInfo upOpaque = {};
+    ApplyEditorMaterial(withNormals, QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE, upOpaque);
+    const bool okUpOpaque = Near(upOpaque.layerColors[2].data[2], 0.05f, 1e-5f);
+
+    EditorMaterialParams glassMat = withNormals;
+    glassMat.type = EditorMaterialType::Glass;
+    glassMat.glassIor = 1.5f;
+    glassMat.glassThickness = 2.0f;
+    QrGeometryUploadInfo upGlass = {};
+    ApplyEditorMaterial(glassMat, QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE, upGlass);
+    const bool okUpGlass = Near(upGlass.layerColors[2].data[2], 0.0f, 1e-5f);
+
+    EditorMaterialParams sssMat = withNormals;
+    sssMat.sssEnabled = true;
+    sssMat.sssStrength = 0.5f;
+    QrGeometryUploadInfo upSss = {};
+    ApplyEditorMaterial(sssMat, QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE, upSss);
+    const bool okUpSss = Near(upSss.layerColors[2].data[2], 0.0f, 1e-5f);
+
+    ScopedTempTestDir tmp("qray_parallax_yaml");
+    const std::filesystem::path yamlPath = tmp.dir / "qray.materials.yaml";
+    EditorMaterialsDocument doc;
+    EditorMaterialEntry entry;
+    entry.name = "textures/base_wall/test_pom";
+    entry.params = withNormals;
+    std::string err;
+    EditorMaterialsDocument reloaded;
+    EditorMaterialParams readBack;
+    const bool yamlOk = WriteEditorFile(yamlPath.string(), doc.WriteMerged({ entry }), err) &&
+                        reloaded.Load(yamlPath.string(), err) &&
+                        reloaded.ReadMaterial(entry.name, readBack) &&
+                        readBack.heightTexture == "wall_height" &&
+                        Near(readBack.parallaxScale, 0.05f, 1e-4f);
+    return okUpOpaque && okUpGlass && okUpSss && yamlOk;
+}
+
+bool TestParallaxHeightBakeUploadAndYamlRoundTrip()
+{
+    EditorScene scene;
+    BuildParallaxTestScene(scene);
+
+    const auto resolve = [](const std::string &n) -> int32_t {
+        if (n == "wall_albedo")
+        {
+            return 0;
+        }
+        if (n == "wall_norm")
+        {
+            return 1;
+        }
+        return (n == "wall_height") ? 2 : -1;
+    };
+    const QrInstance dummyInstance = reinterpret_cast<QrInstance>(uintptr_t(1));
+    const std::vector<QrMaterial> pool = { 10, 11 };
+
+    EditorMaterialParams withNormals;
+    withNormals.normalTexture = "wall_norm";
+    withNormals.heightTexture = "wall_height";
+    withNormals.parallaxScale = 0.05f;
+
+    EditorMaterialBakes bakes;
+    bakes.BeginPass();
+    g_lastBakedNormal.clear();
+    const QrMaterial bakedA =
+        bakes.Get(dummyInstance, "wall_albedo", withNormals, scene, pool, resolve);
+    const bool okA = bakedA != QR_NO_MATERIAL && g_lastBakedNormal.size() == 16u * 4u &&
+                     g_lastBakedNormal[0] > 160u && g_lastBakedNormal[3] == 72u;
+
+    EditorMaterialParams heightOnly;
+    heightOnly.heightTexture = "wall_height";
+    heightOnly.parallaxScale = 0.05f;
+    g_lastBakedNormal.clear();
+    const QrMaterial bakedB =
+        bakes.Get(dummyInstance, "wall_albedo", heightOnly, scene, pool, resolve);
+    const bool okB = bakedB != QR_NO_MATERIAL && g_lastBakedNormal.size() == 16u * 4u &&
+                     g_lastBakedNormal[0] == 128u && g_lastBakedNormal[1] == 128u &&
+                     g_lastBakedNormal[2] == 255u && g_lastBakedNormal[3] == 72u;
+
+    return Check(okA && okB && VerifyParallaxUploadAndYaml(withNormals),
+                 "Parallax height alpha bake, upload channel, and YAML round-trip failed");
+}
+
 } // namespace
 
 int main()
@@ -3990,6 +4110,7 @@ int main()
         TestAiGlossAndEmissiveAdjustments,
         TestAiCppLotusPrepPoissonAndOnnx,
         TestBakeNormalPreservesEmbeddedPbrMasks,
+        TestParallaxHeightBakeUploadAndYamlRoundTrip,
         TestAiModelDownloadSpecsAndSha256,
         TestEditorGuiSpacingAndButtonFitConsistency,
     };
