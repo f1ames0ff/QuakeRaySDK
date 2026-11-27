@@ -2149,6 +2149,7 @@ bool TestGlossMultiBlockBlendAndBakeInvalidation()
     scene.textures.push_back(tex);
 
     EditorMaterialParams params;
+    params.glossEnabled = true;
     params.hasColorGloss = true;
     EditorGlossBlock b0;
     b0.brushWidth = 16;
@@ -2468,6 +2469,7 @@ bool TestEmissiveBrushBake()
     tex.rgba.assign(8u * 8u * 4u, 255);
     scene.textures.push_back(tex);
     EditorMaterialParams params;
+    params.emissiveEnabled = true;
     params.hasColorEmissive = true;
     EditorEmissiveBlock eb;
     eb.brushWidth = 8;
@@ -3041,6 +3043,7 @@ bool TestBakeInvalidateTexturePreservesUnrelatedMapBakes()
     mapParams.normalTexture = "map_wall_norm";
 
     EditorMaterialParams previewParams;
+    previewParams.glossEnabled = true;
     previewParams.glossTexture = "preview_skin_gloss";
 
     const std::vector<QrMaterial> pool = { 10, 11, 12, 13 };
@@ -3708,6 +3711,246 @@ bool TestAiModelDownloadSpecsAndSha256()
     return VerifyOnlineDownloadBehavior();
 }
 
+bool VerifyDisplayFitButtonsAndCombos()
+{
+    const ImGuiStyle &style = ImGui::GetStyle();
+    static constexpr const char *kFitButtons[] = {
+        "Regenerate",
+        "Unload Mod",
+        "Download Model (1.25 GB)",
+    };
+    for (const char *btn : kFitButtons)
+    {
+        const float fitted = EditorGuiFitButtonWidth(btn);
+        const float needed =
+            ImGui::CalcTextSize(btn, nullptr, true).x + style.FramePadding.x * 2.0f;
+        if (!Check(fitted >= needed - 0.1f,
+                   (std::string("EditorGuiFitButtonWidth too narrow for ") + btn).c_str()))
+        {
+            return false;
+        }
+    }
+
+    static constexpr const char *kComboA[] = { "768 px (Default)" };
+    static constexpr const char *kComboB[] = { "DeepBump (Fast GGUF)" };
+    const float wA = EditorGuiComboWidth(kComboA, 1);
+    const float needA = ImGui::CalcTextSize(kComboA[0], nullptr, true).x +
+                        style.FramePadding.x * 2.0f + ImGui::GetFrameHeight();
+    const float wB = EditorGuiComboWidth(kComboB, 1);
+    const float needB = ImGui::CalcTextSize(kComboB[0], nullptr, true).x +
+                        style.FramePadding.x * 2.0f + ImGui::GetFrameHeight();
+    return Check(wA >= needA - 0.1f && wB >= needB - 0.1f,
+                 "EditorGuiComboWidth failed to fit item text and dropdown arrow");
+}
+
+bool CheckAlignedRowWidgets(float contentMinX, float contentMaxX, float labelLimit,
+                            const std::string &ellipsizedLong)
+{
+    bool chk = true;
+    bool clrRst = false;
+    bool slRst = false;
+    bool texRst = false;
+    bool vecRst = false;
+    bool browse = false;
+    bool aiGen = false;
+    float slVal = 0.5f;
+    float col[3] = { 0.4f, 0.6f, 0.8f };
+    float vec[3] = { 1.0f, 2.0f, 3.0f };
+    std::string texPath = "textures/base_wall.tga";
+    float slStartX = 0.0f;
+
+    EditorGuiCheckbox("enabled", &chk, { true, true, nullptr, nullptr, &clrRst });
+    const ImVec2 rstChkMin = ImGui::GetItemRectMin();
+    const ImVec2 rstChkMax = ImGui::GetItemRectMax();
+    EditorGuiColorHex("light_color", col, { true, true, nullptr, nullptr, &clrRst });
+    const ImVec2 rstClrMin = ImGui::GetItemRectMin();
+    const ImVec2 rstClrMax = ImGui::GetItemRectMax();
+    EditorGuiSliderFloat("rt_dtal_proxy_model_minarea", &slVal, 0.0f, 1024.0f,
+                         { true, true, nullptr, "%.1f", &slRst,
+                           [&](const char *) { slStartX = ImGui::GetItemRectMin().x; }, "sl" });
+    const ImVec2 rstSlMin = ImGui::GetItemRectMin();
+    const ImVec2 rstSlMax = ImGui::GetItemRectMax();
+    EditorGuiTexturePath("texture_normals", texPath, &browse,
+                         { true, true, nullptr, nullptr, &texRst }, &aiGen);
+    const ImVec2 rstTexMin = ImGui::GetItemRectMin();
+    const ImVec2 rstTexMax = ImGui::GetItemRectMax();
+    EditorGuiVec3Input("origin", vec, 1.0f, { true, true, nullptr, nullptr, &vecRst });
+    const ImVec2 rstVecMin = ImGui::GetItemRectMin();
+    const ImVec2 rstVecMax = ImGui::GetItemRectMax();
+    static constexpr const char *kLightBtns[] = {
+        "Teleport", "Clone in world", "Clone here", "Remove",
+    };
+    EditorGuiButtonRow(kLightBtns, nullptr, 4);
+    const ImVec2 lastBtnMin = ImGui::GetItemRectMin();
+    const ImVec2 lastBtnMax = ImGui::GetItemRectMax();
+
+    const float resetMinXs[] = { rstChkMin.x, rstClrMin.x, rstTexMin.x, rstVecMin.x };
+    const float resetMaxXs[] = { rstChkMax.x, rstClrMax.x, rstSlMax.x, rstTexMax.x, rstVecMax.x };
+    bool resetAligned = true;
+    for (float x : resetMinXs)
+    {
+        resetAligned &= Near(x, rstSlMin.x, 1.0f);
+    }
+    for (float x : resetMaxXs)
+    {
+        resetAligned &= (x <= contentMaxX + 1.0f);
+    }
+    const float ellipW = ImGui::CalcTextSize(ellipsizedLong.c_str()).x;
+    const bool labelClear = ellipW <= labelLimit + 0.5f && (contentMinX + ellipW <= slStartX);
+    const bool buttonsFit =
+        lastBtnMin.x >= contentMinX - 0.5f && lastBtnMax.x <= contentMaxX + 0.5f;
+    return Check(resetAligned && labelClear && buttonsFit,
+                 "UI panel alignment, ellipsize, or button row overflow check failed");
+}
+
+bool VerifyPanelRowsAlignment(float displayW, float displayH)
+{
+    const bool open = EditorGuiBeginPanel("MATERIAL EDITOR", displayW, displayH);
+    if (!Check(open && Near(kEditorGuiPanelWidth, 536.0f, 1e-4f) &&
+                   Near(kEditorGuiLabelWidth, 176.0f, 1e-4f),
+               "panel geometry constants changed unexpectedly"))
+    {
+        EditorGuiEndPanel();
+        return false;
+    }
+
+    const ImGuiStyle &style = ImGui::GetStyle();
+    EditorGuiBeginScroll("##LayoutTestScroll");
+    const float contentMinX = ImGui::GetCursorScreenPos().x;
+    const float contentMaxX = contentMinX + ImGui::GetContentRegionAvail().x;
+    const float labelLimit =
+        std::max(24.0f * EditorGuiScale(),
+                 std::round(kEditorGuiLabelWidth * EditorGuiScale()) - style.ItemSpacing.x);
+    const std::string ellipsizedLong =
+        EditorGuiEllipsize("rt_dtal_proxy_model_minarea", labelLimit);
+    const bool ok = CheckAlignedRowWidgets(contentMinX, contentMaxX, labelLimit, ellipsizedLong);
+    EditorGuiEndScroll();
+    EditorGuiEndPanel();
+    return ok;
+}
+
+bool TestEditorGuiSpacingAndButtonFitConsistency()
+{
+    IMGUI_CHECKVERSION();
+    ImGuiTestContextGuard ctxGuard(ImGui::CreateContext());
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DeltaTime = 1.0f / 60.0f;
+
+    unsigned char *pixels = nullptr;
+    int texW = 0;
+    int texH = 0;
+    io.Fonts->AddFontDefault();
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &texW, &texH);
+    io.Fonts->SetTexID(ImTextureID(uintptr_t(1)));
+
+    static constexpr float kCases[][2] = {
+        { 1280.0f, 720.0f },
+        { 2560.0f, 1440.0f },
+        { 3840.0f, 2160.0f },
+    };
+    for (const auto &dc : kCases)
+    {
+        io.DisplaySize = ImVec2(dc[0], dc[1]);
+        EditorGuiApplyStyle(dc[0], dc[1]);
+        ImGui::NewFrame();
+        const bool ok = VerifyDisplayFitButtonsAndCombos() && VerifyPanelRowsAlignment(dc[0], dc[1]);
+        ImGui::Render();
+        if (!ok)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void BuildEmbeddedPbrTestScene(EditorScene &scene)
+{
+    EditorTexture albedo;
+    albedo.name = "shiny_albedo";
+    albedo.width = 16;
+    albedo.height = 16;
+    albedo.rgba.assign(16u * 16u * 4u, 180u);
+    albedo.isMetallicEnv = true;
+    EditorOverlayStage envStage;
+    envStage.isEnvironment = true;
+    albedo.shaderStages.push_back(envStage);
+    albedo.baseStageIndex = 1u;
+    albedo.roughnessMask.assign(16u * 16u, 40u);
+    albedo.metallicMask.assign(16u * 16u, 220u);
+    scene.textures.push_back(std::move(albedo));
+
+    EditorTexture normal;
+    normal.name = "test_norm";
+    normal.width = 16;
+    normal.height = 16;
+    normal.rgba.assign(16u * 16u * 4u, 128u);
+    for (size_t i = 0; i < 16u * 16u; ++i)
+    {
+        normal.rgba[i * 4u + 2u] = 255u;
+        normal.rgba[i * 4u + 3u] = 255u;
+    }
+    scene.textures.push_back(std::move(normal));
+}
+
+bool BakeMatchesRmeBytes(EditorMaterialBakes &bakes, const EditorMaterialParams &params,
+                         const EditorScene &scene,
+                         const std::function<int32_t(const std::string &)> &resolve,
+                         uint8_t expectRough, uint8_t expectMetal, uint8_t tol = 0u)
+{
+    const QrInstance dummyInstance = reinterpret_cast<QrInstance>(uintptr_t(1));
+    const std::vector<QrMaterial> pool = { 10, 11 };
+    g_lastBakedRme.clear();
+    g_lastBakedNormal.clear();
+    const QrMaterial baked =
+        bakes.Get(dummyInstance, "shiny_albedo", params, scene, pool, resolve);
+    if (baked == QR_NO_MATERIAL || g_lastBakedRme.empty() || g_lastBakedNormal.empty())
+    {
+        return false;
+    }
+    const int d0 = std::abs(int(g_lastBakedRme[0]) - int(expectRough));
+    const int d1 = std::abs(int(g_lastBakedRme[1]) - int(expectMetal));
+    return d0 <= int(tol) && d1 <= int(tol);
+}
+
+bool TestBakeNormalPreservesEmbeddedPbrMasks()
+{
+    EditorScene scene;
+    BuildEmbeddedPbrTestScene(scene);
+
+    const auto resolve = [](const std::string &n) -> int32_t {
+        if (n == "shiny_albedo")
+        {
+            return 0;
+        }
+        return (n == "test_norm") ? 1 : -1;
+    };
+
+    EditorMaterialParams params;
+    params.normalTexture = "test_norm";
+    params.glossEnabled = false;
+
+    EditorMaterialBakes bakes;
+    bakes.BeginPass();
+    const bool okA = BakeMatchesRmeBytes(bakes, params, scene, resolve, 40u, 220u);
+
+    EditorMaterialParams paramsB = params;
+    paramsB.disabledStagesMask = 1u;
+    const uint8_t defaultRoughByte = uint8_t(kEditorDefaultRoughness * 255.0f);
+    const bool okB = BakeMatchesRmeBytes(bakes, paramsB, scene, resolve, defaultRoughByte, 0u);
+
+    EditorMaterialParams paramsC = params;
+    paramsC.disabledStagesMask = 0u;
+    paramsC.glossEnabled = true;
+    paramsC.roughnessOverride = 0.5f;
+    paramsC.metalnessFactor = 0.25f;
+    const bool okC = BakeMatchesRmeBytes(bakes, paramsC, scene, resolve, 128u, 64u, 1u);
+
+    return Check(okA && okB && okC,
+                 "Normal-map bake must preserve embedded metallic/roughness masks unless env "
+                 "stage is disabled or gloss override is active");
+}
+
 } // namespace
 
 int main()
@@ -3746,7 +3989,9 @@ int main()
         TestAiHeightToNormalAndInvertHeight,
         TestAiGlossAndEmissiveAdjustments,
         TestAiCppLotusPrepPoissonAndOnnx,
+        TestBakeNormalPreservesEmbeddedPbrMasks,
         TestAiModelDownloadSpecsAndSha256,
+        TestEditorGuiSpacingAndButtonFitConsistency,
     };
 
     for (TestFn test : kTests)

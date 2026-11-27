@@ -187,26 +187,83 @@ bool HasFullbright(const EditorTexture *texture)
     return texture != nullptr && !texture->fullbright.empty();
 }
 
+bool HasEmbeddedPbrMasks(const EditorTexture *texture)
+{
+    return texture != nullptr &&
+           (!texture->roughnessMask.empty() || !texture->metallicMask.empty());
+}
+
+bool HasEnabledEmbeddedPbrMasks(const EditorTexture *texture, uint32_t disabledStagesMask)
+{
+    if (!HasEmbeddedPbrMasks(texture) || texture->width == 0 || texture->height == 0)
+    {
+        return false;
+    }
+    if (texture->isMetallicEnv)
+    {
+        bool foundEnvStage = false;
+        bool anyEnvEnabled = false;
+        for (size_t i = 0; i < texture->shaderStages.size(); i++)
+        {
+            if (!texture->shaderStages[i].isEnvironment)
+            {
+                continue;
+            }
+            foundEnvStage = true;
+            if (i >= 32u || ((disabledStagesMask >> uint32_t(i)) & 1u) == 0u)
+            {
+                anyEnvEnabled = true;
+                break;
+            }
+        }
+        if (foundEnvStage && !anyEnvEnabled)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HasActiveFullbright(const EditorTexture *texture)
 {
     return texture != nullptr && !texture->fullbright.empty() &&
            texture->defaultEmissiveTexture.empty();
 }
 
+bool HasScalarFullbrightOverrides(const EditorMaterialParams &params)
+{
+    const bool glossOverrideActive =
+        params.glossEnabled && (params.roughnessOverride >= 0.0f || params.metalnessFactor > 0.0f);
+    return !params.enabled || glossOverrideActive || params.emissiveFactor != 1.0f ||
+           params.mirror || params.baseFactor != 1.0f;
+}
+
 bool NeedsFullbrightBake(const EditorTexture *texture, const EditorMaterialParams &params)
 {
-    if (!HasFullbright(texture))
+    const bool hasFullbright = HasFullbright(texture);
+    const bool hasPbrMasks = HasEmbeddedPbrMasks(texture);
+    if (!hasFullbright && !hasPbrMasks)
     {
         return false;
     }
 
-    if (!texture->defaultEmissiveTexture.empty() && params.emissiveTexture.empty())
+    if (hasPbrMasks && !HasEnabledEmbeddedPbrMasks(texture, params.disabledStagesMask))
     {
         return true;
     }
 
-    return !params.enabled || params.roughnessOverride >= 0.0f || params.metalnessFactor > 0.0f ||
-           params.emissiveFactor != 1.0f || params.mirror || params.baseFactor != 1.0f;
+    if (hasFullbright && !params.emissiveEnabled)
+    {
+        return true;
+    }
+
+    if (texture != nullptr && !texture->defaultEmissiveTexture.empty() &&
+        params.emissiveTexture.empty())
+    {
+        return true;
+    }
+
+    return HasScalarFullbrightOverrides(params);
 }
 
 // The falloff of a colour block's threshold mask, gl_texmgr.c RT_COLOR_EMISSIVE_FALLOFF.
@@ -909,7 +966,7 @@ bool IsChromeCapableMaterial(const EditorMaterialParams &material,
         return true;
     }
 
-    if (passThrough != QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE)
+    if (passThrough != QR_GEOMETRY_PASS_THROUGH_TYPE_OPAQUE || !material.glossEnabled)
     {
         return false;
     }
@@ -972,11 +1029,13 @@ void ApplyMaterialPassThroughAndRoughness(const EditorMaterialParams &material,
     upload.passThroughType = passThrough;
 
     // Mirror forces roughness to 0; glass keeps its own override, as the game's tooltip says.
-    const float roughness =
-        material.roughnessOverride < 0.0f ? kEditorDefaultRoughness : material.roughnessOverride;
+    const bool glossActive = material.glossEnabled;
+    const float roughness = (glossActive && material.roughnessOverride >= 0.0f)
+                                ? material.roughnessOverride
+                                : kEditorDefaultRoughness;
 
     upload.defaultRoughness = mirror ? 0.0f : roughness;
-    upload.defaultMetallicity = material.metalnessFactor;
+    upload.defaultMetallicity = glossActive ? material.metalnessFactor : 0.0f;
 }
 
 float DistanceToSegmentTexel(float px, float py, float x0, float y0, float x1, float y1)
@@ -1207,7 +1266,7 @@ bool HasEditorSubsurface(const EditorMaterialParams &material)
     const bool blockedType = material.type == EditorMaterialType::Glass ||
                              material.type == EditorMaterialType::Water ||
                              material.mirror;
-    return !blockedType &&
+    return material.sssEnabled && !blockedType &&
            std::isfinite(material.sssStrength) && material.sssStrength > 0.0f &&
            std::isfinite(material.sssRadius) && material.sssRadius > 0.0f;
 }
@@ -1443,23 +1502,24 @@ namespace
 int32_t ActiveEmissiveIndex(const EditorMaterialParams &params,
                             const std::function<int32_t(const std::string &)> &resolveTexture)
 {
-    return params.enabled ? resolveTexture(params.emissiveTexture) : -1;
+    return (params.enabled && params.emissiveEnabled) ? resolveTexture(params.emissiveTexture) : -1;
 }
 
 bool ShouldMaskEmission(const EditorMaterialParams &params, int32_t emissive)
 {
-    return params.enabled && params.hasColorEmissive && !params.emissiveBlocks.empty() &&
-           emissive < 0;
+    return params.enabled && params.emissiveEnabled && params.hasColorEmissive &&
+           !params.emissiveBlocks.empty() && emissive < 0;
 }
 
 float BakeEmissionFactor(const EditorMaterialParams &params)
 {
-    return params.enabled ? params.emissiveFactor : 0.0f;
+    return (params.enabled && (params.emissiveEnabled || params.luma)) ? params.emissiveFactor
+                                                                       : 0.0f;
 }
 
 bool ShouldBlendEmission(const EditorMaterialParams &params)
 {
-    return params.enabled && params.lumaBlend >= 0;
+    return params.enabled && params.emissiveEnabled && params.lumaBlend >= 0;
 }
 
 float SampleBakedEmissionIfEnabled(bool enabled, const BakeEmissionInputs &inputs, uint32_t x,
@@ -1485,7 +1545,7 @@ bool IsBakeEmissionValid(bool enabled, bool hasEmissiveImage, bool hasColorEmiss
 
 bool ShouldMaskGloss(const EditorMaterialParams &params, int32_t gloss)
 {
-    return params.hasColorGloss && !params.glossBlocks.empty() && gloss < 0;
+    return params.glossEnabled && params.hasColorGloss && !params.glossBlocks.empty() && gloss < 0;
 }
 
 void BuildColorGlossIfNeeded(bool masksGloss, const EditorMaterialParams &params,
@@ -1587,6 +1647,7 @@ struct BakeRoughnessInputs
     const SourceImage &gloss;
     const SourceImage &normal;
     const ColorGlossBuffers &colorGloss;
+    const EditorTexture *pbrMaskTex = nullptr;
     uint32_t targetWidth = 0;
     uint32_t targetHeight = 0;
     uint32_t maskWidth = 0;
@@ -1598,11 +1659,51 @@ struct BakeRoughnessInputs
     float defaultMetallic = 0.0f;
 };
 
+void ApplyEmbeddedPbrMaskSample(const BakeRoughnessInputs &inputs, uint32_t x, uint32_t y,
+                                float &roughness, float &metallic)
+{
+    const EditorTexture *tex = inputs.pbrMaskTex;
+    if (tex == nullptr || tex->width == 0 || tex->height == 0 || inputs.gloss.Valid() ||
+        !inputs.colorGloss.weight.empty())
+    {
+        return;
+    }
+    const uint32_t mx = uint32_t(uint64_t(x) * tex->width / inputs.targetWidth) % tex->width;
+    const uint32_t my = uint32_t(uint64_t(y) * tex->height / inputs.targetHeight) % tex->height;
+    const size_t mpix = size_t(tex->width) * size_t(tex->height);
+    const size_t midx = size_t(my) * tex->width + mx;
+    if (!inputs.mirror && tex->roughnessMask.size() == mpix)
+    {
+        roughness = float(tex->roughnessMask[midx]) / 255.0f;
+    }
+    if (!inputs.metalFromNormalAlpha && tex->metallicMask.size() == mpix)
+    {
+        metallic = float(tex->metallicMask[midx]) / 255.0f;
+    }
+}
+
+float ComputeGlossMapRoughness(const BakeRoughnessInputs &inputs, float glossVal)
+{
+    if (inputs.mirror)
+    {
+        return 0.0f;
+    }
+    if (!inputs.hasRoughnessOverride)
+    {
+        return 1.0f - glossVal;
+    }
+    const float rMap = 1.0f - glossVal;
+    const float rTarget = std::clamp(inputs.defaultRoughness, 0.0f, 1.0f);
+    return (rTarget <= 0.5f) ? (rMap * (rTarget * 2.0f))
+                             : (rMap + (1.0f - rMap) * ((rTarget - 0.5f) * 2.0f));
+}
+
 void SampleBakeRoughnessMetallic(const BakeRoughnessInputs &inputs, uint32_t x, uint32_t y,
                                  float &roughness, float &metallic)
 {
     roughness = inputs.defaultRoughness;
     metallic = inputs.defaultMetallic;
+    ApplyEmbeddedPbrMaskSample(inputs, x, y, roughness, metallic);
 
     if (inputs.metalFromNormalAlpha)
     {
@@ -1617,19 +1718,7 @@ void SampleBakeRoughnessMetallic(const BakeRoughnessInputs &inputs, uint32_t x, 
         uint8_t glossPixel[4] = {};
         SampleSourceBilinear(inputs.gloss, x, y, inputs.targetWidth, inputs.targetHeight,
                              glossPixel);
-        const float glossVal = glossPixel[0] / 255.0f;
-        if (inputs.mirror)
-        {
-            roughness = 0.0f;
-        }
-        else if (inputs.hasRoughnessOverride)
-        {
-            roughness = 1.0f - glossVal * (1.0f - inputs.defaultRoughness);
-        }
-        else
-        {
-            roughness = 1.0f - glossVal;
-        }
+        roughness = ComputeGlossMapRoughness(inputs, glossPixel[0] / 255.0f);
         return;
     }
 
@@ -1684,13 +1773,14 @@ void SampleBakeNormal(const SourceImage &normalImage, uint32_t targetWidth, uint
     SampleSourceBilinear(normalImage, x, y, targetWidth, targetHeight, normalPixel);
     const float nx0 = (float(normalPixel[0]) - 128.0f) / 127.0f;
     const float ny0 = (float(normalPixel[1]) - 128.0f) / 127.0f;
-    const float nz0 = std::max(0.25f, (float(normalPixel[2]) - 128.0f) / 127.0f);
-    constexpr float kBumpSlopeGain = 2.0f;
+    const float nz0 = std::max(0.15f, (float(normalPixel[2]) - 128.0f) / 127.0f);
+    constexpr float kBumpSlopeGain = 1.5f;
     const float sx = (nx0 / nz0) * bumpScale * kBumpSlopeGain;
     const float sy = (ny0 / nz0) * bumpScale * kBumpSlopeGain;
-    outNormal[0] = uint8_t(std::clamp(std::lround(sx * 127.0f + 128.0f), 0l, 255l));
-    outNormal[1] = uint8_t(std::clamp(std::lround(sy * 127.0f + 128.0f), 0l, 255l));
-    outNormal[2] = normalPixel[2];
+    const float invLen = 1.0f / std::sqrt(sx * sx + sy * sy + 1.0f);
+    outNormal[0] = uint8_t(std::clamp(std::lround((sx * invLen) * 127.0f + 128.0f), 0l, 255l));
+    outNormal[1] = uint8_t(std::clamp(std::lround((sy * invLen) * 127.0f + 128.0f), 0l, 255l));
+    outNormal[2] = uint8_t(std::clamp(std::lround(invLen * 127.0f + 128.0f), 0l, 255l));
 }
 
 } // namespace
@@ -1895,7 +1985,9 @@ struct BakeResolvedContext
     float metallic = 0.0f;
     float emission = 0.0f;
     float underlayOpenFraction = 1.0f;
+    int32_t pbrMaskTexIndex = -1;
     const EditorTexture *albedoTex = nullptr;
+    const EditorTexture *pbrMaskTex = nullptr;
     SourceImage overlayImage;
     SourceImage glossImage;
     SourceImage normalImage;
@@ -2081,11 +2173,11 @@ void PopulateBakeScalarsAndMasks(const EditorMaterialParams &params, bool paints
     out.sssEnabled = HasEditorSubsurface(params) && !out.glass;
     out.transparency = out.glass ? params.transparency : 1.0f;
     out.mirror = params.mirror && !out.glass && params.type != EditorMaterialType::Water;
-    out.hasRoughnessOverride = params.roughnessOverride >= 0.0f;
+    out.hasRoughnessOverride = params.glossEnabled && params.roughnessOverride >= 0.0f;
     out.roughness = out.mirror ? 0.0f
                   : out.hasRoughnessOverride ? params.roughnessOverride
                                              : kEditorDefaultRoughness;
-    out.metallic = params.metalnessFactor;
+    out.metallic = params.glossEnabled ? params.metalnessFactor : 0.0f;
     out.emission = BakeEmissionFactor(params);
     if (out.masksEmission)
     {
@@ -2152,6 +2244,44 @@ bool FinalizeBakeContextGeometry(const EditorMaterialParams &params,
     return true;
 }
 
+void ResolveBakePbrMaskSource(const EditorMaterialParams &params, const EditorScene &scene,
+                              int32_t origIdx, bool mirrorActive, BakeResolvedContext &out)
+{
+    if (params.glossEnabled || mirrorActive)
+    {
+        return;
+    }
+    const EditorTexture *origTex = TextureAt(scene, origIdx);
+    const bool useAlbedoPbr = HasEmbeddedPbrMasks(out.albedoTex);
+    const EditorTexture *pbrCandidate = useAlbedoPbr ? out.albedoTex : origTex;
+    if (HasEnabledEmbeddedPbrMasks(pbrCandidate, params.disabledStagesMask))
+    {
+        out.pbrMaskTexIndex = useAlbedoPbr ? out.albedo : origIdx;
+    }
+}
+
+void LoadResolvedBakeSourceImages(const EditorScene &scene, BakeResolvedContext &out)
+{
+    out.glossImage = SourceOf(scene, out.gloss);
+    out.normalImage = SourceOf(scene, out.normal);
+    out.emissiveImage = SourceOf(scene, out.emissive);
+    out.sssImage = SourceOf(scene, out.sssTex);
+    out.albedoImage = SelectBakeFallbackImage(SourceOf(scene, out.albedo), out.glossImage,
+                                              out.normalImage, out.emissiveImage, out.overlayImage,
+                                              out.sssImage);
+}
+
+void PopulateBakeFeatureFlags(
+    const EditorMaterialParams &params, BakeResolvedContext &out)
+{
+    out.masksEmission = ShouldMaskEmission(params, out.emissive);
+    out.masksGloss = ShouldMaskGloss(params, out.gloss);
+    out.activeFullbright = params.emissiveEnabled && HasActiveFullbright(out.albedoTex);
+    out.uniformLightGlow = ComputeUniformLightGlow(params, out.emissive, out.masksEmission,
+                                                   out.activeFullbright);
+    out.needsSss = ShouldBakeSss(params, out.normal, out.sssTex, out.glass);
+}
+
 bool ResolveBakeContext(const std::string &name, const EditorMaterialParams &params,
                         const EditorScene &scene,
                         const std::function<int32_t(const std::string &)> &resolveTexture,
@@ -2159,11 +2289,12 @@ bool ResolveBakeContext(const std::string &name, const EditorMaterialParams &par
 {
     out.glass = params.type == EditorMaterialType::Glass;
     const int32_t baseIdx = resolveTexture(params.baseTexture);
-    out.albedo = baseIdx >= 0 ? baseIdx : resolveTexture(name);
-    out.gloss = resolveTexture(params.glossTexture);
+    const int32_t origIdx = resolveTexture(name);
+    out.albedo = baseIdx >= 0 ? baseIdx : origIdx;
+    out.gloss = params.glossEnabled ? resolveTexture(params.glossTexture) : -1;
     out.normal = resolveTexture(params.normalTexture);
     out.overlay = resolveTexture(params.overlayTexture);
-    out.sssTex = resolveTexture(params.textureSss);
+    out.sssTex = HasEditorSubsurface(params) ? resolveTexture(params.textureSss) : -1;
     out.passesLight = out.glass && params.transparency != 1.0f;
     out.albedoTex = TextureAt(scene, out.albedo);
     out.emissive = ResolveVisibleEmissiveIndex(params, out.albedoTex,
@@ -2172,21 +2303,17 @@ bool ResolveBakeContext(const std::string &name, const EditorMaterialParams &par
     const bool mirrorActive = params.mirror && !out.glass && params.type != EditorMaterialType::Water;
     out.neutralMirrorAlbedo = mirrorActive && params.baseTexture.empty() &&
                               (forceEnvBase || IsEnvironmentBaseTexture(out.albedoTex));
+    ResolveBakePbrMaskSource(params, scene, origIdx, mirrorActive, out);
     out.overlayImage = SourceOf(scene, out.overlay);
     const bool paintsOverlay = out.overlayImage.Valid() && !out.glass;
-    out.masksEmission = ShouldMaskEmission(params, out.emissive);
-    out.masksGloss = ShouldMaskGloss(params, out.gloss);
-    out.activeFullbright = HasActiveFullbright(out.albedoTex);
-    out.uniformLightGlow = ComputeUniformLightGlow(params, out.emissive, out.masksEmission,
-                                                   out.activeFullbright);
-    out.needsSss = ShouldBakeSss(params, out.normal, out.sssTex, out.glass);
+    PopulateBakeFeatureFlags(params, out);
 
     const BakeNeedFlags needFlags{ out.gloss,
                                    out.normal >= 0,
                                    out.emissive,
                                    out.passesLight,
                                    ShouldBlendEmission(params),
-                                   params.metalnessFromNormalAlpha,
+                                   params.glossEnabled && params.metalnessFromNormalAlpha,
                                    out.masksEmission,
                                    out.masksGloss,
                                    paintsOverlay,
@@ -2199,14 +2326,13 @@ bool ResolveBakeContext(const std::string &name, const EditorMaterialParams &par
         return false;
     }
 
-    out.glossImage = SourceOf(scene, out.gloss);
-    out.normalImage = SourceOf(scene, out.normal);
-    out.emissiveImage = SourceOf(scene, out.emissive);
-    out.sssImage = SourceOf(scene, out.sssTex);
-    out.albedoImage = SelectBakeFallbackImage(SourceOf(scene, out.albedo), out.glossImage,
-                                              out.normalImage, out.emissiveImage, out.overlayImage,
-                                              out.sssImage);
-    return FinalizeBakeContextGeometry(params, scene, resolveTexture, paintsOverlay, out);
+    LoadResolvedBakeSourceImages(scene, out);
+    if (!FinalizeBakeContextGeometry(params, scene, resolveTexture, paintsOverlay, out))
+    {
+        return false;
+    }
+    out.pbrMaskTex = TextureAt(scene, out.pbrMaskTexIndex);
+    return true;
 }
 
 struct BakeRasterOutputs
@@ -2218,6 +2344,39 @@ struct BakeRasterOutputs
     bool *hasColorEmission = nullptr;
     bool *bakeNormalSlot = nullptr;
 };
+
+size_t ComputeSssMaskPixelIndex(const std::vector<uint8_t> &sssMaskBytes,
+                                const BakeResolvedContext &ctx, uint32_t x, uint32_t y)
+{
+    if (sssMaskBytes.empty() || !ctx.albedoImage.Valid())
+    {
+        return size_t(-1);
+    }
+    const uint32_t mx =
+        uint32_t(uint64_t(x) * ctx.albedoImage.width / ctx.targetWidth) % ctx.albedoImage.width;
+    const uint32_t my =
+        uint32_t(uint64_t(y) * ctx.albedoImage.height / ctx.targetHeight) % ctx.albedoImage.height;
+    return size_t(my) * ctx.albedoImage.width + mx;
+}
+
+void AccumulatePixelEmissionStats(const uint8_t *emissRgb, bool hasEmissRgb, float emission,
+                                  const uint8_t *albedoPx, uint32_t x, uint32_t y,
+                                  BakeEmissionAccum &emissAccum)
+{
+    if (emission > 0.0f)
+    {
+        const uint8_t *colorSrc =
+            (hasEmissRgb && (int(emissRgb[0]) + int(emissRgb[1]) + int(emissRgb[2])) > 0)
+                ? emissRgb
+                : albedoPx;
+        emissAccum.r += colorSrc[0] * emission;
+        emissAccum.g += colorSrc[1] * emission;
+        emissAccum.b += colorSrc[2] * emission;
+    }
+    emissAccum.mean += std::min(1.0f, emission);
+    emissAccum.meanBase += emission;
+    AccumulateGlow(emission, x, y, emissAccum.glow);
+}
 
 void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeResolvedContext &ctx,
                                  const BakeRasterOutputs &out)
@@ -2232,7 +2391,9 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
     normalData.resize(pixels * 4);
 
     const uint8_t blendCode = params.lumaBlend < 0 ? 0 : uint8_t(params.lumaBlend + 1);
-    const bool metalFromNormalAlpha = params.metalnessFromNormalAlpha && ctx.normalImage.Valid();
+    const bool metalFromNormalAlpha =
+        params.glossEnabled && params.metalnessFromNormalAlpha && ctx.normalImage.Valid();
+    const bool emitEnabled = params.enabled && (params.emissiveEnabled || ctx.uniformLightGlow);
 
     std::vector<float> colorEmission;
     std::vector<uint8_t> colorBlend;
@@ -2249,9 +2410,10 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
     *out.bakeNormalSlot = ctx.normalImage.Valid() || ctx.passesLight || !sssMaskBytes.empty();
     const BakeRoughnessInputs roughnessInputs{
         ctx.glossImage,           ctx.normalImage,        colorGloss,
-        ctx.targetWidth,          ctx.targetHeight,       ctx.albedoImage.width,
-        ctx.albedoImage.height,   metalFromNormalAlpha,   ctx.mirror,
-        ctx.hasRoughnessOverride, ctx.roughness,          ctx.metallic,
+        ctx.pbrMaskTex,           ctx.targetWidth,        ctx.targetHeight,
+        ctx.albedoImage.width,    ctx.albedoImage.height, metalFromNormalAlpha,
+        ctx.mirror,               ctx.hasRoughnessOverride, ctx.roughness,
+        ctx.metallic,
     };
     const BakeEmissionInputs emissionInputs{
         ctx.emissiveImage,          ctx.albedoTex,
@@ -2274,18 +2436,7 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
         {
             const size_t offset = (size_t(y) * ctx.targetWidth + x) * 4;
             StampBakeAlbedoAndOverlay(albedoTarget, x, y, albedoData.data() + offset);
-
-            size_t maskPixelIndex = size_t(-1);
-            if (!sssMaskBytes.empty() && ctx.albedoImage.Valid())
-            {
-                const uint32_t mx =
-                    uint32_t(uint64_t(x) * ctx.albedoImage.width / ctx.targetWidth) %
-                    ctx.albedoImage.width;
-                const uint32_t my =
-                    uint32_t(uint64_t(y) * ctx.albedoImage.height / ctx.targetHeight) %
-                    ctx.albedoImage.height;
-                maskPixelIndex = size_t(my) * ctx.albedoImage.width + mx;
-            }
+            const size_t maskPixelIndex = ComputeSssMaskPixelIndex(sssMaskBytes, ctx, x, y);
 
             float roughness = ctx.roughness;
             float metallic = ctx.metallic;
@@ -2295,20 +2446,9 @@ void RasterizeMaterialBakePixels(const EditorMaterialParams &params, const BakeR
             uint8_t emissRgb[3] = {};
             bool hasEmissRgb = false;
             float emission = SampleBakedEmissionIfEnabled(
-                params.enabled, emissionInputs, x, y, pixelBlend, emissRgb, hasEmissRgb);
-            if (emission > 0.0f)
-            {
-                const uint8_t *colorSrc =
-                    (hasEmissRgb && (int(emissRgb[0]) + int(emissRgb[1]) + int(emissRgb[2])) > 0)
-                        ? emissRgb
-                        : (albedoData.data() + offset);
-                emissAccum.r += colorSrc[0] * emission;
-                emissAccum.g += colorSrc[1] * emission;
-                emissAccum.b += colorSrc[2] * emission;
-            }
-            emissAccum.mean += std::min(1.0f, emission);
-            emissAccum.meanBase += emission;
-            AccumulateGlow(emission, x, y, emissAccum.glow);
+                emitEnabled, emissionInputs, x, y, pixelBlend, emissRgb, hasEmissRgb);
+            AccumulatePixelEmissionStats(emissRgb, hasEmissRgb, emission, albedoData.data() + offset,
+                                         x, y, emissAccum);
 
             ApplyUniformLightGlowToPixel(ctx.uniformLightGlow, params.lightColor, ctx.emission,
                                          blendCode, albedoData.data() + offset, emission,
@@ -2357,7 +2497,7 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     key.bumpScale = params.bumpScale;
     key.transparency = ctx.transparency;
     key.lumaBlend = params.lumaBlend;
-    key.metalnessFromNormalAlpha = params.metalnessFromNormalAlpha;
+    key.metalnessFromNormalAlpha = params.glossEnabled && params.metalnessFromNormalAlpha;
     key.enabled = params.enabled;
     key.uniformLightGlow = ctx.uniformLightGlow;
     std::copy_n(ctx.lightColor, 3, key.lightColor);
@@ -2366,6 +2506,7 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     key.glossMask = ctx.glossMask;
     key.sssMask = ctx.sssMask;
     key.hasRoughnessOverride = ctx.hasRoughnessOverride;
+    key.useEmbeddedPbrMasks = ctx.pbrMaskTex != nullptr;
     key.mirror = ctx.mirror;
     key.neutralMirrorAlbedo = ctx.neutralMirrorAlbedo;
     key.roughness = ctx.roughness;
@@ -2410,9 +2551,9 @@ QrMaterial EditorMaterialBakes::Get(QrInstance instance, const std::string &name
     }
 
     const size_t pixels = size_t(ctx.targetWidth) * size_t(ctx.targetHeight);
-    const bool emissionValid = IsBakeEmissionValid(key.enabled, ctx.emissiveImage.Valid(),
-                                                   hasColorEmission, ctx.activeFullbright,
-                                                   emissAccum.meanBase);
+    const bool emissionValid = IsBakeEmissionValid(
+        key.enabled && (params.emissiveEnabled || ctx.uniformLightGlow), ctx.emissiveImage.Valid(),
+        hasColorEmission, ctx.activeFullbright, emissAccum.meanBase);
     const EditorMaterialEmission emissionInfo = BuildBakeEmissionSummary(
         emissionValid, pixels, ctx.targetWidth, ctx.targetHeight, emissAccum);
 

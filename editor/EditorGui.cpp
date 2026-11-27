@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace
 {
@@ -102,13 +103,25 @@ bool IconButton(const char *faGlyph, const char *fallbackAscii, const char *idSu
     return clicked;
 }
 
-void BeginTwoColumnRow(const char *label, const EditorGuiRowOpts &opts, float rightReserve)
+struct TwoColumnRowLayout
 {
+    float startX = 0.0f;
+    float controlWidth = 0.0f;
+    float resetX = 0.0f;
+    float resetSize = 0.0f;
+};
+
+TwoColumnRowLayout BeginTwoColumnRow(const char *label, const EditorGuiRowOpts &opts,
+                                     float rightReserve)
+{
+    const float startX = ImGui::GetCursorPosX();
+    const float availW = EditorGuiRowAvailWidth();
     const float labelWidth = Scaled(kEditorGuiLabelWidth);
-    const float rowWidth = std::max(Scaled(80.0f), ImGui::GetContentRegionAvail().x);
+    const float resetSize = EditorGuiIconButtonSize();
+    const float spacingX = ImGui::GetStyle().ItemSpacing.x;
     const float controlWidth =
-        std::max(Scaled(48.0f), rowWidth - labelWidth - Scaled(kEditorGuiResetSize) - rightReserve -
-                                    ImGui::GetStyle().ItemSpacing.x * 2.0f);
+        std::max(Scaled(48.0f), availW - labelWidth - resetSize - rightReserve - spacingX);
+    const float resetX = startX + availW - resetSize;
 
     ImGui::AlignTextToFramePadding();
     if (!opts.enabled)
@@ -120,25 +133,42 @@ void BeginTwoColumnRow(const char *label, const EditorGuiRowOpts &opts, float ri
         ImGui::PushStyleColor(ImGuiCol_Text, ColorU8(232, 200, 118));
     }
 
-    ImGui::TextUnformatted(label);
+    const float maxLabelW = std::max(Scaled(24.0f), labelWidth - spacingX);
+    const std::string shownLabel = EditorGuiEllipsize(label, maxLabelW);
+    const bool labelTruncated = (label != nullptr && shownLabel != label);
+    ImGui::TextUnformatted(shownLabel.c_str());
     if (!opts.enabled || opts.changed)
     {
         ImGui::PopStyleColor();
     }
-    ShowTooltip(opts.tooltip);
+    if (labelTruncated)
+    {
+        std::string tip = label;
+        if (opts.tooltip != nullptr && opts.tooltip[0] != '\0')
+        {
+            tip += "\n";
+            tip += opts.tooltip;
+        }
+        ShowTooltip(tip.c_str(), true);
+    }
+    else
+    {
+        ShowTooltip(opts.tooltip);
+    }
 
-    ImGui::SameLine(labelWidth);
+    ImGui::SameLine(startX + labelWidth);
     ImGui::SetNextItemWidth(controlWidth);
+    return TwoColumnRowLayout{ startX, controlWidth, resetX, resetSize };
 }
 
-void EndTwoColumnRow(const char *id, const EditorGuiRowOpts &opts)
+void EndTwoColumnRow(const char *id, const EditorGuiRowOpts &opts, const TwoColumnRowLayout &layout)
 {
     ReportItemRect(opts);
     ShowTooltip(opts.tooltip);
 
+    ImGui::SameLine(layout.resetX);
     if (opts.resetClicked != nullptr)
     {
-        ImGui::SameLine();
         if (EditorGuiResetButton(id, opts.changed && opts.enabled))
         {
             *opts.resetClicked = true;
@@ -146,9 +176,7 @@ void EndTwoColumnRow(const char *id, const EditorGuiRowOpts &opts)
     }
     else
     {
-        ImGui::SameLine();
-        const float size = Scaled(kEditorGuiResetSize);
-        ImGui::Dummy(ImVec2(size, size));
+        ImGui::Dummy(ImVec2(layout.resetSize, layout.resetSize));
     }
 }
 
@@ -266,6 +294,7 @@ void EditorGuiApplyStyle(float displayWidth, float displayHeight)
     style.WindowRounding = Scaled(5.0f);
     style.ChildRounding = Scaled(4.0f);
     style.FrameRounding = Scaled(3.0f);
+    style.TabRounding = Scaled(3.0f);
     style.PopupRounding = Scaled(4.0f);
     style.ScrollbarRounding = Scaled(4.0f);
     style.GrabRounding = Scaled(2.0f);
@@ -273,9 +302,10 @@ void EditorGuiApplyStyle(float displayWidth, float displayHeight)
     style.FrameBorderSize = 1.0f;
     style.PopupBorderSize = 1.0f;
     style.WindowPadding = ImVec2(Scaled(12.0f), Scaled(10.0f));
-    style.FramePadding = ImVec2(Scaled(7.0f), Scaled(4.0f));
-    style.ItemSpacing = ImVec2(Scaled(7.0f), Scaled(5.0f));
-    style.ItemInnerSpacing = ImVec2(Scaled(5.0f), Scaled(4.0f));
+    style.FramePadding = ImVec2(Scaled(8.0f), Scaled(4.0f));
+    style.ItemSpacing = ImVec2(Scaled(8.0f), Scaled(6.0f));
+    style.ItemInnerSpacing = ImVec2(Scaled(6.0f), Scaled(4.0f));
+    style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
     style.ScrollbarSize = Scaled(12.0f);
     style.GrabMinSize = Scaled(10.0f);
     ApplyPalette(style);
@@ -284,6 +314,167 @@ void EditorGuiApplyStyle(float displayWidth, float displayHeight)
 float EditorGuiScale()
 {
     return g_uiScale;
+}
+
+float EditorGuiIconButtonSize()
+{
+    return std::max(Scaled(kEditorGuiResetSize), ImGui::GetFrameHeight());
+}
+
+float EditorGuiFitButtonWidth(const char *label, float minUnscaledWidth)
+{
+    const float textW =
+        (label != nullptr) ? ImGui::CalcTextSize(label, nullptr, true).x : 0.0f;
+    const float needed =
+        textW + ImGui::GetStyle().FramePadding.x * 2.0f + Scaled(8.0f);
+    return std::max(Scaled(minUnscaledWidth), needed);
+}
+
+float EditorGuiComboWidth(const char *const *items, int32_t itemCount, float minUnscaledWidth)
+{
+    const ImGuiStyle &style = ImGui::GetStyle();
+    float maxTextW = 0.0f;
+    if (items != nullptr)
+    {
+        for (int32_t i = 0; i < itemCount; ++i)
+        {
+            if (items[i] != nullptr)
+            {
+                maxTextW =
+                    std::max(maxTextW, ImGui::CalcTextSize(items[i], nullptr, true).x);
+            }
+        }
+    }
+    const float needed =
+        maxTextW + style.FramePadding.x * 2.0f + ImGui::GetFrameHeight() + Scaled(8.0f);
+    return std::max(Scaled(minUnscaledWidth), needed);
+}
+
+float EditorGuiBlockActionsWidth(bool canRemove)
+{
+    const float btnSize = EditorGuiIconButtonSize();
+    const int32_t count = canRemove ? 3 : 2;
+    return float(count) * btnSize + float(count - 1) * ImGui::GetStyle().ItemSpacing.x;
+}
+
+float EditorGuiRowAvailWidth()
+{
+    ImGuiWindow *window = ImGui::GetCurrentWindow();
+    const float reserve = (window != nullptr && window->ScrollbarY) ? Scaled(6.0f) : 0.0f;
+    return std::max(Scaled(80.0f), ImGui::GetContentRegionAvail().x - reserve);
+}
+
+std::string EditorGuiEllipsize(const char *text, float maxWidth)
+{
+    if (text == nullptr || text[0] == '\0')
+    {
+        return {};
+    }
+    if (ImGui::CalcTextSize(text).x <= maxWidth)
+    {
+        return text;
+    }
+    std::string trimmed = text;
+    const float ellipsisW = ImGui::CalcTextSize("...").x;
+    if (maxWidth <= ellipsisW)
+    {
+        return "...";
+    }
+    while (!trimmed.empty() &&
+           ImGui::CalcTextSize((trimmed + "...").c_str()).x > maxWidth)
+    {
+        while (!trimmed.empty() && (static_cast<unsigned char>(trimmed.back()) & 0xC0u) == 0x80u)
+        {
+            trimmed.pop_back();
+        }
+        if (!trimmed.empty())
+        {
+            trimmed.pop_back();
+        }
+    }
+    trimmed += "...";
+    return trimmed;
+}
+
+int32_t DrawFittedButtonRow(const char *const *labels, const bool *enabled, int32_t count,
+                            const std::vector<float> &minWidths, float extraEach)
+{
+    int32_t clicked = -1;
+    for (int32_t i = 0; i < count; ++i)
+    {
+        if (i > 0)
+        {
+            ImGui::SameLine();
+        }
+        const bool isEnabled = (enabled == nullptr) || enabled[i];
+        ImGui::BeginDisabled(!isEnabled);
+        if (ImGui::Button(labels[i] != nullptr ? labels[i] : "",
+                          ImVec2(minWidths[size_t(i)] + extraEach, 0.0f)))
+        {
+            clicked = i;
+        }
+        ImGui::EndDisabled();
+    }
+    return clicked;
+}
+
+int32_t DrawWrappedButtonRow(const char *const *labels, const bool *enabled, int32_t count,
+                             const std::vector<float> &minWidths, float availW, float spacingX)
+{
+    int32_t clicked = -1;
+    float lineUsed = 0.0f;
+    for (int32_t i = 0; i < count; ++i)
+    {
+        const float w = std::min(availW, minWidths[size_t(i)]);
+        if (i > 0 && lineUsed + spacingX + w <= availW)
+        {
+            ImGui::SameLine();
+            lineUsed += spacingX + w;
+        }
+        else
+        {
+            lineUsed = w;
+        }
+        const bool isEnabled = (enabled == nullptr) || enabled[i];
+        ImGui::BeginDisabled(!isEnabled);
+        if (ImGui::Button(labels[i] != nullptr ? labels[i] : "", ImVec2(w, 0.0f)))
+        {
+            clicked = i;
+        }
+        ImGui::EndDisabled();
+    }
+    return clicked;
+}
+
+int32_t EditorGuiButtonRow(const char *const *labels, const bool *enabled, int32_t count)
+{
+    if (labels == nullptr || count <= 0)
+    {
+        return -1;
+    }
+
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float availW = EditorGuiRowAvailWidth();
+    const float spacingX = style.ItemSpacing.x;
+    std::vector<float> minWidths(static_cast<size_t>(count), 0.0f);
+    float totalMinW = count > 1 ? spacingX * float(count - 1) : 0.0f;
+
+    for (int32_t i = 0; i < count; ++i)
+    {
+        const float textW =
+            (labels[i] != nullptr) ? ImGui::CalcTextSize(labels[i], nullptr, true).x : 0.0f;
+        const float w = textW + style.FramePadding.x * 2.0f + Scaled(6.0f);
+        minWidths[size_t(i)] = w;
+        totalMinW += w;
+    }
+
+    if (totalMinW <= availW)
+    {
+        const float extraEach = (availW - totalMinW) / float(count);
+        return DrawFittedButtonRow(labels, enabled, count, minWidths, extraEach);
+    }
+
+    return DrawWrappedButtonRow(labels, enabled, count, minWidths, availW, spacingX);
 }
 
 bool EditorGuiBeginPanel(const char *title, float displayWidth, float displayHeight)
@@ -309,6 +500,7 @@ bool EditorGuiBeginPanel(const char *title, float displayWidth, float displayHei
     ImGui::TextUnformatted(title);
     ImGui::PopStyleColor();
     ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, Scaled(2.0f)));
     return true;
 }
 
@@ -319,11 +511,14 @@ void EditorGuiEndPanel()
 
 void EditorGuiBeginScroll(const char *id)
 {
+    ImGui::Separator();
     ImGui::BeginChild(id, ImVec2(0.0f, 0.0f), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    ImGui::Dummy(ImVec2(0.0f, Scaled(2.0f)));
 }
 
 void EditorGuiEndScroll()
 {
+    ImGui::Dummy(ImVec2(0.0f, Scaled(6.0f)));
     ImGui::EndChild();
 }
 
@@ -336,7 +531,7 @@ bool EditorGuiTabs(const char *const *labels, int32_t count, int32_t *activeInde
     }
 
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    const float trashSize = showResetTrash ? ImGui::GetFrameHeight() : 0.0f;
+    const float trashSize = showResetTrash ? EditorGuiIconButtonSize() : 0.0f;
     const float avail = ImGui::GetContentRegionAvail().x - (showResetTrash ? (trashSize + spacing) : 0.0f);
     const float tabW = count > 0 ? std::max(Scaled(50.0f), (avail - spacing * float(count - 1)) / float(count)) : avail;
     bool changed = false;
@@ -387,22 +582,22 @@ void EditorGuiSectionHeader(const char *label, const char *tooltip)
 {
     ImGui::Spacing();
     const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const float width = ImGui::GetContentRegionAvail().x;
-    const float height = ImGui::GetTextLineHeight() + Scaled(6.0f);
-    ImGui::GetWindowDrawList()->AddRectFilled(
+    const float width = EditorGuiRowAvailWidth();
+    const float padY = Scaled(4.0f);
+    const float height = ImGui::GetTextLineHeight() + 2.0f * padY;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(
         pos, ImVec2(pos.x + width, pos.y + height), ColorImU32(34, 46, 62, 175), Scaled(2.0f));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + Scaled(6.0f));
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + Scaled(3.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ColorU8(162, 206, 250));
-    ImGui::TextUnformatted(label);
-    ImGui::PopStyleColor();
+    dl->AddText(
+        ImVec2(pos.x + Scaled(8.0f), pos.y + padY), ColorImU32(162, 206, 250, 255), label);
+    ImGui::Dummy(ImVec2(width, height));
     ShowTooltip(tooltip);
     ImGui::Spacing();
 }
 
 bool EditorGuiResetButton(const char *id, bool changed, const char *tooltip)
 {
-    const float size = Scaled(kEditorGuiResetSize);
+    const float size = EditorGuiIconButtonSize();
     if (!changed)
     {
         ImGui::Dummy(ImVec2(size, size));
@@ -423,7 +618,7 @@ bool EditorGuiResetButton(const char *id, bool changed, const char *tooltip)
 uint32_t EditorGuiBlockActions(const char *id, bool canCopy, bool canPaste, bool canRemove)
 {
     uint32_t actions = kEditorGuiActionNone;
-    const float s = Scaled(kEditorGuiActionSize);
+    const float s = EditorGuiIconButtonSize();
     const ImVec4 activeCol = ColorU8(215, 224, 236);
     const ImVec4 disabledCol = ColorU8(110, 118, 128);
     ImGui::PushID(id);
@@ -460,7 +655,7 @@ uint32_t EditorGuiBlockActions(const char *id, bool canCopy, bool canPaste, bool
 int32_t EditorGuiMaskAddButtons(const char *id, bool canAdd)
 {
     int32_t clicked = -1;
-    const float s = Scaled(26.0f);
+    const float s = EditorGuiIconButtonSize();
     const ImVec4 col = canAdd ? ColorU8(215, 224, 236) : ColorU8(110, 118, 128);
 
     ImGui::PushID(id);
@@ -502,7 +697,7 @@ int32_t EditorGuiMaskAddButtons(const char *id, bool canAdd)
 bool EditorGuiCheckbox(const char *label, bool *value, const EditorGuiRowOpts &opts)
 {
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
     bool editVal = opts.mixed ? false : *value;
     const bool edited = ImGui::Checkbox("##chk", &editVal);
@@ -521,7 +716,7 @@ bool EditorGuiCheckbox(const char *label, bool *value, const EditorGuiRowOpts &o
         *value = editVal;
     }
     ImGui::EndDisabled();
-    EndTwoColumnRow("##rst_chk", opts);
+    EndTwoColumnRow("##rst_chk", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -530,7 +725,7 @@ bool EditorGuiSliderFloat(const char *label, float *value, float minVal, float m
                           const EditorGuiRowOpts &opts)
 {
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
     const char *fmt = opts.mixed ? "?" : (opts.format != nullptr ? opts.format : "%.3g");
     float editVal = *value;
@@ -552,7 +747,7 @@ bool EditorGuiSliderFloat(const char *label, float *value, float minVal, float m
         *value = editVal;
     }
     ImGui::EndDisabled();
-    EndTwoColumnRow("##rst_slf", opts);
+    EndTwoColumnRow("##rst_slf", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -561,7 +756,7 @@ bool EditorGuiSliderInt(const char *label, int32_t *value, int32_t minVal, int32
                         const EditorGuiRowOpts &opts)
 {
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
     const char *fmt = opts.mixed ? "?" : (opts.format != nullptr ? opts.format : "%d");
     const int32_t sentinel =
@@ -583,7 +778,7 @@ bool EditorGuiSliderInt(const char *label, int32_t *value, int32_t minVal, int32
         *value = editVal;
     }
     ImGui::EndDisabled();
-    EndTwoColumnRow("##rst_sli", opts);
+    EndTwoColumnRow("##rst_sli", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -592,7 +787,7 @@ bool EditorGuiCombo(const char *label, int32_t *selected, const char *const *ite
                     int32_t itemCount, const EditorGuiRowOpts &opts)
 {
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
     const int32_t cur = (*selected >= 0 && *selected < itemCount) ? *selected : 0;
     const char *preview = opts.mixed ? "?" : (itemCount > 0 ? items[cur] : "");
@@ -627,7 +822,7 @@ bool EditorGuiCombo(const char *label, int32_t *selected, const char *const *ite
     }
 
     ImGui::EndDisabled();
-    EndTwoColumnRow("##rst_cmb", opts);
+    EndTwoColumnRow("##rst_cmb", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -636,7 +831,7 @@ bool EditorGuiComboFiltered(const char *label, int32_t *selected, const EditorGu
                             const EditorGuiRowOpts &opts)
 {
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
     ImGui::BeginDisabled(!opts.enabled);
     const char *preview = (*selected >= 0 && *selected < model.count && model.labelAt)
                               ? model.labelAt(*selected)
@@ -680,7 +875,7 @@ bool EditorGuiComboFiltered(const char *label, int32_t *selected, const EditorGu
     }
 
     ImGui::EndDisabled();
-    EndTwoColumnRow("##rst_fcmb", opts);
+    EndTwoColumnRow("##rst_fcmb", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -726,15 +921,18 @@ bool DrawOptionalAiGenerateButton(bool enabled, float aiW, bool *generateAiClick
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!enabled);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
     ImGui::PushStyleColor(ImGuiCol_Button, ColorU8(42, 74, 108, 240));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorU8(58, 98, 140, 250));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorU8(70, 118, 168, 255));
-    const bool clicked = ImGui::Button("##ai_gen", ImVec2(aiW, 0.0f));
+    const bool clicked = ImGui::Button("##ai_gen", ImVec2(aiW, aiW));
     const ImVec2 bMin = ImGui::GetItemRectMin();
     const ImVec2 bMax = ImGui::GetItemRectMax();
     DrawRobotIcon(ImGui::GetWindowDrawList(), bMin, bMax,
                   enabled ? ColorImU32(182, 226, 255) : ColorImU32(112, 120, 132));
     ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar(2);
     ImGui::EndDisabled();
     ShowTooltip("Generate with AI", true);
     return clicked;
@@ -756,10 +954,11 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
 
     ImGui::PushID(label);
     const float spacingX = ImGui::GetStyle().ItemSpacing.x;
-    const float browseW = Scaled(kEditorGuiBrowseWidth);
-    const float aiW = generateAiClicked != nullptr ? Scaled(kEditorGuiBrowseWidth) : 0.0f;
+    const float browseW = EditorGuiIconButtonSize();
+    const float aiW = generateAiClicked != nullptr ? browseW : 0.0f;
     const float extraReserve = (generateAiClicked != nullptr) ? (aiW + spacingX) : 0.0f;
-    BeginTwoColumnRow(label, opts, browseW + spacingX + extraReserve);
+    const TwoColumnRowLayout layout =
+        BeginTwoColumnRow(label, opts, browseW + spacingX + extraReserve);
 
     char buffer[260] = {};
     std::snprintf(buffer, sizeof(buffer), "%s", path.c_str());
@@ -784,10 +983,13 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("...", ImVec2(browseW, 0.0f)) && browseClicked != nullptr)
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    if (ImGui::Button("...", ImVec2(browseW, browseW)) && browseClicked != nullptr)
     {
         *browseClicked = true;
     }
+    ImGui::PopStyleVar(2);
     ShowTooltip("Browse texture assets");
     ImGui::EndDisabled();
 
@@ -796,7 +998,7 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
         *generateAiClicked = true;
     }
 
-    EndTwoColumnRow("##rst_tex", opts);
+    EndTwoColumnRow("##rst_tex", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -804,9 +1006,9 @@ bool EditorGuiTexturePath(const char *label, std::string &path, bool *browseClic
 bool EditorGuiColorHex(const char *label, float rgb[3], const EditorGuiRowOpts &opts)
 {
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
     const bool edited = EditorGuiColorRow("##clrrow", rgb, opts);
-    EndTwoColumnRow("##rst_clr", opts);
+    EndTwoColumnRow("##rst_clr", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -846,8 +1048,11 @@ bool EditorGuiColorRow(const char *id, float rgb[3], const EditorGuiRowOpts &opt
     {
         ColorToHex(rgb, hex);
     }
+    const float hexW = std::max(
+        Scaled(96.0f),
+        ImGui::CalcTextSize("888888").x + ImGui::GetStyle().FramePadding.x * 2.0f + Scaled(8.0f));
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(Scaled(84.0f));
+    ImGui::SetNextItemWidth(hexW);
     bool hexEdited = false;
     if (opts.mixed)
     {
@@ -963,11 +1168,12 @@ bool EditorGuiVec3Input(const char *label, float vec[3], float step, const Edito
     }
 
     ImGui::PushID(label);
-    BeginTwoColumnRow(label, opts, 0.0f);
-    const float rowW =
-        std::max(Scaled(120.0f), ImGui::GetContentRegionAvail().x - Scaled(kEditorGuiResetSize) -
-                                     ImGui::GetStyle().ItemSpacing.x);
-    const float itemW = std::max(Scaled(32.0f), (rowW - Scaled(48.0f)) / 3.0f);
+    const TwoColumnRowLayout layout = BeginTwoColumnRow(label, opts, 0.0f);
+    const float axisW =
+        ImGui::CalcTextSize("X").x + ImGui::CalcTextSize("Y").x + ImGui::CalcTextSize("Z").x;
+    const float overhead =
+        axisW + 3.0f * Scaled(3.0f) + 2.0f * ImGui::GetStyle().ItemSpacing.x;
+    const float itemW = std::max(Scaled(32.0f), (layout.controlWidth - overhead) / 3.0f);
     bool edited = false;
 
     ImGui::BeginDisabled(!opts.enabled);
@@ -981,7 +1187,7 @@ bool EditorGuiVec3Input(const char *label, float vec[3], float step, const Edito
     }
     ImGui::EndDisabled();
 
-    EndTwoColumnRow("##rst_v3", opts);
+    EndTwoColumnRow("##rst_v3", opts, layout);
     ImGui::PopID();
     return edited;
 }
@@ -997,7 +1203,16 @@ int32_t EditorGuiDialogCentered(const char *id, const char *title, const char *m
                                 const char *const *buttons, int32_t buttonCount)
 {
     const ImGuiIO &io = ImGui::GetIO();
-    const float width = Scaled(420.0f);
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float spacing = style.ItemSpacing.x;
+    float minBtnsW = buttonCount > 1 ? spacing * float(buttonCount - 1) : 0.0f;
+    for (int32_t i = 0; i < buttonCount; ++i)
+    {
+        minBtnsW += EditorGuiFitButtonWidth(buttons[i], 80.0f);
+    }
+    const float width = std::min(
+        io.DisplaySize.x - Scaled(32.0f),
+        std::max(Scaled(420.0f), minBtnsW + style.WindowPadding.x * 2.0f));
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
@@ -1014,19 +1229,20 @@ int32_t EditorGuiDialogCentered(const char *id, const char *title, const char *m
         ImGui::Spacing();
         ImGui::TextWrapped("%s", message);
         ImGui::Spacing();
+        ImGui::Separator();
         ImGui::Spacing();
 
-        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float btnH = std::max(Scaled(30.0f), ImGui::GetFrameHeight() + Scaled(4.0f));
         const float btnW = buttonCount > 0 ? (ImGui::GetContentRegionAvail().x - spacing * float(buttonCount - 1)) /
                                                  float(buttonCount)
-                                           : 100.0f;
+                                           : Scaled(100.0f);
         for (int32_t i = 0; i < buttonCount; ++i)
         {
             if (i > 0)
             {
                 ImGui::SameLine();
             }
-            if (ImGui::Button(buttons[i], ImVec2(btnW, Scaled(30.0f))))
+            if (ImGui::Button(buttons[i], ImVec2(btnW, btnH)))
             {
                 clicked = i;
             }
@@ -1041,7 +1257,7 @@ int32_t EditorGuiDialogVertical(const char *id, const char *title, const char *s
                                 int32_t buttonCount)
 {
     const ImGuiIO &io = ImGui::GetIO();
-    const float width = Scaled(460.0f);
+    const float width = std::min(io.DisplaySize.x - Scaled(32.0f), Scaled(460.0f));
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
@@ -1065,6 +1281,7 @@ int32_t EditorGuiDialogVertical(const char *id, const char *title, const char *s
         ImGui::Spacing();
 
         const float btnW = ImGui::GetContentRegionAvail().x;
+        const float btnH = std::max(Scaled(38.0f), ImGui::GetFrameHeight() + Scaled(10.0f));
         for (int32_t i = 0; i < buttonCount; ++i)
         {
             if (i == 0)
@@ -1072,7 +1289,7 @@ int32_t EditorGuiDialogVertical(const char *id, const char *title, const char *s
                 ImGui::PushStyleColor(ImGuiCol_Button, ColorU8(48, 86, 134));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorU8(64, 112, 170));
             }
-            if (ImGui::Button(buttons[i], ImVec2(btnW, Scaled(38.0f))))
+            if (ImGui::Button(buttons[i], ImVec2(btnW, btnH)))
             {
                 clicked = i;
             }
@@ -1086,7 +1303,10 @@ int32_t EditorGuiDialogVertical(const char *id, const char *title, const char *s
                 ImGui::TextWrapped("%s", descriptions[i]);
                 ImGui::PopStyleColor();
             }
-            ImGui::Spacing();
+            if (i + 1 < buttonCount)
+            {
+                ImGui::Spacing();
+            }
         }
     }
     ImGui::End();

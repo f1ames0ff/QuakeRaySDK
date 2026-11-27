@@ -244,6 +244,48 @@ bool DrawMaterialEnabledRow(EditorMaterialParams &params, const EditorMaterialPa
     return edited;
 }
 
+bool IsMaterialTextureSlotMuted(EditorApp::EditorTextureSlot slot, const EditorMaterialParams &params)
+{
+    return (slot == EditorApp::EditorTextureSlot::Emissive && !params.emissiveEnabled) ||
+           (slot == EditorApp::EditorTextureSlot::Gloss && !params.glossEnabled) ||
+           (slot == EditorApp::EditorTextureSlot::Subsurface && !params.sssEnabled);
+}
+
+bool DrawMaterialUvAndParallaxSliders(EditorMaterialParams &params, const EditorMaterialParams &base)
+{
+    struct FloatRow
+    {
+        const char *label;
+        float *val;
+        float baseVal;
+        float lo;
+        float hi;
+        const char *fmt;
+        const char *tip;
+    };
+    const FloatRow floats[] = {
+        { "texture_scale_u", &params.textureScaleU, base.textureScaleU, 0.05f, 8.0f, "%.2f",
+          "Horizontal UV tiling multiplier." },
+        { "texture_scale_v", &params.textureScaleV, base.textureScaleV, 0.05f, 8.0f, "%.2f",
+          "Vertical UV tiling multiplier." },
+        { "texture_offset_u", &params.textureOffsetU, base.textureOffsetU, -8.0f, 8.0f, "%.2f",
+          "Horizontal UV shift." },
+        { "texture_offset_v", &params.textureOffsetV, base.textureOffsetV, -8.0f, 8.0f, "%.2f",
+          "Vertical UV shift." },
+        { "bump_scale", &params.bumpScale, base.bumpScale, 0.0f, 4.0f, "%.2f",
+          "Normal map xy strength factor." },
+    };
+    bool edited = false;
+    for (const FloatRow &f : floats)
+    {
+        bool reset = false;
+        EditorGuiRowOpts opts{ !AlmostEq(*f.val, f.baseVal), true, f.tip, f.fmt, &reset };
+        edited |= EditorGuiSliderFloat(f.label, f.val, f.lo, f.hi, opts);
+        edited |= ResetIfClicked(*f.val, f.baseVal, &reset);
+    }
+    return edited;
+}
+
 bool DrawMaterialTexturesSection(
     const std::function<void(EditorApp::EditorTextureSlot)> &onBrowse,
     const std::function<void(EditorApp::EditorTextureSlot)> &onGenerateAi,
@@ -286,16 +328,18 @@ bool DrawMaterialTexturesSection(
         bool generateAi = false;
         EditorGuiRowOpts opts{ dst != ref, true, row.tip,
                                baseHint.empty() ? nullptr : baseHint.c_str(), &reset };
-        opts.dimValue = inheritedFromBaseMod && !baseModSlot.empty() && dst == baseModSlot;
+        opts.dimValue = IsMaterialTextureSlotMuted(row.slot, params) ||
+                        (inheritedFromBaseMod && !baseModSlot.empty() && dst == baseModSlot);
         if (EditorGuiTexturePath(row.label, dst, &browse, opts,
                                  row.supportsAi ? &generateAi : nullptr))
         {
             edited = true;
+            if (!dst.empty())
+            {
+                EditorApp::AutoEnableMaterialSlot(params, row.slot);
+            }
         }
-        if (ResetIfClicked(dst, ref, &reset))
-        {
-            edited = true;
-        }
+        edited |= ResetIfClicked(dst, ref, &reset);
         if (browse)
         {
             onBrowse(row.slot);
@@ -306,34 +350,7 @@ bool DrawMaterialTexturesSection(
         }
     }
 
-    struct FloatRow
-    {
-        const char *label;
-        float *val;
-        float baseVal;
-        float lo;
-        float hi;
-        const char *tip;
-    };
-    const FloatRow floats[] = {
-        { "texture_scale_u", &params.textureScaleU, base.textureScaleU, 0.05f, 8.0f,
-          "Horizontal UV tiling multiplier." },
-        { "texture_scale_v", &params.textureScaleV, base.textureScaleV, 0.05f, 8.0f,
-          "Vertical UV tiling multiplier." },
-        { "texture_offset_u", &params.textureOffsetU, base.textureOffsetU, -8.0f, 8.0f,
-          "Horizontal UV shift." },
-        { "texture_offset_v", &params.textureOffsetV, base.textureOffsetV, -8.0f, 8.0f,
-          "Vertical UV shift." },
-        { "bump_scale", &params.bumpScale, base.bumpScale, 0.0f, 4.0f,
-          "Normal map xy strength factor." },
-    };
-    for (const FloatRow &f : floats)
-    {
-        bool reset = false;
-        EditorGuiRowOpts opts{ !AlmostEq(*f.val, f.baseVal), true, f.tip, "%.2f", &reset };
-        edited |= EditorGuiSliderFloat(f.label, f.val, f.lo, f.hi, opts);
-        edited |= ResetIfClicked(*f.val, f.baseVal, &reset);
-    }
+    edited |= DrawMaterialUvAndParallaxSliders(params, base);
     return edited;
 }
 
@@ -620,11 +637,20 @@ bool DrawMaskBlockHeader(const char *actionId, size_t index, Block &block, Block
     const std::string header = FormatMaskBlockLabel(index, block);
     const bool canPaste =
         clipboardValid && MaskBlockKindOf(clipboard) == MaskBlockKindOf(block);
+    const float startX = ImGui::GetCursorPosX();
+    const float availW = EditorGuiRowAvailWidth();
+    const float actionsW = EditorGuiBlockActionsWidth(true);
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float maxTextW = std::max(80.0f * EditorGuiScale(), availW - actionsW - spacing);
+    const std::string shown = EditorGuiEllipsize(header.c_str(), maxTextW);
 
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(header.c_str());
-    ImGui::SameLine(
-        std::max(160.0f, ImGui::GetWindowContentRegionMax().x - 108.0f * EditorGuiScale()));
+    ImGui::TextUnformatted(shown.c_str());
+    if (shown != header && ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("%s", header.c_str());
+    }
+    ImGui::SameLine(startX + availW - actionsW);
 
     const uint32_t actions = EditorGuiBlockActions(actionId, true, canPaste, true);
     bool pasted = false;
@@ -804,12 +830,14 @@ bool DrawBrushMaskPreview(const char *brushId, Block &block, uint64_t previewHan
         ImGui::TextDisabled("Texture preview unavailable.");
     }
 
-    if (ImGui::Button("Clear brush"))
+    ImGui::Spacing();
+    static constexpr const char *kBrushBtns[] = { "Clear brush", "Fill brush" };
+    const int32_t brushAction = EditorGuiButtonRow(kBrushBtns, nullptr, 2);
+    if (brushAction == 0)
     {
         edited |= FillBrushMaskBytes(block.brushMask, uint8_t(0));
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Fill brush"))
+    else if (brushAction == 1)
     {
         edited |= FillBrushMaskBytes(block.brushMask, uint8_t(255));
     }
@@ -872,7 +900,8 @@ bool DrawUvPolygonMaskPreview(const char *maskId, std::vector<float> &polyUv,
         ImGui::TextDisabled("Texture preview unavailable.");
     }
 
-    if (ImGui::Button("Reset mask"))
+    ImGui::Spacing();
+    if (ImGui::Button("Reset mask", ImVec2(EditorGuiFitButtonWidth("Reset mask"), 0.0f)))
     {
         polyUv = { 0.25f, 0.25f, 0.75f, 0.25f, 0.75f, 0.75f, 0.25f, 0.75f };
         edited = true;
@@ -1310,13 +1339,17 @@ void DrawSpotLightFields(EditorLight &light, const EditorLight *baseLight, bool 
         ResetVec3IfClicked(light.direction, baseLight->direction, &dirReset);
     }
 
-    if (ImGui::Button("Aim along camera view"))
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                         std::round(kEditorGuiLabelWidth * EditorGuiScale()));
+    if (ImGui::Button("Aim along camera view",
+                      ImVec2(EditorGuiFitButtonWidth("Aim along camera view"), 0.0f)))
     {
         const float cp = std::cos(camPitch);
         light.direction[0] = cp * std::cos(camYaw);
         light.direction[1] = cp * std::sin(camYaw);
         light.direction[2] = std::sin(camPitch);
     }
+    ImGui::Spacing();
 
     DrawSpotConeAnglesAndShafts(light, baseLight, isCustom);
 }
@@ -1754,18 +1787,17 @@ void DrawGlobalTimeAndNightSection(EditorRenderSettings &s, const EditorRenderSe
     static constexpr PresetTime kPresets[] = {
         { "Dawn", 6.15f }, { "Noon", 12.0f }, { "Sunset", 17.85f }, { "Twilight", 18.25f }, { "Night", 0.0f },
     };
-    for (size_t i = 0; i < std::size(kPresets); i++)
+    static constexpr const char *kPresetLabels[] = {
+        "Dawn", "Noon", "Sunset", "Twilight", "Night",
+    };
+    ImGui::Spacing();
+    const int32_t presetClicked = EditorGuiButtonRow(kPresetLabels, nullptr, 5);
+    if (presetClicked >= 0 && size_t(presetClicked) < std::size(kPresets))
     {
-        if (i > 0)
-        {
-            ImGui::SameLine();
-        }
-        if (ImGui::SmallButton(kPresets[i].label))
-        {
-            s.timeOfDayEnable = true;
-            s.timeOfDay = kPresets[i].hour;
-        }
+        s.timeOfDayEnable = true;
+        s.timeOfDay = kPresets[size_t(presetClicked)].hour;
     }
+    ImGui::Spacing();
 
     EditorGuiSectionHeader("Moon & Stars");
     DrawBoolSettingRow("rt_sky_stars_enable", &s.starsEnabled, b.starsEnabled,
@@ -1820,10 +1852,15 @@ void DrawGlobalLightingAndSky(EditorApp &app, EditorRenderSettings &s, const Edi
     };
     DrawFloatSettingRows(angleRows, std::size(angleRows));
 
-    if (ImGui::Button("Set sun position"))
+    ImGui::Spacing();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                         std::round(kEditorGuiLabelWidth * EditorGuiScale()));
+    if (ImGui::Button("Set sun position",
+                      ImVec2(EditorGuiFitButtonWidth("Set sun position"), 0.0f)))
     {
         outPlaceSun = true;
     }
+    ImGui::Spacing();
     (void)app;
 }
 
@@ -2532,8 +2569,8 @@ void SetBrowserDir(std::string &dir, char *buf, size_t bufSize, const std::strin
 
 void DrawDirectoryPathBar(std::string &dir, char *buf, size_t bufSize, const char *idSuffix)
 {
-    const float scale = EditorGuiScale();
-    const float btnW = 54.0f * scale;
+    const float btnW = std::max(EditorGuiFitButtonWidth("Go", 54.0f),
+                                EditorGuiFitButtonWidth("Up", 54.0f));
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float inputW = std::max(120.0f, ImGui::GetContentRegionAvail().x - (btnW + spacing) * 2.0f);
 
@@ -2814,14 +2851,21 @@ void EditorApp::DrawOpenLevelModTab(std::string &chosenPath)
     }
 
     const float scale = EditorGuiScale();
+    const ImGuiStyle &style = ImGui::GetStyle();
     m_openLevelTab = 0;
-    ImGui::SetNextItemWidth(260.0f * scale);
+    const float checkW = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x +
+                         ImGui::CalcTextSize("Show brush models (b_*.bsp)").x;
+    const float searchW =
+        std::max(140.0f * scale, ImGui::GetContentRegionAvail().x - checkW - style.ItemSpacing.x);
+    ImGui::SetNextItemWidth(searchW);
     ImGui::InputTextWithHint("##level_search", "Filter maps...", m_openLevelSearch,
                              sizeof(m_openLevelSearch));
     ImGui::SameLine();
     ImGui::Checkbox("Show brush models (b_*.bsp)", &m_showBrushSubmodels);
 
-    const float listH = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.8f;
+    const float footerH = ImGui::GetFrameHeightWithSpacing() * 2.0f + style.ItemSpacing.y * 2.0f +
+                          4.0f * scale;
+    const float listH = ImGui::GetContentRegionAvail().y - footerH;
     if (ImGui::BeginChild("##mod_levels", ImVec2(0.0f, std::max(120.0f, listH)), true))
     {
         if (m_mapCatalog.empty())
@@ -2865,7 +2909,7 @@ void DrawFsLevelQuickButtons(std::string &dir, char *buf, size_t bufSize,
 {
     std::error_code ec;
     const bool hasScenes = std::filesystem::is_directory("build/linux-editor/scenes", ec);
-    if (hasScenes && ImGui::SmallButton("Scenes"))
+    if (hasScenes && ImGui::Button("Scenes", ImVec2(EditorGuiFitButtonWidth("Scenes"), 0.0f)))
     {
         SetBrowserDir(dir, buf, bufSize, "build/linux-editor/scenes");
     }
@@ -2873,7 +2917,8 @@ void DrawFsLevelQuickButtons(std::string &dir, char *buf, size_t bufSize,
     {
         ImGui::SameLine();
     }
-    if (!gamePath.empty() && ImGui::SmallButton("Game Dir"))
+    if (!gamePath.empty() &&
+        ImGui::Button("Game Dir", ImVec2(EditorGuiFitButtonWidth("Game Dir"), 0.0f)))
     {
         SetBrowserDir(dir, buf, bufSize, gamePath);
     }
@@ -2918,7 +2963,10 @@ void EditorApp::DrawOpenLevelFsTab(std::string &chosenPath)
     DrawFsLevelQuickButtons(m_fileBrowserDir, m_fileBrowserPathInput,
                             sizeof(m_fileBrowserPathInput), m_gamePath);
 
-    const float listH = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.8f;
+    const float scale = EditorGuiScale();
+    const float footerH = ImGui::GetFrameHeightWithSpacing() * 2.0f +
+                          ImGui::GetStyle().ItemSpacing.y * 2.0f + 4.0f * scale;
+    const float listH = ImGui::GetContentRegionAvail().y - footerH;
     if (ImGui::BeginChild("##fs_levels", ImVec2(0.0f, std::max(120.0f, listH)), true))
     {
         for (const BrowserDirEntry &entry : ListBrowserDirectory(m_fileBrowserDir, true))
@@ -2962,9 +3010,11 @@ void EditorApp::DrawOpenLevelDialog()
             m_openLevelTab == 0
                 ? (m_selectedCatalogMap >= 0 && size_t(m_selectedCatalogMap) < m_mapCatalog.size())
                 : !m_selectedBrowserFile.empty();
+        ImGui::Spacing();
         ImGui::Checkbox("Multiplayer mode (Deathmatch)", &m_multiplayerMode);
+        const float btnH = std::max(28.0f * scale, ImGui::GetFrameHeight());
         ImGui::BeginDisabled(!hasSelection);
-        if (ImGui::Button("Open", ImVec2(110.0f * scale, 0.0f)))
+        if (ImGui::Button("Open", ImVec2(EditorGuiFitButtonWidth("Open", 110.0f), btnH)))
         {
             chosenPath = m_openLevelTab == 0
                              ? m_mapCatalog[size_t(m_selectedCatalogMap)].path
@@ -2972,7 +3022,7 @@ void EditorApp::DrawOpenLevelDialog()
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(110.0f * scale, 0.0f)))
+        if (ImGui::Button("Cancel", ImVec2(EditorGuiFitButtonWidth("Cancel", 110.0f), btnH)))
         {
             open = false;
         }
@@ -3023,11 +3073,15 @@ void EditorApp::DrawDetectedModsList(std::string &modToLoad)
         }
     }
     ImGui::EndChild();
+    ImGui::Spacing();
 }
 
 void EditorApp::DrawModDirectoryList()
 {
-    const float listH = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.8f;
+    const float scale = EditorGuiScale();
+    const float footerH = ImGui::GetFrameHeightWithSpacing() * 2.0f +
+                          ImGui::GetStyle().ItemSpacing.y * 2.0f + 4.0f * scale;
+    const float listH = ImGui::GetContentRegionAvail().y - footerH;
     if (ImGui::BeginChild("##mod_dirs", ImVec2(0.0f, std::max(100.0f, listH)), true))
     {
         for (const BrowserDirEntry &entry : ListBrowserDirectory(m_modBrowserDir, false))
@@ -3081,6 +3135,7 @@ void EditorApp::DrawOpenModDialog()
                              "mod");
         DrawModDirectoryList();
 
+        ImGui::Spacing();
         ImGui::Checkbox("Use mod folder for qray.materials.yaml and qray.lights.yaml",
                         &m_modUseOwnYaml);
 
@@ -3088,8 +3143,9 @@ void EditorApp::DrawOpenModDialog()
             !m_selectedModSubdir.empty() ? m_selectedModSubdir : m_modBrowserDir;
         std::error_code ec;
         const bool validDir = !targetMod.empty() && std::filesystem::is_directory(targetMod, ec);
+        const float btnH = std::max(28.0f * scale, ImGui::GetFrameHeight());
         ImGui::BeginDisabled(!validDir);
-        if (ImGui::Button("Load Mod", ImVec2(120.0f * scale, 0.0f)))
+        if (ImGui::Button("Load Mod", ImVec2(EditorGuiFitButtonWidth("Load Mod", 116.0f), btnH)))
         {
             modToLoad = targetMod;
         }
@@ -3097,14 +3153,15 @@ void EditorApp::DrawOpenModDialog()
 
         ImGui::SameLine();
         ImGui::BeginDisabled(m_gamePath.empty());
-        if (ImGui::Button("Unload Mod", ImVec2(120.0f * scale, 0.0f)))
+        if (ImGui::Button("Unload Mod",
+                          ImVec2(EditorGuiFitButtonWidth("Unload Mod", 116.0f), btnH)))
         {
             unloadRequested = true;
         }
         ImGui::EndDisabled();
 
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f * scale, 0.0f)))
+        if (ImGui::Button("Cancel", ImVec2(EditorGuiFitButtonWidth("Cancel", 100.0f), btnH)))
         {
             open = false;
         }
@@ -3281,7 +3338,10 @@ void EditorApp::DrawPanelActionBar(bool isLightEditor)
     {
         RequestEditorExit();
     }
+    const float pad = 2.0f * EditorGuiScale();
+    ImGui::Dummy(ImVec2(0.0f, pad));
     ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, pad));
 }
 
 namespace
@@ -3342,8 +3402,37 @@ void AppendLumaBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &
     }
 
     params.emissiveBlocks.push_back(std::move(blk));
+    params.emissiveEnabled = true;
     params.hasColorEmissive = true;
     selectedBlock = int32_t(params.emissiveBlocks.size()) - 1;
+}
+
+std::vector<int32_t> CollectAnimFrameMaterials(const EditorScene &scene,
+                                               const EditorMaterialTable &materials,
+                                               const EditorSurface &surface,
+                                               int32_t selectedMaterial, int32_t &outFramePos)
+{
+    std::vector<int32_t> frameMats;
+    frameMats.reserve(surface.animationFrames.size());
+    outFramePos = 0;
+
+    for (int32_t texIdx : surface.animationFrames)
+    {
+        if (texIdx < 0 || size_t(texIdx) >= scene.textures.size())
+        {
+            continue;
+        }
+        const int32_t mIdx = materials.IndexOf(scene.textures[size_t(texIdx)].name);
+        if (mIdx >= 0)
+        {
+            if (mIdx == selectedMaterial)
+            {
+                outFramePos = int32_t(frameMats.size());
+            }
+            frameMats.push_back(mIdx);
+        }
+    }
+    return frameMats;
 }
 
 bool DrawMaterialAnimFrameRow(const EditorScene &scene, EditorMaterialTable &materials,
@@ -3351,42 +3440,17 @@ bool DrawMaterialAnimFrameRow(const EditorScene &scene, EditorMaterialTable &mat
 {
     const std::string &matName = materials.NameAt(size_t(selectedMaterial));
     const EditorSurface *surface = FindAnimatedSurfaceForMaterial(scene, matName);
-
     if (surface == nullptr)
     {
         return false;
     }
 
-    std::vector<int32_t> frameMats;
-    frameMats.reserve(surface->animationFrames.size());
-
-    for (int32_t texIdx : surface->animationFrames)
-    {
-        if (texIdx >= 0 && size_t(texIdx) < scene.textures.size())
-        {
-            const int32_t mIdx = materials.IndexOf(scene.textures[size_t(texIdx)].name);
-
-            if (mIdx >= 0)
-            {
-                frameMats.push_back(mIdx);
-            }
-        }
-    }
-
+    int32_t framePos = 0;
+    const std::vector<int32_t> frameMats =
+        CollectAnimFrameMaterials(scene, materials, *surface, selectedMaterial, framePos);
     if (frameMats.size() <= 1)
     {
         return false;
-    }
-
-    int32_t framePos = 0;
-
-    for (size_t i = 0; i < frameMats.size(); i++)
-    {
-        if (frameMats[i] == selectedMaterial)
-        {
-            framePos = int32_t(i);
-            break;
-        }
     }
 
     ImGui::TextDisabled("the frames of this texture: the one below is shown and edited");
@@ -3400,13 +3464,22 @@ bool DrawMaterialAnimFrameRow(const EditorScene &scene, EditorMaterialTable &mat
         switched = true;
     }
 
+    ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("Frames:");
 
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float spacing = style.ItemSpacing.x;
+    const float rowLimitX = ImGui::GetCursorPosX() + EditorGuiRowAvailWidth();
     for (size_t i = 0; i < frameMats.size(); i++)
     {
-        ImGui::SameLine();
         const std::string &fname = materials.NameAt(size_t(frameMats[i]));
         const std::string tag = fname.size() >= 2 ? fname.substr(0, 2) : fname;
+        const float btnW = ImGui::CalcTextSize(tag.c_str()).x + style.FramePadding.x * 2.0f;
+        const bool sameLine = (i == 0) || (ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + spacing + btnW <= rowLimitX);
+        if (sameLine)
+        {
+            ImGui::SameLine();
+        }
         const bool active = frameMats[i] == selectedMaterial;
 
         if (active)
@@ -3414,7 +3487,7 @@ bool DrawMaterialAnimFrameRow(const EditorScene &scene, EditorMaterialTable &mat
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.24f, 0.45f, 0.70f, 1.0f));
         }
 
-        if (ImGui::SmallButton(tag.c_str()))
+        if (ImGui::Button(tag.c_str(), ImVec2(btnW, 0.0f)))
         {
             selectedMaterial = frameMats[i];
             materials.BindSurfaceAlias(surface->textureName, selectedMaterial);
@@ -3426,6 +3499,7 @@ bool DrawMaterialAnimFrameRow(const EditorScene &scene, EditorMaterialTable &mat
             ImGui::PopStyleColor();
         }
     }
+    ImGui::Spacing();
 
     return switched;
 }
@@ -3476,9 +3550,32 @@ void DrawMaterialTextureInfoHeader(const EditorScene &scene, const EditorMateria
 bool DrawMaterialLumaToggleSection(EditorMaterialParams &params, const EditorMaterialParams &base,
                                    int32_t &selectedBlock)
 {
-    EditorGuiSectionHeader("Luma", "Emissive mask blocks & blend controls.");
+    EditorGuiSectionHeader("Emissive", "Emissive texture, blend controls, and mask blocks.");
     const bool hasTexEmis = !params.emissiveTexture.empty();
-    bool edited = false;
+    const bool prevEnabled = params.emissiveEnabled;
+    bool emisReset = false;
+    bool edited = EditorGuiCheckbox(
+        "emissive", &params.emissiveEnabled,
+        { params.emissiveEnabled != base.emissiveEnabled ||
+              params.hasColorEmissive != base.hasColorEmissive,
+          true,
+          hasTexEmis ? "Enable or disable emissive texture & glow on this material."
+                     : "Enable emissive glow by color or UV mask.",
+          nullptr, &emisReset });
+
+    if (emisReset)
+    {
+        params.emissiveEnabled = base.emissiveEnabled;
+        params.hasColorEmissive = base.hasColorEmissive;
+        params.emissiveBlocks = base.emissiveBlocks;
+        selectedBlock = 0;
+        edited = true;
+    }
+
+    if (!params.emissiveEnabled)
+    {
+        return edited;
+    }
 
     if (hasTexEmis)
     {
@@ -3500,27 +3597,13 @@ bool DrawMaterialLumaToggleSection(EditorMaterialParams &params, const EditorMat
 
         edited |= ResetIfClicked(params.lumaBlend, base.lumaBlend, &blReset);
     }
-
-    const bool prevLuma = params.hasColorEmissive;
-    bool lumaReset = false;
-    edited |= EditorGuiCheckbox(
-        "luma", &params.hasColorEmissive,
-        { params.hasColorEmissive != base.hasColorEmissive, !hasTexEmis,
-          hasTexEmis ? "Disabled while texture_emissive is assigned."
-                     : "Glow by color or mask: click pixels or paint UV masks below.",
-          nullptr, &lumaReset });
-
-    if (lumaReset)
+    else if (!prevEnabled)
     {
-        params.hasColorEmissive = base.hasColorEmissive;
-        params.emissiveBlocks = base.emissiveBlocks;
-        selectedBlock = 0;
-        edited = true;
-    }
-
-    if (!prevLuma && params.hasColorEmissive && params.emissiveBlocks.empty() && !hasTexEmis)
-    {
-        AppendLumaBlock(params, MaskBlockKind::Color, selectedBlock);
+        params.hasColorEmissive = true;
+        if (params.emissiveBlocks.empty())
+        {
+            AppendLumaBlock(params, MaskBlockKind::Color, selectedBlock);
+        }
         edited = true;
     }
 
@@ -3647,6 +3730,7 @@ void AppendGlossBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t 
     }
 
     params.glossBlocks.push_back(std::move(blk));
+    params.glossEnabled = true;
     params.hasColorGloss = true;
     selectedBlock = int32_t(params.glossBlocks.size()) - 1;
 }
@@ -3679,6 +3763,7 @@ void AppendSssBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &s
     EditorSssBlock blk =
         MakeFactorMaskBlock<EditorSssBlock>(kind, params.sssThreshold, params.sssFeather, previewTex);
     params.sssBlocks.push_back(std::move(blk));
+    params.sssEnabled = true;
     selectedBlock = int32_t(params.sssBlocks.size()) - 1;
     if (params.sssStrength <= 0.0f)
     {
@@ -3689,11 +3774,31 @@ void AppendSssBlock(EditorMaterialParams &params, MaskBlockKind kind, int32_t &s
 bool DrawMaterialGlossSection(EditorMaterialParams &params, const EditorMaterialParams &base,
                               int32_t &selectedBlock, const EditorTexture *previewTex)
 {
+    (void)previewTex;
     EditorGuiSectionHeader("Gloss", "Roughness, metalness and procedural gloss mask blocks.");
-    bool edited = false;
+    bool glossReset = false;
+    bool edited = EditorGuiCheckbox(
+        "gloss", &params.glossEnabled,
+        { params.glossEnabled != base.glossEnabled || params.hasColorGloss != base.hasColorGloss,
+          true, "Enable roughness, metalness, gloss texture, and procedural gloss masks.", nullptr,
+          &glossReset });
+
+    if (glossReset)
+    {
+        params.glossEnabled = base.glossEnabled;
+        params.hasColorGloss = base.hasColorGloss;
+        params.glossBlocks = base.glossBlocks;
+        selectedBlock = 0;
+        edited = true;
+    }
+
+    if (!params.glossEnabled)
+    {
+        return edited;
+    }
 
     const bool hasTexGloss = !params.glossTexture.empty();
-    const bool proceduralGlossActive = params.hasColorGloss && !hasTexGloss;
+    const bool proceduralGlossActive = !hasTexGloss && params.hasColorGloss && !params.glossBlocks.empty();
 
     if (!proceduralGlossActive)
     {
@@ -3727,29 +3832,6 @@ bool DrawMaterialGlossSection(EditorMaterialParams &params, const EditorMaterial
     edited |= ResetIfClicked(params.metalnessFromNormalAlpha, base.metalnessFromNormalAlpha,
                              &mnReset);
 
-    const bool prevGloss = params.hasColorGloss;
-    bool glossReset = false;
-    edited |= EditorGuiCheckbox(
-        "gloss", &params.hasColorGloss,
-        { params.hasColorGloss != base.hasColorGloss, !hasTexGloss,
-          hasTexGloss ? "Disabled while texture_gloss is assigned."
-                      : "Gloss by color or mask: click pixels or paint UV masks below.",
-          nullptr, &glossReset });
-
-    if (glossReset)
-    {
-        params.hasColorGloss = base.hasColorGloss;
-        params.glossBlocks = base.glossBlocks;
-        selectedBlock = 0;
-        edited = true;
-    }
-
-    if (!prevGloss && params.hasColorGloss && params.glossBlocks.empty() && !hasTexGloss)
-    {
-        AppendGlossBlock(params, MaskBlockKind::Color, selectedBlock, previewTex);
-        edited = true;
-    }
-
     return edited;
 }
 
@@ -3774,27 +3856,49 @@ bool DrawMaterialSssSection(EditorMaterialParams &params, const EditorMaterialPa
 {
     EditorGuiSectionHeader(
         "Subsurface", "Subsurface scattering tint, radius, strength, and procedural mask blocks.");
-    const bool enabled = !IsSssLockedByMaterial(params);
-    if (!enabled)
+    const bool locked = IsSssLockedByMaterial(params);
+    if (locked)
     {
         ImGui::TextDisabled("Disabled on glass, water, and mirror materials.");
     }
 
-    bool edited = false;
-    edited |= DrawUnitScalarRow("sss_strength", params.sssStrength, base.sssStrength, enabled, "%.2f",
+    const bool prevSss = params.sssEnabled;
+    bool sssReset = false;
+    bool edited = EditorGuiCheckbox(
+        "sss", &params.sssEnabled,
+        { params.sssEnabled != base.sssEnabled, !locked,
+          "Enable subsurface scattering texture, controls, and mask blocks.", nullptr, &sssReset });
+    if (sssReset)
+    {
+        params.sssEnabled = base.sssEnabled;
+        params.sssStrength = base.sssStrength;
+        params.sssBlocks = base.sssBlocks;
+        edited = true;
+    }
+    if (!prevSss && params.sssEnabled && !locked && params.sssStrength <= 0.0f)
+    {
+        params.sssStrength = 1.0f;
+        edited = true;
+    }
+    if (!params.sssEnabled || locked)
+    {
+        return edited;
+    }
+
+    edited |= DrawUnitScalarRow("sss_strength", params.sssStrength, base.sssStrength, true, "%.2f",
                                 "Global subsurface scattering intensity (0 disables).");
-    edited |= DrawUnitScalarRow("sss_radius", params.sssRadius, base.sssRadius, enabled, "%.3f",
+    edited |= DrawUnitScalarRow("sss_radius", params.sssRadius, base.sssRadius, true, "%.3f",
                                 "Subsurface scatter blur radius in meters.");
 
     bool colorReset = false;
     edited |= EditorGuiColorHex("sss_color", params.sssColor,
-                                { !ColorEq(params.sssColor, base.sssColor), enabled,
+                                { !ColorEq(params.sssColor, base.sssColor), true,
                                   "Subsurface scattering tint color.", nullptr, &colorReset });
     edited |= ResetVec3IfClicked(params.sssColor, base.sssColor, &colorReset);
 
-    edited |= DrawUnitScalarRow("sss_threshold", params.sssThreshold, base.sssThreshold, enabled,
+    edited |= DrawUnitScalarRow("sss_threshold", params.sssThreshold, base.sssThreshold, true,
                                 "%.3f", "Default color distance threshold for new subsurface blocks.");
-    edited |= DrawUnitScalarRow("sss_feather", params.sssFeather, base.sssFeather, enabled, "%.1f",
+    edited |= DrawUnitScalarRow("sss_feather", params.sssFeather, base.sssFeather, true, "%.1f",
                                 "Default edge feathering for new subsurface blocks.",
                                 float(kEditorMaskFeatherMax));
     return edited;
@@ -4064,6 +4168,7 @@ bool RunMaskBlockPanel(const char *pushId, bool canAdd, DrawFn drawActive, Appen
     }
     bool edited = drawActive();
     MaskBlockKind addKind = MaskBlockKind::Color;
+    ImGui::Spacing();
     if (DrawAddColorOrMaskButtons(canAdd, addKind))
     {
         appendBlock(addKind);
@@ -4151,10 +4256,23 @@ static bool DrawMaterialClipboardActions(const std::string &matName, EditorMater
                                          const EditorMaterialParams &base,
                                          EditorMaterialParams &clipboard, bool &hasClipboard)
 {
-    ImGui::TextDisabled("Material: %s", matName.c_str());
-    ImGui::SameLine(
-        std::max(180.0f, ImGui::GetWindowContentRegionMax().x - 108.0f * EditorGuiScale()));
-    const uint32_t actions = EditorGuiBlockActions("##matcp", true, hasClipboard, params != base);
+    const bool canRemove = (params != base);
+    const float startX = ImGui::GetCursorPosX();
+    const float availW = EditorGuiRowAvailWidth();
+    const float actionsW = EditorGuiBlockActionsWidth(canRemove);
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const std::string fullText = "Material: " + matName;
+    const float maxTextW = std::max(80.0f * EditorGuiScale(), availW - actionsW - spacing);
+    const std::string shown = EditorGuiEllipsize(fullText.c_str(), maxTextW);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", shown.c_str());
+    if (shown != fullText && ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("%s", fullText.c_str());
+    }
+    ImGui::SameLine(startX + availW - actionsW);
+    const uint32_t actions = EditorGuiBlockActions("##matcp", true, hasClipboard, canRemove);
 
     if ((actions & kEditorGuiActionCopy) != 0)
     {
@@ -4188,12 +4306,12 @@ static const EditorTexture *GetSceneTexturePtr(const EditorScene &scene, int32_t
 
 static bool UsesProceduralLuma(const EditorMaterialParams &params)
 {
-    return params.emissiveTexture.empty() && params.hasColorEmissive;
+    return params.emissiveEnabled && params.emissiveTexture.empty();
 }
 
 static bool UsesProceduralGloss(const EditorMaterialParams &params)
 {
-    return params.glossTexture.empty() && params.hasColorGloss;
+    return params.glossEnabled && params.glossTexture.empty();
 }
 
 namespace
@@ -4345,6 +4463,7 @@ bool BindSelectedStageToEmissive(const EditorTexture &tex, int32_t selectedStage
         return false;
     }
     params.emissiveTexture = ref;
+    params.emissiveEnabled = true;
     return true;
 }
 
@@ -4432,23 +4551,25 @@ bool DrawStageQuickWireButtons(const std::string &stageTexRef, EditorMaterialPar
     }
 
     bool edited = false;
-    if (ImGui::SmallButton("-> base"))
+    static constexpr const char *kStageBtns[] = { "-> base", "-> emissive", "-> overlay" };
+    const int32_t clicked = EditorGuiButtonRow(kStageBtns, nullptr, 3);
+    if (clicked == 0)
     {
         params.baseTexture = cleanRef;
         edited = true;
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("-> emissive"))
+    else if (clicked == 1)
     {
         params.emissiveTexture = cleanRef;
+        params.emissiveEnabled = true;
         edited = true;
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("-> overlay"))
+    else if (clicked == 2)
     {
         params.overlayTexture = cleanRef;
         edited = true;
     }
+    ImGui::Spacing();
     return edited;
 }
 
@@ -4462,13 +4583,17 @@ void DrawSelectedShaderPreviewImage(uint64_t handle, const EditorTexture *previe
     }
 
     const float aspect = float(previewTex->width) / float(previewTex->height);
-    constexpr float kMaxSide = 160.0f;
+    const float kMaxSide = 160.0f * EditorGuiScale();
     const float w = aspect >= 1.0f ? kMaxSide : kMaxSide * aspect;
     const float h = aspect >= 1.0f ? (kMaxSide / aspect) : kMaxSide;
     ImGui::Image(ImTextureRef(ImTextureID(uintptr_t(handle))), ImVec2(w, h));
     ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("%u x %u px\n%s", previewTex->width, previewTex->height,
                         previewTex->name.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
 }
 
 bool MaybeBindSelectedStageOnLightEnable(bool wasLight, const EditorTexture *tex,
@@ -4587,6 +4712,14 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
         DrawMaterialEditorLumaBlocks(matName, params, materialIndex);
     }
 
+    DrawMaterialPbrSectionsTail(matName, params, base, materialIndex);
+}
+
+void EditorApp::DrawMaterialPbrSectionsTail(const std::string &matName,
+                                            EditorMaterialParams &params,
+                                            const EditorMaterialParams &base,
+                                            int32_t materialIndex)
+{
     int32_t glossTexIdx = ResolveOrLoadTexture(params.baseTexture);
     if (glossTexIdx < 0)
     {
@@ -4609,7 +4742,7 @@ void EditorApp::DrawMaterialEditorBody(int32_t materialIndex, bool showFaceHeade
         MarkMaterialEdited(materialIndex);
     }
 
-    if (!IsSssLockedByMaterial(params))
+    if (params.sssEnabled && !IsSssLockedByMaterial(params))
     {
         DrawMaterialEditorSssBlocks(matName, params, materialIndex);
     }
@@ -4817,12 +4950,15 @@ void EditorApp::DrawMaterialEditorModelsTab()
                       { false, true, "Illuminate the previewed model with a front key light." });
     EditorGuiCheckbox("Auto rotate", &m_previewAutoRotate,
                       { false, true, "Slowly spin the previewed model on the turntable." });
-    if (ImGui::Button("Reset view"))
+    ImGui::Spacing();
+    if (ImGui::Button("Reset view", ImVec2(EditorGuiFitButtonWidth("Reset view"), 0.0f)))
     {
         ResetPreviewView();
     }
 
+    ImGui::Spacing();
     ImGui::Separator();
+    ImGui::Spacing();
 
     if (m_previewMaterialIndex >= 0 && size_t(m_previewMaterialIndex) < m_materials.Count())
     {
@@ -4852,7 +4988,8 @@ void EditorApp::DrawMaterialEditorEntitiesTab()
         ImGui::Text("Surface #%d  Face #%d", m_selectedSurface, m_selectedFace);
         ImGui::Text("Texture: %s", surf.textureName.c_str());
         ImGui::Text("Faces: %zu  Triangles: %zu", surf.faces.size(), surf.indices.size() / 3);
-        if (ImGui::Button("Edit material"))
+        ImGui::Spacing();
+        if (ImGui::Button("Edit material", ImVec2(EditorGuiFitButtonWidth("Edit material"), 0.0f)))
         {
             const int32_t matIdx = m_materials.IndexOf(surf.textureName);
             if (matIdx >= 0)
@@ -4868,10 +5005,12 @@ void EditorApp::DrawMaterialEditorEntitiesTab()
     }
 
     EditorGuiSectionHeader("Emissive Tools");
-    if (ImGui::Button("Regenerate from map"))
+    if (ImGui::Button("Regenerate from map",
+                      ImVec2(EditorGuiFitButtonWidth("Regenerate from map"), 0.0f)))
     {
         m_regenPrompt = 1;
     }
+    ImGui::Spacing();
 }
 
 void EditorApp::DrawSystemTab()
@@ -5197,7 +5336,10 @@ void DrawEmitterSpotAndFlags(EditorEmitterLightOverride &ov, const EditorEmitter
                 ov.hasDir = true;
                 changed = true;
             }
-            if (ImGui::Button("Aim along camera view"))
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 std::round(kEditorGuiLabelWidth * EditorGuiScale()));
+            if (ImGui::Button("Aim along camera view",
+                              ImVec2(EditorGuiFitButtonWidth("Aim along camera view"), 0.0f)))
             {
                 const float cp = std::cos(camPitch);
                 ov.dir[0] = cp * std::cos(camYaw);
@@ -5206,6 +5348,7 @@ void DrawEmitterSpotAndFlags(EditorEmitterLightOverride &ov, const EditorEmitter
                 ov.hasDir = true;
                 changed = true;
             }
+            ImGui::Spacing();
         }
         else
         {
@@ -5936,18 +6079,22 @@ void EditorApp::DrawMultiSelectedLightsInspector()
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("Differing parameters show gray '?'; editing replaces all selected.");
     ImGui::PopStyleColor();
-    if (ImGui::SmallButton("Clear selection"))
+    ImGui::Spacing();
+    static constexpr const char *kMultiBtns[] = { "Clear selection", "Remove selected" };
+    const int32_t multiAction = EditorGuiButtonRow(kMultiBtns, nullptr, 2);
+    if (multiAction == 0)
     {
         ClearSelection();
         return;
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Remove selected"))
+    if (multiAction == 1)
     {
         RemoveSelectedLights();
         return;
     }
+    ImGui::Spacing();
     ImGui::Separator();
+    ImGui::Spacing();
 
     if (agg.allEmitters)
     {
@@ -6034,32 +6181,34 @@ void EditorApp::DrawLightEditorEntityTab()
     const EditorLight *base =
         BaselineMapLightAt(m_selectedLight, m_scene.lights, m_baselineMapLights);
 
-    if (ImGui::Button("Teleport"))
+    static constexpr const char *kEntityBtns[] = {
+        "Teleport", "Clone in world", "Clone here", "Remove",
+    };
+    const int32_t entityAction = EditorGuiButtonRow(kEntityBtns, nullptr, 4);
+    if (entityAction == 0)
     {
         m_cameraPosition[0] = light.position[0] - 64.0f;
         m_cameraPosition[1] = light.position[1] - 64.0f;
         m_cameraPosition[2] = light.position[2] + 32.0f;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Clone in world"))
+    else if (entityAction == 1)
     {
         m_customCloning = m_selectedLight;
         m_customPlacing = false;
         m_placingSun = false;
         SetCursorMode(false);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Clone here"))
+    else if (entityAction == 2)
     {
         AddCustomLight(&light, LightSpawn::Duplicate);
         m_lightTab = 1;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Remove"))
+    else if (entityAction == 3)
     {
         RemoveSelectedLights();
         return;
     }
+    ImGui::Spacing();
 
     if (light.emitterUniqueID == 0)
     {
@@ -6072,32 +6221,36 @@ void EditorApp::DrawLightEditorEntityTab()
 
 void EditorApp::DrawLightEditorCustomTab()
 {
-    if (ImGui::Button("Add light"))
+    static constexpr const char *kCustomBtns[] = {
+        "Add light", "Add in front", "Duplicate", "Remove",
+    };
+    const bool customEnabled[4] = {
+        true,
+        true,
+        !(m_selectedCustomLight < 0 || HasMultiLightSelection()),
+        !(m_selectedCustomLight < 0 && m_selectedCustomLights.empty()),
+    };
+    const int32_t customAction = EditorGuiButtonRow(kCustomBtns, customEnabled, 4);
+    if (customAction == 0)
     {
         m_customPlacing = true;
         m_customCloning = -1;
         m_placingSun = false;
         SetCursorMode(false);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Add in front"))
+    else if (customAction == 1)
     {
         AddCustomLight(nullptr, LightSpawn::Camera);
     }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(m_selectedCustomLight < 0 || HasMultiLightSelection());
-    if (ImGui::Button("Duplicate"))
+    else if (customAction == 2)
     {
         DuplicateSelectedLight();
     }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(m_selectedCustomLight < 0 && m_selectedCustomLights.empty());
-    if (ImGui::Button("Remove"))
+    else if (customAction == 3)
     {
         RemoveSelectedCustomLight();
     }
-    ImGui::EndDisabled();
+    ImGui::Spacing();
 
     if (HasMultiLightSelection())
     {
@@ -6169,12 +6322,16 @@ void EditorApp::DrawLightEditorGlobalTab()
     }
     DrawGlobalAtmosphereSection(m_settings, m_baselineSettings);
 
+    ImGui::Spacing();
     ImGui::Separator();
-    if (ImGui::Button("Regenerate from map"))
+    ImGui::Spacing();
+    if (ImGui::Button("Regenerate from map",
+                      ImVec2(EditorGuiFitButtonWidth("Regenerate from map"), 0.0f)))
     {
         m_regenPrompt = 1;
         m_loggedRegenLayout = 0;
     }
+    ImGui::Spacing();
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip("Restore the level's standard predefined lights from the map and "

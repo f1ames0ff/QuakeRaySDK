@@ -5533,7 +5533,7 @@ void EditorApp::DrawViewportOverlay()
         ActiveViewportDragHint(m_grabDragging, m_gizmoDragging, IsModelOrbitMode());
     if (dragLine != nullptr)
     {
-        const float padding = 14.0f;
+        const float padding = 14.0f * EditorGuiScale();
         const ImVec2 size = ImGui::CalcTextSize(dragLine);
         const float rightEdge = m_panelVisible ? m_panelLeft - padding : width - padding;
         const ImVec2 position(std::max(padding, rightEdge - size.x), height - padding - size.y);
@@ -7887,10 +7887,11 @@ int32_t EditorApp::DrawTextureBrowserGrid(const std::vector<int32_t> &visible, f
         return 0;
     }
 
-    const float imageSize = 128.0f;
-    const float tileGap = 10.0f;
+    const float scale = EditorGuiScale();
+    const float imageSize = 128.0f * scale;
+    const float tileGap = 10.0f * scale;
     const float rowStep =
-        imageSize + ImGui::GetTextLineHeight() + 10.0f + ImGui::GetStyle().ItemSpacing.y;
+        imageSize + ImGui::GetTextLineHeight() + 10.0f * scale + ImGui::GetStyle().ItemSpacing.y;
     const ImVec2 start = ImGui::GetCursorPos();
     const int32_t columns =
         std::max(1, int((ImGui::GetContentRegionAvail().x + tileGap) / (imageSize + tileGap)));
@@ -7967,12 +7968,16 @@ void EditorApp::DrawTextureBrowser()
     }
 
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const float scale = EditorGuiScale();
+    const float margin = 12.0f * scale;
+    const float topOffset = ImGui::GetFrameHeight() + margin;
     EditorGuiBackdrop(viewport->Size.x, viewport->Size.y, 0.58f);
 
-    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + 16.0f, viewport->Pos.y + 16.0f),
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + margin, viewport->Pos.y + topOffset),
                             ImGuiCond_Appearing);
-    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x * 0.72f, viewport->Size.y - 32.0f),
-                             ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(
+        ImVec2(viewport->Size.x * 0.72f, std::max(320.0f * scale, viewport->Size.y - topOffset - margin)),
+        ImGuiCond_Appearing);
 
     if (m_textureBrowserFocus)
     {
@@ -7985,16 +7990,17 @@ void EditorApp::DrawTextureBrowser()
     if (ImGui::Begin("Texture Browser", &open,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings))
     {
+        ImGui::AlignTextToFramePadding();
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "TEXTURE BROWSER");
         ImGui::SameLine();
         const std::string activeMod = ActiveModDisplayName(m_gamePath);
+        ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("active mod: %s", activeMod.c_str());
 
-        const float closeWidth =
-            ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float closeWidth = EditorGuiFitButtonWidth("Close", 72.0f);
         ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - closeWidth);
 
-        if (ImGui::Button("Close"))
+        if (ImGui::Button("Close", ImVec2(closeWidth, 0.0f)))
         {
             action = 2;
         }
@@ -8039,9 +8045,9 @@ void EditorApp::DrawTextureBrowser()
         }
 
         const float footerHeight =
-            ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing() + 8.0f;
-        const float contentHeight = std::max(100.0f, ImGui::GetContentRegionAvail().y - footerHeight);
-        const float folderWidth = std::max(220.0f, ImGui::GetContentRegionAvail().x * 0.30f);
+            ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing() + 14.0f * scale;
+        const float contentHeight = std::max(100.0f * scale, ImGui::GetContentRegionAvail().y - footerHeight);
+        const float folderWidth = std::max(220.0f * scale, ImGui::GetContentRegionAvail().x * 0.30f);
 
         DrawBrowserFolderPane(m_textureBrowserFolders, folderWidth, contentHeight,
                               m_textureBrowserFolder, m_textureBrowserSearch);
@@ -8074,7 +8080,7 @@ void EditorApp::DrawTextureBrowser()
             ImGui::BeginDisabled();
         }
 
-        if (ImGui::Button("Select"))
+        if (ImGui::Button("Select", ImVec2(EditorGuiFitButtonWidth("Select", 96.0f), 0.0f)))
         {
             action = 1;
         }
@@ -8087,7 +8093,7 @@ void EditorApp::DrawTextureBrowser()
         LogRect("texbrowse select");
         ImGui::SameLine();
 
-        if (ImGui::Button("Cancel"))
+        if (ImGui::Button("Cancel", ImVec2(EditorGuiFitButtonWidth("Cancel", 96.0f), 0.0f)))
         {
             action = 2;
         }
@@ -8107,27 +8113,59 @@ void EditorApp::DrawTextureBrowser()
         return;
     }
 
-    if (action == 1 && m_textureBrowserSelection >= 0 &&
-        size_t(m_textureBrowserSelection) < m_textureBrowserCatalog.size())
+    if (action == 1)
     {
-        const int32_t materialIndex = m_materials.IndexOf(m_textureBrowserMaterial);
-
-        if (materialIndex >= 0)
-        {
-            const std::string &chosen =
-                m_textureBrowserCatalog[size_t(m_textureBrowserSelection)].name;
-            MaterialSlotRef(m_materials.At(size_t(materialIndex)), m_textureBrowserSlot) = chosen;
-            ResolveOrLoadTexture(chosen);
-            m_materialsChanged = true;
-            TouchMaterial(m_textureBrowserMaterial);
-            PrintMessage(("texture browser: slot '" + m_textureBrowserMaterial + "' -> " + chosen)
-                             .c_str(),
-                         this);
-        }
+        ApplyTextureBrowserSelection();
     }
 
     m_textureBrowserMaterial.clear();
     m_textureBrowserSelection = -1;
+}
+
+void EditorApp::AutoEnableMaterialSlot(EditorMaterialParams &params, EditorTextureSlot slot)
+{
+    if (slot == EditorTextureSlot::Emissive)
+    {
+        params.emissiveEnabled = true;
+    }
+    else if (slot == EditorTextureSlot::Gloss)
+    {
+        params.glossEnabled = true;
+    }
+    else if (slot == EditorTextureSlot::Subsurface)
+    {
+        params.sssEnabled = true;
+        if (params.sssStrength <= 0.0f)
+        {
+            params.sssStrength = 1.0f;
+        }
+    }
+}
+
+void EditorApp::ApplyTextureBrowserSelection()
+{
+    if (m_textureBrowserSelection < 0 ||
+        size_t(m_textureBrowserSelection) >= m_textureBrowserCatalog.size())
+    {
+        return;
+    }
+    const int32_t materialIndex = m_materials.IndexOf(m_textureBrowserMaterial);
+    if (materialIndex < 0)
+    {
+        return;
+    }
+    const std::string &chosen = m_textureBrowserCatalog[size_t(m_textureBrowserSelection)].name;
+    EditorMaterialParams &params = m_materials.At(size_t(materialIndex));
+    MaterialSlotRef(params, m_textureBrowserSlot) = chosen;
+    if (!chosen.empty())
+    {
+        AutoEnableMaterialSlot(params, m_textureBrowserSlot);
+    }
+    ResolveOrLoadTexture(chosen);
+    m_materialsChanged = true;
+    TouchMaterial(m_textureBrowserMaterial);
+    PrintMessage(("texture browser: slot '" + m_textureBrowserMaterial + "' -> " + chosen).c_str(),
+                 this);
 }
 
 namespace
@@ -9875,10 +9913,12 @@ int32_t DrawSessionPromptButtons(std::string &buttonRects)
     };
 
     int32_t answer = 0;
+    const float scale = EditorGuiScale();
+    const float btnH = std::max(30.0f * scale, ImGui::GetFrameHeight() + 4.0f * scale);
     const float buttonWidth =
         (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-    if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f)))
+    if (ImGui::Button("Yes", ImVec2(buttonWidth, btnH)))
     {
         answer = 1;
     }
@@ -9886,7 +9926,7 @@ int32_t DrawSessionPromptButtons(std::string &buttonRects)
     noteRect("Yes");
     ImGui::SameLine();
 
-    if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f)))
+    if (ImGui::Button("No", ImVec2(buttonWidth, btnH)))
     {
         answer = 2;
     }
@@ -9904,13 +9944,17 @@ void EditorApp::DrawSessionPrompt()
     }
 
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const float scale = EditorGuiScale();
+    EditorGuiBackdrop(viewport->Size.x, viewport->Size.y, 0.58f);
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
                                    viewport->Pos.y + viewport->Size.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     // A fixed width with a fitted height: the wrapped text and the path decide how tall the dialog
     // is, and a height that is too small clips the buttons out of the window, where they cannot be
     // clicked at all.
-    ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(viewport->Size.x - 32.0f * scale, 440.0f * scale), 0.0f),
+        ImGuiCond_Always);
 
     bool open = true;
     int32_t answer = 0;
@@ -9934,6 +9978,8 @@ void EditorApp::DrawSessionPrompt()
         {
             ImGui::TextWrapped("%s", ResolveSystemConfigPath().c_str());
         }
+        ImGui::Spacing();
+        ImGui::Separator();
         ImGui::Spacing();
         answer = DrawSessionPromptButtons(buttonRects);
     }
@@ -9989,13 +10035,17 @@ void EditorApp::DrawResetPrompt()
     }
 
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const float scale = EditorGuiScale();
+    EditorGuiBackdrop(viewport->Size.x, viewport->Size.y, 0.58f);
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
                                    viewport->Pos.y + viewport->Size.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     // Fixed width, fitted height: this one names the files so a session cannot remove a file the
     // author did not expect, and the wrapped paths make the content taller than any height guessed
     // here would be.
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(viewport->Size.x - 32.0f * scale, 560.0f * scale), 0.0f),
+        ImGuiCond_Always);
 
     bool open = true;
     int32_t answer = 0;
@@ -10020,11 +10070,14 @@ void EditorApp::DrawResetPrompt()
         ImGui::TextWrapped("%s", m_sessionPaths.materials.c_str());
         ImGui::TextWrapped("%s", m_sessionPaths.lights.c_str());
         ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
 
+        const float btnH = std::max(30.0f * scale, ImGui::GetFrameHeight() + 4.0f * scale);
         const float buttonWidth =
             (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-        if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f)))
+        if (ImGui::Button("Yes", ImVec2(buttonWidth, btnH)))
         {
             answer = 1;
         }
@@ -10033,7 +10086,7 @@ void EditorApp::DrawResetPrompt()
 
         ImGui::SameLine();
 
-        if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f)))
+        if (ImGui::Button("No", ImVec2(buttonWidth, btnH)))
         {
             answer = 2;
         }
@@ -10091,10 +10144,14 @@ void EditorApp::DrawRegenPrompt()
     }
 
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const float scale = EditorGuiScale();
+    EditorGuiBackdrop(viewport->Size.x, viewport->Size.y, 0.58f);
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
                                    viewport->Pos.y + viewport->Size.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(viewport->Size.x - 32.0f * scale, 560.0f * scale), 0.0f),
+        ImGuiCond_Always);
 
     bool open = true;
     int32_t answer = 0;
@@ -10118,11 +10175,14 @@ void EditorApp::DrawRegenPrompt()
         ImGui::Spacing();
         ImGui::TextWrapped("%s", m_sessionPaths.lights.c_str());
         ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
 
+        const float btnH = std::max(30.0f * scale, ImGui::GetFrameHeight() + 4.0f * scale);
         const float buttonWidth =
             (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-        if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f)))
+        if (ImGui::Button("Yes", ImVec2(buttonWidth, btnH)))
         {
             answer = 1;
         }
@@ -10131,7 +10191,7 @@ void EditorApp::DrawRegenPrompt()
 
         ImGui::SameLine();
 
-        if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f)))
+        if (ImGui::Button("No", ImVec2(buttonWidth, btnH)))
         {
             answer = 2;
         }
@@ -10241,7 +10301,9 @@ void EditorApp::DrawNotification()
     // The game draws its toast over everything at 14,14; the editor's panel owns that corner, so
     // the line sits in the viewport's bottom-left instead, still over the whole window.
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
-    const ImVec2 position(viewport->Pos.x + 14.0f, viewport->Pos.y + viewport->Size.y - 58.0f);
+    const float scale = EditorGuiScale();
+    const ImVec2 position(viewport->Pos.x + 14.0f * scale,
+                          viewport->Pos.y + viewport->Size.y - 58.0f * scale);
     ImDrawList *draw = ImGui::GetForegroundDrawList();
 
     draw->AddText(ImVec2(position.x + 1.0f, position.y + 1.0f),

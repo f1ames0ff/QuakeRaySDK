@@ -463,6 +463,11 @@ std::string FormatColor(const float color[3])
 void AppendSssOwnedValues(const EditorMaterialParams &params,
                           std::vector<std::pair<const char *, std::string>> &values)
 {
+    if (!params.sssEnabled &&
+        (!params.textureSss.empty() || params.sssStrength > 0.0f || !params.sssBlocks.empty()))
+    {
+        values.emplace_back("sss_enabled", "false");
+    }
     if (!params.textureSss.empty())
     {
         values.emplace_back("texture_sss", params.textureSss);
@@ -524,6 +529,25 @@ void AppendOwnedLightAndShaftTailValues(const EditorMaterialParams &params,
     }
 }
 
+void AppendOwnedSectionToggleValues(
+    const EditorMaterialParams &params,
+    std::vector<std::pair<const char *, std::string>> &values)
+{
+    if (!params.emissiveEnabled &&
+        (!params.emissiveTexture.empty() || params.hasColorEmissive ||
+         !params.emissiveBlocks.empty() || params.emissiveFactor != 1.0f || params.lumaBlend >= 0))
+    {
+        values.emplace_back("emissive_enabled", "false");
+    }
+    if (!params.glossEnabled &&
+        (!params.glossTexture.empty() || params.roughnessOverride >= 0.0f ||
+         params.metalnessFactor > 0.0f || params.metalnessFromNormalAlpha ||
+         params.hasColorGloss || !params.glossBlocks.empty()))
+    {
+        values.emplace_back("gloss_enabled", "false");
+    }
+}
+
 void AppendOwnedTailValues(const EditorMaterialParams &params,
                            std::vector<std::pair<const char *, std::string>> &values)
 {
@@ -532,6 +556,7 @@ void AppendOwnedTailValues(const EditorMaterialParams &params,
         values.emplace_back("enabled", "false");
     }
     AppendOwnedLightAndShaftTailValues(params, values);
+    AppendOwnedSectionToggleValues(params, values);
     if (params.hasColorEmissive && !params.emissiveBlocks.empty())
     {
         values.emplace_back("luma", std::string());
@@ -559,6 +584,55 @@ void AppendOwnedTailValues(const EditorMaterialParams &params,
     AppendSssOwnedValues(params, values);
 }
 
+void AppendOwnedTextureAndBumpValues(
+    const EditorMaterialParams &params,
+    std::vector<std::pair<const char *, std::string>> &values)
+{
+    auto append = [&values](const char *key, const std::string &value) {
+        values.emplace_back(key, value);
+    };
+    if (!params.baseTexture.empty())
+    {
+        append("texture_base", params.baseTexture);
+    }
+    if (!params.normalTexture.empty())
+    {
+        append("texture_normals", params.normalTexture);
+    }
+    if (!params.emissiveTexture.empty())
+    {
+        append("texture_emissive", params.emissiveTexture);
+    }
+    if (!params.overlayTexture.empty())
+    {
+        append("texture_overlay", params.overlayTexture);
+    }
+    if (!params.glossTexture.empty())
+    {
+        append("texture_gloss", params.glossTexture);
+    }
+    if (params.textureScaleU != 1.0f)
+    {
+        append("texture_scale_u", FormatFloat(params.textureScaleU));
+    }
+    if (params.textureScaleV != 1.0f)
+    {
+        append("texture_scale_v", FormatFloat(params.textureScaleV));
+    }
+    if (params.textureOffsetU != 0.0f)
+    {
+        append("texture_offset_u", FormatFloat(params.textureOffsetU));
+    }
+    if (params.textureOffsetV != 0.0f)
+    {
+        append("texture_offset_v", FormatFloat(params.textureOffsetV));
+    }
+    if (params.bumpScale != 1.0f)
+    {
+        append("bump_scale", FormatFloat(params.bumpScale));
+    }
+}
+
 // The owned keys of `params`, in canonical order, as `key`/`value` pairs. A key at its file
 // default is left out, which is what keeps a save from growing the file by eleven dead lines.
 std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMaterialParams &params)
@@ -570,55 +644,7 @@ std::vector<std::pair<const char *, std::string>> OwnedValues(const EditorMateri
     };
 
     // The game writes the diffuse image first, before the scale and offset pair.
-    if (!params.baseTexture.empty())
-    {
-        append("texture_base", params.baseTexture);
-    }
-
-    if (!params.normalTexture.empty())
-    {
-        append("texture_normals", params.normalTexture);
-    }
-
-    if (!params.emissiveTexture.empty())
-    {
-        append("texture_emissive", params.emissiveTexture);
-    }
-
-    if (!params.overlayTexture.empty())
-    {
-        append("texture_overlay", params.overlayTexture);
-    }
-
-    if (!params.glossTexture.empty())
-    {
-        append("texture_gloss", params.glossTexture);
-    }
-
-    if (params.textureScaleU != 1.0f)
-    {
-        append("texture_scale_u", FormatFloat(params.textureScaleU));
-    }
-
-    if (params.textureScaleV != 1.0f)
-    {
-        append("texture_scale_v", FormatFloat(params.textureScaleV));
-    }
-
-    if (params.textureOffsetU != 0.0f)
-    {
-        append("texture_offset_u", FormatFloat(params.textureOffsetU));
-    }
-
-    if (params.textureOffsetV != 0.0f)
-    {
-        append("texture_offset_v", FormatFloat(params.textureOffsetV));
-    }
-
-    if (params.bumpScale != 1.0f)
-    {
-        append("bump_scale", FormatFloat(params.bumpScale));
-    }
+    AppendOwnedTextureAndBumpValues(params, values);
 
     if (params.roughnessOverride >= 0.0f)
     {
@@ -1606,12 +1632,35 @@ void ResetMaterialBlockState(EditorMaterialParams &params)
     params.sssBlocks.clear();
 }
 
+struct MaterialReadToggleFlags
+{
+    bool hasSssStrength = false;
+    bool hasEmissiveEnabled = false;
+    bool hasGlossEnabled = false;
+    bool hasSssEnabled = false;
+};
+
 void ApplyExtraMaterialScalarKey(std::string_view key, std::string_view value,
-                                 EditorMaterialParams &params, bool &hasSssStrength)
+                                 EditorMaterialParams &params, MaterialReadToggleFlags &flags)
 {
     if (key == "enabled")
     {
         params.enabled = BoolOf(value, params.enabled);
+    }
+    else if (key == "emissive_enabled")
+    {
+        params.emissiveEnabled = BoolOf(value, params.emissiveEnabled);
+        flags.hasEmissiveEnabled = true;
+    }
+    else if (key == "gloss_enabled")
+    {
+        params.glossEnabled = BoolOf(value, params.glossEnabled);
+        flags.hasGlossEnabled = true;
+    }
+    else if (key == "sss_enabled")
+    {
+        params.sssEnabled = BoolOf(value, params.sssEnabled);
+        flags.hasSssEnabled = true;
     }
     else if (key == "light_shafts")
     {
@@ -1650,17 +1699,40 @@ void ApplyExtraMaterialScalarKey(std::string_view key, std::string_view value,
     else
     {
         ApplyGlossScalarKey(key, value, params);
-        ApplySssScalarKey(key, value, params, hasSssStrength);
+        ApplySssScalarKey(key, value, params, flags.hasSssStrength);
     }
 }
 
-void FinalizeExtraMaterialRead(EditorMaterialParams &params, bool hasSssStrength)
+void InferMissingEmissiveAndGlossToggles(EditorMaterialParams &params,
+                                         const MaterialReadToggleFlags &flags)
+{
+    if (!flags.hasEmissiveEnabled)
+    {
+        params.emissiveEnabled = params.emissiveEnabled || !params.emissiveTexture.empty() ||
+                                 params.hasColorEmissive || params.emissiveFactor != 1.0f ||
+                                 params.lumaBlend >= 0;
+    }
+    if (!flags.hasGlossEnabled)
+    {
+        params.glossEnabled = params.glossEnabled || !params.glossTexture.empty() ||
+                              params.roughnessOverride >= 0.0f || params.metalnessFactor > 0.0f ||
+                              params.metalnessFromNormalAlpha || params.hasColorGloss;
+    }
+}
+
+void FinalizeExtraMaterialRead(EditorMaterialParams &params, const MaterialReadToggleFlags &flags)
 {
     params.hasColorEmissive = params.hasColorEmissive || !params.emissiveBlocks.empty();
     params.hasColorGloss = params.hasColorGloss || !params.glossBlocks.empty();
-    if (!hasSssStrength && (!params.textureSss.empty() || !params.sssBlocks.empty()))
+    InferMissingEmissiveAndGlossToggles(params, flags);
+    if (!flags.hasSssStrength && (!params.textureSss.empty() || !params.sssBlocks.empty()))
     {
         params.sssStrength = 1.0f;
+    }
+    if (!flags.hasSssEnabled)
+    {
+        params.sssEnabled = params.sssEnabled || !params.textureSss.empty() ||
+                            params.sssStrength > 0.0f || !params.sssBlocks.empty();
     }
 }
 
@@ -2588,6 +2660,9 @@ bool IsEmittedMaterialKey(std::string_view key,
     // state on save so clearing or resetting a field back to its default deletes the old YAML line.
     static constexpr const char *kOwnedMaterialKeys[] = {
         "enabled",
+        "emissive_enabled",
+        "gloss_enabled",
+        "sss_enabled",
         "texture_base",
         "texture_normals",
         "texture_emissive",
@@ -2889,6 +2964,62 @@ size_t InferMaterialKeyIndent(const std::vector<TextLine> &lines, const std::str
     return keyIndent;
 }
 
+bool ApplyMaterialTextureAndBumpKey(std::string_view key, std::string_view value,
+                                    EditorMaterialParams &params)
+{
+    if (key == "texture_base")
+    {
+        params.baseTexture = TextOf(value);
+        return true;
+    }
+    if (key == "texture_normals")
+    {
+        params.normalTexture = TextOf(value);
+        return true;
+    }
+    if (key == "texture_emissive")
+    {
+        params.emissiveTexture = TextOf(value);
+        return true;
+    }
+    if (key == "texture_gloss")
+    {
+        params.glossTexture = TextOf(value);
+        return true;
+    }
+    if (key == "texture_overlay")
+    {
+        params.overlayTexture = TextOf(value);
+        return true;
+    }
+    if (key == "texture_scale_u")
+    {
+        params.textureScaleU = FloatOf(value, params.textureScaleU);
+        return true;
+    }
+    if (key == "texture_scale_v")
+    {
+        params.textureScaleV = FloatOf(value, params.textureScaleV);
+        return true;
+    }
+    if (key == "texture_offset_u")
+    {
+        params.textureOffsetU = FloatOf(value, params.textureOffsetU);
+        return true;
+    }
+    if (key == "texture_offset_v")
+    {
+        params.textureOffsetV = FloatOf(value, params.textureOffsetV);
+        return true;
+    }
+    if (key == "bump_scale")
+    {
+        params.bumpScale = FloatOf(value, params.bumpScale);
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMaterialParams &params) const
@@ -2903,7 +3034,7 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
     const std::vector<TextLine> lines = SplitLines(m_text);
     bool glass = false;
     bool water = false;
-    bool hasSssStrength = false;
+    MaterialReadToggleFlags toggleFlags;
 
     ResetMaterialBlockState(params);
 
@@ -2928,49 +3059,13 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
 
         const std::string_view value = ValueOf(line);
 
-        if (key == "texture_base")
+        if (ApplyMaterialTextureAndBumpKey(key, value, params))
         {
-            params.baseTexture = TextOf(value);
+            continue;
         }
-        else if (key == "texture_normals")
-        {
-            params.normalTexture = TextOf(value);
-        }
-        else if (key == "texture_emissive")
-        {
-            params.emissiveTexture = TextOf(value);
-        }
-        else if (key == "texture_gloss")
-        {
-            params.glossTexture = TextOf(value);
-        }
-        else if (key == "texture_overlay")
-        {
-            params.overlayTexture = TextOf(value);
-        }
-        else if (key == "texture_scale_u")
-        {
-            params.textureScaleU = FloatOf(value, params.textureScaleU);
-        }
-        else if (key == "texture_scale_v")
-        {
-            params.textureScaleV = FloatOf(value, params.textureScaleV);
-        }
-        else if (key == "texture_offset_u")
-        {
-            params.textureOffsetU = FloatOf(value, params.textureOffsetU);
-        }
-        else if (key == "texture_offset_v")
-        {
-            params.textureOffsetV = FloatOf(value, params.textureOffsetV);
-        }
-        else if (key == "roughness_override")
+        if (key == "roughness_override")
         {
             params.roughnessOverride = FloatOf(value, params.roughnessOverride);
-        }
-        else if (key == "bump_scale")
-        {
-            params.bumpScale = FloatOf(value, params.bumpScale);
         }
         else if (key == "metalness_factor")
         {
@@ -3068,7 +3163,7 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
         }
         else
         {
-            ApplyExtraMaterialScalarKey(key, value, params, hasSssStrength);
+            ApplyExtraMaterialScalarKey(key, value, params, toggleFlags);
         }
     }
 
@@ -3076,7 +3171,7 @@ bool EditorMaterialsDocument::ReadMaterial(const std::string &name, EditorMateri
     ReadEmissiveBlocks(m_text, lines, head + 1, end, keyIndent, params);
     ReadGlossBlocks(m_text, lines, head + 1, end, keyIndent, params);
     ReadSssBlocks(m_text, lines, head + 1, end, keyIndent, params);
-    FinalizeExtraMaterialRead(params, hasSssStrength);
+    FinalizeExtraMaterialRead(params, toggleFlags);
 
     // a material that asks for both is glass, as the loader decides
     params.type = glass ? EditorMaterialType::Glass
