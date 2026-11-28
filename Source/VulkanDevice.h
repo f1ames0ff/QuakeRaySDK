@@ -26,6 +26,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Common.h"
@@ -72,6 +73,7 @@ class RhiRasterOverlayPass;
 class RhiRasterSkyPass;
 class RhiRtComposePass;
 class RhiRtDirectPass;
+class RhiGpuParticlePass;
 class RhiLightShaftVolumePass;
 class RhiRtGodRaysPass;
 class RhiRtIndirectPass;
@@ -149,6 +151,13 @@ public:
 
     void SetFogVolumes(uint32_t count, const QrFogVolume *pVolumes);
 
+    QrResult SpawnParticleBurst(const QrParticleBurstInfo *pBurstInfo);
+    QrResult UploadParticleEmitters(uint32_t count, const QrParticleEmitterInfo *pEmitters);
+    QrResult ResetGpuParticles();
+    QrResult CreateVectorField(const QrVectorFieldCreateInfo *pCreateInfo, QrVectorField *pResult);
+    QrResult DestroyVectorField(QrVectorField vectorField);
+    QrResult SetVectorFieldVolumes(uint32_t count, const QrVectorFieldVolume *pVolumes);
+
     void CreateMaterial(const QrMaterialCreateInfo *pCreateInfo, QrMaterial *pResult);
     void CreateAnimatedMaterial(const QrAnimatedMaterialCreateInfo *pCreateInfo, QrMaterial *pResult);
     void ChangeAnimatedMaterialFrame(QrMaterial animatedMaterial, uint32_t frameIndex);
@@ -224,6 +233,7 @@ private:
                         const QrayGpuRequirements &gpuRequirements);
     void CreateDevice(const QrayGpuRequirements &gpuRequirements);
     void CreateNvrhiDevice(const QrayGpuRequirements &gpuRequirements);
+    void InitOverlayLayoutsAndGpuParticles(const QrInstanceCreateInfo *info);
     void InitGodRaysAndLightShaftPasses(const QrInstanceCreateInfo *info);
     void CreateSyncPrimitives();
     static VkSurfaceKHR GetSurfaceFromUser(VkInstance instance, const QrInstanceCreateInfo &info);
@@ -351,6 +361,23 @@ private:
     std::shared_ptr<RhiShadowMapPass>       rhiShadowMapPass;
     std::shared_ptr<RhiRtGodRaysPass>       rhiRtGodRaysPass;
     std::shared_ptr<RhiLightShaftVolumePass> rhiLightShaftVolumePass;
+    std::shared_ptr<RhiGpuParticlePass>     rhiGpuParticlePass;
+
+    friend struct GpuParticleFrameBuilder;
+    uint32_t ResolveParticleMaterialTexture(QrMaterial material) const;
+
+    uint32_t                                maxGpuParticleCount = 0u;
+    std::mutex                              gpuParticleMutex;
+    uint32_t                                nextVectorFieldHandle = 1u;
+    std::unordered_map<QrVectorField, uint32_t> vectorFieldSlots;
+    std::vector<QrVectorFieldVolume>        activeVectorFieldVolumes;
+    std::vector<uint32_t>                   activeVectorFieldAtlasSlots;
+    std::vector<QrParticleEmitterInfo>      activeParticleEmitters;
+    std::vector<float>                      activeEmitterAccumulators;
+    std::vector<uint32_t>                   activeEmitterTextureIndices;
+    std::vector<QrParticleBurstInfo>        pendingParticleBursts;
+    std::vector<uint32_t>                   pendingParticleBurstTextureIndices;
+    float                                   gpuParticleSimTime = 0.0f;
 
     std::shared_ptr<RhiRtReflRefrPass>      rhiRtReflRefrPass;
 

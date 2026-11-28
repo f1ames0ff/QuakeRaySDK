@@ -1,0 +1,46 @@
+# Format: 1
+# Toolchain: dxc libdxcompiler.so: 1.9(dev;5049-d72f75ee); spirv-dis SPIRV-Tools v2025.4 v2025.4-0-g7f2d9ee9
+=== block set 0 binding 0
+
+[0] offset 0 v4(uint32)
+=== block set 0 binding 1
+
+[0] offset 0 v4(uint32)
+[1] offset 16 v4(float32)
+[2] offset 32 v4(float32)
+[3] offset 48 v4(float32)
+[4] offset 64 v4(float32)
+[5] offset 80 v4(float32)
+[6] offset 96 v4(float32)
+[7] offset 112 v4(float32)
+[8] offset 128 v4(float32)
+=== block set 0 binding 2
+
+[0] offset 0 v4(float32)
+[1] offset 16 v4(float32)
+[2] offset 32 v4(float32)
+[3] offset 48 v4(float32)
+[4] offset 64 v4(float32)
+[5] offset 80 v4(float32)
+[6] offset 96 v4(uint32)
+[7] offset 112 v4(float32)
+=== builtin GlobalInvocationId
+v3(int32)
+=== capability Shader
+declared
+=== descriptor set 0 binding 0
+struct
+=== descriptor set 0 binding 0: storage class
+Uniform
+=== descriptor set 0 binding 1
+struct nonwritable
+=== descriptor set 0 binding 1: storage class
+StorageBuffer
+=== descriptor set 0 binding 2
+struct
+=== descriptor set 0 binding 2: storage class
+StorageBuffer
+=== entry point
+GLCompute main
+=== workgroup size
+64 1 1

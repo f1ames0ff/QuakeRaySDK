@@ -1913,6 +1913,8 @@ void EditorApp::ApplyBaselineCapture()
     m_baselineCustomLights = m_customLights;
     m_baselineMapLights = m_scene.lights;
     m_baselineEmitterOverrides = m_emitterLightOverrides;
+    m_baselineParticleEmitters = m_runtime.particleEmitters;
+    m_baselineVectorFields = m_runtime.vectorFields;
 }
 
 bool EditorApp::HasUnsavedEditorChanges() const
@@ -1958,6 +1960,11 @@ void EditorApp::InitEditorSessionMode()
         {
             m_editorMode = EditorMode::Material;
             m_materialTab = 3;
+        }
+        else if (EqualsIgnoreCase(m_initialTab, "Particles") || EqualsIgnoreCase(m_initialTab, "VFX"))
+        {
+            m_editorMode = EditorMode::Particles;
+            m_particleTab = 0;
         }
         else
         {
@@ -2051,7 +2058,7 @@ bool EditorApp::HandleEditorModeKeyDown(int key)
     {
         return true;
     }
-    if (m_gizmoDragging || m_grabDragging)
+    if (m_gizmoDragging || m_grabDragging || m_particleGizmo.dragging)
     {
         FinishGizmoDrag(false);
         FinishLightGrab(false);
@@ -2717,6 +2724,13 @@ void EditorApp::DrawModeMenu()
         StartEditorMode(EditorMode::Light);
     }
 
+    if (ImGui::MenuItem("Particles & VFX", nullptr,
+                        m_sceneLoaded && !m_choosingMode && m_editorMode == EditorMode::Particles,
+                        m_sceneLoaded))
+    {
+        StartEditorMode(EditorMode::Particles);
+    }
+
     if (ImGui::MenuItem("Mode Chooser...", nullptr, m_sceneLoaded && m_choosingMode, m_sceneLoaded))
     {
         BackToChooser();
@@ -3203,6 +3217,10 @@ void EditorApp::DrawEditorOverlay(float deltaSeconds)
         {
             DrawMaterialEditorPanel();
         }
+        else if (m_editorMode == EditorMode::Particles)
+        {
+            DrawParticleEditorPanel();
+        }
         else
         {
             DrawLightEditorPanel();
@@ -3220,15 +3238,16 @@ void EditorApp::DrawEditorOverlay(float deltaSeconds)
 void EditorApp::DrawModeChooser()
 {
     EditorGuiBackdrop(float(m_clientWidth), float(m_clientHeight), 0.52f);
-    static constexpr const char *kButtons[] = { "Material Editor", "Light Editor", "Exit" };
+    static constexpr const char *kButtons[] = { "Material Editor", "Light Editor", "Particles & VFX", "Exit" };
     static constexpr const char *kDescs[] = {
         "Edit texture overrides, PBR parameters, is_light emission and DTAL system cvars.",
         "Inspect entity lights, place custom spotlights/lights and adjust sky & sun.",
+        "Author GPU physics particles, surface burst presets, and 3D vector fields.",
         "Quit QuakeRay Editor (prompts if there are unsaved session changes).",
     };
     const int32_t choice = EditorGuiDialogVertical(
         "##ModeChooser", "QuakeRay Editor", "Choose the editor to run on this level (Esc closes).",
-        kButtons, kDescs, 3);
+        kButtons, kDescs, 4);
     if (choice == 0)
     {
         StartEditorMode(EditorMode::Material);
@@ -3238,6 +3257,10 @@ void EditorApp::DrawModeChooser()
         StartEditorMode(EditorMode::Light);
     }
     else if (choice == 2)
+    {
+        StartEditorMode(EditorMode::Particles);
+    }
+    else if (choice == 3)
     {
         RequestEditorExit();
     }

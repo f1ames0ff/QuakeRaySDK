@@ -281,6 +281,47 @@ QrMatrix3D SpatialFrame::CubemapRotation(const QrMatrix3D &value) const
     return result;
 }
 
+QrParticleBurstInfo SpatialFrame::ParticleBurst(const QrParticleBurstInfo &value) const
+{
+    QrParticleBurstInfo result = value;
+    result.origin = Point(value.origin);
+    result.direction = Direction(value.direction);
+    result.originJitterRadius = Length(value.originJitterRadius);
+    result.speedMin = Length(value.speedMin);
+    result.speedMax = Length(value.speedMax);
+    result.sizeStartMin = Length(value.sizeStartMin);
+    result.sizeStartMax = Length(value.sizeStartMax);
+    return result;
+}
+
+QrParticleEmitterInfo SpatialFrame::ParticleEmitter(const QrParticleEmitterInfo &value) const
+{
+    QrParticleEmitterInfo result = value;
+    result.burst = ParticleBurst(value.burst);
+    return result;
+}
+
+QrVectorFieldVolume SpatialFrame::VectorFieldVolume(const QrVectorFieldVolume &value) const
+{
+    QrVectorFieldVolume result = value;
+    result.worldFromLocal = Transform(value.worldFromLocal);
+    result.axis = Direction(value.axis);
+    result.intensity = Length(value.intensity);
+    result.maxSpeed = Length(value.maxSpeed);
+    result.curlFrequency *= invScale;
+    result.curlScrollSpeed = Length(value.curlScrollSpeed);
+    return result;
+}
+
+void SpatialFrame::VectorFieldVelocity(const float src[3], float dst[3]) const
+{
+    const QrFloat3D in = { { src[0], src[1], src[2] } };
+    const QrFloat3D out = Point(in);
+    dst[0] = out.data[0];
+    dst[1] = out.data[1];
+    dst[2] = out.data[2];
+}
+
 void SpatialFrame::Aabb(const QrFloat3D &minValue, const QrFloat3D &maxValue,
                         QrFloat3D &outMin, QrFloat3D &outMax) const
 {

@@ -1125,6 +1125,38 @@ void RhiRasterOverlayPass::SetParticleTimer(nvrhi::ITimerQuery *pParticleTimerQu
     particleTimerQuery = pParticleTimerQuery;
 }
 
+void RhiRasterOverlayPass::SetCustomOverlayCallback(CustomOverlayCallback callback)
+{
+    customOverlayCallback = std::move(callback);
+}
+
+void RhiRasterOverlayPass::InvokeCustomOverlay(nvrhi::ICommandList *pCommandList,
+                                               const Target &target,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               const float *defaultViewProj) const
+{
+    if (!customOverlayCallback || target.framebuffer == nullptr)
+    {
+        return;
+    }
+
+    CustomOverlayDrawContext ctx{};
+    ctx.pCommandList = pCommandList;
+    ctx.pFramebuffer = target.framebuffer;
+    ctx.pPingLfShTexture = target.smokePingLfShTexture;
+    ctx.pPingLfCocgTexture = target.smokePingLfCocgTexture;
+    ctx.pTonemappingBuffer = target.tonemappingBuffer;
+    ctx.pDefaultViewProj = defaultViewProj;
+    ctx.width = width;
+    ctx.height = height;
+    ctx.color0Format = target.finalTexture != nullptr ? target.finalTexture->getDesc().format
+                                                      : pipelineColor0Format;
+    ctx.color1Format = target.screenEmissionTexture != nullptr ? target.screenEmissionTexture->getDesc().format
+                                                               : pipelineColor1Format;
+    customOverlayCallback(ctx);
+}
+
 bool RhiRasterOverlayPass::ValidateRenderInputs(uint32_t frameIndex, const float *pView,
                                                 const float *pProj, const float jitter[2],
                                                 nvrhi::IBuffer *pUniformBuffer)
@@ -1225,14 +1257,11 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
         (pDraws != nullptr && drawCount > 0) ||
         (pSmokeDraws != nullptr && smokeDrawCount > 0) ||
         (pParticleDraws != nullptr && particleDrawCount > 0) ||
-        (pParticlePointDraws != nullptr && particlePointDrawCount > 0);
+        (pParticlePointDraws != nullptr && particlePointDrawCount > 0) ||
+        static_cast<bool>(customOverlayCallback);
     if (!hasAnyRequestedDraws)
     {
-        if (particleTimerQuery != nullptr)
-        {
-            pCommandList->beginTimerQuery(particleTimerQuery);
-            pCommandList->endTimerQuery(particleTimerQuery);
-        }
+        RecordEmptyOverlayTimer(pCommandList);
         return;
     }
 
@@ -1288,7 +1317,9 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
         LogMessage(print, "Warning: RHI: the raster overlay particle point draws are not drawable (a shader, the light layout/set or the TLAS is missing), the particle point draws are skipped");
     }
 
-    if (worldDrawable || smokeDrawable || particleDrawable || particlePointDrawable)
+    const bool customDrawable = static_cast<bool>(customOverlayCallback);
+
+    if (worldDrawable || smokeDrawable || particleDrawable || particlePointDrawable || customDrawable)
     {
         RecordDepthCopy(pCommandList, target, width, height);
 
@@ -1318,28 +1349,20 @@ void RhiRasterOverlayPass::Render(nvrhi::ICommandList *pCommandList,
                              pDraws, drawCount, applyVertexColorGamma, smokeDrawable, particleDrawable);
         }
 
-        if (particleTimerQuery != nullptr)
-        {
-            pCommandList->beginTimerQuery(particleTimerQuery);
-        }
-
-        if (particleDrawable)
-        {
-            RecordParticleDraws(pCommandList, target, width, height, defaultViewProj,
-                                pParticleDraws, particleDrawCount, pSmokeLightSet, pRayStatsSet);
-        }
-
-        if (particlePointDrawable)
-        {
-            RecordParticlePointDraws(pCommandList, target, width, height, defaultViewProj,
-                                     pParticlePointDraws, particlePointDrawCount, pSmokeLightSet,
-                                     pRayStatsSet);
-        }
-
-        if (particleTimerQuery != nullptr)
-        {
-            pCommandList->endTimerQuery(particleTimerQuery);
-        }
+        ParticleOverlayParams overlayParams;
+        overlayParams.width = width;
+        overlayParams.height = height;
+        overlayParams.defaultViewProj = defaultViewProj;
+        overlayParams.particleDrawable = particleDrawable;
+        overlayParams.particlePointDrawable = particlePointDrawable;
+        overlayParams.customDrawable = customDrawable;
+        overlayParams.pParticleDraws = pParticleDraws;
+        overlayParams.particleDrawCount = particleDrawCount;
+        overlayParams.pParticlePointDraws = pParticlePointDraws;
+        overlayParams.particlePointDrawCount = particlePointDrawCount;
+        overlayParams.pSmokeLightSet = pSmokeLightSet;
+        overlayParams.pRayStatsSet = pRayStatsSet;
+        RecordParticleAndCustomOverlays(pCommandList, target, overlayParams);
 
         if (smokeDrawable)
         {
@@ -2912,4 +2935,46 @@ bool RhiRasterOverlayPass::LoadShader(const char *pFileName, nvrhi::ShaderType t
     }
 
     return true;
+}
+
+void RhiRasterOverlayPass::RecordEmptyOverlayTimer(nvrhi::ICommandList *pCommandList) const
+{
+    if (particleTimerQuery != nullptr)
+    {
+        pCommandList->beginTimerQuery(particleTimerQuery);
+        pCommandList->endTimerQuery(particleTimerQuery);
+    }
+}
+
+void RhiRasterOverlayPass::RecordParticleAndCustomOverlays(nvrhi::ICommandList *pCommandList, const Target &target,
+                                                           const ParticleOverlayParams &params)
+{
+    if (particleTimerQuery != nullptr)
+    {
+        pCommandList->beginTimerQuery(particleTimerQuery);
+    }
+
+    if (params.particleDrawable)
+    {
+        RecordParticleDraws(pCommandList, target, params.width, params.height, params.defaultViewProj,
+                            params.pParticleDraws, params.particleDrawCount, params.pSmokeLightSet,
+                            params.pRayStatsSet);
+    }
+
+    if (params.particlePointDrawable)
+    {
+        RecordParticlePointDraws(pCommandList, target, params.width, params.height, params.defaultViewProj,
+                                 params.pParticlePointDraws, params.particlePointDrawCount,
+                                 params.pSmokeLightSet, params.pRayStatsSet);
+    }
+
+    if (params.customDrawable)
+    {
+        InvokeCustomOverlay(pCommandList, target, params.width, params.height, params.defaultViewProj);
+    }
+
+    if (particleTimerQuery != nullptr)
+    {
+        pCommandList->endTimerQuery(particleTimerQuery);
+    }
 }

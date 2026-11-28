@@ -37,6 +37,8 @@ set(QR_EDITOR_COMMON_SOURCES
     EditorGui.cpp
     EditorOverlayPipeline.cpp
     EditorPanels.cpp
+    EditorParticlePanel.cpp
+    EditorParticles.cpp
     EditorMaterial.cpp
     EditorSceneRuntime.cpp
     EditorSettings.cpp

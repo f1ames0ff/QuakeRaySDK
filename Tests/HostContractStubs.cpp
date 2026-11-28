@@ -232,4 +232,36 @@ QrResult qrDrawFrame(QrInstance, const QrDrawFrameInfo *)
     return QR_SUCCESS;
 }
 
+QrResult qrSpawnParticleBurst(QrInstance, const QrParticleBurstInfo *)
+{
+    return QR_SUCCESS;
+}
+
+QrResult qrUploadParticleEmitters(QrInstance, uint32_t, const QrParticleEmitterInfo *)
+{
+    return QR_SUCCESS;
+}
+
+QrResult qrResetGpuParticles(QrInstance)
+{
+    return QR_SUCCESS;
+}
+
+QrResult qrCreateVectorField(QrInstance, const QrVectorFieldCreateInfo *, QrVectorField *pResult)
+{
+    if (pResult != nullptr)
+        *pResult = QR_EMPTY_VECTOR_FIELD;
+    return QR_SUCCESS;
+}
+
+QrResult qrDestroyVectorField(QrInstance, QrVectorField)
+{
+    return QR_SUCCESS;
+}
+
+QrResult qrSetVectorFieldVolumes(QrInstance, uint32_t, const QrVectorFieldVolume *)
+{
+    return QR_SUCCESS;
+}
+
 } // extern "C"

@@ -121,6 +121,7 @@ set(renderer_SOURCES
     Source/RHI/RhiRtDirectPass.cpp
     Source/RHI/RhiRtGodRaysPass.cpp
     Source/RHI/RhiLightShaftVolumePass.cpp
+    Source/RHI/RhiGpuParticlePass.cpp
     Source/RHI/RhiRtIndirectPass.cpp
     Source/RHI/RhiRtPrimaryPass.cpp
     Source/RHI/RhiRtReflRefrPass.cpp
@@ -605,6 +606,63 @@ if(QR_BUILD_TESTS)
     )
     add_test(NAME qray_light_shaft_tests COMMAND qray_light_shaft_tests)
     set_tests_properties(qray_light_shaft_tests PROPERTIES TIMEOUT 300 ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~")
+
+    add_executable(qray_gpu_particles_tests
+        Tests/GpuParticlesTests.cpp
+        editor/EditorParticles.cpp
+        editor/EditorSpatial.cpp
+        editor/Assets.cpp
+        editor/Scene.cpp
+        Source/Stb/stb_image.cpp
+    )
+    target_compile_features(qray_gpu_particles_tests PRIVATE cxx_std_20)
+    target_include_directories(qray_gpu_particles_tests PRIVATE Include Source Source/Stb editor)
+    if(WIN32)
+        target_compile_definitions(qray_gpu_particles_tests PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+        target_link_libraries(qray_gpu_particles_tests PRIVATE renderer nvrhi_vk nvrhi user32)
+        add_custom_command(TARGET qray_gpu_particles_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:qray_gpu_particles_tests>/amd_fidelityfx_vk.dll"
+            VERBATIM)
+    else()
+        find_package(X11 REQUIRED)
+        target_compile_definitions(qray_gpu_particles_tests PRIVATE QR_STATIC QR_USE_SURFACE_XLIB)
+        target_link_libraries(qray_gpu_particles_tests PRIVATE renderer nvrhi_vk nvrhi X11::X11)
+        add_custom_command(TARGET qray_gpu_particles_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_SO}"
+                "$<TARGET_FILE_DIR:qray_gpu_particles_tests>/libamd_fidelityfx_vk.so"
+            VERBATIM)
+    endif()
+    add_test(NAME qray_gpu_particles_tests COMMAND qray_gpu_particles_tests)
+    set_tests_properties(qray_gpu_particles_tests PROPERTIES TIMEOUT 60)
+
+    add_executable(qray_gpu_particles_smoke Tests/GpuParticlesSmoke.cpp)
+    target_compile_features(qray_gpu_particles_smoke PRIVATE cxx_std_20)
+    target_include_directories(qray_gpu_particles_smoke PRIVATE Include Source)
+    if(WIN32)
+        target_compile_definitions(qray_gpu_particles_smoke PRIVATE QR_STATIC QR_USE_SURFACE_WIN32 UNICODE _UNICODE)
+        target_link_libraries(qray_gpu_particles_smoke PRIVATE renderer nvrhi_vk nvrhi user32)
+        add_custom_command(TARGET qray_gpu_particles_smoke POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:qray_gpu_particles_smoke>/amd_fidelityfx_vk.dll"
+            VERBATIM)
+    else()
+        find_package(X11 REQUIRED)
+        target_compile_definitions(qray_gpu_particles_smoke PRIVATE QR_STATIC QR_USE_SURFACE_XLIB)
+        target_link_libraries(qray_gpu_particles_smoke PRIVATE renderer nvrhi_vk nvrhi X11::X11)
+        add_custom_command(TARGET qray_gpu_particles_smoke POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${QR_FFX_VK_SO}"
+                "$<TARGET_FILE_DIR:qray_gpu_particles_smoke>/libamd_fidelityfx_vk.so"
+            VERBATIM)
+    endif()
+    add_test(NAME qray_gpu_particles_smoke COMMAND qray_gpu_particles_smoke
+        "${CMAKE_CURRENT_SOURCE_DIR}/Build")
+    set_tests_properties(qray_gpu_particles_smoke PROPERTIES TIMEOUT 180
+        ENVIRONMENT "VK_LOADER_LAYERS_DISABLE=~implicit~" LABELS gpu)
 endif()
 
 add_library(qray_alias OBJECT Source/rt_alias.c)

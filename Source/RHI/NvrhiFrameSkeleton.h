@@ -33,6 +33,7 @@
 #include "../ISwapchainDependency.h"
 #include "../RasterizedDataCollector.h"
 #include "RhiCloudsPass.h"
+#include "RhiGpuParticlePass.h"
 #include "RhiProceduralSkyPass.h"
 #include "RhiRtGodRaysPass.h"
 #include "RhiRtPrimaryPass.h"
@@ -179,6 +180,18 @@ public:
         // particle discard reads from the uniform.
         const ParticleProxy *particleProxies = nullptr;
         uint32_t particleProxyCount = 0;
+
+        struct GpuParticles
+        {
+            const RhiGpuParticlePass::SpawnSubmission *pSpawns = nullptr;
+            uint32_t spawnCount = 0;
+            const RhiGpuParticlePass::VolumeSubmission *pVolumes = nullptr;
+            uint32_t volumeCount = 0;
+            float dt = 0.0f;
+            float time = 0.0f;
+            float worldUp[3] = { 0.0f, 0.0f, 1.0f };
+            bool enableCollision = true;
+        } gpuParticles;
 
         // -- rasterized geometry buffers (sky, world overlay, particle points, UI) --
         const RasterizedDataCollector::DrawInfo *swapchainDraws = nullptr;
@@ -454,6 +467,7 @@ public:
     ~NvrhiFrameSkeleton() override;
 
     void SetLightShaftVolumePass(RhiLightShaftVolumePass *pPass) { lightShaftVolumePass = pPass; }
+    void SetGpuParticlePass(RhiGpuParticlePass *pPass) { gpuParticlePass = pPass; }
 
     NvrhiFrameSkeleton(const NvrhiFrameSkeleton &other) = delete;
     NvrhiFrameSkeleton(NvrhiFrameSkeleton &&other) noexcept = delete;
@@ -575,6 +589,9 @@ private:
                                      const ShGlobalUniform *pUniform,
                                      const RhiShadowMapPass::GeometryBuffers &shadowGeometry,
                                      RhiRtGodRaysPass::Params &godRaysParams);
+    bool HasActiveGpuParticles(const SkyFrameInputs &sky) const;
+    void InvokeComposeRasterOverlay(nvrhi::ICommandList *pOverlayList, uint32_t frameIndex,
+                                    const SkyFrameInputs &sky);
 
     nvrhi::vulkan::IDevice *device;
     PrintFunction print;
@@ -713,6 +730,11 @@ private:
     RhiShadowMapPass *shadowMapPass = nullptr;
     RhiRtGodRaysPass *godRaysPass = nullptr;
     RhiLightShaftVolumePass *lightShaftVolumePass = nullptr;
+    RhiGpuParticlePass *gpuParticlePass = nullptr;
+
+    void RecordGpuParticleSimulation(nvrhi::ICommandList *commandList, uint32_t frameIndex,
+                                     const SkyFrameInputs &sky, bool tracedFrame);
+    void ConfigureGpuParticleOverlay(uint32_t frameIndex, const SkyFrameInputs &sky, bool enabled);
 
     // The 2D-UI pass (RhiUiPass, RHI/RhiUiPass.h), driven in the traced chain once the compose ran:
     // it draws the frame's SWAPCHAIN overlay into the compose's upscaled image. Not owned; null

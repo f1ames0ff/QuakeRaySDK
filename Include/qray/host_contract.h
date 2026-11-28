@@ -226,6 +226,9 @@ struct QrayFrameUpdates
     QrayArrayView<QraySceneDtalBatch> dtalBatches;
     const QrClusterLightSourcesUploadInfo *pClusterSources = nullptr;
     QrayArrayView<QrFogVolume> fogVolumes;
+    QrayArrayView<QrParticleBurstInfo> particleBursts;
+    QrayArrayView<QrParticleEmitterInfo> particleEmitters;
+    QrayArrayView<QrVectorFieldVolume> vectorFieldVolumes;
 };
 
 enum QrayMaterialIntentFlagBits : uint32_t

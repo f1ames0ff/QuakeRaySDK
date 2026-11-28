@@ -2816,6 +2816,9 @@ void EditorApp::RenderSceneFrameContents(float deltaSeconds)
         UploadLights();
         UploadEmissiveLights();
         UploadClusterLightSources();
+        m_runtime.UploadParticleSystems(
+            m_instance, m_assets, false,
+            [this](const char *msg) { PrintMessage(msg, this); });
     }
 
     m_ui.BeginFrame(deltaSeconds, m_clientWidth, m_clientHeight);
@@ -3151,6 +3154,7 @@ void EditorApp::HandleMouseMoveEvent(const EditorEvent &event)
     }
 
     UpdateGizmoDrag(event.x, event.y);
+    UpdateParticleGizmoDrag(event.x, event.y);
 }
 
 void EditorApp::UpdatePreviewOrbitDrag(int32_t x, int32_t y)
@@ -3215,17 +3219,36 @@ void EditorApp::HandleMouseWheelEvent(const EditorEvent &event)
     }
 }
 
+bool EditorApp::TryBeginModeViewportManipulator(bool additive)
+{
+    if (additive)
+    {
+        return false;
+    }
+    if (m_editorMode == EditorMode::Light)
+    {
+        if (!HasMultiLightSelection() && BeginGizmoDrag(m_ui.MouseX(), m_ui.MouseY()))
+        {
+            return true;
+        }
+        return BeginLightGrab();
+    }
+    if (m_editorMode == EditorMode::Particles)
+    {
+        if (BeginParticleGizmoDrag(m_ui.MouseX(), m_ui.MouseY()))
+        {
+            return true;
+        }
+        return TryPickParticleViewportItem(m_ui.MouseX(), m_ui.MouseY());
+    }
+    return false;
+}
+
 void EditorApp::HandleViewportLeftPress(const EditorEvent &event)
 {
     const bool additive = event.modifiers.ctrl || event.modifiers.shift ||
                           m_keys[size_t(EditorKey::Ctrl)] || m_keys[size_t(EditorKey::Shift)];
-    bool handled = (m_editorMode == EditorMode::Light) && !additive &&
-                   !HasMultiLightSelection() && BeginGizmoDrag(m_ui.MouseX(), m_ui.MouseY());
-    if (!handled && m_editorMode == EditorMode::Light && !additive)
-    {
-        handled = BeginLightGrab();
-    }
-    if (handled)
+    if (TryBeginModeViewportManipulator(additive))
     {
         return;
     }
@@ -5051,6 +5074,7 @@ void EditorApp::UpdateHoverPick()
             ImVec2(m_ui.MouseX(), m_ui.MouseY()),
         };
         ResolvePanelGizmoHover(CameraBasis(), m_customLights, q, m_hoverGizmoPart, m_hoverGizmoAxis);
+        UpdateParticleGizmoHover(m_ui.MouseX(), m_ui.MouseY(), m_ui.WantsMouse());
         return;
     }
 
@@ -5088,6 +5112,23 @@ void EditorApp::UpdateHoverPick()
     }
 }
 
+bool EditorApp::TryHandleModeSpecificPick(const EditorFacePick &facePick, const float direction[3])
+{
+    if (m_editorMode == EditorMode::Particles)
+    {
+        HandleParticleModePick(facePick);
+        return true;
+    }
+
+    if (m_editorMode == EditorMode::Light)
+    {
+        HandleLightModePick(direction, facePick.distance, facePick.surface >= 0);
+        return true;
+    }
+
+    return false;
+}
+
 void EditorApp::Pick()
 {
     if (m_choosingMode ||
@@ -5106,9 +5147,8 @@ void EditorApp::Pick()
     const EditorFacePick facePick =
         PickSceneFace(m_scene, m_cameraPosition, direction, &m_materials);
 
-    if (m_editorMode == EditorMode::Light)
+    if (TryHandleModeSpecificPick(facePick, direction))
     {
-        HandleLightModePick(direction, facePick.distance, facePick.surface >= 0);
         return;
     }
 
@@ -5480,6 +5520,7 @@ void EditorApp::DrawSelectionOverlay()
     }
 
     DrawLightEditorViewportExtras();
+    DrawParticleEditorViewportExtras(drawList, cam, showWorldExtras);
 
     if (m_choosingMode || m_editorMode != EditorMode::Light || HasMultiLightSelection() ||
         m_selectedCustomLight < 0 || size_t(m_selectedCustomLight) >= m_customLights.size())
@@ -5530,7 +5571,7 @@ void EditorApp::DrawViewportOverlay()
     }
 
     const char *dragLine =
-        ActiveViewportDragHint(m_grabDragging, m_gizmoDragging, IsModelOrbitMode());
+        ActiveViewportDragHint(m_grabDragging, m_gizmoDragging || m_particleGizmo.dragging, IsModelOrbitMode());
     if (dragLine != nullptr)
     {
         const float padding = 14.0f;
@@ -5690,6 +5731,7 @@ void EditorApp::UpdateGizmoDrag(float cursorX, float cursorY)
 
 void EditorApp::FinishGizmoDrag(bool kept)
 {
+    FinishParticleGizmoDrag(kept);
     if (!m_gizmoDragging)
     {
         return;
@@ -8559,7 +8601,8 @@ std::string EditorApp::LevelFingerprint() const
 {
     return RenderEditorLevelSection(m_sessionPaths.level, LevelSky(), LevelFog(), LevelLights(),
                                     ShouldWriteEmptyLightsBlock()) +
-           RenderEmitterLightsBlock(m_emitterLightOverrides);
+           RenderEmitterLightsBlock(m_emitterLightOverrides) +
+           RenderEditorLevelParticlesYaml(m_runtime.particleEmitters, m_runtime.vectorFields);
 }
 
 void EditorApp::LoadLightsSession()
@@ -9154,6 +9197,8 @@ bool EditorApp::SaveLevelLightsSession()
     std::string merged = m_levelDocument.WriteMerged(
         m_sessionPaths.level, LevelSky(), LevelFog(), LevelLights(), ShouldWriteEmptyLightsBlock());
     MaybeAppendEmitterLightsYaml(merged, m_emitterLightOverrides, m_baselineEmitterOverrides);
+    MergeEditorLevelParticlesYaml(merged, m_sessionPaths.level,
+                                  m_runtime.particleEmitters, m_runtime.vectorFields);
 
     std::string error;
     if (m_levelDocument.Exists() &&
@@ -9188,6 +9233,8 @@ bool EditorApp::SaveLevelLightsSession()
     // The session now matches the file: the text it was written from is the baseline the next
     // edit is told apart from.
     CaptureSky();
+    m_baselineParticleEmitters = m_runtime.particleEmitters;
+    m_baselineVectorFields = m_runtime.vectorFields;
     m_levelFingerprint = LevelFingerprint();
     RefreshMapCatalogSavedFlags();
 
@@ -9302,6 +9349,8 @@ void EditorApp::DiscardSession()
     m_selectedCustomLights.clear();
     m_selectedLight = -1;
     m_selectedLights.clear();
+    m_selectedParticleEmitter = -1;
+    m_selectedVectorField = -1;
     m_hoverLight = -1;
     m_hoverCustomLight = -1;
     if (m_sceneLoaded)

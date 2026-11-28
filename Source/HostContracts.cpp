@@ -518,6 +518,37 @@ QrResult ApplyDtal(QrInstance instance, const QraySceneDtalBatch &dtal,
     return qrUploadDtalGroups(instance, &batch);
 }
 
+bool ValidateParticleAndFieldUpdates(const QrayFrameUpdates &updates) noexcept
+{
+    if (!ArrayValid(updates.fogVolumes) ||
+        !ArrayValid(updates.particleBursts) ||
+        !ArrayValid(updates.particleEmitters) ||
+        !ArrayValid(updates.vectorFieldVolumes) ||
+        updates.vectorFieldVolumes.count > QR_MAX_VECTOR_FIELD_VOLUMES)
+        return false;
+    return true;
+}
+
+QrResult ApplyParticlesAndEnvironment(QrInstance instance, const QrayFrameUpdates &updates) noexcept
+{
+    QrResult firstError = QR_SUCCESS;
+    auto record = [&](QrResult r) {
+        if (firstError == QR_SUCCESS && r != QR_SUCCESS)
+            firstError = r;
+    };
+    if (updates.fogVolumes.count != 0)
+        record(qrSetFogVolumes(instance, updates.fogVolumes.count, updates.fogVolumes.pData));
+    for (const QrParticleBurstInfo &burst : updates.particleBursts)
+        record(qrSpawnParticleBurst(instance, &burst));
+    if (updates.particleEmitters.count != 0)
+        record(qrUploadParticleEmitters(instance, updates.particleEmitters.count,
+                                        updates.particleEmitters.pData));
+    if (updates.vectorFieldVolumes.count != 0)
+        record(qrSetVectorFieldVolumes(instance, updates.vectorFieldVolumes.count,
+                                       updates.vectorFieldVolumes.pData));
+    return firstError;
+}
+
 QrResult ApplyOwnedDtal(QrInstance instance, const OwnedDtal &dtal) noexcept
 {
     const QrDtalGroupUploadBatch batch = {
@@ -763,7 +794,7 @@ QrResult qrayValidateFrameUpdates(const QrayFrameUpdates *pUpdates,
         !ArrayValid(pUpdates->rasterized) || !ArrayValid(pUpdates->particles) ||
         !ArrayValid(pUpdates->decals) || !ArrayValid(pUpdates->portals) ||
         !ArrayValid(pUpdates->lights) || !ArrayValid(pUpdates->dtalBatches) ||
-        !ArrayValid(pUpdates->fogVolumes))
+        !ValidateParticleAndFieldUpdates(*pUpdates))
         return Fail(pDiagnostic, QR_WRONG_ARGUMENT, QRAY_DIAG_BAD_ARRAY);
 
     for (uint32_t i = 0; i < pUpdates->transforms.count; ++i)
@@ -1237,8 +1268,7 @@ QrResult QraySceneBinding::RenderFrame(const QrayFrameView &view,
         apply(ApplyDtal(m_impl->instance, dtal, m_impl->materials, m_impl->scratchDtalGroups));
     if (updates.pClusterSources != nullptr)
         apply(qrUploadClusterLightSources(m_impl->instance, updates.pClusterSources));
-    if (updates.fogVolumes.count != 0)
-        apply(qrSetFogVolumes(m_impl->instance, updates.fogVolumes.count, updates.fogVolumes.pData));
+    apply(ApplyParticlesAndEnvironment(m_impl->instance, updates));
 
     const QrResult drawResult = qrDrawFrame(m_impl->instance, view.pDrawInfo);
     m_impl->frameOpen = false;

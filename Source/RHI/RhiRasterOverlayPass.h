@@ -215,6 +215,21 @@ class RhiRasterOverlayPass final
 public:
     using PrintFunction = std::function<void(const char *)>;
 
+    struct CustomOverlayDrawContext
+    {
+        nvrhi::ICommandList *pCommandList = nullptr;
+        nvrhi::IFramebuffer *pFramebuffer = nullptr;
+        nvrhi::ITexture *pPingLfShTexture = nullptr;
+        nvrhi::ITexture *pPingLfCocgTexture = nullptr;
+        nvrhi::IBuffer *pTonemappingBuffer = nullptr;
+        const float *pDefaultViewProj = nullptr;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        nvrhi::Format color0Format = nvrhi::Format::UNKNOWN;
+        nvrhi::Format color1Format = nvrhi::Format::UNKNOWN;
+    };
+    using CustomOverlayCallback = std::function<void(const CustomOverlayDrawContext &)>;
+
     RhiRasterOverlayPass();
     ~RhiRasterOverlayPass();
 
@@ -280,6 +295,7 @@ public:
     bool SetRayStatsLayout(nvrhi::BindingLayoutHandle pRayStatsLayout);
 
     void SetParticleTimer(nvrhi::ITimerQuery *pParticleTimerQuery);
+    void SetCustomOverlayCallback(CustomOverlayCallback callback);
 
     // One call per frame, on the frame context's open command list of 'frameIndex', inside the
     // compose's window (see the class comment). It (re)resolves the engine images, (re)wraps them
@@ -495,6 +511,27 @@ private:
                                   const RasterizedDataCollector::ParticlePointDrawInfo *pDraws,
                                   uint32_t drawCount, nvrhi::IBindingSet *pLightSet,
                                   nvrhi::IBindingSet *pRayStatsSet);
+    void InvokeCustomOverlay(nvrhi::ICommandList *pCommandList, const Target &target,
+                             uint32_t width, uint32_t height, const float *defaultViewProj) const;
+
+    struct ParticleOverlayParams
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        const float *defaultViewProj = nullptr;
+        bool particleDrawable = false;
+        bool particlePointDrawable = false;
+        bool customDrawable = false;
+        const RasterizedDataCollector::DrawInfo *pParticleDraws = nullptr;
+        uint32_t particleDrawCount = 0;
+        const RasterizedDataCollector::ParticlePointDrawInfo *pParticlePointDraws = nullptr;
+        uint32_t particlePointDrawCount = 0;
+        nvrhi::IBindingSet *pSmokeLightSet = nullptr;
+        nvrhi::IBindingSet *pRayStatsSet = nullptr;
+    };
+    void RecordEmptyOverlayTimer(nvrhi::ICommandList *pCommandList) const;
+    void RecordParticleAndCustomOverlays(nvrhi::ICommandList *pCommandList, const Target &target,
+                                         const ParticleOverlayParams &params);
 
     void ReleaseTarget(Target &target);
     void ReleasePipelineCache();
@@ -598,6 +635,7 @@ private:
 
     nvrhi::BindingLayoutHandle rayStatsLayout;
     nvrhi::ITimerQuery *particleTimerQuery = nullptr;
+    CustomOverlayCallback customOverlayCallback;
 
     // One smoke pipeline per state key, like worldPipelines but with no vertex-gamma bit: the smoke
     // shaders declare no specialization constant. Built lazily against smokeLightLayout.

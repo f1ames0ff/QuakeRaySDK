@@ -567,6 +567,52 @@ QrResult qrSetFogVolumes(QrInstance qrInstance, uint32_t count, const QrFogVolum
     return Call(qrInstance, &VulkanDevice::SetFogVolumes, count, pVolumes);
 }
 
+template<typename Func, typename... Args>
+static QrResult CallParticleApi(QrInstance qrInstance, Func f, Args&&... args)
+{
+    try
+    {
+        VulkanDevice &dev = GetDevice(qrInstance);
+        G_EntryPointCalls.fetch_add(1, std::memory_order_relaxed);
+        return (dev.*f)(std::forward<Args>(args)...);
+    }
+    catch (QrException &e)
+    {
+        TryPrintError(qrInstance, e.what());
+        return e.GetErrorCode();
+    }
+}
+
+QrResult qrSpawnParticleBurst(QrInstance qrInstance, const QrParticleBurstInfo *pBurstInfo)
+{
+    return CallParticleApi(qrInstance, &VulkanDevice::SpawnParticleBurst, pBurstInfo);
+}
+
+QrResult qrUploadParticleEmitters(QrInstance qrInstance, uint32_t count, const QrParticleEmitterInfo *pEmitters)
+{
+    return CallParticleApi(qrInstance, &VulkanDevice::UploadParticleEmitters, count, pEmitters);
+}
+
+QrResult qrResetGpuParticles(QrInstance qrInstance)
+{
+    return CallParticleApi(qrInstance, &VulkanDevice::ResetGpuParticles);
+}
+
+QrResult qrCreateVectorField(QrInstance qrInstance, const QrVectorFieldCreateInfo *pCreateInfo, QrVectorField *pResult)
+{
+    return CallParticleApi(qrInstance, &VulkanDevice::CreateVectorField, pCreateInfo, pResult);
+}
+
+QrResult qrDestroyVectorField(QrInstance qrInstance, QrVectorField vectorField)
+{
+    return CallParticleApi(qrInstance, &VulkanDevice::DestroyVectorField, vectorField);
+}
+
+QrResult qrSetVectorFieldVolumes(QrInstance qrInstance, uint32_t count, const QrVectorFieldVolume *pVolumes)
+{
+    return CallParticleApi(qrInstance, &VulkanDevice::SetVectorFieldVolumes, count, pVolumes);
+}
+
 QrBool32 qrIsRenderUpscaleTechniqueAvailable(QrInstance qrInstance, QrRenderUpscaleTechnique technique)
 {
     return Call(qrInstance, &VulkanDevice::IsRenderUpscaleTechniqueAvailable, technique);

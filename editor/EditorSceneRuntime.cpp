@@ -953,6 +953,17 @@ EditorLevelApplyResult EditorSceneRuntime::ApplyLevelDocument(const EditorLevelD
         }
     }
 
+    ReadEditorLevelParticlesYaml(levelDoc.Text(), levelKey, particleEmitters, vectorFields);
+    for (EditorParticleEmitterDef &em : particleEmitters)
+    {
+        em.cluster = ResolveEditorLightCluster(scene, em.origin);
+        if (em.cluster == QR_CLUSTER_LIGHT_NO_CLUSTER)
+        {
+            em.cluster = 0u;
+        }
+    }
+    particlesDirty = true;
+
     return result;
 }
 
@@ -1971,8 +1982,186 @@ void EditorSceneRuntime::DestroyOverlayMaterials(QrInstance instance)
     overlayCache.Destroy(instance);
 }
 
+namespace
+{
+
+QrVectorField ResolveSceneVectorFieldHandle(
+    QrInstance instance,
+    const EditorAssetSource &assets,
+    const EditorVectorFieldDef &vf,
+    std::unordered_map<std::string, QrVectorField> &cache,
+    const EditorRuntimeLogFn &log)
+{
+    if (vf.fgaPath.empty())
+    {
+        return QR_EMPTY_VECTOR_FIELD;
+    }
+
+    const auto cachedIt = cache.find(vf.fgaPath);
+    if (cachedIt != cache.end())
+    {
+        return cachedIt->second;
+    }
+
+    EditorFgaGrid grid;
+    std::string error;
+    if (!LoadEditorFgaFile(vf.fgaPath, &assets, grid, error))
+    {
+        EmitLog(log, "particles: " + error);
+        return QR_EMPTY_VECTOR_FIELD;
+    }
+
+    EditorMetersFgaVectors(grid.vectorsXYZ);
+    const QrVectorFieldCreateInfo ci = {
+        grid.width,
+        grid.height,
+        grid.depth,
+        grid.vectorsXYZ.data(),
+    };
+    QrVectorField handle = QR_EMPTY_VECTOR_FIELD;
+    if (qrCreateVectorField(instance, &ci, &handle) != QR_SUCCESS ||
+        handle == QR_EMPTY_VECTOR_FIELD)
+    {
+        EmitLog(log, "particles: failed to upload FGA vector field: " + vf.fgaPath);
+        return QR_EMPTY_VECTOR_FIELD;
+    }
+
+    cache[vf.fgaPath] = handle;
+    return handle;
+}
+
+void UploadSceneVectorFieldVolumes(QrInstance instance,
+                                   const EditorAssetSource &assets,
+                                   const std::vector<EditorVectorFieldDef> &vectorFields,
+                                   std::unordered_map<std::string, QrVectorField> &cache,
+                                   const EditorRuntimeLogFn &log)
+{
+    std::vector<QrVectorFieldVolume> gpuVolumes;
+    gpuVolumes.reserve(std::min<size_t>(vectorFields.size(), QR_MAX_VECTOR_FIELD_VOLUMES));
+    for (const EditorVectorFieldDef &vf : vectorFields)
+    {
+        if (!vf.enabled || gpuVolumes.size() >= QR_MAX_VECTOR_FIELD_VOLUMES)
+        {
+            continue;
+        }
+
+        QrVectorField handle = QR_EMPTY_VECTOR_FIELD;
+        if (vf.kind == QR_VECTOR_FIELD_KIND_LUT_3D)
+        {
+            handle = ResolveSceneVectorFieldHandle(instance, assets, vf, cache, log);
+            if (handle == QR_EMPTY_VECTOR_FIELD)
+            {
+                continue;
+            }
+        }
+
+        QrVectorFieldVolume vol = BuildEditorVectorFieldVolumeQuakeUnits(vf, handle);
+        EditorMetersVectorFieldVolume(vol);
+        gpuVolumes.push_back(vol);
+    }
+    qrSetVectorFieldVolumes(instance, static_cast<uint32_t>(gpuVolumes.size()),
+                            gpuVolumes.empty() ? nullptr : gpuVolumes.data());
+}
+
+} // namespace
+
+void EditorSceneRuntime::UploadParticleSystems(QrInstance instance, const EditorAssetSource &assets,
+                                               bool force, const EditorRuntimeLogFn &log)
+{
+    if (instance == nullptr || (!force && !particlesDirty))
+    {
+        return;
+    }
+
+    std::vector<QrParticleEmitterInfo> gpuEmitters;
+    gpuEmitters.reserve(particleEmitters.size());
+    for (size_t i = 0; i < particleEmitters.size(); i++)
+    {
+        const EditorParticleEmitterDef &def = particleEmitters[i];
+        if (!def.enabled || def.spawnRate <= 0.0f)
+        {
+            continue;
+        }
+
+        QrMaterial mat = QR_NO_MATERIAL;
+        if (!def.textureName.empty())
+        {
+            const int32_t texIdx = ResolveOrLoadTexture(instance, assets, def.textureName);
+            if (texIdx >= 0 && size_t(texIdx) < textureMaterials.size())
+            {
+                mat = textureMaterials[size_t(texIdx)];
+            }
+        }
+
+        uint32_t cluster = def.cluster != 0u ? def.cluster : ResolveEditorLightCluster(scene, def.origin);
+        cluster = cluster == QR_CLUSTER_LIGHT_NO_CLUSTER ? 0u : cluster;
+
+        QrParticleEmitterInfo info = {};
+        info.uniqueID = uint64_t(i + 1u);
+        info.spawnRate = def.spawnRate;
+        info.burst = BuildEditorBurstQuakeUnits(def, mat);
+        info.burst.cluster = cluster;
+        EditorMetersParticleEmitter(info);
+        gpuEmitters.push_back(info);
+    }
+    qrUploadParticleEmitters(instance, static_cast<uint32_t>(gpuEmitters.size()),
+                             gpuEmitters.empty() ? nullptr : gpuEmitters.data());
+
+    UploadSceneVectorFieldVolumes(instance, assets, vectorFields, vectorFieldCache, log);
+    particlesDirty = false;
+}
+
+void EditorSceneRuntime::SpawnPresetBurst(QrInstance instance, EditorParticlePreset preset,
+                                            const float originUnits[3], const float normal[3],
+                                            float scale, float emissionScale) const
+{
+    if (instance == nullptr || originUnits == nullptr || normal == nullptr)
+    {
+        return;
+    }
+
+    const float nudged[3] = {
+        originUnits[0] + normal[0] * 1.5f,
+        originUnits[1] + normal[1] * 1.5f,
+        originUnits[2] + normal[2] * 1.5f,
+    };
+    uint32_t cluster = ResolveEditorLightCluster(scene, nudged);
+    if (cluster == QR_CLUSTER_LIGHT_NO_CLUSTER)
+    {
+        cluster = 0u;
+    }
+
+    std::vector<QrParticleBurstInfo> bursts;
+    BuildEditorPresetBurstsQuakeUnits(preset, originUnits, normal, cluster, scale, bursts,
+                                      emissionScale);
+    for (QrParticleBurstInfo &b : bursts)
+    {
+        EditorMetersParticleBurst(b);
+        qrSpawnParticleBurst(instance, &b);
+    }
+}
+
+void EditorSceneRuntime::DestroyVectorFields(QrInstance instance)
+{
+    if (instance != nullptr)
+    {
+        qrUploadParticleEmitters(instance, 0u, nullptr);
+        qrSetVectorFieldVolumes(instance, 0u, nullptr);
+        qrResetGpuParticles(instance);
+        for (const auto &kv : vectorFieldCache)
+        {
+            if (kv.second != QR_EMPTY_VECTOR_FIELD)
+            {
+                qrDestroyVectorField(instance, kv.second);
+            }
+        }
+    }
+    vectorFieldCache.clear();
+}
+
 void EditorSceneRuntime::DestroyGpuResources(QrInstance instance)
 {
+    DestroyVectorFields(instance);
     if (instance != nullptr)
     {
         if (qrBeginStaticGeometries(instance) == QR_SUCCESS)
@@ -1997,6 +2186,9 @@ void EditorSceneRuntime::DestroyGpuResources(QrInstance instance)
     generatedLightBases.clear();
     emitterLightOverrides.clear();
     customLights.clear();
+    particleEmitters.clear();
+    vectorFields.clear();
+    particlesDirty = true;
     m_dynamicMaterialCache.clear();
     m_activeDocIndex = {};
     m_baseDocIndex = {};
@@ -2006,6 +2198,7 @@ void EditorSceneRuntime::DestroyGpuResources(QrInstance instance)
 
 void EditorSceneRuntime::ResetGpuHandlesOnly()
 {
+    vectorFieldCache.clear();
     materialBakes = EditorMaterialBakes{};
     dynamicMaterialBakes = EditorMaterialBakes{};
     textureMaterials.clear();

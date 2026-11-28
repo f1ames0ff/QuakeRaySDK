@@ -68,6 +68,7 @@
 #include "RHI/RhiRtComposePass.h"
 #include "RHI/RhiPipeline.h"
 #include "RHI/RhiRtDirectPass.h"
+#include "RHI/RhiGpuParticlePass.h"
 #include "RHI/RhiLightShaftVolumePass.h"
 #include "RHI/RhiRtGodRaysPass.h"
 #include "RHI/RhiRtIndirectPass.h"
@@ -91,6 +92,39 @@ uint32_t QueryMaxSupportedAnisotropy(const PhysicalDevice &physDevice)
     return raw >= 1.0f ? static_cast<uint32_t>(raw) : 1u;
 }
 
+}
+
+void VulkanDevice::InitOverlayLayoutsAndGpuParticles(const QrInstanceCreateInfo *info)
+{
+    if (rhiRasterOverlayPass != nullptr && rhiRtPrimaryPass != nullptr)
+    {
+        rhiRasterOverlayPass->SetRayStatsLayout(rhiRtPrimaryPass->GetRayStatsLayout());
+    }
+
+    if (rhiRasterOverlayPass != nullptr && rhiRtDirectPass != nullptr)
+    {
+        rhiRasterOverlayPass->SetSmokeLightLayout(rhiRtDirectPass->GetLightLayout());
+    }
+
+    rhiGpuParticlePass = std::make_shared<RhiGpuParticlePass>();
+    RhiGpuParticlePass::CreateInfo particleCreateInfo = {};
+    particleCreateInfo.pDevice = nvrhi->GetDevice();
+    particleCreateInfo.pFrameContext = rhiFrameContext.get();
+    particleCreateInfo.pTextureTable = rhiTextureTable.get();
+    particleCreateInfo.pShaderFolderPath = info->pShaderFolderPath;
+    particleCreateInfo.maxParticles = maxGpuParticleCount;
+    particleCreateInfo.pfnPrint = [this](const char *pMessage) { Print(pMessage); };
+    if (!rhiGpuParticlePass->Create(particleCreateInfo))
+    {
+        rhiGpuParticlePass.reset();
+        Print("Warning: RHI: the GPU particle pass is unavailable, GPU particle effects are skipped");
+    }
+    else if (rhiRtDirectPass != nullptr && rhiRtPrimaryPass != nullptr)
+    {
+        rhiGpuParticlePass->SetBorrowedLayouts(
+            rhiRtDirectPass->GetLightLayout(),
+            rhiRtPrimaryPass->GetRayStatsLayout());
+    }
 }
 
 void VulkanDevice::InitGodRaysAndLightShaftPasses(const QrInstanceCreateInfo *info)
@@ -145,6 +179,7 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
     try
     {
     ValidateCreateInfo( info );
+    maxGpuParticleCount = info->maxGpuParticleCount;
     const QrayGpuRequirements defaultGpuRequirements = {};
     gpuRequirements = pGpuRequirements != nullptr ? *pGpuRequirements : defaultGpuRequirements;
     gpuRequirementsProvided = pGpuRequirements != nullptr;
@@ -418,15 +453,7 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                     }
                 }
 
-                if (rhiRasterOverlayPass != nullptr && rhiRtPrimaryPass != nullptr)
-                {
-                    rhiRasterOverlayPass->SetRayStatsLayout(rhiRtPrimaryPass->GetRayStatsLayout());
-                }
-
-                if (rhiRasterOverlayPass != nullptr && rhiRtDirectPass != nullptr)
-                {
-                    rhiRasterOverlayPass->SetSmokeLightLayout(rhiRtDirectPass->GetLightLayout());
-                }
+                InitOverlayLayoutsAndGpuParticles(info);
 
                 rhiShadowMapPass = std::make_shared<RhiShadowMapPass>();
                 if (!rhiShadowMapPass->Create(nvrhi->GetDevice(), info->pShaderFolderPath,
@@ -574,6 +601,7 @@ VulkanDevice::VulkanDevice( const QrInstanceCreateInfo* info,
                 [this](const char *pMessage) { Print(pMessage); });
 
             nvrhiFrameSkeleton->SetLightShaftVolumePass(rhiLightShaftVolumePass.get());
+            nvrhiFrameSkeleton->SetGpuParticlePass(rhiGpuParticlePass.get());
             swapchain->Subscribe(nvrhiFrameSkeleton);
 
             if (RhiSkyPass *skyPass = nvrhiFrameSkeleton->GetSkyPass())
@@ -647,6 +675,7 @@ void VulkanDevice::Destroy() noexcept
     rhiBloomPass.reset();
     rhiRtGodRaysPass.reset();
     rhiLightShaftVolumePass.reset();
+    rhiGpuParticlePass.reset();
     rhiShadowMapPass.reset();
     rhiUiPass.reset();
     rhiRtIndirectPass.reset();

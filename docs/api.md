@@ -405,6 +405,17 @@ owns all output images. Optional pointer blocks select rendering features:
 Pass `nullptr` for optional blocks to use renderer defaults. The SDK does not
 retain these pointers after `qrDrawFrame`.
 
+### GPU Physics Particles and 3D Vector Fields
+
+| Function | Purpose |
+|---|---|
+| `qrSpawnParticleBurst` | Queue a one-shot GPU particle burst (`QrParticleBurstInfo`) with world-collision (`RayQuery`) and optional vector-field flags (`SPARK`, `BILLBOARD`, `RETRO_SQUARE`, `DEBRIS_3D`). |
+| `qrUploadParticleEmitters` | Replace persistent continuous GPU particle emitters (`QrParticleEmitterInfo`, `spawnRate` particles/sec). |
+| `qrResetGpuParticles` | Clear all active GPU particles and reset continuous emitter accumulators (also runs automatically on `qrBeginStaticGeometries`). |
+| `qrCreateVectorField` | Upload a 3D velocity LUT (`QrVectorFieldCreateInfo`, meters per second) into the GPU 3D atlas (up to 16 active `QrVectorField` handles). |
+| `qrDestroyVectorField` | Free a `QrVectorField` slot allocated by `qrCreateVectorField`. |
+| `qrSetVectorFieldVolumes` | Set up to `QR_MAX_VECTOR_FIELD_VOLUMES` (16) active oriented 3D vector field boxes (`LUT_3D`, `CURL_NOISE`, `VORTEX`, `POINT_FORCE`, `DIRECTIONAL`). |
+
 ### Readback, screenshots and diagnostics
 
 | Function | Purpose |

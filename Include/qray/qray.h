@@ -76,6 +76,7 @@ typedef uint32_t QrBool32;
 QR_DEFINE_NON_DISPATCHABLE_HANDLE(QrInstance)
 typedef uint32_t QrMaterial;
 typedef uint32_t QrCubemap;
+typedef uint32_t QrVectorField;
 typedef uint32_t QrFlags;
 
 /* Spatial values use meters, square meters and inverse meters. The host converts
@@ -98,6 +99,7 @@ typedef struct QrSpatialConvention
 #define QR_NULL_HANDLE      0
 #define QR_NO_MATERIAL      0
 #define QR_EMPTY_CUBEMAP    0
+#define QR_EMPTY_VECTOR_FIELD 0
 #define QR_FALSE            0
 #define QR_TRUE             1
 
@@ -227,6 +229,9 @@ typedef struct QrInstanceCreateInfo
     QrBool32                    effectWipeIsUsed;
 
     uint32_t                    godRaysQuality;
+
+    /* Maximum simultaneously active GPU physics particles (0 selects default 65536). */
+    uint32_t                    maxGpuParticleCount;
 } QrInstanceCreateInfo;
 
 QRAPI QrResult QRCONV qrCreateInstance(
@@ -712,6 +717,122 @@ typedef struct QrParticleUploadInfo
 QRAPI QrResult QRCONV qrUploadParticles(
     QrInstance                              qrInstance,
     const QrParticleUploadInfo              *pUploadInfo);
+
+typedef enum QrGpuParticleRenderMode QR_ENUM_UINT32
+{
+    QR_GPU_PARTICLE_RENDER_SPARK = 0,
+    QR_GPU_PARTICLE_RENDER_BILLBOARD = 1,
+    QR_GPU_PARTICLE_RENDER_RETRO_SQUARE = 2,
+    QR_GPU_PARTICLE_RENDER_DEBRIS_3D = 3,
+} QrGpuParticleRenderMode;
+
+typedef enum QrGpuParticleFlagBits
+{
+    QR_GPU_PARTICLE_FLAG_COLLIDE_WORLD_BIT = 1u << 0,
+    QR_GPU_PARTICLE_FLAG_REST_ON_FLOOR_BIT = 1u << 1,
+    QR_GPU_PARTICLE_FLAG_AFFECTED_BY_VECTOR_FIELDS_BIT = 1u << 2,
+    QR_GPU_PARTICLE_FLAG_SELF_LIT_BIT = 1u << 3,
+    QR_GPU_PARTICLE_FLAG_ADDITIVE_BLEND_BIT = 1u << 4,
+} QrGpuParticleFlagBits;
+typedef QrFlags QrGpuParticleFlags;
+
+/* All spatial values use meters and seconds in host-world coordinates. */
+typedef struct QrParticleBurstInfo
+{
+    QrFloat3D                   origin;                 /* meters */
+    QrFloat3D                   direction;              /* unit vector or surface normal */
+    float                       coneHalfAngleRadians;
+    uint32_t                    count;
+    float                       originJitterRadius;     /* meters */
+    float                       speedMin;               /* meters per second */
+    float                       speedMax;               /* meters per second */
+    float                       sizeStartMin;           /* meters */
+    float                       sizeStartMax;           /* meters */
+    float                       sizeEndScale;
+    float                       velocityStretch;        /* seconds of spark tail stretch */
+    float                       lifetimeMin;            /* seconds */
+    float                       lifetimeMax;            /* seconds */
+    float                       gravityScale;           /* 1.0 = 9.81 m/s^2 along -worldUp */
+    float                       drag;                   /* inverse seconds */
+    float                       restitution;            /* 0..1 bounce coefficient */
+    float                       friction;               /* 0..1 tangential damping */
+    QrFloat4D                   colorStart;             /* linear RGBA */
+    QrFloat4D                   colorEnd;               /* linear RGBA */
+    float                       emission;               /* HDR emission boost */
+    float                       spinSpeed;              /* radians per second */
+    QrMaterial                  material;               /* QR_NO_MATERIAL = procedural */
+    uint32_t                    cluster;                /* shifted PVS cluster or 0 */
+    QrGpuParticleRenderMode     renderMode;
+    QrGpuParticleFlags          flags;
+} QrParticleBurstInfo;
+
+typedef struct QrParticleEmitterInfo
+{
+    uint64_t                    uniqueID;
+    float                       spawnRate;              /* particles per second */
+    QrParticleBurstInfo         burst;
+} QrParticleEmitterInfo;
+
+#define QR_MAX_VECTOR_FIELD_VOLUMES 16
+
+typedef enum QrVectorFieldKind QR_ENUM_UINT32
+{
+    QR_VECTOR_FIELD_KIND_LUT_3D = 0,
+    QR_VECTOR_FIELD_KIND_CURL_NOISE = 1,
+    QR_VECTOR_FIELD_KIND_VORTEX = 2,
+    QR_VECTOR_FIELD_KIND_POINT_FORCE = 3,
+    QR_VECTOR_FIELD_KIND_DIRECTIONAL = 4,
+} QrVectorFieldKind;
+
+typedef struct QrVectorFieldCreateInfo
+{
+    uint32_t        width;
+    uint32_t        height;
+    uint32_t        depth;
+    /* width * height * depth * 3 floats (X fastest, Y, Z), velocities in meters per second. */
+    const float     *pVectorsXYZ;
+} QrVectorFieldCreateInfo;
+
+typedef struct QrVectorFieldVolume
+{
+    QrVectorField       field;
+    QrVectorFieldKind   kind;
+    /* Maps local [-1, +1]^3 box coordinates into host-world meters. */
+    QrTransform         worldFromLocal;
+    float               intensity;          /* force scale (m/s^2) or LUT multiplier */
+    float               maxSpeed;           /* target speed cap in meters per second */
+    float               tightness;          /* [0, 1]: 0 = force, 1 = velocity lock */
+    float               edgeFalloff;        /* [0, 1]: boundary feather fraction */
+    float               curlFrequency;      /* inverse meters */
+    float               curlScrollSpeed;    /* meters per second */
+    QrFloat3D           axis;               /* unit world axis for VORTEX / DIRECTIONAL */
+} QrVectorFieldVolume;
+
+QRAPI QrResult QRCONV qrSpawnParticleBurst(
+    QrInstance                              qrInstance,
+    const QrParticleBurstInfo               *pBurstInfo);
+
+QRAPI QrResult QRCONV qrUploadParticleEmitters(
+    QrInstance                              qrInstance,
+    uint32_t                                count,
+    const QrParticleEmitterInfo             *pEmitters);
+
+QRAPI QrResult QRCONV qrResetGpuParticles(
+    QrInstance                              qrInstance);
+
+QRAPI QrResult QRCONV qrCreateVectorField(
+    QrInstance                              qrInstance,
+    const QrVectorFieldCreateInfo           *pCreateInfo,
+    QrVectorField                           *pResult);
+
+QRAPI QrResult QRCONV qrDestroyVectorField(
+    QrInstance                              qrInstance,
+    QrVectorField                           vectorField);
+
+QRAPI QrResult QRCONV qrSetVectorFieldVolumes(
+    QrInstance                              qrInstance,
+    uint32_t                                count,
+    const QrVectorFieldVolume               *pVolumes);
 
 typedef struct QrDecalUploadInfo
 {

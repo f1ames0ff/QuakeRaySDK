@@ -61,6 +61,7 @@ public:
     {
         Material,
         Light,
+        Particles,
     };
 
     enum class EditorTextureSlot
@@ -79,6 +80,43 @@ public:
         Center,
         Axis,
         SpotArc,
+    };
+
+    enum class ParticleGizmoTarget : uint8_t
+    {
+        None = 0,
+        Emitter,
+        VectorField,
+        BurstAim,
+    };
+    enum class ParticleGizmoHandle : uint8_t
+    {
+        None = 0,
+        MoveAxis,
+        RotateRing,
+    };
+    enum class ParticleGizmoTool : uint8_t
+    {
+        TranslateAndRotate = 0,
+        RotateOnly = 1,
+        TranslateOnly = 2,
+    };
+    struct ParticleGizmoState
+    {
+        ParticleGizmoTarget activeTarget = ParticleGizmoTarget::None;
+        ParticleGizmoTool tool = ParticleGizmoTool::TranslateAndRotate;
+        ParticleGizmoHandle hoverHandle = ParticleGizmoHandle::None;
+        int32_t hoverAxis = -1;
+        bool dragging = false;
+        ParticleGizmoHandle dragHandle = ParticleGizmoHandle::None;
+        int32_t dragAxis = -1;
+        float startCursor[2] = {};
+        float screenTangent[2] = {};
+        float pixelsPerUnit = 1.0f;
+        float worldAxis[3] = {};
+        float backupPos[3] = {};
+        float backupDir[3] = {};
+        float backupAnglesDeg[3] = {};
     };
 
     enum class PendingSessionAction
@@ -252,6 +290,7 @@ private:
 
     // Casts a ray through the cursor the way QRE_DoPick resolves a click against the world:
     // the nearest surface polygon along the ray wins, and a light in front of that surface wins.
+    bool TryHandleModeSpecificPick(const EditorFacePick &facePick, const float direction[3]);
     void Pick();
     void UpdateHoverPick();
     void SetCursorMode(bool panelOpen);
@@ -297,6 +336,12 @@ private:
     bool ResolveGrabTargetLight(int32_t &outIndex, bool &outCustom) const;
     void UpdateLightGrab();
     void FinishLightGrab(bool kept);
+    bool TryBeginModeViewportManipulator(bool additive);
+    void UpdateParticleGizmoHover(float cursorX, float cursorY, bool uiWantsMouse);
+    bool BeginParticleGizmoDrag(float cursorX, float cursorY);
+    void UpdateParticleGizmoDrag(float cursorX, float cursorY);
+    void FinishParticleGizmoDrag(bool kept);
+    bool TryPickParticleViewportItem(float cursorX, float cursorY);
 
     // One luma block copied from the panel, the way the game keeps a block clipboard; valid only
     // while the flag is set, because a default block is a legitimate clipboard entry.
@@ -494,6 +539,10 @@ private:
     void DrawMultiSelectedEmitterFields(const std::vector<int32_t> &emitterIndices);
     void DrawLightEditorCustomTab();
     void DrawLightEditorGlobalTab();
+    void DrawParticleEditorPanel();
+    void DrawParticleEditorViewportExtras(ImDrawList *drawList, const EditorCameraBasis &cam,
+                                          bool showWorldExtras);
+    void HandleParticleModePick(const EditorFacePick &facePick);
     void DrawPanelActionBar(bool isLightEditor);
     void DrawLightEditorViewportExtras();
     void UploadTorchLight(QrResult &lastResult);
@@ -571,6 +620,14 @@ private:
     EditorMode m_editorMode = EditorMode::Material;
     int32_t m_materialTab = 0;
     int32_t m_lightTab = 0;
+    int32_t m_particleTab = 0;
+    int32_t m_selectedParticleEmitter = -1;
+    int32_t m_selectedVectorField = -1;
+    bool m_burstTestClickArmed = true;
+    EditorParticlePreset m_burstTestPreset = EditorParticlePreset::ExplosionSparks;
+    float m_burstTestScale = 1.0f;
+    float m_burstTestEmissionScale = 1.0f;
+    float m_pickNormal[3] = { 0.0f, 0.0f, 1.0f };
     bool m_torchMode = false;
     bool m_customPlacing = false;
     int32_t m_customCloning = -1;
@@ -584,6 +641,8 @@ private:
     std::vector<EditorLight> m_baselineCustomLights;
     std::vector<EditorLight> m_baselineMapLights;
     std::vector<EditorEmitterLightOverride> m_baselineEmitterOverrides;
+    std::vector<EditorParticleEmitterDef> m_baselineParticleEmitters;
+    std::vector<EditorVectorFieldDef> m_baselineVectorFields;
     EditorRenderSettings m_lastLightBuildSettings;
     bool m_hasLightBuildSettings = false;
     std::string m_scenePath;
@@ -806,4 +865,5 @@ private:
     float m_grabOrigin[3] = {};
     float m_grabStart[2] = {};
     float m_grabLoggedPosition[3] = {};
+    ParticleGizmoState m_particleGizmo;
 };

@@ -375,6 +375,12 @@ Every item below happened in real debugging sessions during the Quake III (`ioq3
 
 ---
 
+### GPU Physics Particles & 3D Vector Fields (Shared Editor/Runtime)
+- Static level `particle_emitters:` and `vector_fields:` blocks inside `qray.lights.yaml`, `.fga` grid loading (`ParseEditorFgaMemory` / `LoadEditorFgaFile`), Quake-to-meter scaling (`EditorSpatial`), and all 7 burst presets (`ExplosionSparks`, `MetalStrikeSparks`, `LightningConcreteHit`, `FireEmbers`, `WindDust`, `QuakeRetroShotgun`, `QuakeRetroBlood`) live in `QuakeRaySDK/editor/EditorParticles.{h,cpp}` and `EditorSceneRuntime::{UploadParticleSystems, SpawnPresetBurst}`.
+- Runtime hosts feed dynamic gameplay impacts (weapons, gibs, blood, sparks, concrete debris) by calling `qrSpawnParticleBurst` with world-meter coordinates (e.g., `QR_GPU_PARTICLE_RENDER_RETRO_SQUARE` + `QR_GPU_PARTICLE_FLAG_COLLIDE_WORLD_BIT | QR_GPU_PARTICLE_FLAG_REST_ON_FLOOR_BIT` for physical Quake 1 pixel blood and wall chips) while `EditorSceneRuntime::UploadParticleSystems` keeps level emitters and active 3D vector fields synchronized 1-to-1 with `quakerayeditor`.
+
+---
+
 ## Part 4 — Verification & Quality Gate Checklist
 
 Always run these checks before opening or updating any `QuakeRaySDK` PR or host-engine integration PR:

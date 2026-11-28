@@ -29,6 +29,7 @@ by the SDK.
 | Raster order | Upload order inside emitted categories | Transparent ordering is host-owned; see [api.md](api.md#rasterized-scene-overlays-particles-decals-and-portals). |
 | Screen effects | `QR_RASTERIZED_GEOMETRY_RENDER_TYPE_SWAPCHAIN`, post-effect blocks | Host builds UI/HUD geometry; painter order is preserved. |
 | Particles/smoke | `qrUploadParticles`, raster geometry | `r_particles_points`; alpha, ordering and emitter lights are host choices. |
+| GPU physics particles & vector fields | `qrSpawnParticleBurst`, `qrUploadParticleEmitters`, `qrResetGpuParticles`, `qrCreateVectorField`, `qrDestroyVectorField`, `qrSetVectorFieldVolumes` | Persistent GPU simulation with `RayQuery` world collision (`SPARK`, `BILLBOARD`, `RETRO_SQUARE`, `DEBRIS_3D`) and up to 16 3D vector field volumes (`.fga` LUT or procedural). |
 | Decals | `qrUploadDecal` | Frame-scoped upload; material owns alpha. |
 | Resolution/upscaler | `QrDrawFrameRenderResolutionParams` | Query availability with `qrIsRenderUpscaleTechniqueAvailable`. |
 | Tone mapping/bloom/post | Corresponding `QrDrawFrame*Params` blocks | All are per-frame pointers or embedded values. |

@@ -154,6 +154,48 @@ void EditorMetersAreaLight(QrTexturedAreaLightUploadInfo &upload)
     upload.area = EditorMetersArea(upload.area);
 }
 
+void EditorMetersParticleBurst(QrParticleBurstInfo &burst)
+{
+    EditorMetersPoint(burst.origin);
+    burst.originJitterRadius = EditorMetersLength(burst.originJitterRadius);
+    burst.speedMin = EditorMetersLength(burst.speedMin);
+    burst.speedMax = EditorMetersLength(burst.speedMax);
+    burst.sizeStartMin = EditorMetersLength(burst.sizeStartMin);
+    burst.sizeStartMax = EditorMetersLength(burst.sizeStartMax);
+}
+
+void EditorMetersParticleEmitter(QrParticleEmitterInfo &emitter)
+{
+    EditorMetersParticleBurst(emitter.burst);
+}
+
+void EditorMetersVectorFieldVolume(QrVectorFieldVolume &volume)
+{
+    for (int row = 0; row < 3; row++)
+    {
+        for (int col = 0; col < 4; col++)
+        {
+            volume.worldFromLocal.matrix[row][col] =
+                EditorMetersLength(volume.worldFromLocal.matrix[row][col]);
+        }
+    }
+    if (volume.kind != QR_VECTOR_FIELD_KIND_LUT_3D)
+    {
+        volume.intensity = EditorMetersLength(volume.intensity);
+    }
+    volume.maxSpeed = EditorMetersLength(volume.maxSpeed);
+    volume.curlFrequency = EditorMetersPerUnitRate(volume.curlFrequency);
+    volume.curlScrollSpeed = EditorMetersLength(volume.curlScrollSpeed);
+}
+
+void EditorMetersFgaVectors(std::vector<float> &vectorsXYZ)
+{
+    for (float &v : vectorsXYZ)
+    {
+        v = EditorMetersLength(v);
+    }
+}
+
 QrResult EditorDrawFrame(QrInstance instance, const QrDrawFrameInfo *drawInfo)
 {
     if (drawInfo == nullptr)

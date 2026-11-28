@@ -158,6 +158,21 @@ positions are converted and sizes are scaled; `viewRight` and `viewUp` are
 rotated as directions. Particle point clusters are topology identifiers and
 are never changed.
 
+GPU physics particle bursts (`QrParticleBurstInfo`) and continuous emitters
+(`QrParticleEmitterInfo`) accept origins, jitter radii, speeds (`m/s`) and
+particle sizes in host-world meters, plus direction vectors rotated by the
+active `QrSpatialConvention`. `velocityStretch`, `lifetimeMin/Max` (seconds),
+`gravityScale` (relative to `9.81 m/s^2` along `-worldUp`), `drag` (`1/s`),
+`restitution`, `friction` and cluster indices are axis-invariant.
+
+3D vector field grids (`QrVectorFieldCreateInfo`) accept velocities in `m/s`
+and are rotated into canonical scene axes on upload. Active vector field volumes
+(`QrVectorFieldVolume`) use `worldFromLocal` mapping local `[-1, +1]^3` into
+host-world meters, `maxSpeed` in `m/s`, `curlScrollSpeed` in `m/s`,
+`curlFrequency` in inverse meters (`1/m`), `intensity` in `m/s^2` for procedural
+fields (dimensionless gain multiplier for `LUT_3D`), and local/world `axis`
+rotated by the spatial frame.
+
 Smoke raster batches additionally carry puff radii in meters in the vertex
 normal channel and spatial noise scales in `smokeNoise`. The renderer consumes
 those fields as meters; `smokeLook` remains dimensionless. The

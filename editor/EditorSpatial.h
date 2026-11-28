@@ -56,6 +56,10 @@ void EditorMetersSphericalLight(QrSphericalLightUploadInfo &upload);
 void EditorMetersSpotLight(QrSpotLightUploadInfo &upload);
 void EditorMetersClusterLightSource(QrClusterLightSource &source);
 void EditorMetersAreaLight(QrTexturedAreaLightUploadInfo &upload);
+void EditorMetersParticleBurst(QrParticleBurstInfo &burst);
+void EditorMetersParticleEmitter(QrParticleEmitterInfo &emitter);
+void EditorMetersVectorFieldVolume(QrVectorFieldVolume &volume);
+void EditorMetersFgaVectors(std::vector<float> &vectorsXYZ);
 
 // The frame's own block: the view translation, the camera range, and every parameter block the
 // draw info points at are converted into a copy of the frame, so the caller's blocks stay in the

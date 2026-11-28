@@ -30,6 +30,7 @@
 #include "EditorDtalPipeline.h"
 #include "EditorMaterial.h"
 #include "EditorOverlayPipeline.h"
+#include "EditorParticles.h"
 #include "EditorSession.h"
 #include "EditorSettings.h"
 #include "Scene.h"
@@ -80,6 +81,10 @@ public:
     std::vector<EditorEmissiveLight> emissiveLights;
     std::vector<EditorGeneratedLightBase> generatedLightBases;
     std::vector<EditorEmitterLightOverride> emitterLightOverrides;
+    std::vector<EditorParticleEmitterDef> particleEmitters;
+    std::vector<EditorVectorFieldDef> vectorFields;
+    std::unordered_map<std::string, QrVectorField> vectorFieldCache;
+    bool particlesDirty = true;
     std::vector<QrMaterial> textureMaterials;
     std::vector<EditorMaterialEmission> textureEmissions;
     std::unordered_map<std::string, int32_t> textureIndexByName;
@@ -162,6 +167,13 @@ public:
     QrResult UploadClusterLightSources(QrInstance instance,
                                        const EditorClusterLightUploadExtras *extras = nullptr,
                                        const EditorRuntimeLogFn &log = {}) const;
+
+    void UploadParticleSystems(QrInstance instance, const EditorAssetSource &assets,
+                               bool force = false, const EditorRuntimeLogFn &log = {});
+    void SpawnPresetBurst(QrInstance instance, EditorParticlePreset preset,
+                          const float originUnits[3], const float normal[3],
+                          float scale = 1.0f, float emissionScale = 1.0f) const;
+    void DestroyVectorFields(QrInstance instance);
 
     void PopulateDrawFrame(QrInstance instance, const float viewerPos[3], uint32_t clientWidth,
                            uint32_t clientHeight, EditorFrameParams &outFrameParams,

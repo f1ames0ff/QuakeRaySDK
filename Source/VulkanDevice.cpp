@@ -37,6 +37,7 @@
 #include "RHI/NvrhiFrameSkeleton.h"
 #include "RHI/RhiAccelStructs.h"
 #include "RHI/RhiFrameContext.h"
+#include "RHI/RhiGpuParticlePass.h"
 
 using namespace qray;
 
@@ -1476,6 +1477,83 @@ QrResult VulkanDevice::GetFrameReadbackStatus(uint64_t requestId, QrBool32 *pDon
     return nvrhiFrameSkeleton->GetFrameReadbackStatus(requestId, *pDone);
 }
 
+namespace qray
+{
+
+struct GpuParticleFrameBuilder
+{
+    static void Build(VulkanDevice &dev,
+                      const ShGlobalUniform *globalUniform,
+                      bool renderUiOnly,
+                      bool enableCollision,
+                      std::vector<RhiGpuParticlePass::SpawnSubmission> &outSpawns,
+                      std::vector<RhiGpuParticlePass::VolumeSubmission> &outVolumes,
+                      NvrhiFrameSkeleton::SkyFrameInputs::GpuParticles &outInputs)
+    {
+        outSpawns.clear();
+        outVolumes.clear();
+        outInputs = {};
+        if (renderUiOnly)
+        {
+            return;
+        }
+
+        const float dt = globalUniform != nullptr ? std::clamp(globalUniform->timeDelta, 0.0f, 0.1f) : 0.0f;
+        std::lock_guard<std::mutex> lock(dev.gpuParticleMutex);
+        dev.gpuParticleSimTime += dt;
+
+        for (size_t i = 0; i < dev.pendingParticleBursts.size(); i++)
+        {
+            outSpawns.push_back({ dev.pendingParticleBursts[i], dev.pendingParticleBurstTextureIndices[i] });
+        }
+        dev.pendingParticleBursts.clear();
+        dev.pendingParticleBurstTextureIndices.clear();
+
+        if (dt > 0.0f)
+        {
+            for (size_t i = 0; i < dev.activeParticleEmitters.size(); i++)
+            {
+                const QrParticleEmitterInfo &emitter = dev.activeParticleEmitters[i];
+                if (emitter.spawnRate <= 0.0f)
+                {
+                    continue;
+                }
+                dev.activeEmitterAccumulators[i] += emitter.spawnRate * dt;
+                const uint32_t emitCount = static_cast<uint32_t>(std::floor(dev.activeEmitterAccumulators[i]));
+                if (emitCount > 0u)
+                {
+                    dev.activeEmitterAccumulators[i] -= float(emitCount);
+                    QrParticleBurstInfo burst = emitter.burst;
+                    burst.count = emitCount;
+                    outSpawns.push_back({ burst, dev.activeEmitterTextureIndices[i] });
+                }
+            }
+        }
+
+        const size_t volumeCount = std::min(dev.activeVectorFieldVolumes.size(),
+                                            dev.activeVectorFieldAtlasSlots.size());
+        outVolumes.reserve(volumeCount);
+        for (size_t i = 0; i < volumeCount; i++)
+        {
+            outVolumes.push_back({ dev.activeVectorFieldVolumes[i], dev.activeVectorFieldAtlasSlots[i] });
+        }
+
+        outInputs.pSpawns = outSpawns.empty() ? nullptr : outSpawns.data();
+        outInputs.spawnCount = static_cast<uint32_t>(outSpawns.size());
+        outInputs.pVolumes = outVolumes.empty() ? nullptr : outVolumes.data();
+        outInputs.volumeCount = static_cast<uint32_t>(outVolumes.size());
+        outInputs.dt = dt;
+        outInputs.time = dev.gpuParticleSimTime;
+        if (globalUniform != nullptr)
+        {
+            std::memcpy(outInputs.worldUp, globalUniform->worldUpVector, sizeof(outInputs.worldUp));
+        }
+        outInputs.enableCollision = enableCollision;
+    }
+};
+
+} // namespace qray
+
 bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
 {
     if (nvrhiFrameSkeleton == nullptr || nvrhiFrameSkeleton->IsUnavailable())
@@ -1618,6 +1696,12 @@ bool VulkanDevice::RenderThroughRhi(const QrDrawFrameInfo &drawInfo)
     sky.decalBufferSize = static_cast<uint64_t>(decalManager->GetBufferSize());
     sky.decalCopySize = static_cast<uint64_t>(decalManager->GetCopySize());
     sky.decalCount = decalManager->GetDecalCount();
+
+    std::vector<RhiGpuParticlePass::SpawnSubmission> gpuParticleSpawns;
+    std::vector<RhiGpuParticlePass::VolumeSubmission> gpuParticleVolumes;
+    GpuParticleFrameBuilder::Build(*this, globalUniform, drawInfo.renderUiOnly != 0,
+                                   !drawInfo.disableRayTracedGeometry,
+                                   gpuParticleSpawns, gpuParticleVolumes, sky.gpuParticles);
 
     sky.renderResolution = &renderResolution;
     sky.cameraNear = drawInfo.cameraNear;
@@ -2917,6 +3001,7 @@ void VulkanDevice::StartNewStaticScene()
     std::lock_guard<std::mutex> geometryLock(geometryUploadMutex);
     geometryWindingFlips.clear();
     scene->StartNewStatic();
+    ResetGpuParticles();
 }
 
 void VulkanDevice::UploadDirectionalLight(const QrDirectionalLightUploadInfo *pLightInfo)
@@ -3340,6 +3425,208 @@ void VulkanDevice::SetFogVolumes(uint32_t count, const QrFogVolume *pVolumes)
         fogVolumes[i] = spatialFrame.IsIdentity() ? pVolumes[i] : SpatialFogVolume(spatialFrame, pVolumes[i]);
     }
     fogVolumeCount = count;
+}
+
+uint32_t VulkanDevice::ResolveParticleMaterialTexture(QrMaterial material) const
+{
+    if (material == QR_NO_MATERIAL || textureManager == nullptr)
+    {
+        return 0u;
+    }
+    return textureManager->GetMaterialTextures(material).indices[MATERIAL_ALBEDO_ALPHA_INDEX];
+}
+
+QrResult VulkanDevice::SpawnParticleBurst(const QrParticleBurstInfo *pBurstInfo)
+{
+    if (pBurstInfo == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+    if (pBurstInfo->count == 0u)
+    {
+        return QR_SUCCESS;
+    }
+
+    LockSpatialFrame();
+    const QrParticleBurstInfo converted = spatialFrame.ParticleBurst(*pBurstInfo);
+    const uint32_t texIdx = ResolveParticleMaterialTexture(pBurstInfo->material);
+
+    std::lock_guard<std::mutex> lock(gpuParticleMutex);
+    pendingParticleBursts.push_back(converted);
+    pendingParticleBurstTextureIndices.push_back(texIdx);
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::UploadParticleEmitters(uint32_t count, const QrParticleEmitterInfo *pEmitters)
+{
+    if (count > 0u && pEmitters == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    LockSpatialFrame();
+    std::vector<QrParticleEmitterInfo> converted;
+    std::vector<uint32_t> textureIndices;
+    converted.reserve(count);
+    textureIndices.reserve(count);
+    for (uint32_t i = 0; i < count; i++)
+    {
+        converted.push_back(spatialFrame.ParticleEmitter(pEmitters[i]));
+        textureIndices.push_back(ResolveParticleMaterialTexture(pEmitters[i].burst.material));
+    }
+
+    std::lock_guard<std::mutex> lock(gpuParticleMutex);
+    std::unordered_map<uint64_t, float> prevAccumulators;
+    for (size_t i = 0; i < activeParticleEmitters.size(); i++)
+    {
+        if (activeParticleEmitters[i].uniqueID != 0u)
+        {
+            prevAccumulators[activeParticleEmitters[i].uniqueID] = activeEmitterAccumulators[i];
+        }
+    }
+
+    std::vector<float> accumulators(count, 0.0f);
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (converted[i].uniqueID != 0u)
+        {
+            const auto it = prevAccumulators.find(converted[i].uniqueID);
+            if (it != prevAccumulators.end())
+            {
+                accumulators[i] = it->second;
+            }
+        }
+    }
+
+    activeParticleEmitters = std::move(converted);
+    activeEmitterAccumulators = std::move(accumulators);
+    activeEmitterTextureIndices = std::move(textureIndices);
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::ResetGpuParticles()
+{
+    std::lock_guard<std::mutex> lock(gpuParticleMutex);
+    pendingParticleBursts.clear();
+    pendingParticleBurstTextureIndices.clear();
+    std::fill(activeEmitterAccumulators.begin(), activeEmitterAccumulators.end(), 0.0f);
+    gpuParticleSimTime = 0.0f;
+    if (rhiGpuParticlePass != nullptr)
+    {
+        rhiGpuParticlePass->RequestReset();
+    }
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::CreateVectorField(const QrVectorFieldCreateInfo *pCreateInfo, QrVectorField *pResult)
+{
+    if (pResult == nullptr || pCreateInfo == nullptr)
+    {
+        if (pResult != nullptr)
+        {
+            *pResult = QR_EMPTY_VECTOR_FIELD;
+        }
+        return QR_WRONG_ARGUMENT;
+    }
+
+    *pResult = QR_EMPTY_VECTOR_FIELD;
+    if (pCreateInfo->width == 0u || pCreateInfo->height == 0u || pCreateInfo->depth == 0u ||
+        pCreateInfo->pVectorsXYZ == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    const uint64_t voxelCount =
+        uint64_t(pCreateInfo->width) * uint64_t(pCreateInfo->height) * uint64_t(pCreateInfo->depth);
+    if (voxelCount > 16777216ull)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    if (rhiGpuParticlePass == nullptr || !rhiGpuParticlePass->IsCreated())
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    LockSpatialFrame();
+    std::vector<uint16_t> brick;
+    RhiGpuParticlePass::ResampleVectorFieldToBrick(*pCreateInfo, spatialFrame, brick);
+
+    std::lock_guard<std::mutex> lock(gpuParticleMutex);
+    const uint32_t slot = rhiGpuParticlePass->AllocateVectorFieldSlot(brick);
+    if (slot == UINT32_MAX)
+    {
+        return QR_FEATURE_UNAVAILABLE;
+    }
+
+    QrVectorField handle = nextVectorFieldHandle++;
+    while (handle == QR_EMPTY_VECTOR_FIELD || vectorFieldSlots.find(handle) != vectorFieldSlots.end())
+    {
+        handle = nextVectorFieldHandle++;
+    }
+
+    vectorFieldSlots[handle] = slot;
+    *pResult = handle;
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::DestroyVectorField(QrVectorField vectorField)
+{
+    if (vectorField == QR_EMPTY_VECTOR_FIELD)
+    {
+        return QR_SUCCESS;
+    }
+
+    std::lock_guard<std::mutex> lock(gpuParticleMutex);
+    const auto it = vectorFieldSlots.find(vectorField);
+    if (it == vectorFieldSlots.end())
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    if (rhiGpuParticlePass != nullptr)
+    {
+        rhiGpuParticlePass->FreeVectorFieldSlot(it->second);
+    }
+    vectorFieldSlots.erase(it);
+    return QR_SUCCESS;
+}
+
+QrResult VulkanDevice::SetVectorFieldVolumes(uint32_t count, const QrVectorFieldVolume *pVolumes)
+{
+    if (count > 0u && pVolumes == nullptr)
+    {
+        return QR_WRONG_ARGUMENT;
+    }
+
+    LockSpatialFrame();
+    std::lock_guard<std::mutex> lock(gpuParticleMutex);
+
+    const uint32_t capped = std::min<uint32_t>(count, QR_MAX_VECTOR_FIELD_VOLUMES);
+    std::vector<QrVectorFieldVolume> nextVolumes;
+    std::vector<uint32_t> nextSlots;
+    nextVolumes.reserve(capped);
+    nextSlots.reserve(capped);
+
+    for (uint32_t i = 0; i < capped; i++)
+    {
+        uint32_t atlasSlot = 0u;
+        if (pVolumes[i].kind == QR_VECTOR_FIELD_KIND_LUT_3D)
+        {
+            const auto it = vectorFieldSlots.find(pVolumes[i].field);
+            if (it == vectorFieldSlots.end())
+            {
+                return QR_WRONG_ARGUMENT;
+            }
+            atlasSlot = it->second;
+        }
+        nextVolumes.push_back(spatialFrame.VectorFieldVolume(pVolumes[i]));
+        nextSlots.push_back(atlasSlot);
+    }
+
+    activeVectorFieldVolumes = std::move(nextVolumes);
+    activeVectorFieldAtlasSlots = std::move(nextSlots);
+    return QR_SUCCESS;
 }
 
 void VulkanDevice::CreateMaterial(const QrMaterialCreateInfo *createInfo, QrMaterial *result)

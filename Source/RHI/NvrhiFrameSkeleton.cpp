@@ -980,6 +980,113 @@ void NvrhiFrameSkeleton::UpdateHistoryTracking(bool renderUiOnly, bool filterEna
     }
 }
 
+void NvrhiFrameSkeleton::RecordGpuParticleSimulation(nvrhi::ICommandList *commandList,
+                                                     uint32_t frameIndex,
+                                                     const SkyFrameInputs &sky,
+                                                     bool tracedFrame)
+{
+    if (!tracedFrame || gpuParticlePass == nullptr || !gpuParticlePass->IsCreated() ||
+        accelStructs == nullptr || worldUniformBuffer == nullptr)
+    {
+        return;
+    }
+
+    RhiGpuParticlePass::SimInputs sim = {};
+    sim.frameIndex = frameIndex;
+    sim.pUniformBuffer = worldUniformBuffer.Get();
+    sim.pTopLevel = accelStructs->GetTopLevel(frameIndex);
+    sim.vertexData = accelStructs->GetVertexDataBuffers(frameIndex);
+    sim.pSpawns = sky.gpuParticles.pSpawns;
+    sim.spawnCount = sky.gpuParticles.spawnCount;
+    sim.pVolumes = sky.gpuParticles.pVolumes;
+    sim.volumeCount = sky.gpuParticles.volumeCount;
+    sim.dt = sky.gpuParticles.dt;
+    sim.time = sky.gpuParticles.time;
+    sim.worldUp[0] = sky.gpuParticles.worldUp[0];
+    sim.worldUp[1] = sky.gpuParticles.worldUp[1];
+    sim.worldUp[2] = sky.gpuParticles.worldUp[2];
+    sim.enableCollision = sky.gpuParticles.enableCollision;
+    gpuParticlePass->Simulate(commandList, sim);
+}
+
+void NvrhiFrameSkeleton::ConfigureGpuParticleOverlay(uint32_t frameIndex,
+                                                     const SkyFrameInputs &sky,
+                                                     bool enabled)
+{
+    if (rasterOverlayPass == nullptr)
+    {
+        return;
+    }
+
+    if (!enabled || sky.disableRasterization || gpuParticlePass == nullptr ||
+        !gpuParticlePass->IsCreated() || accelStructs == nullptr ||
+        worldUniformBuffer == nullptr || rtDirectPass == nullptr || rtPrimaryPass == nullptr)
+    {
+        rasterOverlayPass->SetCustomOverlayCallback({});
+        return;
+    }
+
+    nvrhi::IBuffer *pUniform = worldUniformBuffer.Get();
+    nvrhi::rt::IAccelStruct *pTopLevel = accelStructs->GetTopLevel(frameIndex);
+    nvrhi::IBindingSet *pLightSet = rtDirectPass->GetLightSet(frameIndex).Get();
+    nvrhi::IBindingSet *pRayStatsSet = rtPrimaryPass->GetRayStatsSet(frameIndex).Get();
+    RhiGpuParticlePass *pPass = gpuParticlePass;
+
+    rasterOverlayPass->SetCustomOverlayCallback(
+        [pPass, frameIndex, pUniform, pTopLevel, pLightSet, pRayStatsSet](
+            const RhiRasterOverlayPass::CustomOverlayDrawContext &ctx) {
+            RhiGpuParticlePass::RenderInputs ri = {};
+            ri.frameIndex = frameIndex;
+            ri.pFramebuffer = ctx.pFramebuffer;
+            ri.pPingLfShTexture = ctx.pPingLfShTexture;
+            ri.pPingLfCocgTexture = ctx.pPingLfCocgTexture;
+            ri.pUniformBuffer = pUniform;
+            ri.pTonemappingBuffer = ctx.pTonemappingBuffer;
+            ri.pTopLevel = pTopLevel;
+            ri.pLightSet = pLightSet;
+            ri.pRayStatsSet = pRayStatsSet;
+            ri.pViewProj = ctx.pDefaultViewProj;
+            ri.width = ctx.width;
+            ri.height = ctx.height;
+            ri.color0Format = ctx.color0Format;
+            ri.color1Format = ctx.color1Format;
+            pPass->Render(ctx.pCommandList, ri);
+        });
+}
+
+bool NvrhiFrameSkeleton::HasActiveGpuParticles(const SkyFrameInputs &sky) const
+{
+    return !sky.disableRasterization &&
+           gpuParticlePass != nullptr &&
+           gpuParticlePass->IsCreated() &&
+           (gpuParticlePass->GetActiveSlotLimit() > 0u || sky.gpuParticles.spawnCount > 0u);
+}
+
+void NvrhiFrameSkeleton::InvokeComposeRasterOverlay(nvrhi::ICommandList *pOverlayList, uint32_t frameIndex,
+                                                    const SkyFrameInputs &sky)
+{
+    rasterOverlayPass->SetParticleTimer(
+        gpuTimersReady ? gpuPassQueries[frameIndex][GPU_PASS_PARTICLES].Get() : nullptr);
+
+    rasterOverlayPass->Render(
+        pOverlayList, frameIndex, sky.framebuffers,
+        sky.width, sky.height, sky.jitter,
+        worldUniformBuffer.Get(),
+        sky.worldDraws, sky.worldDrawCount,
+        sky.view, sky.projection, sky.applyVertexColorGamma,
+        sky.smokeDraws, sky.smokeDrawCount,
+        sky.particleDraws, sky.particleDrawCount,
+        sky.particlePointDraws, sky.particlePointDrawCount,
+        accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
+        rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex).Get() : nullptr,
+        rtPrimaryPass != nullptr ? rtPrimaryPass->GetRayStatsSet(frameIndex).Get() : nullptr);
+
+    if (gpuTimersReady)
+    {
+        gpuPassMasks[frameIndex] |= 1u << GPU_PASS_PARTICLES;
+    }
+}
+
 bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex, const SkyFrameInputs &sky,
                                 FrameSubmissionSynchronization &submission)
 {
@@ -1219,6 +1326,7 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                                     worldUniformBuffer.Get(),
                                                     sky.preprocessStatic);
             EndGpuPass(commandList, frameIndex, GPU_PASS_SETUP_PREPROC);
+            RecordGpuParticleSimulation(commandList, frameIndex, sky, tracedFrame);
         }
     }
 
@@ -1762,11 +1870,13 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
         // samples (RhiRtComposePass.h documents both entry points and the sizes they take).
         if (rtComposePass != nullptr)
         {
+            const bool hasGpuParticles = HasActiveGpuParticles(sky);
             const bool hasOverlayDraws =
                 (sky.worldDraws != nullptr && sky.worldDrawCount > 0) ||
                 (sky.smokeDraws != nullptr && sky.smokeDrawCount > 0) ||
                 (sky.particleDraws != nullptr && sky.particleDrawCount > 0) ||
-                (sky.particlePointDraws != nullptr && sky.particlePointDrawCount > 0);
+                (sky.particlePointDraws != nullptr && sky.particlePointDrawCount > 0) ||
+                hasGpuParticles;
             const bool overlayRuns =
                 hasOverlayDraws && rasterOverlayPass != nullptr && rasterOverlayPass->IsCreated() && uniform != nullptr;
 
@@ -1776,28 +1886,10 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
             std::function<void(nvrhi::ICommandList *)> overlayCallback;
             if (overlayRuns)
             {
-                overlayCallback = [&](nvrhi::ICommandList *pOverlayList)
+                ConfigureGpuParticleOverlay(frameIndex, sky, hasGpuParticles);
+                overlayCallback = [this, frameIndex, &sky](nvrhi::ICommandList *pOverlayList)
                 {
-                    rasterOverlayPass->SetParticleTimer(
-                        gpuTimersReady ? gpuPassQueries[frameIndex][GPU_PASS_PARTICLES].Get() : nullptr);
-
-                    rasterOverlayPass->Render(
-                        pOverlayList, frameIndex, sky.framebuffers,
-                        sky.width, sky.height, sky.jitter,
-                        worldUniformBuffer.Get(),
-                        sky.worldDraws, sky.worldDrawCount,
-                        sky.view, sky.projection, sky.applyVertexColorGamma,
-                        sky.smokeDraws, sky.smokeDrawCount,
-                        sky.particleDraws, sky.particleDrawCount,
-                        sky.particlePointDraws, sky.particlePointDrawCount,
-                        accelStructs != nullptr ? accelStructs->GetTopLevel(frameIndex) : nullptr,
-                        rtDirectPass != nullptr ? rtDirectPass->GetLightSet(frameIndex).Get() : nullptr,
-                        rtPrimaryPass != nullptr ? rtPrimaryPass->GetRayStatsSet(frameIndex).Get() : nullptr);
-
-                    if (gpuTimersReady)
-                    {
-                        gpuPassMasks[frameIndex] |= 1u << GPU_PASS_PARTICLES;
-                    }
+                    InvokeComposeRasterOverlay(pOverlayList, frameIndex, sky);
                 };
             }
 
@@ -1813,6 +1905,10 @@ bool NvrhiFrameSkeleton::Render(const Swapchain *pSwapchain, uint32_t frameIndex
                                   worldUniformBuffer.Get(),
                                   sky.postEffectParams,
                                   overlayCallback);
+            if (rasterOverlayPass != nullptr)
+            {
+                rasterOverlayPass->SetCustomOverlayCallback({});
+            }
             EndGpuPass(commandList, frameIndex, GPU_PASS_COMPOSE);
             // The frame's upscaler (A5.7): the engine's own FSR 3.1 (the default configuration)
             // writes image 30 through the module's interop contract; on success the skeleton copies

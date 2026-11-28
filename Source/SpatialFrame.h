@@ -50,6 +50,10 @@ public:
     QrTransform Transform(const QrTransform &value) const;
     QrGeometryUploadInfo Geometry(const QrGeometryUploadInfo &value) const;
     QrMatrix3D CubemapRotation(const QrMatrix3D &value) const;
+    QrParticleBurstInfo ParticleBurst(const QrParticleBurstInfo &value) const;
+    QrParticleEmitterInfo ParticleEmitter(const QrParticleEmitterInfo &value) const;
+    QrVectorFieldVolume VectorFieldVolume(const QrVectorFieldVolume &value) const;
+    void VectorFieldVelocity(const float src[3], float dst[3]) const;
 
     // A negative determinant in the composed scene transform reverses the
     // geometric winding, so triangle order has to be flipped for the face that
