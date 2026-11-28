@@ -1862,7 +1862,8 @@ bool EditorMaterialBakes::InvalidateTexture(QrInstance instance, int32_t texture
     {
         const Key &k = m_entries[i].key;
         if (k.albedo != textureIndex && k.gloss != textureIndex && k.normal != textureIndex &&
-            k.emissive != textureIndex && k.overlay != textureIndex && k.sssTex != textureIndex)
+            k.heightTex != textureIndex && k.emissive != textureIndex &&
+            k.overlay != textureIndex && k.sssTex != textureIndex)
         {
             continue;
         }

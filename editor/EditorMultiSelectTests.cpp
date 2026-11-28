@@ -4265,6 +4265,24 @@ bool VerifyParallaxUploadAndYaml(const EditorMaterialParams &withNormals)
     return okUpOpaque && okUpGlass && okUpSss && yamlOk;
 }
 
+template <typename Resolver>
+bool VerifyHeightBakeInvalidation(EditorMaterialBakes &bakes, QrInstance instance,
+                                  const EditorMaterialParams &heightOnly,
+                                  const EditorScene &scene, const std::vector<QrMaterial> &pool,
+                                  const Resolver &resolve)
+{
+    const size_t before = bakes.Count();
+    const int32_t heightIdx = resolve("wall_height");
+    const bool invalidated = bakes.InvalidateTexture(instance, heightIdx);
+    const bool shrunk = bakes.Count() < before;
+    const bool repeat = bakes.InvalidateTexture(instance, heightIdx);
+    g_lastBakedNormal.clear();
+    const QrMaterial rebaked =
+        bakes.Get(instance, "wall_albedo", heightOnly, scene, pool, resolve);
+    return invalidated && shrunk && !repeat && rebaked != QR_NO_MATERIAL &&
+           g_lastBakedNormal.size() == 16u * 4u && g_lastBakedNormal[3] == 72u;
+}
+
 bool TestParallaxHeightBakeUploadAndYamlRoundTrip()
 {
     EditorScene scene;
@@ -4307,7 +4325,9 @@ bool TestParallaxHeightBakeUploadAndYamlRoundTrip()
                      g_lastBakedNormal[0] == 128u && g_lastBakedNormal[1] == 128u &&
                      g_lastBakedNormal[2] == 255u && g_lastBakedNormal[3] == 72u;
 
-    return Check(okA && okB && VerifyParallaxUploadAndYaml(withNormals),
+    return Check(okA && okB && VerifyParallaxUploadAndYaml(withNormals) &&
+                     VerifyHeightBakeInvalidation(bakes, dummyInstance, heightOnly, scene, pool,
+                                                  resolve),
                  "Parallax height alpha bake, upload channel, and YAML round-trip failed");
 }
 
