@@ -411,8 +411,8 @@ public:
     void Destroy(QrInstance instance);
 
     // Releases only the cached bakes that reference `textureIndex` in any texture slot
-    // (albedo, gloss, normal, emissive, overlay). Returns true if at least one entry was
-    // invalidated so the caller knows whether static scene geometry needs a re-upload.
+    // (albedo, gloss, normal, height, emissive, overlay, sss). Returns true if at least one entry
+    // was invalidated so the caller knows whether static scene geometry needs a re-upload.
     bool InvalidateTexture(QrInstance instance, int32_t textureIndex);
 
     // Call before re-uploading the scene: Get marks what the pass keeps, EndPass releases the
